@@ -4,8 +4,8 @@
 // later milestones.
 import { watch, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { Ledger, readEvents } from '../ledger/ledger.mjs';
-import { INSTANCE_EVENTS } from '../ledger/registry.mjs';
+import { readEvents } from '../ledger/ledger.mjs';
+import { openInstanceStore } from '../telemetry/stores.mjs';
 import { loadInstanceConfig, INSTANCE_CONFIG_FILE } from '../config/instance.mjs';
 import { scaffoldHome, homePaths, runLedgerPath } from './home.mjs';
 import { acquireLock } from './lock.mjs';
@@ -42,7 +42,7 @@ export class Daemon {
     this.lock = acquireLock(this.paths.lock);
     try {
       this.config = loadInstanceConfig(this.paths.home);
-      this.ledger = new Ledger(this.paths.instanceLedger, { allowedEvents: INSTANCE_EVENTS });
+      this.ledger = openInstanceStore(this.paths);
       const runsResumed = this.openRuns();
       this.ledger.append('daemon-started', {
         actor: ACTOR,

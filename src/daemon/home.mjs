@@ -13,6 +13,8 @@ export function homePaths(home) {
     queuedStream: join(home, 'streams', 'queued.jsonl'),
     loudStream: join(home, 'streams', 'loud.jsonl'),
     runs: join(home, 'runs'),
+    archive: join(home, 'archive'),
+    archivedRuns: join(home, 'archive', 'runs'),
     control: join(home, 'control'),
     controlDone: join(home, 'control', 'done'),
     controlRejected: join(home, 'control', 'rejected'),
@@ -29,6 +31,7 @@ export function scaffoldHome(home) {
     paths.home,
     paths.streams,
     paths.runs,
+    paths.archivedRuns,
     paths.control,
     paths.controlDone,
     paths.controlRejected,
@@ -43,4 +46,9 @@ export function scaffoldHome(home) {
 /** @param {ReturnType<typeof homePaths>} paths */
 export function runLedgerPath(paths, runId) {
   return join(paths.runs, runId, 'ledger.jsonl');
+}
+
+/** @param {ReturnType<typeof homePaths>} paths */
+export function archivedRunLedgerPath(paths, runId) {
+  return join(paths.archivedRuns, runId, 'ledger.jsonl');
 }

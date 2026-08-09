@@ -32,7 +32,7 @@ Done when: the daemon starts from an empty daemon home, scaffolds the stores,
 stamps lifecycle events, survives a hard kill + restart with consistent seq,
 picks up config edits, and the tests cover lock, resume, and config paths.
 
-## M2 — Telemetry stores — open
+## M2 — Telemetry stores — done
 
 - Closed event registries (run + instance) as code; unknown event = error.
 - Stream classing; queued/loud stream index appends (pointer + gist).
@@ -198,3 +198,9 @@ never carries a project's specifics.
   live edit pickup, daemon lifecycle (lock, lifecycle stamps, control inbox,
   CLI), service-wiring docs. Verified by 25 tests plus a manual hard-kill +
   restart with consistent seq. Next: M2 (telemetry stores).
+- 2026-08-10 — M2 done: telemetry stores over the ledger primitive. Stream
+  indexes (pointer + gist, appended in the same call as the source event),
+  escapes ledger with the two-event lifecycle and both vocabularies, paired
+  `resolved` appends with writer-side checks, run archive after `run-closed`,
+  reader API (filter, open-loud, open-breaches, ships, escapes-window math).
+  ADR-0002 records the shapes. 46 tests green. Next: M3 (run engine).
