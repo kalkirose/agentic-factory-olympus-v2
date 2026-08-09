@@ -14,7 +14,7 @@ Repo scaffold: README, doctrine, architecture, ADR-0001 (runtime), package
 manifest, CI (`node --check` + `node:test`), gitignore.
 Done when: CI is green on a trivial test.
 
-## M1 — Daemon core + instance config — in progress
+## M1 — Daemon core + instance config — done
 
 - Ledger envelope primitive: append-only JSONL writer/reader, per-ledger
   monotonic `seq`, crash-safe open (truncated-tail repair).
@@ -194,4 +194,7 @@ never carries a project's specifics.
 ## Session log
 
 - 2026-08-09 — Repo initialized. Build order derived from the locked spec.
-  M0 done. M1 started.
+  M0 done. M1 done: ledger envelope + closed registries, instance config with
+  live edit pickup, daemon lifecycle (lock, lifecycle stamps, control inbox,
+  CLI), service-wiring docs. Verified by 25 tests plus a manual hard-kill +
+  restart with consistent seq. Next: M2 (telemetry stores).

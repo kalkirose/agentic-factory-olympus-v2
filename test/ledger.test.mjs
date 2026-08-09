@@ -1,0 +1,99 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { appendFileSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { Ledger, readEvents, tailEvents } from '../src/ledger/ledger.mjs';
+import { RUN_EVENTS, INSTANCE_EVENTS } from '../src/ledger/registry.mjs';
+import { tempDir, removeDir } from './helpers.mjs';
+
+function runLedger(dir) {
+  return new Ledger(join(dir, 'ledger.jsonl'), { allowedEvents: RUN_EVENTS });
+}
+
+test('append stamps the envelope with monotonic seq', (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const ledger = runLedger(dir);
+  const a = ledger.append('run-launched', { actor: 'daemon', lane: 'story' });
+  const b = ledger.append('stage-entered', { actor: 'daemon', stage: 'readiness' });
+  ledger.close();
+  assert.equal(a.seq, 1);
+  assert.equal(b.seq, 2);
+  assert.ok(a.ts <= b.ts);
+  const events = readEvents(join(dir, 'ledger.jsonl'));
+  assert.equal(events.length, 2);
+  assert.equal(events[1].stage, 'readiness');
+});
+
+test('stream-classed events carry their stream; others carry none', (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const ledger = runLedger(dir);
+  const park = ledger.append('park', { actor: 'daemon', reason: 'open-decisions' });
+  const loud = ledger.append('liveness-violation', { actor: 'daemon' });
+  const plain = ledger.append('stage-entered', { actor: 'daemon', stage: 'freeze' });
+  ledger.close();
+  assert.equal(park.stream, 'queued');
+  assert.equal(loud.stream, 'loud');
+  assert.equal(plain.stream, undefined);
+});
+
+test('events outside the closed registry are refused', (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const ledger = runLedger(dir);
+  assert.throws(() => ledger.append('made-up-event', { actor: 'daemon' }), /not in registry/);
+  assert.throws(() => ledger.append('daemon-started', { actor: 'daemon' }), /not in registry/);
+  ledger.close();
+});
+
+test('payload keys cannot shadow the envelope', (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const ledger = runLedger(dir);
+  assert.throws(() => ledger.append('flake', { actor: 'p', seq: 99 }), /shadows the envelope/);
+  ledger.close();
+});
+
+test('reopen resumes seq after the last valid line', (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const path = join(dir, 'ledger.jsonl');
+  const first = new Ledger(path, { allowedEvents: RUN_EVENTS });
+  first.append('run-launched', { actor: 'daemon' });
+  first.append('stage-entered', { actor: 'daemon', stage: 'readiness' });
+  first.close();
+  const second = new Ledger(path, { allowedEvents: RUN_EVENTS });
+  const line = second.append('stage-entered', { actor: 'daemon', stage: 'spec-birth' });
+  second.close();
+  assert.equal(line.seq, 3);
+});
+
+test('a torn tail from a crash is truncated away on open', (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const path = join(dir, 'ledger.jsonl');
+  const first = new Ledger(path, { allowedEvents: RUN_EVENTS });
+  first.append('run-launched', { actor: 'daemon' });
+  first.append('stage-entered', { actor: 'daemon', stage: 'readiness' });
+  first.close();
+  appendFileSync(path, '{"seq":3,"ev'); // torn write
+  const second = new Ledger(path, { allowedEvents: RUN_EVENTS });
+  const line = second.append('stage-entered', { actor: 'daemon', stage: 'spec-birth' });
+  second.close();
+  assert.equal(line.seq, 3);
+  const events = readEvents(path);
+  assert.equal(events.length, 3);
+  assert.ok(!readFileSync(path, 'utf8').includes('{"seq":3,"ev'));
+  assert.equal(events[2].stage, 'spec-birth');
+});
+
+test('tailEvents returns the newest n', (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const ledger = new Ledger(join(dir, 'i.jsonl'), { allowedEvents: INSTANCE_EVENTS });
+  for (let i = 0; i < 5; i++) ledger.append('launch', { actor: 'daemon', n: i });
+  ledger.close();
+  const tail = tailEvents(join(dir, 'i.jsonl'), 2);
+  assert.deepEqual(tail.map((e) => e.n), [3, 4]);
+});

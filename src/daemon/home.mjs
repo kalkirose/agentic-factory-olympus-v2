@@ -1,0 +1,46 @@
+// Daemon home layout. All stores sit under this one root — the command
+// center's read-only server and every console read from here.
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+
+export function homePaths(home) {
+  return {
+    home,
+    instanceConfig: join(home, 'instance.json'),
+    instanceLedger: join(home, 'instance.ledger.jsonl'),
+    escapesLedger: join(home, 'escapes.ledger.jsonl'),
+    streams: join(home, 'streams'),
+    queuedStream: join(home, 'streams', 'queued.jsonl'),
+    loudStream: join(home, 'streams', 'loud.jsonl'),
+    runs: join(home, 'runs'),
+    control: join(home, 'control'),
+    controlDone: join(home, 'control', 'done'),
+    controlRejected: join(home, 'control', 'rejected'),
+    clones: join(home, 'clones'),
+    worktrees: join(home, 'worktrees'),
+    lock: join(home, 'daemon.lock'),
+  };
+}
+
+/** Creates the daemon home directory tree. Idempotent. */
+export function scaffoldHome(home) {
+  const paths = homePaths(home);
+  for (const dir of [
+    paths.home,
+    paths.streams,
+    paths.runs,
+    paths.control,
+    paths.controlDone,
+    paths.controlRejected,
+    paths.clones,
+    paths.worktrees,
+  ]) {
+    mkdirSync(dir, { recursive: true });
+  }
+  return paths;
+}
+
+/** @param {ReturnType<typeof homePaths>} paths */
+export function runLedgerPath(paths, runId) {
+  return join(paths.runs, runId, 'ledger.jsonl');
+}
