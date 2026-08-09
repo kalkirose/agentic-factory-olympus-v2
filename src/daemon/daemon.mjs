@@ -1,27 +1,33 @@
 // The orchestrator daemon core: home scaffold, single-instance lock,
-// instance config with live edit pickup, instance ledger, control inbox.
-// Run ownership (state machines, supervision, liveness) builds on this in
-// later milestones.
+// instance config with live edit pickup, instance ledger, control inbox,
+// and the run engine that owns every open run.
 import { watch, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { readEvents } from '../ledger/ledger.mjs';
 import { openInstanceStore } from '../telemetry/stores.mjs';
 import { loadInstanceConfig, INSTANCE_CONFIG_FILE } from '../config/instance.mjs';
-import { scaffoldHome, homePaths, runLedgerPath } from './home.mjs';
+import { RunEngine } from '../engine/engine.mjs';
+import { scaffoldHome, homePaths } from './home.mjs';
 import { acquireLock } from './lock.mjs';
 
 const ACTOR = 'daemon';
 const CONFIG_DEBOUNCE_MS = 150; // collapses editor multi-writes; not a detector
 
 export class Daemon {
-  /** @param {string} home @param {{handleSignals?: boolean}} opts */
-  constructor(home, { handleSignals = false } = {}) {
+  /**
+   * @param {string} home
+   * @param {{handleSignals?: boolean, lanes?: Record<string, object>}} opts
+   *   lanes: lane name → {stages, handlers}, registered on the run engine at
+   *   start. Concrete lanes land with their milestones.
+   */
+  constructor(home, { handleSignals = false, lanes = {} } = {}) {
     this.paths = homePaths(home);
     this.handleSignals = handleSignals;
+    this.lanes = lanes;
     this.running = false;
     this.config = null;
     this.lock = null;
     this.ledger = null;
+    this.engine = null;
     this.watchers = [];
     this.commands = new Map();
     this.configTimer = null;
@@ -29,6 +35,17 @@ export class Daemon {
     this.onStopped = null;
     this.registerCommand('stop', async (command) => {
       await this.stop({ trigger: 'control', actor: command.actor });
+    });
+    this.registerCommand('answer', async (command) => {
+      this.engine.answer({
+        runId: command.runId,
+        actor: command.actor,
+        answer: command.answer,
+        option: command.option,
+      });
+    });
+    this.registerCommand('kill', async (command) => {
+      this.engine.killRun(command.runId, { actor: command.actor });
     });
   }
 
@@ -43,7 +60,14 @@ export class Daemon {
     try {
       this.config = loadInstanceConfig(this.paths.home);
       this.ledger = openInstanceStore(this.paths);
-      const runsResumed = this.openRuns();
+      this.engine = new RunEngine(this.paths, {
+        instanceStore: this.ledger,
+        getSlotCap: (project) => this.config.projects[project]?.slotCap,
+      });
+      for (const [name, lane] of Object.entries(this.lanes)) {
+        this.engine.registerLane(name, lane);
+      }
+      const runsResumed = this.engine.resumeOpenRuns();
       this.ledger.append('daemon-started', {
         actor: ACTOR,
         pid: process.pid,
@@ -56,27 +80,13 @@ export class Daemon {
       this.running = true;
       return { runsResumed };
     } catch (error) {
+      if (this.engine) {
+        await this.engine.stop();
+        this.engine = null;
+      }
       this.teardown();
       throw error;
     }
-  }
-
-  /** Scans runs/ for ledgers without a run-closed stamp. */
-  openRuns() {
-    let entries;
-    try {
-      entries = readdirSync(this.paths.runs, { withFileTypes: true });
-    } catch {
-      return [];
-    }
-    const open = [];
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const events = readEvents(runLedgerPath(this.paths, entry.name));
-      if (events.length === 0) continue;
-      if (!events.some((e) => e.event === 'run-closed')) open.push(entry.name);
-    }
-    return open;
   }
 
   // -- instance config ------------------------------------------------------
@@ -152,7 +162,15 @@ export class Daemon {
       // Claim before execute: the drain that wins the rename runs the
       // handler; a competing drain skips. Prevents double execution.
       if (this.finishControlFile(file, this.paths.controlDone)) {
-        await handler(command);
+        try {
+          await handler(command);
+        } catch (error) {
+          // The command was claimed; the reason file is the console's feedback.
+          writeFileSync(
+            join(this.paths.controlRejected, basename(file) + '.reason.txt'),
+            error.message + '\n',
+          );
+        }
       }
     }
   }
@@ -184,10 +202,18 @@ export class Daemon {
   async stop({ trigger, actor } = { trigger: 'api', actor: ACTOR }) {
     if (!this.running) return this.stopPromise;
     this.running = false;
-    this.ledger.append('daemon-stopped', { actor: actor ?? ACTOR, trigger });
-    this.teardown();
-    if (this.onStopped) this.onStopped();
-    return (this.stopPromise = Promise.resolve());
+    this.stopPromise = (async () => {
+      // Engine first: in-flight seats get their seat-terminated stamps while
+      // the run stores are still open.
+      if (this.engine) {
+        await this.engine.stop();
+        this.engine = null;
+      }
+      this.ledger.append('daemon-stopped', { actor: actor ?? ACTOR, trigger });
+      this.teardown();
+      if (this.onStopped) this.onStopped();
+    })();
+    return this.stopPromise;
   }
 
   teardown() {

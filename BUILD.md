@@ -45,7 +45,7 @@ picks up config edits, and the tests cover lock, resume, and config paths.
 Done when: every registry event round-trips writer → reader, stream-classed
 events index correctly, and the open-set queries answer from files alone.
 
-## M3 — Run engine — open
+## M3 — Run engine — done
 
 - Run state machine: stages as internal states; transitions stamped;
   `run-launched` / `stage-entered` / `run-closed` on every terminal state.
@@ -204,3 +204,12 @@ never carries a project's specifics.
   `resolved` appends with writer-side checks, run archive after `run-closed`,
   reader API (filter, open-loud, open-breaches, ships, escapes-window math).
   ADR-0002 records the shapes. 46 tests green. Next: M3 (run engine).
+- 2026-08-10 — M3 done: run engine. Lanes as stage lists + handlers with a
+  one-directive contract (next / park / close); child supervision over stdout
+  progress lines with the cost ceiling as guardrail; restart resume from the
+  ledger alone (`resumed` stamps, parked and violated runs wait); event-keyed
+  liveness invariant at the handler settle, violations loud and never
+  auto-killed; park/answer/resume with option validation and who/when stamps;
+  per-project lane-agnostic slot accounting that gates launch only. Control
+  inbox gained `answer` and `kill`. ADR-0003 records the shapes. 60 tests
+  green. Next: M4 (project config + run isolation).

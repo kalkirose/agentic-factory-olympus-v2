@@ -87,3 +87,19 @@ export function streamOf(event) {
   if (LOUD_EVENTS.has(event)) return 'loud';
   return null;
 }
+
+// Closed park catalog — the only states that wait on the human. A new park
+// type enters only by a design-level decision, never ad hoc from a seat.
+export const PARK_TYPES = new Set([
+  'open-decisions', // open decisions at build start
+  'grounding-conflict', // spec birth
+  'intent-conflict', // spec gate
+  'unkilled-gap-survivor', // adversary survivor without a killing test
+  'second-zero-kill', // second 0/N adversary round
+  'second-stall', // response ladder
+  'card-invalidated', // ship-time card sweep
+  'provisioning-gate',
+]);
+
+// Terminal run states. Every one of them stamps `run-closed`.
+export const CLOSE_STATES = new Set(['shipped', 'failed', 'killed']);
