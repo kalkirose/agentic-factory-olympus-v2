@@ -8,6 +8,7 @@ import { runLedgerPath } from '../daemon/home.mjs';
 import { parseProjectConfig, underEntry } from '../config/project.mjs';
 import { cloneDir } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
+import { stackEnv } from '../isolation/stacks.mjs';
 
 export const ACTOR = 'daemon';
 export const GIST_MAX = 120;
@@ -16,6 +17,22 @@ export async function loadProjectConfig(ctx) {
   const clone = cloneDir(ctx.paths, ctx.project);
   const text = await git(['cat-file', '-p', ctx.payload.configBlob], { cwd: clone });
   return parseProjectConfig(text, `${ctx.project}#${ctx.payload.configBlob}`);
+}
+
+/**
+ * The run's stack env: the same derivation the stack rose from at provision.
+ * Every project-config command and every seat spawned inside the run gets it,
+ * so a host-run suite can find the stack it belongs to (no fixed host ports —
+ * the project resolves published ports from the compose project name).
+ * Undefined when the project has no stack.
+ */
+export function runEnv(ctx, config) {
+  if (!config.stack) return undefined;
+  return stackEnv({
+    runId: ctx.runId,
+    worktree: ctx.payload.worktree,
+    extra: config.stack.env,
+  });
 }
 
 export function runEvents(ctx) {

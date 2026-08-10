@@ -17,13 +17,14 @@ const OUTPUT_TAIL = 1500;
  * Runs the full Tier-1 spectrum for one verdict cycle.
  * @param {object} ctx run-engine handler context
  * @param {{layers: Array<{name: string, command: string, needs?: string[]}>,
- *   commands: Record<string, string[]>, cwd: string, cycle: number, sha: string}} opts
+ *   commands: Record<string, string[]>, cwd: string, env?: object,
+ *   cycle: number, sha: string}} opts
  * @returns {Promise<{results?: Array<{layer: string, status: string,
  *   attributedTo?: string, output?: string}>, error?: string}>}
  *   `error` is set when a layer command could not run at all — an
  *   environment defect, never a verdict about the tree.
  */
-export async function runSpectrum(ctx, { layers, commands, cwd, cycle, sha }) {
+export async function runSpectrum(ctx, { layers, commands, cwd, env, cycle, sha }) {
   const stamped = new Map(
     runEvents(ctx)
       .filter((e) => e.event === 'layer-result' && e.cycle === cycle)
@@ -45,7 +46,7 @@ export async function runSpectrum(ctx, { layers, commands, cwd, cycle, sha }) {
           sha,
         });
       } else {
-        const outcome = await runLayer(ctx, { layer, commands, cwd, cycle, sha });
+        const outcome = await runLayer(ctx, { layer, commands, cwd, env, cycle, sha });
         if (outcome.error) return { error: outcome.error };
         record = outcome.record;
       }
@@ -61,15 +62,15 @@ export async function runSpectrum(ctx, { layers, commands, cwd, cycle, sha }) {
   return { results };
 }
 
-async function runLayer(ctx, { layer, commands, cwd, cycle, sha }) {
+async function runLayer(ctx, { layer, commands, cwd, env, cycle, sha }) {
   const argv = commands[layer.command];
-  const first = await runCommand(argv, { cwd });
+  const first = await runCommand(argv, { cwd, env });
   if (first.code === null) return { error: first.error };
   if (first.code === 0) {
     return { record: stampResult(ctx, { cycle, layer: layer.name, status: 'green', sha }) };
   }
   // Flake filter: one red-only re-run by process policy.
-  const rerun = await runCommand(argv, { cwd });
+  const rerun = await runCommand(argv, { cwd, env });
   if (rerun.code === null) return { error: rerun.error };
   if (rerun.code === 0) {
     ctx.store.append('flake', { actor: ACTOR, cycle, layer: layer.name, sha });

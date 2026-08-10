@@ -11,7 +11,14 @@ import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
 import { storyLane } from '../src/lanes/story.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
-import { tempDir, removeDir, waitFor, initOriginRepo, projectConfigJson } from './helpers.mjs';
+import {
+  tempDir,
+  removeDir,
+  waitFor,
+  initOriginRepo,
+  projectConfigJson,
+  fakeComposeRunner,
+} from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
 
@@ -80,7 +87,8 @@ function fixtureParse(line) {
 
 // A fixture seat child: writes files (relative paths land in the seat's cwd),
 // writes the report, exits. Behaviors dispatch per seat on label and prompt.
-function seatScript({ reportPath, model, report, files = {}, exitCode = 0 }) {
+// envCapture writes the named env vars to a file — the seat-env probe.
+function seatScript({ reportPath, model, report, files = {}, exitCode = 0, envCapture }) {
   const stmts = [
     "const fs = require('fs');",
     "const path = require('path');",
@@ -90,6 +98,12 @@ function seatScript({ reportPath, model, report, files = {}, exitCode = 0 }) {
     stmts.push(
       `fs.mkdirSync(path.dirname(${JSON.stringify(file)}), { recursive: true });`,
       `fs.writeFileSync(${JSON.stringify(file)}, ${JSON.stringify(content)});`,
+    );
+  }
+  if (envCapture) {
+    stmts.push(
+      `fs.writeFileSync(${JSON.stringify(envCapture.path)}, JSON.stringify(` +
+        `Object.fromEntries(${JSON.stringify(envCapture.keys)}.map((k) => [k, process.env[k]]))));`,
     );
   }
   if (report !== undefined) {
@@ -123,14 +137,22 @@ function seatFixture(seats) {
   return { commandFor, calls };
 }
 
-function storyFixture(t, { seats, card = DEFAULT_CARD }) {
+function storyFixture(t, { seats, card = DEFAULT_CARD, config, composeRunner }) {
   const root = tempDir();
+  // `config` may be a function of the fixture root, for absolute probe paths.
+  const overrides = typeof config === 'function' ? config(root) : (config ?? {});
+  const base = {
+    repo: { testPaths: ['tests'] },
+    commands: { suite: ['node', '--test', 'tests/*.test.mjs'] },
+    lanes: { story: { suiteCommand: 'suite' } },
+    stack: null,
+  };
   const origin = initOriginRepo(join(root, 'origin'), {
     [CONFIG_PATH]: projectConfigJson({
-      repo: { testPaths: ['tests'] },
-      commands: { suite: ['node', '--test', 'tests/*.test.mjs'] },
-      lanes: { story: { suiteCommand: 'suite' } },
-      stack: null,
+      ...base,
+      ...overrides,
+      commands: { ...base.commands, ...(overrides.commands ?? {}) },
+      lanes: { ...base.lanes, ...(overrides.lanes ?? {}) },
     }),
     'stories/alpha.md': card,
     'src/base.mjs': 'export const base = 1;\n',
@@ -148,7 +170,7 @@ function storyFixture(t, { seats, card = DEFAULT_CARD }) {
       },
     }),
   };
-  const daemon = new Daemon(join(root, 'home'), { lanes });
+  const daemon = new Daemon(join(root, 'home'), { lanes, composeRunner });
   const fixture = seatFixture(seats);
   t.after(async () => {
     await daemon.stop();
@@ -653,4 +675,53 @@ test('a green red-state check routes one suite fix round before the freeze', asy
   const record = JSON.parse(readFileSync(join(fx.paths.archivedRuns, runId, 'freeze.json'), 'utf8'));
   assert.equal(record.redState.result, 'red');
   assert.deepEqual(record.dispositions.map((d) => [d.wave, d.disposition]), [[2, 'spec-indifferent']]);
+});
+
+test('the stack env reaches the compose up, the lint command, and the seats', async (t) => {
+  const ENV_KEYS = ['COMPOSE_PROJECT_NAME', 'OLYMPUS_RUN_ID', 'OLYMPUS_WORKTREE', 'OLY_STATIC'];
+  let lintCapture;
+  let seatCapture;
+  const compose = fakeComposeRunner();
+  const seats = {
+    'spec-birth': () => ({
+      report: { outcome: 'grounding-conflict', summary: 'conflict', conflict: 'which way?' },
+      envCapture: { path: seatCapture, keys: ENV_KEYS },
+    }),
+  };
+  const fx = storyFixture(t, {
+    seats,
+    composeRunner: compose,
+    config: (root) => {
+      lintCapture = join(root, 'lint-env.json');
+      seatCapture = join(root, 'seat-env.json');
+      return {
+        stack: { composeFile: 'compose.harness.yml', env: { OLY_STATIC: 'static-1' } },
+        commands: {
+          lint: [
+            'node',
+            '-e',
+            `require('fs').writeFileSync(${JSON.stringify(lintCapture)},JSON.stringify(` +
+              `Object.fromEntries(${JSON.stringify(ENV_KEYS)}.map((k) => [k, process.env[k]]))))`,
+          ],
+        },
+        lanes: { story: { suiteCommand: 'suite', lintCommand: 'lint' } },
+      };
+    },
+  });
+  const runId = await fx.launch();
+  await waitParked(fx.paths, runId, 'grounding-conflict');
+  // One derivation everywhere: the env compose brought the stack up with is
+  // the env the lint command and the seat ran with.
+  const up = compose.calls.find((c) => c.args.includes('up'));
+  assert.ok(up, 'no compose up call');
+  const expected = {
+    COMPOSE_PROJECT_NAME: `oly-${runId}`,
+    OLYMPUS_RUN_ID: runId,
+    OLYMPUS_WORKTREE: up.env.OLYMPUS_WORKTREE,
+    OLY_STATIC: 'static-1',
+  };
+  assert.equal(up.env.COMPOSE_PROJECT_NAME, expected.COMPOSE_PROJECT_NAME);
+  assert.ok(up.env.OLYMPUS_WORKTREE.length > 0, 'compose up got no worktree');
+  assert.deepEqual(JSON.parse(readFileSync(lintCapture, 'utf8')), expected);
+  assert.deepEqual(JSON.parse(readFileSync(seatCapture, 'utf8')), expected);
 });

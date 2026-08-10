@@ -40,6 +40,19 @@ concrete shapes:
   Teardown works from the project name alone, so it survives worktree
   removal. The compose argv is instance config (`composeCommand`) — it
   describes the machine, not the project.
+- **The run env reaches every execution.** The same env the stack rose from
+  is passed to every project-config command run and every seat spawned
+  inside the run (`runEnv` in the lane helpers). Port discovery stays on the
+  project side: the template publishes container ports to ephemeral host
+  ports, and the project's own test plumbing resolves the published port at
+  run time from the container runtime's port table, keyed on
+  `COMPOSE_PROJECT_NAME` (compose labels its containers with the project
+  and service names). The harness never resolves or injects port numbers —
+  a service→variable map would be project knowledge in instance config, and
+  a port file written at `up` time would be state that can go stale; the
+  runtime's port table is the single source of truth and survives daemon
+  restarts. With the stack env unset, project test configs fall back to
+  their fixed local-dev defaults, so humans and CI see no change.
 - **Workspace record.** Provision writes `workspace.json` into the run
   directory: project, worktree, branch, base sha, config blob, stack name.
   It archives with the run and makes release restart-safe — release reads

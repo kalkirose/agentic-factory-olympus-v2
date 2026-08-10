@@ -34,6 +34,7 @@ import { SUITE_SCHEMA, SPEC_AMEND_SCHEMA } from './story.mjs';
 import {
   ACTOR,
   loadProjectConfig,
+  runEnv,
   runEvents,
   answeredPark,
   invocationCount,
@@ -142,6 +143,7 @@ function implementationHandler(mode) {
       reportPath: runReportPath(ctx.paths, ctx.runId, `dev-${n}`),
       schema: DEV_SCHEMA,
       cwd: base.worktree,
+      env: base.env,
       ...(mode === 'story' && { denyTools: testEditDenyRules(base.testPaths) }),
     });
     if (!result.ok) return seatFail('dev', result);
@@ -204,6 +206,7 @@ async function runCycle(ctx, base, mode, { cycle }) {
     layers: base.layers,
     commands: base.commands,
     cwd: base.worktree,
+    env: base.env,
     cycle,
     sha,
   });
@@ -327,6 +330,7 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen }) {
     label: `verdict-triage-c${cycle}`,
     schema: TRIAGE_SCHEMA,
     cwd: base.worktree,
+    env: base.env,
     buildRole: (brief) => triageRole(base, reds, priorOpen, brief),
     checks: (r) => triageChecks(r, { redLayers, priorOpen }),
   });
@@ -632,6 +636,7 @@ async function runDevSeat(ctx, base, mode, { seat, roleBlock, pass = null, phase
     reportPath: runReportPath(ctx.paths, ctx.runId, `${seat}-${n}`),
     schema: DEV_SCHEMA,
     cwd: base.worktree,
+    env: base.env,
     ...(mode === 'story' && { denyTools: testEditDenyRules(base.testPaths) }),
   });
   if (!result.ok) return { fail: seatFail(seat, result) };
@@ -662,6 +667,7 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
       reportPath: runReportPath(ctx.paths, ctx.runId, `spec-birth-${n}`),
       schema: SPEC_AMEND_SCHEMA,
       cwd: base.worktree,
+      env: base.env,
     });
     if (!amend.ok) return { fail: seatFail('spec-birth', amend) };
   }
@@ -670,6 +676,7 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
     label: null,
     schema: SUITE_SCHEMA,
     cwd: base.worktree,
+    env: base.env,
     buildRole: (brief) => refreezeRole(base, findings, record, brief),
     checks: async (r) => {
       const defects = [];
@@ -724,7 +731,7 @@ function resolveGateIntegrity(ctx, openIds) {
  * The lane-level contract loop: one corrective invocation on a deterministic
  * defect in the work product, then seat-failure.
  */
-async function seatWithChecks(ctx, { seat, label, schema, cwd, buildRole, checks }) {
+async function seatWithChecks(ctx, { seat, label, schema, cwd, env, buildRole, checks }) {
   let brief = null;
   for (let attempt = 1; ; attempt++) {
     const events = runEvents(ctx);
@@ -735,6 +742,7 @@ async function seatWithChecks(ctx, { seat, label, schema, cwd, buildRole, checks
       reportPath: runReportPath(ctx.paths, ctx.runId, label ?? `${seat}-${n}`),
       schema,
       cwd,
+      env,
     });
     if (!result.ok) return { fail: seatFail(seat, result) };
     const defects = await checks(result.report);
@@ -873,6 +881,7 @@ async function verdictBase(ctx, mode) {
       worktree,
       layers,
       commands: config.commands,
+      env: runEnv(ctx, config),
       testPaths: config.repo.testPaths,
       uiPaths: config.repo.uiPaths ?? [],
       specRef: join(ctx.paths.runs, ctx.runId, 'spec.md'),
@@ -894,6 +903,7 @@ async function verdictBase(ctx, mode) {
     worktree,
     layers,
     commands: config.commands,
+    env: runEnv(ctx, config),
     testPaths: config.repo.testPaths ?? [],
     uiPaths: config.repo.uiPaths ?? [],
     specRef: ticketPath,

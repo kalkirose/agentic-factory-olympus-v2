@@ -3,7 +3,7 @@
 // stamps flakes instead of findings; stamped layers are never re-run.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, existsSync } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { scaffoldHome, runLedgerPath } from '../src/daemon/home.mjs';
 import { openRunStore } from '../src/telemetry/stores.mjs';
@@ -101,6 +101,27 @@ test('a stamped layer is never re-run in the same cycle', async (t) => {
   });
   assert.deepEqual(results, [{ layer: 'a', status: 'green' }]);
   assert.ok(!existsSync(boom), 'the stamped layer ran again');
+});
+
+test('the run env reaches every layer command', async (t) => {
+  const { root, ctx } = fixture(t);
+  const capture = join(root, 'layer-env.json');
+  const probe = [
+    'node',
+    '-e',
+    `require('fs').writeFileSync(${JSON.stringify(capture)},` +
+      `JSON.stringify({p:process.env.COMPOSE_PROJECT_NAME,s:process.env.OLY_STATIC}));process.exit(0)`,
+  ];
+  const { results } = await runSpectrum(ctx, {
+    layers: [{ name: 'a', command: 'probe' }],
+    commands: { probe },
+    cwd: process.cwd(),
+    env: { COMPOSE_PROJECT_NAME: 'oly-r1', OLY_STATIC: 'static-1' },
+    cycle: 1,
+    sha: 's',
+  });
+  assert.deepEqual(results, [{ layer: 'a', status: 'green' }]);
+  assert.deepEqual(JSON.parse(readFileSync(capture, 'utf8')), { p: 'oly-r1', s: 'static-1' });
 });
 
 test('a layer command that cannot run at all reports an error, not a verdict', async (t) => {

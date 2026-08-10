@@ -44,6 +44,7 @@ import {
 import {
   ACTOR,
   loadProjectConfig,
+  runEnv,
   runEvents,
   answeredPark,
   invocationCount,
@@ -476,6 +477,7 @@ async function mergeRound(ctx, base, { fromSha, mainSha, conflicts }) {
       reportPath: runReportPath(ctx.paths, ctx.runId, `dev-${n}`),
       schema: DEV_SCHEMA,
       cwd: base.worktree,
+      env: base.env,
       ...(base.storyLane && { denyTools: testEditDenyRules(base.testPaths) }),
     });
     if (!result.ok) cause = 'dev seat failed';
@@ -490,6 +492,7 @@ async function mergeRound(ctx, base, { fromSha, mainSha, conflicts }) {
       reportPath: runReportPath(ctx.paths, ctx.runId, `suite-${n}`),
       schema: SUITE_SCHEMA,
       cwd: base.worktree,
+      env: base.env,
     });
     if (!result.ok) cause = 'suite seat failed';
   }
@@ -608,6 +611,7 @@ function freshBase(base, resetSha) {
     worktree: base.worktree,
     testPaths: base.testPaths,
     specRef: base.specRef,
+    env: base.env,
     resetSha,
   };
 }
@@ -824,6 +828,7 @@ async function cardSweep(ctx, base, merged) {
       reportPath: runReportPath(ctx.paths, ctx.runId, `card-sweep-${n}`),
       schema: CARD_SWEEP_SCHEMA,
       cwd: base.worktree,
+      env: base.env,
     });
     if (!result.ok) {
       // The story shipped; a sweep failure never un-ships it. Loud enough
@@ -1011,6 +1016,7 @@ async function shipBase(ctx, forge) {
     branch: ctx.payload.branch,
     defaultBranch: ctx.payload.defaultBranch ?? 'main',
     testPaths: config.repo.testPaths ?? [],
+    env: runEnv(ctx, config),
     cardPath,
     storyKey,
     cardTitle,

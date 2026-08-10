@@ -28,6 +28,7 @@ import { runCommand } from './exec.mjs';
 import {
   ACTOR,
   loadProjectConfig,
+  runEnv,
   runEvents,
   answeredPark,
   escalationLog,
@@ -210,7 +211,10 @@ async function readiness(ctx) {
     return { close: { state: 'failed', reason: 'card-invalid', errors } };
   }
   if (story.lintCommand) {
-    const lint = await runCommand(config.commands[story.lintCommand], { cwd: worktree });
+    const lint = await runCommand(config.commands[story.lintCommand], {
+      cwd: worktree,
+      env: runEnv(ctx, config),
+    });
     if (lint.code === null) {
       return { close: { state: 'failed', reason: 'lint-command-error', error: lint.error } };
     }
@@ -245,6 +249,7 @@ async function specBirth(ctx) {
     reportPath: runReportPath(ctx.paths, ctx.runId, `spec-birth-${n}`),
     schema: SPEC_BIRTH_SCHEMA,
     cwd: base.worktree,
+    env: base.env,
   });
   if (!result.ok) return seatFail('spec-birth', result);
   if (result.report.outcome === 'grounding-conflict') {
@@ -321,6 +326,7 @@ async function gateRound(ctx, base, { round, sections }) {
     reportPath: runReportPath(ctx.paths, ctx.runId, `spec-gate-${n}`),
     schema: SPEC_GATE_SCHEMA,
     cwd: base.worktree,
+    env: base.env,
   });
   if (!result.ok) return { directive: seatFail('spec-gate', result) };
   const conflict = result.report.intentConflict;
@@ -351,6 +357,7 @@ async function amendSpec(ctx, base, brief) {
     reportPath: runReportPath(ctx.paths, ctx.runId, `spec-birth-${n}`),
     schema: SPEC_AMEND_SCHEMA,
     cwd: base.worktree,
+    env: base.env,
   });
 }
 
@@ -388,6 +395,7 @@ async function suiteSeatWithChecks(ctx, base, { schema, buildRole, checks }) {
       reportPath: runReportPath(ctx.paths, ctx.runId, `suite-${n}`),
       schema,
       cwd: base.worktree,
+      env: base.env,
     });
     if (!result.ok) return { fail: seatFail('suite', result) };
     const defects = await checks(result.report);
@@ -597,13 +605,14 @@ async function runWave(ctx, base, clone, { round, wave }) {
     reportPath: runReportPath(ctx.paths, ctx.runId, tag),
     schema: ADVERSARY_SCHEMA,
     cwd: tree,
+    env: base.env,
     denyTools: testEditDenyRules(base.testPaths),
   });
   if (!result.ok) return seatFail('adversary', result);
   // Restore the suite from the sha before evaluation — a tampered test file
   // is structurally void, not detected.
   await restorePaths(tree, sha, base.testPaths);
-  const run = await runCommand(base.suiteArgv, { cwd: tree });
+  const run = await runCommand(base.suiteArgv, { cwd: tree, env: base.env });
   if (run.code === null) return commandFail(run);
   const killed = run.code !== 0;
   ctx.store.append('adversary-wave', {
@@ -625,7 +634,7 @@ async function rerunWave(ctx, base, clone, { round, wave, sha }) {
     return { close: { state: 'failed', reason: 'wave-tree-missing', round, wave } };
   }
   await restorePaths(tree, sha, base.testPaths);
-  const run = await runCommand(base.suiteArgv, { cwd: tree });
+  const run = await runCommand(base.suiteArgv, { cwd: tree, env: base.env });
   if (run.code === null) return commandFail(run);
   const killed = run.code !== 0;
   ctx.store.append('adversary-wave', {
@@ -736,7 +745,7 @@ function freezeHandler(nextStage) {
     // by feature absence alone. One corrective fix round on green, then fail.
     for (let attempt = 1; ; attempt++) {
       const sha = await headSha(base.worktree);
-      const run = await runCommand(base.suiteArgv, { cwd: base.worktree });
+      const run = await runCommand(base.suiteArgv, { cwd: base.worktree, env: base.env });
       if (run.code === null) return commandFail(run);
       const red = run.code !== 0;
       ctx.store.append('red-state-check', { actor: ACTOR, sha, result: red ? 'red' : 'green' });
@@ -952,6 +961,7 @@ async function laneBase(ctx) {
     card,
     testPaths: config.repo.testPaths,
     suiteArgv: config.commands[story.suiteCommand],
+    env: runEnv(ctx, config),
     specPath: join(ctx.paths.runs, ctx.runId, 'spec.md'),
   };
 }

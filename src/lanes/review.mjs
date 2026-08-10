@@ -101,6 +101,7 @@ export async function furyRound(ctx, base, { cycle, diffText, diffFiles }) {
         schema: reviewSchema(FURY_SEATS[seat]),
         roleBlock: furyRole(seat, base, diffText),
         cwd: base.worktree,
+        env: base.env,
       }),
     ),
   );
@@ -125,6 +126,7 @@ export async function generalistReview(ctx, base, { cycle, diffText, priorConfir
     schema: reviewSchema(ALL_LENSES),
     roleBlock: generalistRole(base, diffText),
     cwd: base.worktree,
+    env: base.env,
   });
   if (outcome.fail) return { fail: outcome.fail };
   const collected = outcome.report.findings.map((f) => ({ ...f, source: 'generalist-review' }));
@@ -229,7 +231,7 @@ function stampReviewFinding(ctx, cycle, finding, { advisory }) {
 }
 
 /** One review seat with resume-by-report: a stamped report is never re-run. */
-async function reviewSeat(ctx, { seat, label, schema, roleBlock, cwd }) {
+async function reviewSeat(ctx, { seat, label, schema, roleBlock, cwd, env }) {
   const reportPath = runReportPath(ctx.paths, ctx.runId, label);
   const events = runEvents(ctx);
   const prior = events.find(
@@ -239,7 +241,7 @@ async function reviewSeat(ctx, { seat, label, schema, roleBlock, cwd }) {
     const report = readJson(reportPath);
     if (report) return { report };
   }
-  const result = await ctx.runSeat({ seat, roleBlock, reportPath, schema, cwd });
+  const result = await ctx.runSeat({ seat, roleBlock, reportPath, schema, cwd, env });
   if (!result.ok) return { fail: seatFail(seat, result) };
   return { report: result.report };
 }
@@ -259,6 +261,7 @@ async function verifierSeat(ctx, base, { cycle, items }) {
       schema: VERIFIER_SCHEMA,
       roleBlock: verifierRole(base, items, brief),
       cwd: base.worktree,
+      env: base.env,
     });
     if (outcome.fail) return outcome;
     const defects = verifierCoverageDefects(items, outcome.report.results);
