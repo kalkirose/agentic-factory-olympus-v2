@@ -22,12 +22,14 @@ const GIST_MAX = 120;
 export class RunEngine {
   /**
    * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
-   * @param {{instanceStore?: object, getSlotCap: (project: string) => number|undefined}} opts
+   * @param {{instanceStore?: object, getSlotCap: (project: string) => number|undefined,
+   *   onClosed?: (info: {runId: string, project: string, lane: string, state: string}) => void}} opts
    */
-  constructor(paths, { instanceStore, getSlotCap }) {
+  constructor(paths, { instanceStore, getSlotCap, onClosed }) {
     this.paths = paths;
     this.instanceStore = instanceStore ?? null;
     this.getSlotCap = getSlotCap;
+    this.onClosed = onClosed ?? null;
     this.lanes = new Map();
     this.runs = new Map();
     this.stopped = false;
@@ -252,6 +254,11 @@ export class RunEngine {
     run.store.close();
     this.runs.delete(run.runId);
     archiveRun(this.paths, run.runId);
+    try {
+      this.onClosed?.({ runId: run.runId, project: run.project, lane: run.lane, state });
+    } catch {
+      // The hook owns its errors; a close never fails on it.
+    }
   }
 
   // -- liveness -------------------------------------------------------------

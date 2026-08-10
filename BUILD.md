@@ -62,7 +62,7 @@ Done when: a scripted dummy run walks all stages, survives daemon restart
 mid-stage, parks and resumes on an answer, and a provoked violation lands
 loud.
 
-## M4 — Project config + run isolation — open
+## M4 — Project config + run isolation — done
 
 - Project config: schema (repo facts, commands, gates, conventions, lane
   specifics, tripwire registry section), read from `main` in the bare clone
@@ -213,3 +213,13 @@ never carries a project's specifics.
   per-project lane-agnostic slot accounting that gates launch only. Control
   inbox gained `answer` and `kill`. ADR-0003 records the shapes. 60 tests
   green. Next: M4 (project config + run isolation).
+- 2026-08-10 — M4 done: project config schema v1 (commands as the single argv
+  home, gates reference commands, tripwire section shape-checked), read from
+  the default branch in the bare clone at every launch; fetch with prune
+  first — a failed fetch or an invalid config refuses the launch before any
+  worktree exists. Run worktrees off the bare clone (`worktrees/<id>/tree` on
+  branch `run/<id>`, disposables detached at a sha), per-run compose stacks
+  (`oly-<id>`, derived env, teardown by name alone), workspace record as a
+  run artifact, teardown at close via the engine `onClosed` hook with a
+  `workspace-released` stamp, orphan sweep at daemon start. ADR-0004 records
+  the shapes. 88 tests green. Next: M5 (seat runtime).

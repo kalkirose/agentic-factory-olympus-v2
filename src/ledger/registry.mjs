@@ -61,6 +61,7 @@ export const INSTANCE_EVENTS = new Set([
   'daemon-started',
   'daemon-stopped',
   'launch',
+  'workspace-released',
   'arming-changed',
   'config-changed',
   'factory-starvation',

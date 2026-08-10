@@ -6,7 +6,9 @@ import { join, basename } from 'node:path';
 import { openInstanceStore } from '../telemetry/stores.mjs';
 import { loadInstanceConfig, INSTANCE_CONFIG_FILE } from '../config/instance.mjs';
 import { RunEngine } from '../engine/engine.mjs';
-import { scaffoldHome, homePaths } from './home.mjs';
+import { RunIsolation } from '../isolation/isolation.mjs';
+import { readEvents } from '../ledger/ledger.mjs';
+import { scaffoldHome, homePaths, runLedgerPath } from './home.mjs';
 import { acquireLock } from './lock.mjs';
 
 const ACTOR = 'daemon';
@@ -15,19 +17,25 @@ const CONFIG_DEBOUNCE_MS = 150; // collapses editor multi-writes; not a detector
 export class Daemon {
   /**
    * @param {string} home
-   * @param {{handleSignals?: boolean, lanes?: Record<string, object>}} opts
+   * @param {{handleSignals?: boolean, lanes?: Record<string, object>,
+   *   composeRunner?: Function}} opts
    *   lanes: lane name → {stages, handlers}, registered on the run engine at
-   *   start. Concrete lanes land with their milestones.
+   *   start. Concrete lanes land with their milestones. composeRunner
+   *   substitutes the compose child process (tests only).
    */
-  constructor(home, { handleSignals = false, lanes = {} } = {}) {
+  constructor(home, { handleSignals = false, lanes = {}, composeRunner } = {}) {
     this.paths = homePaths(home);
     this.handleSignals = handleSignals;
     this.lanes = lanes;
+    this.composeRunner = composeRunner;
     this.running = false;
     this.config = null;
     this.lock = null;
     this.ledger = null;
     this.engine = null;
+    this.isolation = null;
+    this.pendingTeardowns = new Set();
+    this.launchCounter = 0;
     this.watchers = [];
     this.commands = new Map();
     this.configTimer = null;
@@ -60,9 +68,14 @@ export class Daemon {
     try {
       this.config = loadInstanceConfig(this.paths.home);
       this.ledger = openInstanceStore(this.paths);
+      this.isolation = new RunIsolation(this.paths, {
+        composeCommand: () => this.config.composeCommand,
+        composeRunner: this.composeRunner,
+      });
       this.engine = new RunEngine(this.paths, {
         instanceStore: this.ledger,
         getSlotCap: (project) => this.config.projects[project]?.slotCap,
+        onClosed: (info) => this.scheduleWorkspaceRelease(info),
       });
       for (const [name, lane] of Object.entries(this.lanes)) {
         this.engine.registerLane(name, lane);
@@ -73,6 +86,7 @@ export class Daemon {
         pid: process.pid,
         runsResumed,
       });
+      await this.sweepOrphanWorkspaces();
       this.archiveStaleControlFiles();
       this.watchConfig();
       this.watchControl();
@@ -86,6 +100,89 @@ export class Daemon {
       }
       this.teardown();
       throw error;
+    }
+  }
+
+  // -- run launch + workspace teardown --------------------------------------
+
+  /**
+   * Launches a run with full isolation: fetch the project's bare clone, read
+   * project config from the default branch, create the run worktree, bring
+   * the per-run stack up, then hand the run to the engine. A provisioning
+   * failure leaves nothing behind and no run starts.
+   * @param {{project: string, lane: string, runId?: string, [k: string]: unknown}} opts
+   */
+  async launchRun({ project, lane, runId, ...payload }) {
+    if (!this.running) throw new Error('daemon not running');
+    const entry = this.config.projects[project];
+    if (!entry) throw new Error(`unknown project: ${project}`);
+    if (!this.engine.lanes.has(lane)) throw new Error(`unknown lane: ${lane}`);
+    if (!this.engine.hasFreeSlot(project)) throw new Error(`no free slot for project ${project}`);
+    runId = runId ?? `${project}-${Date.now().toString(36)}-${++this.launchCounter}`;
+    if (this.engine.runs.has(runId)) throw new Error(`run ${runId} is already live`);
+    if (readEvents(runLedgerPath(this.paths, runId)).length > 0) {
+      throw new Error(`run ${runId} already has a ledger`);
+    }
+    const ws = await this.isolation.provision({
+      runId,
+      project,
+      repoUrl: entry.repoUrl,
+      defaultBranch: entry.defaultBranch,
+      configPath: entry.projectConfigPath,
+    });
+    try {
+      this.engine.launch({
+        runId,
+        project,
+        lane,
+        worktree: ws.worktree,
+        branch: ws.branch,
+        baseSha: ws.baseSha,
+        configBlob: ws.configBlob,
+        ...(ws.stack && { stack: ws.stack.name }),
+        ...payload,
+      });
+    } catch (error) {
+      await this.isolation.release(runId, { project }).catch(() => {});
+      throw error;
+    }
+    return { runId, worktree: ws.worktree, baseSha: ws.baseSha, projectConfig: ws.projectConfig };
+  }
+
+  /** Tears a closed run's workspace down and stamps the outcome. Async. */
+  scheduleWorkspaceRelease({ runId, project }) {
+    const task = this.releaseWorkspace(runId, { project })
+      .catch(() => {})
+      .finally(() => {
+        this.pendingTeardowns.delete(task);
+      });
+    this.pendingTeardowns.add(task);
+  }
+
+  async releaseWorkspace(runId, { project, orphan = false } = {}) {
+    let errors;
+    try {
+      ({ errors } = await this.isolation.release(runId, { project }));
+    } catch (error) {
+      errors = [error.message];
+    }
+    this.ledger.append('workspace-released', {
+      actor: ACTOR,
+      runId,
+      ok: errors.length === 0,
+      ...(orphan && { orphan }),
+      ...(errors.length > 0 && { errors }),
+    });
+  }
+
+  /**
+   * Releases workspaces whose run is not open — a daemon that died between
+   * run close and teardown leaves these behind. Runs at start.
+   */
+  async sweepOrphanWorkspaces() {
+    const open = new Set(this.engine.runs.keys());
+    for (const runId of this.isolation.orphanRunIds(open)) {
+      await this.releaseWorkspace(runId, { orphan: true });
     }
   }
 
@@ -209,6 +306,9 @@ export class Daemon {
         await this.engine.stop();
         this.engine = null;
       }
+      // In-flight workspace teardowns stamp to the instance ledger; let them
+      // land before the ledger closes.
+      await Promise.allSettled([...this.pendingTeardowns]);
       this.ledger.append('daemon-stopped', { actor: actor ?? ACTOR, trigger });
       this.teardown();
       if (this.onStopped) this.onStopped();

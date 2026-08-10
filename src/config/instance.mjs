@@ -12,6 +12,8 @@ export function defaultInstanceConfig() {
     logLevel: 'info',
     // model id → max concurrent seats across all runs
     semaphores: {},
+    // argv that runs compose on this machine
+    composeCommand: ['docker', 'compose'],
     // project name → project entry
     projects: {},
     // notification-stream wiring; consoles read the stream indexes directly
@@ -57,6 +59,13 @@ export function validateInstanceConfig(config) {
   }
   if (config.streams !== undefined && !isPlainObject(config.streams)) {
     err('streams', 'must be an object');
+  }
+  if (config.composeCommand !== undefined) {
+    const ok =
+      Array.isArray(config.composeCommand) &&
+      config.composeCommand.length > 0 &&
+      config.composeCommand.every((v) => typeof v === 'string' && v.length > 0);
+    if (!ok) err('composeCommand', 'must be a non-empty argv array of strings');
   }
   return errors;
 }
