@@ -11,11 +11,8 @@
 // invocation, then seat-failure.
 import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { readEvents } from '../ledger/ledger.mjs';
-import { runLedgerPath, runReportPath } from '../daemon/home.mjs';
-import { parseProjectConfig } from '../config/project.mjs';
+import { runReportPath } from '../daemon/home.mjs';
 import { cloneDir } from '../isolation/clones.mjs';
-import { git } from '../isolation/git.mjs';
 import { addDisposableWorktree, removeWorktree, workspaceRoot } from '../isolation/worktrees.mjs';
 import {
   changedFiles,
@@ -28,10 +25,25 @@ import {
 import { testEditDenyRules } from '../seats/boundary.mjs';
 import { parseIntentCard } from './card.mjs';
 import { runCommand } from './exec.mjs';
+import {
+  ACTOR,
+  loadProjectConfig,
+  runEvents,
+  answeredPark,
+  escalationLog,
+  invocationCount,
+  seatReportAfter,
+  lastSeatReportEvent,
+  readJson,
+  parkDirective,
+  seatFail,
+  commandFail,
+  underAny,
+  briefLines,
+  gist,
+} from './shared.mjs';
 
-const ACTOR = 'daemon';
 const WAVES = 3;
-const GIST_MAX = 120;
 
 export const PRE_FREEZE_STAGES = ['readiness', 'spec-birth', 'spec-gate', 'suite', 'adversary', 'freeze'];
 
@@ -921,12 +933,6 @@ function adversaryRole(base) {
   ].join('\n');
 }
 
-function briefLines(brief) {
-  if (!brief) return [];
-  const items = Array.isArray(brief) ? brief : [brief];
-  return ['Correction brief — fix these defects:', ...items.map((d) => `- ${d}`)];
-}
-
 // -- shared derivations ------------------------------------------------------
 
 async function laneBase(ctx) {
@@ -948,107 +954,4 @@ async function laneBase(ctx) {
     suiteArgv: config.commands[story.suiteCommand],
     specPath: join(ctx.paths.runs, ctx.runId, 'spec.md'),
   };
-}
-
-async function loadProjectConfig(ctx) {
-  const clone = cloneDir(ctx.paths, ctx.project);
-  const text = await git(['cat-file', '-p', ctx.payload.configBlob], { cwd: clone });
-  return parseProjectConfig(text, `${ctx.project}#${ctx.payload.configBlob}`);
-}
-
-function runEvents(ctx) {
-  return readEvents(runLedgerPath(ctx.paths, ctx.runId));
-}
-
-/** The latest park of a type and the answer that followed it, if any. */
-function answeredPark(events, type) {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (e.event === 'park' && e.type === type) {
-      const answer = events.slice(i + 1).find((a) => a.event === 'answer' && a.parkSeq === e.seq);
-      return { park: e, answer: answer ?? null };
-    }
-  }
-  return null;
-}
-
-/** Every answered park as a Q→A pair, for seat role blocks. */
-function escalationLog(events) {
-  const pairs = [];
-  for (const e of events) {
-    if (e.event !== 'park') continue;
-    const answer = events.find((a) => a.event === 'answer' && a.parkSeq === e.seq);
-    if (answer) {
-      pairs.push({
-        type: e.type,
-        question: e.question,
-        answer: answer.option ?? answer.answer,
-        actor: answer.actor,
-      });
-    }
-  }
-  return pairs;
-}
-
-/** Completed seat sessions for a seat (corrective re-prompts not counted). */
-function invocationCount(events, seat) {
-  return events.filter((e) => e.event === 'seat-spawned' && e.seat === seat && e.attempt === 1).length;
-}
-
-function seatReportAfter(events, seat, seq) {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (e.event === 'seat-report' && e.seat === seat && e.seq > seq) return e;
-  }
-  return null;
-}
-
-function lastSeatReportEvent(events, seat) {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (e.event === 'seat-report' && e.seat === seat) return e;
-  }
-  return null;
-}
-
-function readJson(path) {
-  if (!path) return null;
-  try {
-    return JSON.parse(readFileSync(path, 'utf8'));
-  } catch {
-    return null;
-  }
-}
-
-function parkDirective(type, { question, options, refs }) {
-  return { park: { type, question, ...(options && { options }), ...(refs && { refs }) } };
-}
-
-function seatFail(seat, result) {
-  return {
-    close: {
-      state: 'failed',
-      reason: 'seat-failure',
-      seat,
-      ...(result.reason ? { cause: result.reason } : {}),
-    },
-  };
-}
-
-function commandFail(run) {
-  // The command could not run at all — an environment defect, not a verdict.
-  return { close: { state: 'failed', reason: 'suite-command-error', error: run.error } };
-}
-
-function underAny(file, prefixes) {
-  const norm = file.replaceAll('\\', '/');
-  return prefixes.some((p) => {
-    const prefix = p.replaceAll('\\', '/').replace(/\/+$/, '');
-    return norm === prefix || norm.startsWith(prefix + '/');
-  });
-}
-
-function gist(text) {
-  if (typeof text !== 'string') return '';
-  return text.length > GIST_MAX ? text.slice(0, GIST_MAX - 1) + '…' : text;
 }

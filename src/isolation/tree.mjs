@@ -70,6 +70,27 @@ export async function evidenceDiff(tree, { limit = 8000 } = {}) {
   return out.length > limit ? out.slice(0, limit) + '\n[truncated]' : out;
 }
 
+/** The committed diff between two shas as a patch, truncated to `limit`. */
+export async function diffRange(tree, from, to, { limit = 12000 } = {}) {
+  const out = await git(['diff', `${from}..${to}`], { cwd: tree });
+  return out.length > limit ? out.slice(0, limit) + '\n[truncated]' : out;
+}
+
+/** File paths changed between two shas. */
+export async function changedInRange(tree, from, to) {
+  const out = await git(['diff', '--name-only', `${from}..${to}`], { cwd: tree });
+  return out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+/** Hard-resets the working tree and branch to a sha; untracked files removed. */
+export async function resetHard(tree, sha) {
+  await git(['reset', '--hard', sha], { cwd: tree });
+  await git(['clean', '-fd'], { cwd: tree });
+}
+
 /** Files under the given prefixes at a sha. */
 export async function filesAt(tree, sha, prefixes) {
   const out = await git(['ls-tree', '-r', '--name-only', sha, '--', ...prefixes], { cwd: tree });

@@ -109,7 +109,7 @@ export class RunEngine {
       violated: false,
       closed: false,
       executing: false,
-      seat: null,
+      seats: new Set(),
       lastAnswer: null,
     };
     this.runs.set(runId, run);
@@ -128,11 +128,13 @@ export class RunEngine {
     const lane = this.lanes.get(run.lane);
     const handler = lane.handlers[run.stage];
     run.executing = true;
+    // A handler may supervise several seats at once (the Fury fan-out); the
+    // run tracks the whole in-flight set for liveness, kill, and stop.
     const supervise = (opts) => {
       const seat = superviseSeat(run.store, opts);
-      run.seat = seat;
+      run.seats.add(seat);
       return seat.done.finally(() => {
-        if (run.seat === seat) run.seat = null;
+        run.seats.delete(seat);
       });
     };
     const ctx = {
@@ -261,7 +263,7 @@ export class RunEngine {
   killRun(runId, { actor = ACTOR } = {}) {
     const run = this.runs.get(runId);
     if (!run || run.closed) throw new Error(`no open run: ${runId}`);
-    if (run.seat) run.seat.terminate('run-killed');
+    for (const seat of run.seats) seat.terminate('run-killed');
     this.closeRun(run, 'killed', { actor });
   }
 
@@ -287,7 +289,7 @@ export class RunEngine {
   checkLiveness() {
     const violations = [];
     for (const run of this.runs.values()) {
-      if (run.closed || run.parked || run.violated || run.executing || run.seat) continue;
+      if (run.closed || run.parked || run.violated || run.executing || run.seats.size > 0) continue;
       this.stampViolation(run, 'no in-flight child, no parked escalation, no transition in progress');
       violations.push(run.runId);
     }
@@ -348,9 +350,9 @@ export class RunEngine {
     this.stopped = true;
     const draining = [];
     for (const run of this.runs.values()) {
-      if (run.seat) {
-        run.seat.terminate('daemon-stopped');
-        draining.push(run.seat.done);
+      for (const seat of run.seats) {
+        seat.terminate('daemon-stopped');
+        draining.push(seat.done);
       }
     }
     await Promise.all(draining);

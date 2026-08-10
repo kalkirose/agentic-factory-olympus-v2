@@ -29,9 +29,11 @@ export const RUN_EVENTS = new Set([
   'red-state-check',
   'freeze',
   // verdict
+  'implementation-committed',
   'layer-result',
   'flake',
   'finding',
+  'verdict-rendered',
   'repair-round',
   'stall',
   'fresh-pass',

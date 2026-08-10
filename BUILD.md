@@ -109,7 +109,7 @@ stamp correctly under contention.
 Done when: a fixture story reaches a valid freeze record with kill count and
 dispositions, and every escalation case parks correctly.
 
-## M7 — Verdict, repair, review — open
+## M7 — Verdict, repair, review — done
 
 - Tier-1 full-spectrum runner (processes; not-runnable attribution).
 - Flake filter (one red-only re-run; flake events).
@@ -256,3 +256,21 @@ never carries a project's specifics.
   `NODE_TEST_CONTEXT` (inherited context turns a red `node --test` child
   into a false green). ADR-0006 records the shapes. 136 tests green. Next:
   M7 (verdict, repair, review).
+- 2026-08-10 — M7 done: verdict, repair, review. `postFreeze({afterVerdict})`
+  adds implementation → verdict to the story lane; `repairLane` wires the
+  variant (ticket = spec, generalist review, test edits free). Full-spectrum
+  runner with not-runnable attribution through the needs chain; flake filter
+  (one red-only re-run, `flake` stamps). Verdict triage on persistent reds
+  only (four classes + suite-defect depth, prior findings handed in, coverage
+  checks on the contract loop); harness findings stamp `gate-integrity` loud
+  with paired resolution. Fury round: five parallel seats / six lenses,
+  interface conditional on UI diffs, verifier confirm-to-block; repair cycles
+  get generalist review + resolution-check, never a re-fan-out. Response
+  ladder: batched routes per red verdict — repair rounds (size-based progress
+  rule, cap 3), re-freeze (spec-deep amends the born spec; intent parks),
+  operational fix then `provisioning-gate`, one fresh pass off a hard reset
+  to the freeze sha, `second-stall` park with granted-extension options.
+  Verdict records carry the full spectrum + confirmed findings only. Engine
+  tracks in-flight seats as a set (parallel fan-out under liveness/kill/
+  stop); new registry events `implementation-committed`, `verdict-rendered`.
+  ADR-0007 records the shapes. 152 tests green. Next: M8 (ship step).
