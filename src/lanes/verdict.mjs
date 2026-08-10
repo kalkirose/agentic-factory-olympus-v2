@@ -16,7 +16,7 @@
 // Every handler re-derives its position from the run ledger and the git
 // state, so a daemon restart resumes mid-verdict without memory.
 import { existsSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { runReportPath } from '../daemon/home.mjs';
 import {
   changedFiles,
@@ -302,7 +302,11 @@ async function runCycle(ctx, base, mode, { cycle }) {
 
 // -- verdict triage (seat) ---------------------------------------------------
 
-async function triageStep(ctx, base, { cycle, reds, priorOpen }) {
+/**
+ * The shared four-class triage over persistent reds. The ship step calls it
+ * with CI checks as the red layers (`ci:<check>`); the routes stay the same.
+ */
+export async function triageStep(ctx, base, { cycle, reds, priorOpen }) {
   const stamped = runEvents(ctx).filter(
     (e) => e.event === 'finding' && e.cycle === cycle && e.source === 'triage',
   );
@@ -589,7 +593,7 @@ async function repairRound(ctx, base, mode, { pass, round, open, record }) {
   return {};
 }
 
-async function freshPass(ctx, base, mode, { newPass, trigger, open, last }) {
+export async function freshPass(ctx, base, mode, { newPass, trigger, open, last }) {
   const events = runEvents(ctx);
   if (!events.some((e) => e.event === 'fresh-pass' && e.seq > last.seq)) {
     // The fresh pass never sees the prior tree: reset to the pre-
@@ -876,8 +880,13 @@ async function verdictBase(ctx, mode) {
       resetSha: freeze.sha,
     };
   }
+  // The intake ticket is the spec. A repo-relative path names a committed
+  // ticket; an absolute path names a daemon-home ticket (red-merge repair
+  // spawns write these — the defect is not in the tree it escaped from).
   const ticket = ctx.payload.ticket;
-  if (typeof ticket !== 'string' || !existsSync(join(worktree, ticket))) {
+  const ticketPath =
+    typeof ticket === 'string' ? (isAbsolute(ticket) ? ticket : join(worktree, ticket)) : null;
+  if (!ticketPath || !existsSync(ticketPath)) {
     return { fail: { close: { state: 'failed', reason: 'ticket-missing', ticket } } };
   }
   return {
@@ -887,7 +896,7 @@ async function verdictBase(ctx, mode) {
     commands: config.commands,
     testPaths: config.repo.testPaths ?? [],
     uiPaths: config.repo.uiPaths ?? [],
-    specRef: join(worktree, ticket),
+    specRef: ticketPath,
     suiteSha: null,
     resetSha: ctx.payload.baseSha,
   };
@@ -901,7 +910,7 @@ function currentSuiteSha(events) {
   return null;
 }
 
-function currentPass(events) {
+export function currentPass(events) {
   let pass = 0;
   for (const e of events) {
     if (e.event === 'implementation-committed' && e.pass > pass) pass = e.pass;
@@ -928,7 +937,7 @@ function eventsAfter(events, seq) {
 }
 
 /** Every non-advisory finding by id, rebuilt from the ledger. */
-function findingIndex(events) {
+export function findingIndex(events) {
   const index = new Map();
   for (const e of events) {
     if (e.event !== 'finding' || e.advisory) continue;
@@ -953,7 +962,7 @@ function findingFromEvent(e) {
   };
 }
 
-function answerCount(events, parkType, option) {
+export function answerCount(events, parkType, option) {
   const parkSeqs = new Set(
     events.filter((e) => e.event === 'park' && e.type === parkType).map((e) => e.seq),
   );

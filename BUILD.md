@@ -124,7 +124,7 @@ dispositions, and every escalation case parks correctly.
 Done when: seeded defect fixtures route down each ladder arm correctly and
 the verdict record carries the full spectrum + confirmed findings only.
 
-## M8 — Ship step — open
+## M8 — Ship step — done
 
 - PR open + arm auto-merge (squash); branch-protection preflight.
 - Check watcher process: every state transition stamped, per-check durations,
@@ -274,3 +274,29 @@ never carries a project's specifics.
   tracks in-flight seats as a set (parallel fan-out under liveness/kill/
   stop); new registry events `implementation-committed`, `verdict-rendered`.
   ADR-0007 records the shapes. 152 tests green. Next: M8 (ship step).
+- 2026-08-10 — M8 done: ship step. `shipStep({forge})` supplies `ship` +
+  `close-out` behind the verdict; all forge traffic goes through one
+  injected interface (`src/ship/forge.mjs` implements it over the gh CLI,
+  argv-tested; live verification items named in the ADR). Preflight parks
+  `provisioning-gate` without protection + auto-merge; auto-merge (squash)
+  arms at PR open; the check watcher stamps every observed transition with
+  forge-side durations, final states stamped at merge observation too.
+  CI reds: one failed-jobs re-run (`ci-flake` on green), then the shared
+  `triageStep` renders a `source: 'ci'` red verdict and the run re-enters
+  the verdict stage — same ladder, same budgets. Competing merges: daemon
+  merges main in, plain push, `branch-update` linkage; textual conflicts
+  get one merge round (test hunks → suite seat as a re-freeze; failed round
+  → stall → the one fresh pass born on updated main). Green-but-no-merge:
+  loud `gate-integrity`, one re-arm, resolved at merge. Red-merge breach:
+  `merged {red}` → close-out converts open findings to escapes
+  (`harness-self`, story-attributed), spawns repair runs via the injected
+  spawner, stamps the loud breach; repair-lane close-out stamps
+  `escape-fixed`. Card sweep resets to the merge commit, edits cards only,
+  pushes straight to the default branch, and parks invalidated cards in the
+  instance ledger (`park` joins `INSTANCE_EVENTS`) — the card blocks, never
+  the shipped run. Two latent hazards fixed: the bare-clone fetch refspec
+  pins to the default branch (wide refspec + prune deleted live `run/*`
+  branches), and bare `--force-with-lease` is banned (the clone shape makes
+  git self-lease; loop pushes carry an explicit observed-head lease).
+  ADR-0008 records the shapes. 166 tests green. Next: M9 (frontier,
+  escalation queue, console).

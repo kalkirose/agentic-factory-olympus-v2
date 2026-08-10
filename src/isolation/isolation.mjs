@@ -31,7 +31,7 @@ export class RunIsolation {
    *   defaultBranch: string, configPath: string}} opts
    */
   async provision({ runId, project, repoUrl, defaultBranch, configPath }) {
-    const clone = await ensureBareClone(this.paths, project, repoUrl);
+    const clone = await ensureBareClone(this.paths, project, repoUrl, defaultBranch);
     await fetchClone(clone);
     const source = `${project} ${defaultBranch}:${configPath}`;
     const { blob, text } = await readBlobFromBranch(clone, defaultBranch, configPath);

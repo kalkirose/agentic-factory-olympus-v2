@@ -145,7 +145,11 @@ export class RunEngine {
       payload: run.payload,
       lastAnswer: run.lastAnswer,
       store: run.store,
+      instanceStore: this.instanceStore,
       paths: this.paths,
+      // Long-poll handlers (the check watcher) exit their loop on this; the
+      // engine ignores any directive returned after stop or close.
+      stopped: () => this.stopped || run.closed,
       supervise,
       // Dispatch through the engine's supervise wrapper so the liveness
       // invariant sees the seat as an in-flight child.

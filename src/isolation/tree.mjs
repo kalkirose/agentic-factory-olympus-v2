@@ -85,6 +85,58 @@ export async function changedInRange(tree, from, to) {
     .filter((line) => line.length > 0);
 }
 
+/**
+ * Pushes a ref to a remote. `ref` may be `branch` or `HEAD:branch`. `lease`
+ * names the sha the remote ref is expected to hold — the push then forces
+ * only over that exact value. Never use the bare `--force-with-lease` here:
+ * in a bare clone whose fetch refspec writes to `refs/heads/*`, git derives
+ * the lease from the local branch itself and rejects every later push.
+ */
+export async function push(tree, remote, ref, { lease = null } = {}) {
+  const flags = lease ? [`--force-with-lease=${ref}:${lease}`] : [];
+  await git(['push', ...flags, remote, ref], { cwd: tree });
+}
+
+/**
+ * Merges a commit into the current branch. Returns the new head on a clean
+ * merge; on textual conflicts, the conflicted paths with the merge left in
+ * progress (resolve and conclude, or abort).
+ * @returns {Promise<{ok: true, sha: string} | {ok: false, conflicts: string[]}>}
+ */
+export async function mergeIntoTree(tree, sha, message) {
+  try {
+    await git([...IDENTITY, 'merge', '-m', message, sha], { cwd: tree });
+    return { ok: true, sha: await headSha(tree) };
+  } catch {
+    const conflicts = await conflictedFiles(tree);
+    if (conflicts.length === 0) {
+      await abortMerge(tree).catch(() => {});
+      throw new Error('merge failed without conflicts');
+    }
+    return { ok: false, conflicts };
+  }
+}
+
+/** Paths with unmerged index entries. */
+export async function conflictedFiles(tree) {
+  const out = await git(['diff', '--name-only', '--diff-filter=U'], { cwd: tree });
+  return out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+/** Concludes an in-progress merge: stage everything, commit. */
+export async function concludeMerge(tree, message) {
+  await git(['add', '-A'], { cwd: tree });
+  await git([...IDENTITY, 'commit', '-m', message], { cwd: tree });
+  return headSha(tree);
+}
+
+export async function abortMerge(tree) {
+  await git(['merge', '--abort'], { cwd: tree });
+}
+
 /** Hard-resets the working tree and branch to a sha; untracked files removed. */
 export async function resetHard(tree, sha) {
   await git(['reset', '--hard', sha], { cwd: tree });

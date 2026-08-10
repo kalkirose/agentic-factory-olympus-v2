@@ -1,8 +1,10 @@
 // Bare clone management. The daemon keeps one bare clone per project under
-// the daemon home; every run worktree hangs off it. Fetch discipline: a
-// heads-only refspec with prune, fetched at every run launch — the launch
-// reads project config and branch heads as they stand on the remote, or it
-// fails. No launch runs on silently stale refs.
+// the daemon home; every run worktree hangs off it. Fetch discipline: the
+// refspec covers the default branch only, fetched with prune at every run
+// launch and branch update — the launch reads project config and the branch
+// head as they stand on the remote, or it fails. No launch runs on silently
+// stale refs. The refspec must never widen to `refs/heads/*`: with prune,
+// a wide refspec deletes the local run/* branches of every live run.
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { git } from './git.mjs';
@@ -13,16 +15,21 @@ export function cloneDir(paths, project) {
 }
 
 /**
- * Clones the project bare on first use and pins the fetch refspec to branch
- * heads. Idempotent; an existing clone is returned as is.
+ * Clones the project bare on first use and pins the fetch refspec to the
+ * default branch. The refspec is re-pinned on every call, so a clone made
+ * under an older (wider) refspec heals itself.
  */
-export async function ensureBareClone(paths, project, repoUrl) {
+export async function ensureBareClone(paths, project, repoUrl, defaultBranch) {
+  if (typeof defaultBranch !== 'string' || defaultBranch.length === 0) {
+    throw new Error('ensureBareClone requires the default branch');
+  }
   const dir = cloneDir(paths, project);
   if (!existsSync(dir)) {
-    await git(['clone', '--bare', repoUrl, dir]);
     // `clone --bare` sets no fetch refspec; without one, fetch updates nothing.
-    await git(['config', 'remote.origin.fetch', '+refs/heads/*:refs/heads/*'], { cwd: dir });
+    await git(['clone', '--bare', repoUrl, dir]);
   }
+  const refspec = `+refs/heads/${defaultBranch}:refs/heads/${defaultBranch}`;
+  await git(['config', 'remote.origin.fetch', refspec], { cwd: dir });
   return dir;
 }
 

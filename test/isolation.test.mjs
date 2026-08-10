@@ -39,7 +39,7 @@ function fixture(t) {
 
 test('fetch discipline: a change on main applies only after fetch', async (t) => {
   const { origin, paths } = fixture(t);
-  const clone = await ensureBareClone(paths, 'alpha', origin);
+  const clone = await ensureBareClone(paths, 'alpha', origin, 'main');
   const before = await readBlobFromBranch(clone, 'main', CONFIG_PATH);
   commitTree(origin, { [CONFIG_PATH]: projectConfigJson({ conventions: ['v2'] }) }, 'config v2');
   // The clone reads its own refs — nothing changes until fetch.
@@ -50,12 +50,24 @@ test('fetch discipline: a change on main applies only after fetch', async (t) =>
   assert.notEqual(fresh.blob, before.blob);
   assert.deepEqual(JSON.parse(fresh.text).conventions, ['v2']);
   // Idempotent: a second ensure returns the same clone untouched.
-  assert.equal(await ensureBareClone(paths, 'alpha', origin), clone);
+  assert.equal(await ensureBareClone(paths, 'alpha', origin, 'main'), clone);
+});
+
+test('fetch with prune never deletes a live run branch', async (t) => {
+  const { origin, paths } = fixture(t);
+  const clone = await ensureBareClone(paths, 'alpha', origin, 'main');
+  const { path } = await addRunWorktree(clone, paths, 'r9', 'main');
+  // The run branch exists only locally; a wide refspec would prune it here.
+  commitTree(origin, { 'src/app.txt': 'v2\n' }, 'app v2');
+  await fetchClone(clone);
+  assert.equal(await branchSha(clone, 'run/r9'), gitSync(['rev-parse', 'HEAD'], path).trim());
+  assert.equal(await branchSha(clone, 'main'), gitSync(['rev-parse', 'main'], origin).trim());
+  await removeRunWorktrees(clone, paths, 'r9');
 });
 
 test('run worktree: fresh run branch at launch, everything gone at release', async (t) => {
   const { origin, paths } = fixture(t);
-  const clone = await ensureBareClone(paths, 'alpha', origin);
+  const clone = await ensureBareClone(paths, 'alpha', origin, 'main');
   const { path, branch } = await addRunWorktree(clone, paths, 'r1', 'main');
   assert.equal(path, runWorktreePath(paths, 'r1'));
   assert.ok(existsSync(join(path, 'compose.harness.yml')));
@@ -70,7 +82,7 @@ test('run worktree: fresh run branch at launch, everything gone at release', asy
 
 test('disposable worktrees pin a sha and die with the run root', async (t) => {
   const { origin, paths } = fixture(t);
-  const clone = await ensureBareClone(paths, 'alpha', origin);
+  const clone = await ensureBareClone(paths, 'alpha', origin, 'main');
   const oldSha = await branchSha(clone, 'main');
   commitTree(origin, { 'src/app.txt': 'v2\n' }, 'app v2');
   await fetchClone(clone);

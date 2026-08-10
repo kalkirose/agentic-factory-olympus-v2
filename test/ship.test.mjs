@@ -1,0 +1,780 @@
+// The ship step end to end on fixture repos against a fake forge: a fixture
+// PR ships green hands-off; a forced red-merge and a competing merge produce
+// the specified stamps and routes; CI reds take the flake filter and the
+// shared triage; textual conflicts take the merge round. The lane is seeded
+// at the freeze boundary — the pre-freeze chain has its own suite.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { Daemon } from '../src/daemon/daemon.mjs';
+import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
+import { postFreeze, repairLane } from '../src/lanes/verdict.mjs';
+import { shipStep } from '../src/lanes/ship.mjs';
+import { gitHubForge, parseGitHubRepo } from '../src/ship/forge.mjs';
+import { commitAll } from '../src/isolation/tree.mjs';
+import { readEvents } from '../src/ledger/ledger.mjs';
+import { openEscapesStore } from '../src/telemetry/stores.mjs';
+import { recordEscape, readEscapeSet } from '../src/telemetry/escapes.mjs';
+import { tempDir, removeDir, waitFor, gitSync, initOriginRepo, commitTree, projectConfigJson } from './helpers.mjs';
+
+const CONFIG_PATH = '.olympus/project.json';
+
+const DEFAULT_CARD = `---
+key: alpha-1
+title: Alpha feature
+---
+
+## Goal
+
+Provide f(x) that doubles x in src/feature.mjs.
+`;
+
+const GOOD_FEATURE = 'export const f = (x) => 2 * x;\n';
+const ALT_FEATURE = 'export const f = (x) => x + x; // main variant\n';
+
+const STRONG_TEST = `import test from 'node:test';
+import assert from 'node:assert/strict';
+test('f doubles', async () => {
+  const { f } = await import('../src/feature.mjs');
+  assert.equal(f(2), 4);
+});
+`;
+
+const ALT_TEST = `import test from 'node:test';
+import assert from 'node:assert/strict';
+// main variant
+test('f doubles', async () => {
+  const { f } = await import('../src/feature.mjs');
+  assert.equal(f(3), 6);
+});
+`;
+
+// -- check-run shorthands ----------------------------------------------------
+
+const green = (name = 'ci') => ({
+  name,
+  status: 'completed',
+  conclusion: 'success',
+  startedAt: '2026-08-10T00:00:00Z',
+  completedAt: '2026-08-10T00:03:00Z',
+});
+const red = (name = 'ci') => ({
+  name,
+  status: 'completed',
+  conclusion: 'failure',
+  startedAt: '2026-08-10T00:00:00Z',
+  completedAt: '2026-08-10T00:02:00Z',
+});
+const running = (name = 'ci') => ({ name, status: 'in_progress' });
+
+// -- fake forge over the fixture origin --------------------------------------
+
+function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {}) {
+  const state = {
+    autoMergeAllowed: true,
+    requiredChecks: required,
+    armAccepts: true,
+    pr: null,
+    checks: new Map(),
+    autoChecks: null,
+    onRerun: null,
+    reruns: [],
+  };
+  const head = (ref) => gitSync(['rev-parse', ref], origin).trim();
+  const isAncestor = (a, b) => {
+    try {
+      gitSync(['merge-base', '--is-ancestor', a, b], origin);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const checksFor = (sha) => {
+    if (!state.checks.has(sha) && state.autoChecks) state.checks.set(sha, state.autoChecks(sha));
+    return state.checks.get(sha) ?? [];
+  };
+  const allRequiredGreen = (sha) =>
+    state.requiredChecks.every((name) => {
+      const run = checksFor(sha).find((r) => r.name === name);
+      return run?.status === 'completed' && ['success', 'neutral', 'skipped'].includes(run.conclusion);
+    });
+  const doMerge = () => {
+    const pr = state.pr;
+    pr.headShaAtMerge = head(pr.head);
+    gitSync(['merge', '--squash', pr.head], origin);
+    gitSync(
+      ['-c', 'user.email=f@f', '-c', 'user.name=forge', '-c', 'commit.gpgsign=false', 'commit', '-m', `squash ${pr.head}`],
+      origin,
+    );
+    pr.mergeSha = head('main');
+    pr.state = 'merged';
+    // Preset the merge sha's checks so autoChecks never leaks onto it.
+    state.checks.set(pr.mergeSha, mergeCommitChecks ?? []);
+  };
+  return {
+    state,
+    setChecks: (sha, list) => state.checks.set(sha, list),
+    adminMerge: () => doMerge(),
+    async preflight() {
+      return {
+        autoMergeAllowed: state.autoMergeAllowed,
+        strict: true,
+        requiredChecks: state.requiredChecks,
+      };
+    },
+    async openPr({ head: headBranch, base }) {
+      if (!state.pr || state.pr.state === 'closed') {
+        state.pr = { number: 7, head: headBranch, base, armed: false, state: 'open', mergeSha: null };
+      }
+      return { number: state.pr.number, url: `fake://pr/${state.pr.number}` };
+    },
+    async armAutoMerge() {
+      if (!state.armAccepts) return { armed: false, reason: 'refused (fixture)' };
+      state.pr.armed = true;
+      return { armed: true };
+    },
+    async prState() {
+      const pr = state.pr;
+      if (pr.state === 'open' && pr.armed && isAncestor('main', pr.head) && allRequiredGreen(head(pr.head))) {
+        doMerge();
+      }
+      if (pr.state === 'merged') {
+        return {
+          state: 'merged',
+          headSha: pr.headShaAtMerge,
+          mergeSha: pr.mergeSha,
+          behindBase: false,
+          autoMergeArmed: false,
+        };
+      }
+      return {
+        state: pr.state,
+        headSha: head(pr.head),
+        mergeSha: null,
+        behindBase: !isAncestor('main', pr.head),
+        autoMergeArmed: pr.armed,
+      };
+    },
+    async checkRuns(sha) {
+      return checksFor(sha);
+    },
+    async rerunFailed(sha) {
+      state.reruns.push(sha);
+      if (state.onRerun) state.onRerun(sha);
+      else {
+        state.checks.set(
+          sha,
+          checksFor(sha).map((r) =>
+            r.status === 'completed' && r.conclusion !== 'success' ? { name: r.name, status: 'queued' } : r,
+          ),
+        );
+      }
+    },
+    async checkOutput(sha, name) {
+      return `log tail of ${name} at ${sha}`;
+    },
+  };
+}
+
+// -- fixture machinery (seat children, seeded freeze) ------------------------
+
+function fixtureParse(line) {
+  if (!line.trim()) return null;
+  try {
+    const parsed = JSON.parse(line);
+    return { cost: parsed.cost, note: parsed.note, meta: parsed.meta };
+  } catch {
+    return null;
+  }
+}
+
+function seatScript({ reportPath, model, report, files = {}, exitCode = 0 }) {
+  const stmts = [
+    "const fs = require('fs');",
+    "const path = require('path');",
+    `console.log(${JSON.stringify(JSON.stringify({ meta: { model } }))});`,
+  ];
+  for (const [file, content] of Object.entries(files)) {
+    stmts.push(
+      `fs.mkdirSync(path.dirname(${JSON.stringify(file)}), { recursive: true });`,
+      `fs.writeFileSync(${JSON.stringify(file)}, ${JSON.stringify(content)});`,
+    );
+  }
+  if (report !== undefined) {
+    stmts.push(
+      `fs.mkdirSync(path.dirname(${JSON.stringify(reportPath)}), { recursive: true });`,
+      `fs.writeFileSync(${JSON.stringify(reportPath)}, ${JSON.stringify(JSON.stringify(report))});`,
+    );
+  }
+  stmts.push(`process.exit(${exitCode});`);
+  return stmts.join('\n');
+}
+
+function seatFixture(seats) {
+  const calls = [];
+  const commandFor = (opts) => {
+    const seat = /You are the (\S+) seat/.exec(opts.prompt)[1];
+    const lines = opts.prompt.split('\n');
+    const contract = lines.findIndex((l) => l.includes('write your JSON report to this file'));
+    const reportPath = lines[contract + 1];
+    const label = basename(reportPath, '.json');
+    calls.push({ seat, label, attempt: opts.attempt, prompt: opts.prompt, denyTools: opts.denyTools });
+    const behavior = seats[seat];
+    if (!behavior) throw new Error(`no fixture behavior for seat ${seat}`);
+    const out = behavior({ seat, label, prompt: opts.prompt, attempt: opts.attempt }) ?? {};
+    return {
+      cmd: process.execPath,
+      args: ['-e', seatScript({ reportPath, model: opts.model, ...out })],
+      parseLine: fixtureParse,
+    };
+  };
+  return { commandFor, calls };
+}
+
+function furyClean() {
+  const seats = {};
+  for (const seat of ['fury-spec', 'fury-code-shape', 'fury-operational', 'fury-security', 'fury-interface']) {
+    seats[seat] = () => ({ report: { findings: [], summary: 'clean' } });
+  }
+  return seats;
+}
+
+/** Seeds the freeze boundary: suite committed, spec written, freeze stamped. */
+function seedHandler() {
+  return async (ctx) => {
+    const worktree = ctx.payload.worktree;
+    const full = join(worktree, 'tests/feature.test.mjs');
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, STRONG_TEST);
+    const sha = await commitAll(worktree, 'suite: seed');
+    writeFileSync(join(ctx.paths.runs, ctx.runId, 'spec.md'), '# Spec\n\nf(x) returns 2*x.\n');
+    ctx.store.append('freeze', { actor: 'daemon', sha, killCount: 3, amendmentKills: 0 });
+    return { next: 'implementation' };
+  };
+}
+
+const BASE_SEATS = {
+  dev: ({ prompt }) => {
+    if (prompt.includes('textual conflicts')) {
+      return { files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'conflicts resolved' } };
+    }
+    return { files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } };
+  },
+  ...furyClean(),
+  'card-sweep': () => ({
+    files: { 'stories/alpha.md': DEFAULT_CARD + '\n<!-- swept -->\n' },
+    report: { updatedCards: ['stories/alpha.md'], invalidated: [], summary: 'swept' },
+  }),
+};
+
+function shipFixture(t, { seats = {}, pollMs = 30, forgeOpts = {}, spawnRepair = null, slotCap = 2 } = {}) {
+  const root = tempDir();
+  const origin = initOriginRepo(join(root, 'origin'), {
+    [CONFIG_PATH]: projectConfigJson({
+      repo: { testPaths: ['tests'] },
+      commands: { suite: ['node', '--test', 'tests/*.test.mjs'] },
+      gates: { tier1: [{ name: 'unit', command: 'suite' }] },
+      lanes: { story: { suiteCommand: 'suite' } },
+      stack: null,
+    }),
+    'stories/alpha.md': DEFAULT_CARD,
+    'src/base.mjs': 'export const base = 1;\n',
+  });
+  // The card sweep pushes straight to main; the fixture origin accepts it.
+  gitSync(['config', 'receive.denyCurrentBranch', 'updateInstead'], origin);
+  const paths = scaffoldHome(join(root, 'home'));
+  writeFileSync(
+    paths.instanceConfig,
+    JSON.stringify({ version: 1, projects: { proj: { repoUrl: origin, slotCap } } }) + '\n',
+  );
+  const forge = fakeForge(origin, forgeOpts);
+  const spawnCalls = [];
+  const fixtureHolder = {};
+  const spawner = spawnRepair
+    ? async (info) => {
+        spawnCalls.push(info);
+        return spawnRepair(info, fixtureHolder);
+      }
+    : null;
+  const shipLane = shipStep({ forge, pollMs, spawnRepair: spawner });
+  const post = postFreeze({ afterVerdict: shipLane });
+  const done = { stages: ['done'], handlers: { done: async () => ({ close: { state: 'shipped' } }) } };
+  const lanes = {
+    story: { stages: ['seed', ...post.stages], handlers: { seed: seedHandler(), ...post.handlers } },
+    repair: repairLane({ afterVerdict: done }),
+    repairship: {
+      stages: ['seed-fix', ...shipLane.stages],
+      handlers: {
+        'seed-fix': async (ctx) => {
+          writeFileSync(join(ctx.payload.worktree, 'src/fix.mjs'), 'export const fixed = true;\n');
+          await commitAll(ctx.payload.worktree, 'fix: seed');
+          return { next: 'ship' };
+        },
+        ...shipLane.handlers,
+      },
+    },
+  };
+  const daemon = new Daemon(join(root, 'home'), { lanes });
+  const fixture = seatFixture({ ...BASE_SEATS, ...seats });
+  fixtureHolder.daemon = daemon;
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(root);
+  });
+  return {
+    root,
+    origin,
+    paths,
+    daemon,
+    forge,
+    spawnCalls,
+    calls: fixture.calls,
+    async launch(payload = {}) {
+      await daemon.start();
+      daemon.engine.seatDefaults = () => ({ commandFor: fixture.commandFor });
+      const { runId } = await daemon.launchRun({
+        project: 'proj',
+        lane: 'story',
+        card: 'stories/alpha.md',
+        ...payload,
+      });
+      return runId;
+    },
+  };
+}
+
+async function waitClosed(paths, runId, attempts = 600) {
+  try {
+    await waitFor(() => existsSync(archivedRunLedgerPath(paths, runId)), {
+      label: 'run archived',
+      attempts,
+      intervalMs: 100,
+    });
+  } catch (error) {
+    const live = runLedgerPath(paths, runId);
+    const tail = existsSync(live)
+      ? readEvents(live)
+          .slice(-14)
+          .map(
+            (e) =>
+              `${e.seq} ${e.event} ${e.check ?? e.stage ?? e.seat ?? ''} ` +
+              `${e.status ?? e.reason ?? e.verdict ?? e.result ?? ''} ${(e.question ?? '').slice(0, 500)}`,
+          )
+      : ['no live ledger'];
+    error.message += `\nledger tail:\n${tail.join('\n')}`;
+    throw error;
+  }
+  return readEvents(archivedRunLedgerPath(paths, runId));
+}
+
+function waitEvent(paths, runId, predicate, label) {
+  return waitFor(() => readEvents(runLedgerPath(paths, runId)).find(predicate), {
+    label,
+    attempts: 600,
+    intervalMs: 100,
+  });
+}
+
+function waitParked(paths, runId, type) {
+  return waitEvent(paths, runId, (e) => e.event === 'park' && e.type === type, `park ${type}`);
+}
+
+// -- scenarios ---------------------------------------------------------------
+
+test('a fixture PR ships green hands-off with full stamps', async (t) => {
+  const fx = shipFixture(t, { forgeOpts: { mergeCommitChecks: [green('post-merge')] } });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  assert.equal(opened.pr, 7);
+  assert.equal(opened.base, 'main');
+  assert.deepEqual(opened.required, ['ci']);
+  assert.equal(opened.autoMerge, 'squash');
+  await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'check-transition' && e.status === 'in_progress',
+    'in_progress transition',
+  );
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const closed = events.find((e) => e.event === 'run-closed');
+  assert.equal(closed.state, 'shipped');
+  // the watcher stamped the terminal transition with its duration
+  const success = events.find((e) => e.event === 'check-transition' && e.status === 'success');
+  assert.equal(success.required, true);
+  assert.equal(success.duration, 180000);
+  const merged = events.find((e) => e.event === 'merged');
+  assert.equal(merged.red, false);
+  assert.equal(merged.pr, 7);
+  assert.ok(merged.mergeSha);
+  // merge-commit checks watched to terminal
+  const mcc = events.find((e) => e.event === 'merge-commit-check');
+  assert.equal(mcc.check, 'post-merge');
+  assert.equal(mcc.status, 'success');
+  // the squash merge carries the implementation
+  assert.equal(gitSync(['show', 'main:src/feature.mjs'], fx.origin), GOOD_FEATURE);
+  // the card sweep ran and pushed straight to main
+  const sweep = events.find((e) => e.event === 'card-sweep');
+  assert.equal(sweep.ok, true);
+  assert.equal(sweep.pushed, true);
+  assert.match(gitSync(['show', 'main:stories/alpha.md'], fx.origin), /<!-- swept -->/);
+  assert.ok(!events.some((e) => e.event === 'red-merge-breach'));
+});
+
+test('one failed-jobs re-run turns the check green: a ci-flake, never a finding', async (t) => {
+  const fx = shipFixture(t);
+  let first = true;
+  fx.forge.state.autoChecks = () => {
+    if (first) {
+      first = false;
+      return [red()];
+    }
+    return [green()];
+  };
+  fx.forge.state.onRerun = (sha) => fx.forge.setChecks(sha, [green()]);
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const rerun = events.find((e) => e.event === 'check-transition' && e.status === 'rerun-requested');
+  assert.equal(rerun.check, 'ci');
+  const flake = events.find((e) => e.event === 'ci-flake');
+  assert.equal(flake.check, 'ci');
+  assert.equal(fx.forge.state.reruns.length, 1);
+  assert.ok(!events.some((e) => e.event === 'verdict-rendered' && e.source === 'ci'));
+  assert.ok(!events.some((e) => e.event === 'finding'));
+});
+
+test('persistent CI reds enter the shared triage and the repair route', async (t) => {
+  const fx = shipFixture(t, {
+    seats: {
+      'verdict-triage': ({ prompt }) => {
+        const layers = [...prompt.matchAll(/^- layer (\S+):$/gm)].map((m) => m[1]);
+        return {
+          report: {
+            findings: layers.map((layer) => ({
+              class: 'code-defect',
+              layers: [layer],
+              summary: `broken ${layer}`,
+              evidence: `red output of ${layer}`,
+            })),
+            persisting: [],
+            summary: 'triaged',
+          },
+        };
+      },
+      'repair-dev': () => ({
+        files: { 'src/fix-note.mjs': 'export const note = 1;\n' },
+        report: { summary: 'repaired' },
+      }),
+      'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+    },
+  });
+  let shas = 0;
+  fx.forge.state.autoChecks = () => (++shas === 1 ? [red()] : [green()]);
+  fx.forge.state.onRerun = (sha) => fx.forge.setChecks(sha, [red()]);
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // the CI verdict rendered red with the triaged finding
+  const ciRender = events.find((e) => e.event === 'verdict-rendered' && e.source === 'ci');
+  assert.equal(ciRender.verdict, 'red');
+  assert.equal(ciRender.open.length, 1);
+  const finding = events.find((e) => e.event === 'finding');
+  assert.equal(finding.class, 'code-defect');
+  assert.deepEqual(finding.layers, ['ci:ci']);
+  // the shared route: a repair round on the candidate tree, then green
+  assert.ok(events.some((e) => e.event === 'repair-round'));
+  assert.ok(
+    events.some((e) => e.event === 'implementation-committed' && e.phase === 'repair'),
+  );
+  const merged = events.find((e) => e.event === 'merged');
+  assert.equal(merged.red, false);
+  assert.ok(!events.some((e) => e.event === 'ci-flake'));
+});
+
+test('a competing merge updates the branch: merge main in, re-run, auto-merge fires', async (t) => {
+  const fx = shipFixture(t);
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  commitTree(fx.origin, { 'docs/note.md': 'competing change\n' }, 'competing merge');
+  const update = await waitEvent(fx.paths, runId, (e) => e.event === 'branch-update', 'branch-update');
+  assert.equal(update.fromSha, opened.sha);
+  assert.equal(update.mainSha, gitSync(['rev-parse', 'main'], fx.origin).trim());
+  assert.notEqual(update.toSha, update.fromSha);
+  fx.forge.setChecks(update.toSha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!events.some((e) => e.event === 'merge-round'));
+  // the merged main carries both sides
+  assert.equal(gitSync(['show', 'main:src/feature.mjs'], fx.origin), GOOD_FEATURE);
+  assert.match(gitSync(['show', 'main:docs/note.md'], fx.origin), /competing change/);
+});
+
+test('textual conflicts take the merge round; test hunks go to the suite seat', async (t) => {
+  const fx = shipFixture(t, {
+    seats: {
+      suite: ({ prompt }) => {
+        assert.match(prompt, /conflicts in test files/);
+        return {
+          files: { 'tests/feature.test.mjs': STRONG_TEST },
+          report: { suiteFiles: ['tests/feature.test.mjs'], reds: [], summary: 'resolved' },
+        };
+      },
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  commitTree(
+    fx.origin,
+    { 'src/feature.mjs': ALT_FEATURE, 'tests/feature.test.mjs': ALT_TEST },
+    'conflicting main work',
+  );
+  const round = await waitEvent(fx.paths, runId, (e) => e.event === 'merge-round', 'merge-round');
+  assert.equal(round.resolved, true);
+  assert.deepEqual(round.testFiles, ['tests/feature.test.mjs']);
+  assert.ok(round.conflicts.includes('src/feature.mjs'));
+  fx.forge.setChecks(round.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // the resolved tests are the frozen suite now: the round re-froze
+  const refreeze = events.find((e) => e.event === 're-freeze');
+  assert.equal(refreeze.sha, round.sha);
+  assert.ok(
+    events.some((e) => e.event === 'suite-committed' && e.phase === 're-freeze'),
+  );
+  const update = events.find((e) => e.event === 'branch-update');
+  assert.equal(update.toSha, round.sha);
+  // both resolutions shipped
+  assert.equal(gitSync(['show', 'main:src/feature.mjs'], fx.origin), GOOD_FEATURE);
+  assert.equal(gitSync(['show', 'main:tests/feature.test.mjs'], fx.origin), STRONG_TEST);
+  // the dev seat saw the conflict brief; the suite seat took the test hunks
+  const conflictCall = fx.calls.find((c) => c.seat === 'dev' && c.prompt.includes('textual conflicts'));
+  assert.ok(conflictCall);
+  assert.ok(!conflictCall.prompt.includes('tests/feature.test.mjs'));
+});
+
+test('an admin merge over red checks is a breach: loud, escapes, repair spawn', async (t) => {
+  const fx = shipFixture(t, {
+    pollMs: 300,
+    spawnRepair: async (info, holder) => {
+      const ticket = join(fx.root, 'ticket.md');
+      writeFileSync(ticket, `# Escape ${info.escapeSeq}\n\n${info.defectLine}\n`);
+      const { runId } = await holder.daemon.launchRun({
+        project: info.project,
+        lane: 'repair',
+        ticket,
+        escapeSeq: info.escapeSeq,
+      });
+      return runId;
+    },
+    seats: {
+      dev: ({ prompt }) => {
+        if (prompt.includes('Fix the defect')) {
+          return { files: { 'src/regression.mjs': 'export const r = 1;\n' }, report: { summary: 'fixed' } };
+        }
+        return { files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } };
+      },
+      'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  fx.forge.state.onRerun = () => {};
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [red()]);
+  fx.forge.adminMerge();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const merged = events.find((e) => e.event === 'merged');
+  assert.equal(merged.red, true);
+  assert.deepEqual(merged.redChecks, ['ci']);
+  const breach = events.find((e) => e.event === 'red-merge-breach');
+  assert.equal(breach.escapes.length, 1);
+  assert.equal(breach.spawned.length, 1);
+  // loud stream carries the pointer
+  const loud = readFileSync(fx.paths.loudStream, 'utf8');
+  assert.match(loud, /red-merge-breach/);
+  // the conversion landed in the escapes ledger, attributed to the story
+  const escapes = readEscapeSet(fx.paths.escapesLedger);
+  assert.equal(escapes.length, 1);
+  assert.equal(escapes[0].category, 'product-escape');
+  assert.equal(escapes[0].detectionSource, 'harness-self');
+  assert.equal(escapes[0].attribution, 'alpha-1');
+  // the spawned repair run carries the escape linkage and completes
+  assert.equal(fx.spawnCalls.length, 1);
+  assert.equal(fx.spawnCalls[0].escapeSeq, breach.escapes[0]);
+  assert.equal(fx.spawnCalls[0].pr, 7);
+  const repairEvents = await waitClosed(fx.paths, breach.spawned[0]);
+  assert.equal(repairEvents.find((e) => e.event === 'run-closed').state, 'shipped');
+});
+
+test('a repair-lane ship stamps the escape fixed at close-out', async (t) => {
+  const fx = shipFixture(t);
+  const store = openEscapesStore(fx.paths);
+  const recorded = recordEscape(store, {
+    actor: 'daemon',
+    category: 'product-escape',
+    defectLine: 'f(3) returns 5 in production',
+    detectionSource: 'human-report',
+    attribution: 'alpha-1',
+  });
+  store.close();
+  const ticket = join(fx.root, 'ticket.md');
+  writeFileSync(ticket, '# Fix f(3)\n');
+  fx.forge.state.autoChecks = () => [green()];
+  await fx.daemon.start();
+  fx.daemon.engine.seatDefaults = () => ({ commandFor: seatFixture(BASE_SEATS).commandFor });
+  const { runId } = await fx.daemon.launchRun({
+    project: 'proj',
+    lane: 'repairship',
+    ticket,
+    escapeSeq: recorded.seq,
+  });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // repair mode: no card sweep, and the escape lifecycle closed
+  assert.ok(!events.some((e) => e.event === 'card-sweep'));
+  const escapes = readEscapeSet(fx.paths.escapesLedger);
+  assert.equal(escapes[0].fixed, true);
+  assert.equal(escapes[0].fixRefs.runId, runId);
+  assert.equal(escapes[0].fixRefs.pr, 7);
+});
+
+test('green but no merge: loud gate-integrity, one re-arm, resolution at merge', async (t) => {
+  const fx = shipFixture(t);
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  // the arm silently drops; the checks go green — auto-merge cannot fire
+  fx.forge.state.pr.armed = false;
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const alert = events.find((e) => e.event === 'gate-integrity' && e.kind === 'auto-merge');
+  assert.ok(alert);
+  const rearm = events.find((e) => e.event === 'operational-fix' && e.kind === 'auto-merge-rearm');
+  assert.ok(rearm);
+  const resolved = events.find((e) => e.event === 'resolved' && e.resolves === alert.seq);
+  assert.ok(resolved);
+});
+
+test('the sweep parks an invalidated card in the instance ledger, not the run', async (t) => {
+  const fx = shipFixture(t, {
+    seats: {
+      'card-sweep': () => ({
+        files: { 'stories/alpha.md': DEFAULT_CARD + '\n<!-- swept -->\n' },
+        report: {
+          updatedCards: ['stories/alpha.md'],
+          invalidated: [{ card: 'stories/beta.md', reason: 'goal shipped by alpha-1' }],
+          summary: 'swept',
+        },
+      }),
+    },
+  });
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const sweep = events.find((e) => e.event === 'card-sweep');
+  assert.equal(sweep.invalidated, 1);
+  // the park lives in the instance ledger and the queued stream — the
+  // shipping run closed anyway
+  const instanceEvents = readEvents(fx.paths.instanceLedger);
+  const park = instanceEvents.find((e) => e.event === 'park' && e.type === 'card-invalidated');
+  assert.equal(park.card, 'stories/beta.md');
+  assert.equal(park.runId, runId);
+  const queued = readFileSync(fx.paths.queuedStream, 'utf8');
+  assert.match(queued, /card-invalidated/);
+});
+
+test('the preflight parks a provisioning gate until the substrate is ready', async (t) => {
+  const fx = shipFixture(t);
+  fx.forge.state.autoMergeAllowed = false;
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  assert.match(park.question, /auto-merge is not allowed/);
+  fx.forge.state.autoMergeAllowed = true;
+  fx.daemon.engine.answer({ runId, actor: 'kalki', answer: 'auto-merge enabled' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(events.some((e) => e.event === 'pr-opened'));
+});
+
+test('a failed merge round stalls into the fresh pass born on updated main', async (t) => {
+  const fx = shipFixture(t, {
+    seats: {
+      dev: ({ prompt }) => {
+        if (prompt.includes('textual conflicts')) return { exitCode: 1 }; // the round fails
+        return { files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } };
+      },
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  commitTree(fx.origin, { 'src/feature.mjs': ALT_FEATURE }, 'conflicting main work');
+  const fresh = await waitEvent(fx.paths, runId, (e) => e.event === 'fresh-pass', 'fresh-pass');
+  assert.equal(fresh.trigger, 'merge-conflict');
+  const impl = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'implementation-committed' && e.phase === 'fresh',
+    'fresh implementation',
+  );
+  fx.forge.state.autoChecks = () => [green()];
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const round = events.find((e) => e.event === 'merge-round');
+  assert.equal(round.resolved, false);
+  assert.ok(events.some((e) => e.event === 'stall' && e.reason === 'merge-conflict'));
+  assert.equal(impl.pass, 2);
+  // the fresh tree was born on updated main: no further update needed
+  assert.equal(gitSync(['show', 'main:src/feature.mjs'], fx.origin), GOOD_FEATURE);
+});
+
+// -- gh adapter units --------------------------------------------------------
+
+test('parseGitHubRepo handles the common remote shapes', () => {
+  assert.equal(parseGitHubRepo('https://github.com/acme/widgets'), 'acme/widgets');
+  assert.equal(parseGitHubRepo('https://github.com/acme/widgets.git'), 'acme/widgets');
+  assert.equal(parseGitHubRepo('git@github.com:acme/widgets.git'), 'acme/widgets');
+  assert.equal(parseGitHubRepo('ssh://git@github.com/acme/widgets'), 'acme/widgets');
+  assert.equal(parseGitHubRepo('/local/path/repo'), null);
+});
+
+test('the gh adapter builds the documented argv and maps the answers', async () => {
+  const calls = [];
+  const answers = [
+    JSON.stringify({ autoMergeAllowed: true }),
+    JSON.stringify({ strict: true, contexts: ['ci', 'e2e'] }),
+    JSON.stringify({
+      state: 'OPEN',
+      headRefOid: 'abc123',
+      mergeCommit: null,
+      mergeStateStatus: 'BEHIND',
+      autoMergeRequest: { enabledAt: 'now' },
+    }),
+  ];
+  const runner = async (argv) => {
+    calls.push(argv);
+    return { code: 0, output: answers.shift() ?? '{}' };
+  };
+  const forge = gitHubForge({ repo: 'acme/widgets', runner });
+  const pf = await forge.preflight('main');
+  assert.deepEqual(pf, { autoMergeAllowed: true, strict: true, requiredChecks: ['ci', 'e2e'] });
+  assert.deepEqual(calls[0].slice(0, 4), ['gh', 'repo', 'view', 'acme/widgets']);
+  assert.equal(calls[1][2], 'repos/acme/widgets/branches/main/protection/required_status_checks');
+  const st = await forge.prState(7);
+  assert.deepEqual(st, {
+    state: 'open',
+    headSha: 'abc123',
+    mergeSha: null,
+    behindBase: true,
+    autoMergeArmed: true,
+  });
+});

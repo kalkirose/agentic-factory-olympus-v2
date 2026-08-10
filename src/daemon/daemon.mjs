@@ -143,6 +143,7 @@ export class Daemon {
         worktree: ws.worktree,
         branch: ws.branch,
         baseSha: ws.baseSha,
+        defaultBranch: entry.defaultBranch,
         configBlob: ws.configBlob,
         ...(ws.stack && { stack: ws.stack.name }),
         ...payload,

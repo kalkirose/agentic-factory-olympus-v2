@@ -71,6 +71,10 @@ export const INSTANCE_EVENTS = new Set([
   'factory-starvation',
   'tripwire-breach',
   'eval-review',
+  // Instance-scoped escalations: a park that waits on the human but belongs
+  // to no open run (card-invalidated from the ship-time sweep). The queue
+  // milestone owns the answer path; runs park through the engine directive.
+  'park',
   ...SEAT_EVENTS,
   'resolved',
 ]);
