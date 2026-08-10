@@ -21,7 +21,8 @@ Around the daemon:
 - **Tripwire watcher** — a supervised in-daemon process that re-evaluates
   tripwires when matching events append. It classifies and executes nothing.
 - **Eval seat** — an instance-scoped judgment seat fired every five story-lane
-  ships. Proposals only; nothing self-executes.
+  ships. Its report lands under `eval/` in the daemon home; the queued
+  `eval-review` event points to it. Proposals only; nothing self-executes.
 
 ```mermaid
 flowchart LR

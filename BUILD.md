@@ -174,7 +174,7 @@ condition and re-arm only after resolution.
 
 Done when: the page renders live fixture state end to end over the server.
 
-## M12 — Eval seat — open
+## M12 — Eval seat — done
 
 - Every-5-ships trigger; instance-scoped job (no worktree, no stack).
 - Ledger window since last review; report artifact + `eval-review` event.
@@ -360,3 +360,17 @@ never carries a project's specifics.
   textContent. Negative ts pairs read as no duration. ADR-0011 records the
   shapes. 206 tests green; page verified rendering a seeded fixture home
   end to end in the browser. Next: M12 (eval seat).
+- 2026-08-10 — M12 done: eval seat under `src/eval/`. Scheduler keyed on
+  story-lane ship closes (daemon `onClosed`) plus one check at daemon start;
+  owed when total ships minus the last review's `shipCount` reaches 5; a
+  backlog lands in one review. Instance-scoped job through the standard
+  runner against the instance store (Fable semaphore, corrective loop,
+  model integrity all apply); cwd = daemon home; stop terminates the seat
+  and drains. Report contract closes the five proposal shapes
+  (cut-candidate, new-tripwire, band-change, vocabulary-promotion,
+  duration-drift), artifact at `eval/review-<n>.json` (stale file removed
+  before dispatch); `eval-review` stamps only after the report validates,
+  joins the resolvable set. Failed seat = trigger stays owed, next event
+  retries the whole window. No code path reads a proposal. ADR-0012 records
+  the shapes. 214 tests green. All milestones done — next effort: cutover
+  (private side, out of scope here).

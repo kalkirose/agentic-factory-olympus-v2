@@ -20,6 +20,7 @@ export function homePaths(home) {
     controlRejected: join(home, 'control', 'rejected'),
     clones: join(home, 'clones'),
     worktrees: join(home, 'worktrees'),
+    evalReports: join(home, 'eval'),
     lock: join(home, 'daemon.lock'),
   };
 }
@@ -37,6 +38,7 @@ export function scaffoldHome(home) {
     paths.controlRejected,
     paths.clones,
     paths.worktrees,
+    paths.evalReports,
   ]) {
     mkdirSync(dir, { recursive: true });
   }

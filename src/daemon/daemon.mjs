@@ -15,6 +15,7 @@ import { parseIntentCard } from '../lanes/card.mjs';
 import { FrontierLauncher } from '../frontier/autolaunch.mjs';
 import { readGraphSource } from '../frontier/source.mjs';
 import { TripwireWatcher } from '../tripwires/watcher.mjs';
+import { EvalScheduler } from '../eval/review.mjs';
 import { scaffoldHome, homePaths, runLedgerPath } from './home.mjs';
 import { acquireLock } from './lock.mjs';
 
@@ -25,16 +26,21 @@ export class Daemon {
   /**
    * @param {string} home
    * @param {{handleSignals?: boolean, lanes?: Record<string, object>,
-   *   composeRunner?: Function}} opts
+   *   composeRunner?: Function, evalSeatDefaults?: () => object}} opts
    *   lanes: lane name → {stages, handlers}, registered on the run engine at
    *   start. Concrete lanes land with their milestones. composeRunner
-   *   substitutes the compose child process (tests only).
+   *   substitutes the compose child process (tests only); evalSeatDefaults
+   *   substitutes the eval seat's dispatch defaults (tests only).
    */
-  constructor(home, { handleSignals = false, lanes = {}, composeRunner } = {}) {
+  constructor(
+    home,
+    { handleSignals = false, lanes = {}, composeRunner, evalSeatDefaults } = {},
+  ) {
     this.paths = homePaths(home);
     this.handleSignals = handleSignals;
     this.lanes = lanes;
     this.composeRunner = composeRunner;
+    this.evalSeatDefaults = evalSeatDefaults;
     this.running = false;
     this.config = null;
     this.lock = null;
@@ -44,6 +50,7 @@ export class Daemon {
     this.isolation = null;
     this.frontier = null;
     this.tripwires = null;
+    this.evals = null;
     this.pendingTeardowns = new Set();
     this.launchCounter = 0;
     this.watchers = [];
@@ -129,12 +136,19 @@ export class Daemon {
         readRegistry: (project) => this.readTripwireRegistry(project),
         readSource: (project) => this.readGraphSourceFor(project),
       });
+      this.evals = new EvalScheduler({
+        paths: this.paths,
+        ledger: this.ledger,
+        semaphores: this.semaphores,
+        seatDefaults: this.evalSeatDefaults ?? (() => ({ claudeCommand: this.config.claudeCommand })),
+      });
       this.engine = new RunEngine(this.paths, {
         instanceStore: this.ledger,
         getSlotCap: (project) => this.config.projects[project]?.slotCap,
         onClosed: (info) => {
           this.scheduleWorkspaceRelease(info);
           this.frontier.queueSweep(info.project);
+          if (info.lane === 'story' && info.state === 'shipped') this.evals.notify();
         },
         onParked: (info) => this.frontier.queueSweep(info.project),
         semaphores: this.semaphores,
@@ -159,6 +173,8 @@ export class Daemon {
       if (this.handleSignals) this.installSignalHandlers();
       this.running = true;
       this.frontier.queueSweepAll();
+      // One start-time check fires a review owed from before a restart.
+      this.evals.notify();
       return { runsResumed };
     } catch (error) {
       if (this.engine) {
@@ -479,6 +495,7 @@ export class Daemon {
       await Promise.allSettled([...this.pendingTeardowns]);
       if (this.frontier) await this.frontier.drain();
       if (this.tripwires) await this.tripwires.stop();
+      if (this.evals) await this.evals.stop();
       this.ledger.append('daemon-stopped', { actor: actor ?? ACTOR, trigger });
       this.teardown();
       if (this.onStopped) this.onStopped();

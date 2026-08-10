@@ -15,12 +15,13 @@ import {
 import { runLedgerPath, archivedRunLedgerPath } from '../daemon/home.mjs';
 import { appendStreamEntry } from './streams.mjs';
 
-// Loud items, breaches, and baseline proposals take a paired `resolved`
-// append; nothing else does.
+// Loud items, breaches, baseline proposals, and eval reviews take a paired
+// `resolved` append; nothing else does.
 export const RESOLVABLE_EVENTS = new Set([
   ...LOUD_EVENTS,
   'tripwire-breach',
   'baseline-proposal',
+  'eval-review',
 ]);
 
 export class TelemetryStore {
