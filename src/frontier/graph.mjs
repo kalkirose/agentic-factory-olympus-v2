@@ -1,8 +1,10 @@
 // The story-graph frontier, computed from plain inputs: parsed intent cards,
 // the phase list, and ledger-derived run history. Roadmap order is derived,
 // never stored — a topological order with an unlock-count tiebreak, so hubs
-// land early. The phase gate bounds the launchable set; it is an auto-launch
-// rule, never an edge.
+// land early. A card's unlock count is its transitive-descendant count: how
+// many distinct cards it transitively blocks, itself never counted. The
+// phase gate bounds the launchable set; it is an auto-launch rule, never an
+// edge.
 
 /**
  * Card states, mutually exclusive, checked in this order:
@@ -74,6 +76,25 @@ export function computeFrontier({ cards, phases, runs, parkedCards }) {
     pending.set(card.key, inGraph.length);
     for (const blocker of inGraph) dependents.get(blocker).push(card.key);
   }
+  // Unlock count per card: the size of its transitive-descendant set, not
+  // its direct out-degree — a deep chain outranks a wide fan of leaves.
+  // Memoized sets make each card's walk run once; seeding the memo before
+  // the walk lets a cycle (a defect, caught below) terminate.
+  const unlockSets = new Map();
+  const unlockSet = (key) => {
+    const memo = unlockSets.get(key);
+    if (memo) return memo;
+    const set = new Set();
+    unlockSets.set(key, set);
+    for (const dependent of dependents.get(key)) {
+      set.add(dependent);
+      for (const transitive of unlockSet(dependent)) set.add(transitive);
+    }
+    return set;
+  };
+  const unlocks = new Map(
+    [...byKey.keys()].map((key) => [key, unlockSet(key).size]),
+  );
   const phaseOf = (card) => phaseIndex.get(card.phase ?? phases[0].name);
   const ready = [...byKey.values()].filter((c) => pending.get(c.key) === 0);
   const order = [];
@@ -81,7 +102,7 @@ export function computeFrontier({ cards, phases, runs, parkedCards }) {
     ready.sort(
       (a, b) =>
         phaseOf(a) - phaseOf(b) ||
-        dependents.get(b.key).length - dependents.get(a.key).length ||
+        unlocks.get(b.key) - unlocks.get(a.key) ||
         (a.key < b.key ? -1 : 1),
     );
     const card = ready.shift();

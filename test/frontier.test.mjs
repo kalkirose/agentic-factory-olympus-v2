@@ -35,6 +35,72 @@ test('roadmap order: topological, hubs first, then key order', () => {
   assert.equal(frontier.cards.find((e) => e.key === 'c').state, 'blocked');
 });
 
+test('unlock tiebreak counts transitive descendants, not direct dependents', () => {
+  // deep unlocks 4 cards through a chain; wide unlocks 3, all direct.
+  // The transitive rule puts deep first; direct out-degree would pick wide.
+  const frontier = computeFrontier({
+    cards: [
+      card('wide'),
+      card('w1', { blockedBy: ['wide'] }),
+      card('w2', { blockedBy: ['wide'] }),
+      card('w3', { blockedBy: ['wide'] }),
+      card('deep'),
+      card('d1', { blockedBy: ['deep'] }),
+      card('d2', { blockedBy: ['d1'] }),
+      card('d3', { blockedBy: ['d2'] }),
+      card('d4', { blockedBy: ['d3'] }),
+    ],
+  });
+  assert.deepEqual(frontier.order, ['deep', 'd1', 'wide', 'd2', 'd3', 'd4', 'w1', 'w2', 'w3']);
+});
+
+test('unlock count: a diamond descendant counts once', () => {
+  // x unlocks {x1, x2, join} = 3; a unlocks 3 leaves. Equal counts fall to
+  // key order (a first); double-counting join would put x (4) ahead.
+  const frontier = computeFrontier({
+    cards: [
+      card('a'),
+      card('a1', { blockedBy: ['a'] }),
+      card('a2', { blockedBy: ['a'] }),
+      card('a3', { blockedBy: ['a'] }),
+      card('x'),
+      card('x1', { blockedBy: ['x'] }),
+      card('x2', { blockedBy: ['x'] }),
+      card('join', { blockedBy: ['x1', 'x2'] }),
+    ],
+  });
+  assert.deepEqual(frontier.order.slice(0, 2), ['a', 'x']);
+});
+
+test('equal unlock counts fall back to key order', () => {
+  const frontier = computeFrontier({
+    cards: [
+      card('q'),
+      card('p'),
+      card('q1', { blockedBy: ['q'] }),
+      card('p1', { blockedBy: ['p'] }),
+    ],
+  });
+  assert.deepEqual(frontier.order, ['p', 'q', 'p1', 'q1']);
+});
+
+test('a cycle among descendants never hangs the unlock walk', () => {
+  // root's descendant set reaches the m<->n cycle; the walk terminates,
+  // root still orders, and the cycle cards land as defects.
+  const frontier = computeFrontier({
+    cards: [
+      card('root'),
+      card('m', { blockedBy: ['root', 'n'] }),
+      card('n', { blockedBy: ['m'] }),
+      card('solo'),
+    ],
+  });
+  assert.deepEqual(frontier.order, ['root', 'solo']);
+  for (const key of ['m', 'n']) {
+    assert.equal(frontier.cards.find((e) => e.key === key).state, 'defect');
+  }
+});
+
 test('card states from run history and parks', () => {
   const frontier = computeFrontier({
     cards: [card('a'), card('b'), card('c'), card('d'), card('e', { blockedBy: ['a'] })],
