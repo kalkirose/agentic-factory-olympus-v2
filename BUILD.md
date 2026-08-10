@@ -154,7 +154,7 @@ competing merge both produce the specified stamps and routes.
 Done when: a multi-card fixture launches in order under the slot cap, parks
 free slots, answers resume runs, and starvation lands loud.
 
-## M10 — Tripwire watcher — open
+## M10 — Tripwire watcher — done
 
 - Registry parsing from project config; standing metrics implemented
   (escapes rolling-10, per-lens yield, kill-rate band, CI p50 warm-cache,
@@ -324,3 +324,24 @@ never carries a project's specifics.
   `olympus-console` skill; control writes shared via `control.mjs`.
   ADR-0009 records the shapes. 184 tests green. Next: M10 (tripwire
   watcher).
+- 2026-08-10 — M10 done: tripwire watcher under `src/tripwires/`. The metric
+  set is closed as code (registry.mjs: unit, default window, default
+  triggers, required params); project-config validation imports it — unknown
+  metric, bad breach op, unknown trigger event, or a missing answer refuses
+  the launch. Standing metrics: escapes-window (per-project ships, central
+  recency-based count), kill-rate (kills over initial waves across the
+  freeze window), fury-lens-yield (confirmed findings per lens over the
+  runs holding the last N verdicts), ci-critical-path (median of the longest
+  green check per merge, minutes), frontier-width (`computeFrontier` gains
+  `width`: possible-not-forced parallelism, `minUnshipped` guard). Event key
+  by construction: `TelemetryStore` gains an `onAppend` hook — engine run
+  stores bind it to the run's project, `ctx.onAppend` covers handler-opened
+  stores (escapes in the ship step), the instance store keys by the line's
+  project. Watcher chains per project; registry handed over at launch, lazy
+  no-fetch clone read between launches; breach open-once / paired resolved /
+  re-arm at the next matching append (an honest pinch stands until state
+  changes). Baseline proposals at the 5th freeze and 5th verdict
+  (`baseline-proposal` joins the instance registry, queued + resolvable),
+  once per project and metric; the kill-rate proposal suggests the observed
+  floor. `standingTripwires()` ships the three design-given entries.
+  ADR-0010 records the shapes. 202 tests green. Next: M11 (command center).

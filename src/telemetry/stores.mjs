@@ -15,8 +15,13 @@ import {
 import { runLedgerPath, archivedRunLedgerPath } from '../daemon/home.mjs';
 import { appendStreamEntry } from './streams.mjs';
 
-// Loud items and breaches take a paired `resolved` append; nothing else does.
-export const RESOLVABLE_EVENTS = new Set([...LOUD_EVENTS, 'tripwire-breach']);
+// Loud items, breaches, and baseline proposals take a paired `resolved`
+// append; nothing else does.
+export const RESOLVABLE_EVENTS = new Set([
+  ...LOUD_EVENTS,
+  'tripwire-breach',
+  'baseline-proposal',
+]);
 
 export class TelemetryStore {
   /**
@@ -25,11 +30,15 @@ export class TelemetryStore {
    *   ('instance', 'escapes', or 'run:<runId>')
    * @param {string} ledgerPath
    * @param {Set<string>} allowedEvents
+   * @param {{onAppend?: (line: object) => void}} [opts] onAppend fires after
+   *   every append — the tripwire watcher's event key. The hook owns its
+   *   errors; a failing hook never fails the append.
    */
-  constructor(paths, id, ledgerPath, allowedEvents) {
+  constructor(paths, id, ledgerPath, allowedEvents, { onAppend } = {}) {
     this.paths = paths;
     this.id = id;
     this.ledger = new Ledger(ledgerPath, { allowedEvents });
+    this.onAppend = onAppend ?? null;
   }
 
   /**
@@ -49,6 +58,13 @@ export class TelemetryStore {
         event: line.event,
         gist: fields.gist,
       });
+    }
+    if (this.onAppend) {
+      try {
+        this.onAppend(line);
+      } catch {
+        // the hook owns its errors
+      }
     }
     return line;
   }
@@ -79,18 +95,18 @@ export class TelemetryStore {
 }
 
 /** @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths */
-export function openInstanceStore(paths) {
-  return new TelemetryStore(paths, 'instance', paths.instanceLedger, INSTANCE_EVENTS);
+export function openInstanceStore(paths, opts) {
+  return new TelemetryStore(paths, 'instance', paths.instanceLedger, INSTANCE_EVENTS, opts);
 }
 
 /** @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths */
-export function openEscapesStore(paths) {
-  return new TelemetryStore(paths, 'escapes', paths.escapesLedger, ESCAPES_EVENTS);
+export function openEscapesStore(paths, opts) {
+  return new TelemetryStore(paths, 'escapes', paths.escapesLedger, ESCAPES_EVENTS, opts);
 }
 
 /** @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths */
-export function openRunStore(paths, runId) {
-  return new TelemetryStore(paths, `run:${runId}`, runLedgerPath(paths, runId), RUN_EVENTS);
+export function openRunStore(paths, runId, opts) {
+  return new TelemetryStore(paths, `run:${runId}`, runLedgerPath(paths, runId), RUN_EVENTS, opts);
 }
 
 /**

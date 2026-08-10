@@ -20,7 +20,15 @@ function valid() {
     conventions: ['write to the ledger'],
     lanes: { story: { suiteCommand: 'test', greenTarget: 1 } },
     stack: { composeFile: 'compose.harness.yml', env: { NODE_ENV: 'test' } },
-    tripwires: [{ id: 'escapes', metric: 'escapes-rolling', window: { count: 10, of: 'ships' } }],
+    tripwires: [
+      {
+        id: 'escapes',
+        metric: 'escapes-window',
+        window: 10,
+        breach: { op: '>', value: 0.5 },
+        answer: 'restore the cut',
+      },
+    ],
   };
 }
 

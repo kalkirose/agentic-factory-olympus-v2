@@ -70,6 +70,7 @@ export const INSTANCE_EVENTS = new Set([
   'config-changed',
   'factory-starvation',
   'tripwire-breach',
+  'baseline-proposal',
   'eval-review',
   // Instance-scoped escalations: a park that waits on the human but belongs
   // to no open run (card-invalidated from the ship-time sweep). The paired
@@ -85,7 +86,12 @@ export const ESCAPES_EVENTS = new Set(['escape-recorded', 'escape-fixed']);
 
 // Stream classing. Every stream-classed append also lands as a pointer in
 // the matching stream index. The full event lives only in its source ledger.
-export const QUEUED_EVENTS = new Set(['park', 'tripwire-breach', 'eval-review']);
+export const QUEUED_EVENTS = new Set([
+  'park',
+  'tripwire-breach',
+  'baseline-proposal',
+  'eval-review',
+]);
 export const LOUD_EVENTS = new Set([
   'liveness-violation',
   'gate-integrity',

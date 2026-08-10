@@ -65,12 +65,14 @@ export function openBreaches(paths) {
 }
 
 /**
- * Shipped story-lane runs, live and archived, in ship order (by the `merged`
- * stamp). Each entry: runId, ts of the merge, archived flag.
+ * All run ledgers, live and archived, optionally filtered by the launching
+ * project and lane. Each entry: runId, archived flag, project, lane, and the
+ * full event list. A ledger without a `run-launched` stamp matches nothing.
  * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ * @param {{project?: string, lane?: string}} [filter]
  */
-export function listShips(paths) {
-  const ships = [];
+export function listRunEvents(paths, { project, lane } = {}) {
+  const out = [];
   for (const { dir, archived } of [
     { dir: paths.runs, archived: false },
     { dir: paths.archivedRuns, archived: true },
@@ -79,10 +81,25 @@ export function listShips(paths) {
       const path = archived ? archivedRunLedgerPath(paths, runId) : runLedgerPath(paths, runId);
       const events = readEvents(path);
       const launch = events.find((e) => e.event === 'run-launched');
-      if (!launch || launch.lane !== 'story') continue;
-      const merged = events.find((e) => e.event === 'merged');
-      if (merged) ships.push({ runId, ts: merged.ts, archived });
+      if (!launch) continue;
+      if (project !== undefined && launch.project !== project) continue;
+      if (lane !== undefined && launch.lane !== lane) continue;
+      out.push({ runId, archived, project: launch.project, lane: launch.lane, events });
     }
+  }
+  return out;
+}
+
+/**
+ * Shipped story-lane runs, live and archived, in ship order (by the `merged`
+ * stamp). Each entry: runId, project, ts of the merge, archived flag.
+ * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ */
+export function listShips(paths) {
+  const ships = [];
+  for (const { runId, archived, project, events } of listRunEvents(paths, { lane: 'story' })) {
+    const merged = events.find((e) => e.event === 'merged');
+    if (merged) ships.push({ runId, project, ts: merged.ts, archived });
   }
   return ships.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
 }
@@ -97,25 +114,17 @@ export function listShips(paths) {
  */
 export function storyRunsByKey(paths) {
   const map = new Map();
-  for (const { dir, archived } of [
-    { dir: paths.runs, archived: false },
-    { dir: paths.archivedRuns, archived: true },
-  ]) {
-    for (const runId of runDirs(dir)) {
-      const path = archived ? archivedRunLedgerPath(paths, runId) : runLedgerPath(paths, runId);
-      const events = readEvents(path);
-      const launch = events.find((e) => e.event === 'run-launched');
-      if (!launch || launch.lane !== 'story') continue;
-      const key = launch.storyKey ?? events.find((e) => e.event === 'freeze')?.storyKey ?? null;
-      if (!key) continue;
-      const entry = map.get(key) ?? { open: 0, shipped: 0, spent: 0, runIds: [] };
-      const closed = events.find((e) => e.event === 'run-closed');
-      if (!closed) entry.open++;
-      else if (closed.state === 'shipped') entry.shipped++;
-      else entry.spent++;
-      entry.runIds.push(runId);
-      map.set(key, entry);
-    }
+  for (const { runId, events } of listRunEvents(paths, { lane: 'story' })) {
+    const launch = events.find((e) => e.event === 'run-launched');
+    const key = launch.storyKey ?? events.find((e) => e.event === 'freeze')?.storyKey ?? null;
+    if (!key) continue;
+    const entry = map.get(key) ?? { open: 0, shipped: 0, spent: 0, runIds: [] };
+    const closed = events.find((e) => e.event === 'run-closed');
+    if (!closed) entry.open++;
+    else if (closed.state === 'shipped') entry.shipped++;
+    else entry.spent++;
+    entry.runIds.push(runId);
+    map.set(key, entry);
   }
   return map;
 }

@@ -118,26 +118,26 @@ test('listShips returns shipped story-lane runs in ship order, live and archived
   const line = (seq, ts, event, extra = {}) => ({ seq, ts, event, actor: 'daemon', ...extra });
   // story run, merged second, live
   writeLedger(runLedgerPath(paths, 'a'), [
-    line(1, '2026-08-01T00:00:00Z', 'run-launched', { lane: 'story' }),
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
     line(2, '2026-08-02T00:00:00Z', 'merged'),
   ]);
   // story run, merged first, archived
   writeLedger(archivedRunLedgerPath(paths, 'b'), [
-    line(1, '2026-07-30T00:00:00Z', 'run-launched', { lane: 'story' }),
+    line(1, '2026-07-30T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
     line(2, '2026-08-01T12:00:00Z', 'merged'),
     line(3, '2026-08-01T13:00:00Z', 'run-closed', { outcome: 'shipped' }),
   ]);
   // repair run: never a ship
   writeLedger(runLedgerPath(paths, 'c'), [
-    line(1, '2026-08-01T00:00:00Z', 'run-launched', { lane: 'repair' }),
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'repair' }),
     line(2, '2026-08-03T00:00:00Z', 'merged'),
   ]);
   // story run, not merged yet
   writeLedger(runLedgerPath(paths, 'd'), [
-    line(1, '2026-08-04T00:00:00Z', 'run-launched', { lane: 'story' }),
+    line(1, '2026-08-04T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
   ]);
   assert.deepEqual(listShips(paths), [
-    { runId: 'b', ts: '2026-08-01T12:00:00Z', archived: true },
-    { runId: 'a', ts: '2026-08-02T00:00:00Z', archived: false },
+    { runId: 'b', project: 'p', ts: '2026-08-01T12:00:00Z', archived: true },
+    { runId: 'a', project: 'p', ts: '2026-08-02T00:00:00Z', archived: false },
   ]);
 });

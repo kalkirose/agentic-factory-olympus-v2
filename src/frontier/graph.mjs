@@ -103,6 +103,18 @@ export function computeFrontier({ cards, phases, runs, parkedCards }) {
     (phase, i) => i === 0 || runs.get(phase.after)?.shipped > 0,
   );
 
+  // -- width: possible-not-forced parallelism -------------------------------
+  // Unshipped cards whose blockers all shipped and whose phase is open,
+  // regardless of run history or parks — the graph's own measure, for the
+  // width tripwire. An open or spent card still counts: the edges permit
+  // work there.
+  const width = [...byKey.values()].filter(
+    (card) =>
+      !(runs.get(card.key)?.shipped > 0) &&
+      card.blockedBy.every((b) => runs.get(b)?.shipped > 0) &&
+      phaseOpen[phaseOf(card)],
+  ).length;
+
   // -- state per card, in roadmap order; defects trail ----------------------
   const classify = (card) => {
     const history = runs.get(card.key);
@@ -138,6 +150,7 @@ export function computeFrontier({ cards, phases, runs, parkedCards }) {
     cards: entries,
     launchable: entries.filter((e) => e.state === 'launchable'),
     unfinished: entries.filter((e) => e.state !== 'shipped').length,
+    width,
     defects,
   };
 }

@@ -3,6 +3,10 @@
 // changes ship through the same PR path as the code they describe. The
 // ownership test places every value: describes the project's code → here;
 // describes the machine → instance config.
+import { TRIPWIRE_METRICS, BREACH_OPS } from '../tripwires/registry.mjs';
+import { RUN_EVENTS, INSTANCE_EVENTS, ESCAPES_EVENTS } from '../ledger/registry.mjs';
+
+const KNOWN_EVENTS = new Set([...RUN_EVENTS, ...INSTANCE_EVENTS, ...ESCAPES_EVENTS]);
 
 export const DEFAULT_PROJECT_CONFIG_PATH = '.olympus/project.json';
 
@@ -211,6 +215,9 @@ function validateGraph(graph, err) {
   });
 }
 
+// A cut and its tripwire land in one PR; this validation is what "no cut
+// without a tripwire" leans on. The metric set is closed — the daemon
+// implements every name it admits.
 function validateTripwires(tripwires, err) {
   if (tripwires === undefined) return;
   if (!Array.isArray(tripwires)) {
@@ -231,8 +238,46 @@ function validateTripwires(tripwires, err) {
     } else {
       seen.add(entry.id);
     }
-    if (typeof entry.metric !== 'string' || entry.metric.length === 0) {
-      err(at('metric'), 'required string');
+    const metric = TRIPWIRE_METRICS[entry.metric];
+    if (!metric) {
+      err(at('metric'), `must name a metric the daemon implements: ${entry.metric}`);
+      return;
+    }
+    if (entry.window !== undefined) {
+      if (metric.unit === null) {
+        err(at('window'), `metric ${entry.metric} evaluates current state and takes no window`);
+      } else if (!Number.isInteger(entry.window) || entry.window <= 0) {
+        err(at('window'), 'must be a positive integer state count');
+      }
+    }
+    if (
+      !isPlainObject(entry.breach) ||
+      !BREACH_OPS.has(entry.breach.op) ||
+      typeof entry.breach.value !== 'number' ||
+      !Number.isFinite(entry.breach.value)
+    ) {
+      err(at('breach'), 'required: {op: > | >= | < | <=, value: number}');
+    }
+    if (entry.triggerEvents !== undefined) {
+      if (!isStringList(entry.triggerEvents) || entry.triggerEvents.length === 0) {
+        err(at('triggerEvents'), 'must be a non-empty array of event names');
+      } else {
+        for (const event of entry.triggerEvents) {
+          if (!KNOWN_EVENTS.has(event)) err(at('triggerEvents'), `unknown event: ${event}`);
+        }
+      }
+    }
+    if (typeof entry.answer !== 'string' || entry.answer.length === 0) {
+      err(at('answer'), 'required: the restore target or the answering review');
+    }
+    if (entry.params !== undefined && !isPlainObject(entry.params)) {
+      err(at('params'), 'must be an object');
+    }
+    for (const param of metric.requiredParams ?? []) {
+      const value = entry.params?.[param];
+      if (typeof value !== 'string' || value.length === 0) {
+        err(at(`params.${param}`), `metric ${entry.metric} requires params.${param}`);
+      }
     }
   });
 }

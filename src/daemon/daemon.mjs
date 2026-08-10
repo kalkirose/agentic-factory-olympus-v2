@@ -9,9 +9,12 @@ import { RunEngine } from '../engine/engine.mjs';
 import { ModelSemaphores } from '../seats/semaphore.mjs';
 import { RunIsolation } from '../isolation/isolation.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
-import { ensureBareClone, readBlobFromBranch } from '../isolation/clones.mjs';
+import { cloneDir, ensureBareClone, readBlobFromBranch } from '../isolation/clones.mjs';
+import { parseProjectConfig } from '../config/project.mjs';
 import { parseIntentCard } from '../lanes/card.mjs';
 import { FrontierLauncher } from '../frontier/autolaunch.mjs';
+import { readGraphSource } from '../frontier/source.mjs';
+import { TripwireWatcher } from '../tripwires/watcher.mjs';
 import { scaffoldHome, homePaths, runLedgerPath } from './home.mjs';
 import { acquireLock } from './lock.mjs';
 
@@ -40,6 +43,7 @@ export class Daemon {
     this.semaphores = null;
     this.isolation = null;
     this.frontier = null;
+    this.tripwires = null;
     this.pendingTeardowns = new Set();
     this.launchCounter = 0;
     this.watchers = [];
@@ -109,12 +113,22 @@ export class Daemon {
     this.lock = acquireLock(this.paths.lock);
     try {
       this.config = loadInstanceConfig(this.paths.home);
-      this.ledger = openInstanceStore(this.paths);
+      // The watcher exists before any store opens with its hook; the hooks
+      // read `this.tripwires` late so construction order stays simple.
+      this.ledger = openInstanceStore(this.paths, {
+        onAppend: (line) => this.tripwires?.notify(line.project, line),
+      });
       this.isolation = new RunIsolation(this.paths, {
         composeCommand: () => this.config.composeCommand,
         composeRunner: this.composeRunner,
       });
       this.semaphores = new ModelSemaphores(this.config.semaphores);
+      this.tripwires = new TripwireWatcher({
+        paths: this.paths,
+        ledger: this.ledger,
+        readRegistry: (project) => this.readTripwireRegistry(project),
+        readSource: (project) => this.readGraphSourceFor(project),
+      });
       this.engine = new RunEngine(this.paths, {
         instanceStore: this.ledger,
         getSlotCap: (project) => this.config.projects[project]?.slotCap,
@@ -125,6 +139,7 @@ export class Daemon {
         onParked: (info) => this.frontier.queueSweep(info.project),
         semaphores: this.semaphores,
         seatDefaults: () => ({ claudeCommand: this.config.claudeCommand }),
+        onEvent: (project, line) => this.tripwires?.notify(project, line),
       });
       for (const [name, lane] of Object.entries(this.lanes)) {
         this.engine.registerLane(name, lane);
@@ -182,6 +197,9 @@ export class Daemon {
       defaultBranch: entry.defaultBranch,
       configPath: entry.projectConfigPath,
     });
+    // The launch read the config fresh from the default branch; the tripwire
+    // registry the watcher evaluates is the registry that just shipped.
+    this.tripwires.setRegistry(project, ws.projectConfig.tripwires);
     try {
       this.engine.launch({
         runId,
@@ -266,6 +284,34 @@ export class Daemon {
       ...(answer !== undefined && { answer }),
       ...(target.card !== undefined && { card: target.card }),
     });
+  }
+
+  // -- tripwire watcher reads ------------------------------------------------
+
+  /**
+   * The watcher's registry fallback between launches: read the project
+   * config from the bare clone as it stands, without fetching — the observer
+   * never advances the clone. No clone yet = no launch happened = throws,
+   * and the watcher retries on the next matching append.
+   */
+  async readTripwireRegistry(project) {
+    const entry = this.config.projects[project];
+    if (!entry) return [];
+    return this.isolation.withClone(project, async () => {
+      const dir = cloneDir(this.paths, project);
+      const { text } = await readBlobFromBranch(dir, entry.defaultBranch, entry.projectConfigPath);
+      const source = `${entry.defaultBranch}:${entry.projectConfigPath}`;
+      return parseProjectConfig(text, source).tripwires;
+    });
+  }
+
+  /** The width metric's graph source, read from the clone without fetching. */
+  async readGraphSourceFor(project) {
+    const entry = this.config.projects[project];
+    if (!entry) return null;
+    return this.isolation.withClone(project, () =>
+      readGraphSource(this.paths, project, entry, { fetch: false }),
+    );
   }
 
   /** Tears a closed run's workspace down and stamps the outcome. Async. */
@@ -432,6 +478,7 @@ export class Daemon {
       // ledger; let them land before the ledger closes.
       await Promise.allSettled([...this.pendingTeardowns]);
       if (this.frontier) await this.frontier.drain();
+      if (this.tripwires) await this.tripwires.stop();
       this.ledger.append('daemon-stopped', { actor: actor ?? ACTOR, trigger });
       this.teardown();
       if (this.onStopped) this.onStopped();

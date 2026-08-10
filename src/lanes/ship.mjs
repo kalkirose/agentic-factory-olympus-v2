@@ -643,7 +643,7 @@ async function breachFlow(ctx, base, merged, spawnRepair) {
     lastRender?.verdict === 'red'
       ? lastRender.open.map((id) => index.get(id)).filter(Boolean)
       : [];
-  const store = openEscapesStore(ctx.paths);
+  const store = openEscapesStore(ctx.paths, { onAppend: ctx.onAppend });
   try {
     // Restart-safe: a crash after recording re-uses the recorded entries.
     let entries = readEvents(ctx.paths.escapesLedger)
@@ -911,7 +911,7 @@ async function sweepChecks(base, cardDir, report) {
 // -- escape fix-back (repair lane) -------------------------------------------
 
 function fixEscapeBack(ctx, merged) {
-  const store = openEscapesStore(ctx.paths);
+  const store = openEscapesStore(ctx.paths, { onAppend: ctx.onAppend });
   try {
     const target = readEscapeSet(ctx.paths.escapesLedger).find(
       (e) => e.seq === ctx.payload.escapeSeq,

@@ -27,11 +27,17 @@ export class RunEngine {
    *   onClosed?: (info: {runId: string, project: string, lane: string, state: string}) => void,
    *   onParked?: (info: {runId: string, project: string, lane: string, type: string}) => void,
    *   semaphores?: import('../seats/semaphore.mjs').ModelSemaphores,
-   *   seatDefaults?: () => object}} opts
+   *   seatDefaults?: () => object,
+   *   onEvent?: (project: string, line: object) => void}} opts
    *   seatDefaults supplies machine-scoped runSeat options (claudeCommand)
-   *   read fresh per dispatch, so a live config edit applies.
+   *   read fresh per dispatch, so a live config edit applies. onEvent fires
+   *   on every run-store append, project-attributed — the tripwire watcher's
+   *   event key.
    */
-  constructor(paths, { instanceStore, getSlotCap, onClosed, onParked, semaphores, seatDefaults }) {
+  constructor(
+    paths,
+    { instanceStore, getSlotCap, onClosed, onParked, semaphores, seatDefaults, onEvent },
+  ) {
     this.paths = paths;
     this.instanceStore = instanceStore ?? null;
     this.getSlotCap = getSlotCap;
@@ -39,6 +45,7 @@ export class RunEngine {
     this.onParked = onParked ?? null;
     this.semaphores = semaphores ?? null;
     this.seatDefaults = seatDefaults ?? (() => ({}));
+    this.onEvent = onEvent ?? null;
     this.lanes = new Map();
     this.runs = new Map();
     this.stopped = false;
@@ -104,7 +111,9 @@ export class RunEngine {
       lane,
       payload,
       stage: null,
-      store: openRunStore(this.paths, runId),
+      store: openRunStore(this.paths, runId, {
+        onAppend: (line) => this.onEvent?.(project, line),
+      }),
       parked: false,
       parkSeq: 0,
       parkRecord: null,
@@ -149,6 +158,9 @@ export class RunEngine {
       store: run.store,
       instanceStore: this.instanceStore,
       paths: this.paths,
+      // For stores a handler opens itself (the escapes ledger): the same
+      // project-attributed event key the run store carries.
+      onAppend: (line) => this.onEvent?.(run.project, line),
       // Long-poll handlers (the check watcher) exit their loop on this; the
       // engine ignores any directive returned after stop or close.
       stopped: () => this.stopped || run.closed,
