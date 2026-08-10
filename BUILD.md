@@ -165,7 +165,7 @@ free slots, answers resume runs, and starvation lands loud.
 Done when: fixture ledgers trip each standing metric exactly once per breach
 condition and re-arm only after resolution.
 
-## M11 — Command center — open
+## M11 — Command center — done
 
 - Read-only GET server: daemon-home rooted, path-guarded, dependency-free.
 - Page per the accepted layout: status chips, loud strip, run cards,
@@ -345,3 +345,18 @@ never carries a project's specifics.
   once per project and metric; the kill-rate proposal suggests the observed
   floor. `standingTripwires()` ships the three design-given entries.
   ADR-0010 records the shapes. 202 tests green. Next: M11 (command center).
+- 2026-08-10 — M11 done: command center under `src/center/` + the
+  `olympus-center` bin. Read-only GET server (node:http, dependency-free):
+  `/` page, `/snapshot.json` derived view, `/state/...` raw store files with
+  JSON directory listings — path-guarded through symlinks, 405 on every
+  non-GET, no-store. `buildSnapshot` assembles the whole display through the
+  existing pull-only readers (run replay, open-loud/queue joins, escapes
+  window, kill-rate + lens-yield collectors, frontier compute), so the page
+  holds formatting only; clone-backed sections (registry board, frontier)
+  read the clone no-fetch and degrade to null before the first launch. Page
+  per the accepted layout: chips, loud strip, run cards with stage pipeline,
+  escalations, build health, run-time stats, ledger tail; 60 s poll +
+  manual refresh as display cadence only; all ledger text lands via
+  textContent. Negative ts pairs read as no duration. ADR-0011 records the
+  shapes. 206 tests green; page verified rendering a seeded fixture home
+  end to end in the browser. Next: M12 (eval seat).

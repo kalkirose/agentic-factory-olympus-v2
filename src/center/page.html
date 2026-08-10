@@ -1,0 +1,703 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Olympus v2 — Command Center</title>
+<style>
+  /* Dark-committed command-center look, per the accepted layout reference.
+     Data colors = reference palette, dark steps. */
+  :root {
+    color-scheme: dark;
+    --page:        #0d0d0d;
+    --surface:     #1a1a19;
+    --surface-2:   #232322;
+    --ink:         #ffffff;
+    --ink-2:       #c3c2b7;
+    --muted:       #898781;
+    --grid:        #2c2c2a;
+    --baseline:    #383835;
+    --border:      rgba(255,255,255,0.10);
+    --accent:      #3987e5;
+    --accent-dim:  #1c5cab;
+    --good:        #0ca30c;
+    --warning:     #fab219;
+    --serious:     #ec835a;
+    --critical:    #d03b3b;
+    --mono: ui-monospace, Consolas, "Cascadia Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--page);
+    background-image: radial-gradient(ellipse 80% 50% at 50% -10%, rgba(57,135,229,0.07), transparent);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 13px;
+    line-height: 1.45;
+    padding: 20px 24px 40px;
+    max-width: 1500px;
+    margin: 0 auto;
+  }
+  .mono { font-family: var(--mono); }
+  .empty { color: var(--muted); font-size: 12px; }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap; padding-bottom: 14px;
+    border-bottom: 1px solid var(--border); margin-bottom: 14px;
+  }
+  .title { display: flex; align-items: baseline; gap: 14px; }
+  .title h1 {
+    font-size: 15px; font-weight: 650; letter-spacing: 0.22em; text-transform: uppercase;
+  }
+  .title h1 .v { color: var(--accent); }
+  .stamp { color: var(--muted); font-size: 11px; }
+  .stamp.err { color: var(--critical); }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 7px;
+    border: 1px solid var(--border); border-radius: 3px;
+    background: var(--surface); padding: 4px 10px;
+    font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2);
+  }
+  .chip b { color: var(--ink); font-weight: 600; letter-spacing: 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .dot.good     { background: var(--good);     box-shadow: 0 0 6px rgba(12,163,12,0.8); }
+  .dot.warning  { background: var(--warning);  box-shadow: 0 0 6px rgba(250,178,25,0.7); }
+  .dot.critical { background: var(--critical); box-shadow: 0 0 6px rgba(208,59,59,0.8); }
+  .dot.idle     { background: var(--baseline); }
+
+  /* ---------- loud strip ---------- */
+  .loud {
+    display: flex; align-items: center; gap: 12px;
+    border: 1px solid rgba(208,59,59,0.45); border-left: 3px solid var(--critical);
+    background: linear-gradient(90deg, rgba(208,59,59,0.12), rgba(208,59,59,0.03));
+    border-radius: 3px; padding: 9px 14px; margin-bottom: 16px;
+  }
+  .loud .tag {
+    color: var(--critical); font-weight: 700; font-size: 11px;
+    letter-spacing: 0.14em; text-transform: uppercase; flex: none;
+  }
+  .loud .what { color: var(--ink); }
+  .loud .meta { color: var(--muted); font-size: 11px; margin-left: auto; flex: none; }
+
+  /* ---------- grid + panels ---------- */
+  .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+  .panel {
+    grid-column: span 12;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
+    padding: 14px 16px 16px;
+  }
+  @media (min-width: 1000px) {
+    .span7 { grid-column: span 7; }
+    .span5 { grid-column: span 5; }
+  }
+  .panel > h2 {
+    font-size: 11px; font-weight: 650; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--ink-2); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;
+  }
+  .panel > h2::before { content: ""; width: 3px; height: 11px; background: var(--accent); }
+  .panel > h2 .note { margin-left: auto; color: var(--muted); font-weight: 400; letter-spacing: 0.04em; text-transform: none; }
+
+  /* ---------- run cards ---------- */
+  .run {
+    border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2);
+    padding: 11px 13px; margin-bottom: 10px;
+  }
+  .run:last-child { margin-bottom: 0; }
+  .run .head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .run .story { font-family: var(--mono); font-weight: 700; font-size: 14px; }
+  .run .name { color: var(--ink-2); }
+  .badge {
+    margin-left: auto; font-size: 10px; font-weight: 700; letter-spacing: 0.12em;
+    text-transform: uppercase; padding: 2px 8px; border-radius: 2px;
+  }
+  .badge.run-live     { color: var(--accent); border: 1px solid rgba(57,135,229,0.5); }
+  .badge.run-parked   { color: var(--warning); border: 1px solid rgba(250,178,25,0.5); }
+  .badge.run-violated { color: var(--critical); border: 1px solid rgba(208,59,59,0.5); }
+  .pipeline { display: flex; align-items: center; gap: 0; margin: 10px 0 8px; }
+  .stage { display: flex; flex-direction: column; align-items: center; gap: 4px; flex: 1; position: relative; }
+  .stage .node {
+    width: 9px; height: 9px; border-radius: 50%; background: var(--surface-2);
+    border: 1.5px solid var(--baseline); z-index: 1;
+  }
+  .stage.done .node    { background: var(--accent-dim); border-color: var(--accent-dim); }
+  .stage.current .node { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 8px rgba(57,135,229,0.9); }
+  .stage::after {
+    content: ""; position: absolute; top: 4px; left: 50%; width: 100%; height: 1px; background: var(--baseline);
+  }
+  .stage:last-child::after { display: none; }
+  .stage.done::after { background: var(--accent-dim); }
+  .stage .lbl { font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+  .stage.current .lbl { color: var(--ink); font-weight: 600; }
+  .run .facts { display: flex; gap: 18px; flex-wrap: wrap; color: var(--ink-2); font-size: 12px; }
+  .run .facts .k { color: var(--muted); }
+  .run .last { margin-top: 7px; font-size: 11px; color: var(--muted); }
+  .run .last .mono { color: var(--ink-2); }
+  .run.parked { opacity: 0.75; }
+
+  /* ---------- escalations ---------- */
+  .esc { border-left: 3px solid var(--baseline); background: var(--surface-2); border-radius: 2px; padding: 8px 12px; margin-bottom: 8px; }
+  .esc.loud   { border-left-color: var(--critical); }
+  .esc.queued { border-left-color: var(--warning); }
+  .esc .row1 { display: flex; gap: 8px; align-items: baseline; }
+  .esc .type { font-family: var(--mono); font-size: 11px; font-weight: 700; }
+  .esc.loud .type   { color: var(--critical); }
+  .esc.queued .type { color: var(--warning); }
+  .esc .src { color: var(--muted); font-size: 11px; margin-left: auto; }
+  .esc .gist { color: var(--ink-2); margin-top: 2px; }
+  .esc-foot { color: var(--muted); font-size: 11px; margin-top: 10px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .esc-foot b { color: var(--ink-2); }
+
+  /* ---------- stat tiles ---------- */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .tile { border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); padding: 9px 11px; }
+  .tile .lbl { font-size: 11px; color: var(--muted); }
+  .tile .val { font-size: 22px; font-weight: 600; margin-top: 2px; display: flex; align-items: baseline; gap: 6px; }
+  .tile .val .unit { font-size: 12px; color: var(--ink-2); font-weight: 400; }
+  .tile .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .tile .sub .ok   { color: var(--good); }
+  .tile .sub .bad  { color: var(--critical); }
+  .tile .sub .warn { color: var(--warning); }
+  .meter { height: 8px; border-radius: 4px; background: rgba(28,92,171,0.35); margin-top: 8px; position: relative; overflow: hidden; }
+  .meter .fill { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 4px; }
+  .meter .fill.over { background: var(--critical); }
+
+  /* ---------- hero ---------- */
+  .hero { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  .hero .num { font-size: 52px; font-weight: 650; line-height: 1; }
+  .hero .num .unit { font-size: 20px; font-weight: 400; color: var(--ink-2); }
+  .hero .delta { font-size: 13px; font-weight: 600; }
+  .hero .delta.good { color: var(--good); }
+  .hero .delta.bad  { color: var(--critical); }
+  .hero-sub { color: var(--muted); font-size: 11px; margin-bottom: 12px; }
+
+  /* ---------- column chart (last ships) ---------- */
+  .colchart { position: relative; height: 150px; margin: 6px 0 4px; }
+  .colchart .gridline { position: absolute; left: 0; right: 0; height: 1px; background: var(--grid); }
+  .colchart .gridlbl { position: absolute; right: 100%; margin-right: 6px; transform: translateY(-50%); font-size: 10px; color: var(--muted); }
+  .colchart .target { position: absolute; left: 0; right: 0; height: 1px; background: var(--serious); opacity: 0.8; }
+  .colchart .target .tlbl { position: absolute; right: 0; bottom: 2px; font-size: 10px; color: var(--serious); }
+  .cols { position: absolute; inset: 0; display: flex; align-items: flex-end; gap: 10px; padding: 0 4px; }
+  .col { flex: 1; max-width: 24px; position: relative; }
+  .col .bar { width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; }
+  .col .vlbl { position: absolute; bottom: 100%; margin-bottom: 3px; left: 50%; transform: translateX(-50%); font-size: 10px; color: var(--ink-2); }
+  .colwrap { margin-left: 30px; }
+  .axis-note { color: var(--muted); font-size: 10px; margin-top: 6px; margin-left: 30px; }
+
+  /* ---------- horizontal bars ---------- */
+  .hbars { display: grid; grid-template-columns: max-content 1fr max-content; gap: 6px 10px; align-items: center; }
+  .hbars .hlbl { font-size: 11px; color: var(--ink-2); }
+  .hbars .track { height: 14px; position: relative; }
+  .hbars .hbar { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 0 4px 4px 0; }
+  .hbars .hval { font-size: 11px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .subhead { font-size: 11px; color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase; margin: 14px 0 8px; }
+
+  /* ---------- tripwire board ---------- */
+  .wires { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; }
+  .wire { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 5px 8px; border-radius: 2px; background: var(--surface-2); }
+  .wire .id { font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+  .wire .st { margin-left: auto; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+  .wire.breach .st { color: var(--critical); font-weight: 700; }
+
+  /* ---------- ledger tail ---------- */
+  .tail { font-family: var(--mono); font-size: 11.5px; }
+  .tail .line { display: flex; gap: 14px; padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+  .tail .line:last-child { border-bottom: none; }
+  .tail .src { color: var(--muted); width: 90px; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tail .seq { color: var(--muted); width: 48px; flex: none; text-align: right; }
+  .tail .ev  { color: var(--accent); width: 170px; flex: none; }
+  .tail .ev.loudev { color: var(--critical); }
+  .tail .gist { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  footer {
+    margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border);
+    color: var(--muted); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+    display: flex; gap: 20px; flex-wrap: wrap;
+  }
+
+  /* ---------- tooltip + table views ---------- */
+  #tip {
+    position: fixed; pointer-events: none; z-index: 10; display: none;
+    background: #262625; border: 1px solid var(--border); border-radius: 3px;
+    padding: 5px 9px; font-size: 11px; color: var(--ink); box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+    max-width: 360px;
+  }
+  details.tbl { margin-top: 10px; }
+  details.tbl summary { color: var(--muted); font-size: 11px; cursor: pointer; }
+  details.tbl table { border-collapse: collapse; margin-top: 6px; font-size: 11px; }
+  details.tbl th, details.tbl td { border: 1px solid var(--grid); padding: 3px 8px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  details.tbl th { color: var(--muted); font-weight: 600; text-align: left; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="title">
+    <h1>Olympus <span class="v">v2</span> — Command Center</h1>
+    <span class="stamp mono" id="stamp">loading…</span>
+  </div>
+  <div class="chips" id="chips">
+    <span class="chip" id="chip-source" data-tip="Daemon-home root this server was started with. The daemon does not know this server exists."><span class="dot idle" id="dot-source"></span>source <b class="mono" id="source-root">…</b></span>
+    <span class="chip" data-tip="The page re-fetches the snapshot every 60 s. Display cadence only — detection stays with the event-keyed watchers.">auto <b><span id="countdown">60</span> s</b></span>
+    <button class="chip" id="refresh" data-tip="Re-fetches now. A plain page reload does the same." style="cursor:pointer">⟳ <b>refresh</b></button>
+    <span id="chips-live"></span>
+  </div>
+</header>
+
+<div id="loudwrap"></div>
+
+<div class="grid">
+
+  <section class="panel span7">
+    <h2>Runs in progress <span class="note" id="runs-note"></span></h2>
+    <div id="runs"></div>
+  </section>
+
+  <section class="panel span5">
+    <h2>Escalations <span class="note">display only — answer via console</span></h2>
+    <div id="escs"></div>
+    <div class="esc-foot" id="esc-foot"></div>
+  </section>
+
+  <section class="panel span7">
+    <h2>Build health <span class="note">rolling windows, ledger-derived</span></h2>
+    <div id="health"></div>
+  </section>
+
+  <section class="panel span5">
+    <h2>Run-time statistics <span class="note" id="stats-note"></span></h2>
+    <div id="stats"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Ledger tail <span class="note">newest first · all stores</span></h2>
+    <div class="tail" id="tail"></div>
+  </section>
+
+</div>
+
+<footer>
+  <span>read-only — commands via console</span>
+  <span>standalone — own small read-only server; the daemon does not know this page exists</span>
+  <span>polls every 60 s · ⟳ refresh anytime</span>
+  <span>data: run ledgers · instance ledger · escapes ledger · stream indexes</span>
+</footer>
+
+<div id="tip"></div>
+
+<script>
+"use strict";
+/* All content renders from GET /snapshot.json — a view the server derives
+   from the ledger files under the daemon home. Everything lands in the DOM
+   through textContent; ledger text never becomes markup. */
+
+const $ = (id) => document.getElementById(id);
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function tipped(node, text) { node.dataset.tip = text; return node; }
+
+function fmtMinutes(m) {
+  if (m === null || m === undefined) return "—";
+  if (m < 60) return Math.round(m) + " min";
+  return Math.floor(m / 60) + " h " + String(Math.round(m % 60)).padStart(2, "0") + " min";
+}
+
+function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+function empty(node, text) { node.appendChild(el("div", "empty", text)); }
+
+/* ---------- header ---------- */
+
+function renderHeader(s) {
+  $("stamp").className = "stamp mono";
+  $("stamp").textContent =
+    "snapshot · instance seq " + s.instanceSeq + " · " + s.generatedAt.replace("T", " ").slice(0, 19);
+  $("source-root").textContent = s.home;
+  $("dot-source").className = "dot " + (s.daemon.running ? "good" : "critical");
+  const live = $("chips-live");
+  clear(live);
+  const chip = (parts) => { const c = el("span", "chip"); for (const p of parts) c.appendChild(p); live.appendChild(c); return c; };
+  chip([el("span", "dot " + (s.daemon.running ? "good" : "critical")), document.createTextNode("daemon "), el("b", null, s.daemon.running ? "up · pid " + s.daemon.pid : "stopped")]);
+  for (const p of s.projects) {
+    const c = chip([el("span", "dot " + (p.armed ? "good" : "idle")), document.createTextNode("auto-launch "), el("b", null, (s.projects.length > 1 ? p.name + " " : "") + (p.armed ? "armed" : "paused"))]);
+    tipped(c, "Frontier auto-launch arming for project " + p.name + ". Arm and pause via console.");
+  }
+  const busy = s.projects.reduce((n, p) => n + p.slotsBusy, 0);
+  const caps = s.projects.map((p) => p.slotCap).filter((c) => c !== null);
+  const cap = caps.length > 0 ? caps.reduce((a, b) => a + b, 0) : null;
+  tipped(chip([document.createTextNode("slots "), el("b", null, busy + (cap !== null ? " / " + cap : ""))]),
+    "Busy run slots across projects. A parked run frees its slot.");
+  for (const sem of s.semaphores) {
+    tipped(chip([document.createTextNode(shortModel(sem.model) + " sem "), el("b", null, sem.inFlight + (sem.max !== null ? " / " + sem.max : ""))]),
+      "Seats in flight on model " + sem.model + (sem.max !== null ? " · global cap " + sem.max : ""));
+  }
+}
+
+function shortModel(model) {
+  return model.replace(/^claude-/, "").replace(/-\d{8}$/, "");
+}
+
+/* ---------- loud strip ---------- */
+
+function renderLoud(s) {
+  const wrap = $("loudwrap");
+  clear(wrap);
+  for (const item of s.loud) {
+    const strip = el("div", "loud");
+    tipped(strip, "Loud stream: open items without a linked resolved append. Answers go through the console.");
+    strip.appendChild(el("span", "tag", "⚠ loud · " + item.event));
+    strip.appendChild(el("span", "what", item.gist));
+    strip.appendChild(el("span", "meta mono", item.ledger + "#" + item.seq + " · open " + fmtMinutes(item.openMinutes) + " · resolve via console"));
+    wrap.appendChild(strip);
+  }
+}
+
+/* ---------- runs ---------- */
+
+function renderRuns(s) {
+  const box = $("runs");
+  clear(box);
+  const parked = s.runs.filter((r) => r.parked).length;
+  const busy = s.runs.length - parked;
+  $("runs-note").textContent =
+    s.runs.length + " runs · " + busy + " slots busy · " + parked + " parked (slot freed)";
+  if (s.runs.length === 0) return empty(box, "no open runs — the frontier launches on arm, or launch via console");
+  for (const run of s.runs) {
+    const card = el("div", "run" + (run.parked ? " parked" : ""));
+    const head = el("div", "head");
+    head.appendChild(el("span", "story", run.storyKey ?? run.runId));
+    head.appendChild(el("span", "name mono", run.runId + " · " + run.lane + (run.project ? " · " + run.project : "")));
+    let badge;
+    if (run.parked) badge = el("span", "badge run-parked", "parked · slot freed");
+    else if (run.violated) badge = el("span", "badge run-violated", "liveness violated");
+    else badge = el("span", "badge run-live", run.stage + (run.repair ? " · repair " + run.repair.round + "/3" : ""));
+    head.appendChild(badge);
+    card.appendChild(head);
+
+    if (!run.parked && run.stages.length > 0) {
+      const pipe = el("div", "pipeline");
+      const current = run.stages.indexOf(run.stage);
+      run.stages.forEach((stage, i) => {
+        const cls = i < current ? "stage done" : i === current ? "stage current" : "stage";
+        const node = el("div", cls);
+        node.appendChild(el("span", "node"));
+        node.appendChild(el("span", "lbl", stageLabel(stage)));
+        pipe.appendChild(node);
+      });
+      card.appendChild(pipe);
+    }
+
+    const facts = el("div", "facts");
+    const fact = (k, v) => { const f = el("span"); f.appendChild(el("span", "k", k + " ")); f.appendChild(document.createTextNode(v)); facts.appendChild(f); };
+    if (run.parked) {
+      fact("park event", run.parkType ?? "park");
+      fact("waiting", fmtMinutes(run.parkedMinutes));
+      fact("resumes", "on console answer");
+    } else {
+      fact("seats", run.seats.length > 0
+        ? run.seats.map((seat) => seat.seat + " " + shortModel(seat.model) + "·" + seat.effort).join(" + ")
+        : "none in flight");
+      fact("elapsed", fmtMinutes(run.elapsedMinutes));
+    }
+    card.appendChild(facts);
+
+    const last = el("div", "last");
+    last.appendChild(document.createTextNode("last event "));
+    last.appendChild(el("span", "mono", "#" + run.lastEvent.seq + " " + run.lastEvent.event));
+    if (run.lastEvent.detail) last.appendChild(document.createTextNode(" — " + run.lastEvent.detail));
+    card.appendChild(last);
+    box.appendChild(card);
+  }
+}
+
+const STAGE_LABELS = { "readiness": "ready", "spec-birth": "birth", "spec-gate": "gate", "adversary": "advers", "implementation": "dev", "close-out": "close" };
+function stageLabel(stage) { return STAGE_LABELS[stage] ?? stage; }
+
+/* ---------- escalations ---------- */
+
+function renderEscalations(s) {
+  const box = $("escs");
+  clear(box);
+  for (const item of s.loud) {
+    const e = el("div", "esc loud");
+    const row = el("div", "row1");
+    row.appendChild(el("span", "type", item.event));
+    row.appendChild(el("span", "src mono", item.ledger + "#" + item.seq + " · " + fmtMinutes(item.openMinutes)));
+    e.appendChild(row);
+    e.appendChild(el("div", "gist", item.gist));
+    box.appendChild(e);
+  }
+  for (const item of s.queue) {
+    const e = el("div", "esc queued");
+    const row = el("div", "row1");
+    row.appendChild(el("span", "type", (item.event === "park" ? "park · " + (item.type ?? "") : item.event)));
+    row.appendChild(el("span", "src mono", item.ledger + "#" + item.seq + " · " + fmtMinutes(item.waitingMinutes)));
+    e.appendChild(row);
+    e.appendChild(el("div", "gist", item.question ?? item.gist));
+    box.appendChild(e);
+  }
+  if (s.loud.length === 0 && s.queue.length === 0) empty(box, "nothing waits on you");
+  const foot = $("esc-foot");
+  clear(foot);
+  const stat = (label, value) => { const span = el("span"); span.appendChild(document.createTextNode(label + " ")); span.appendChild(el("b", null, String(value))); foot.appendChild(span); };
+  stat("queued depth", s.queue.length);
+  stat("loud open", s.loud.length);
+  stat("answered today", s.answeredToday);
+  foot.appendChild(el("span", null, "order: loud first, then FIFO (roadmap tiebreak)"));
+}
+
+/* ---------- build health ---------- */
+
+function tile(label, value, unit, sub, tipText) {
+  const t = el("div", "tile");
+  if (tipText) tipped(t, tipText);
+  t.appendChild(el("div", "lbl", label));
+  const val = el("div", "val", value);
+  if (unit) val.appendChild(el("span", "unit", unit));
+  t.appendChild(val);
+  if (sub) t.appendChild(sub);
+  return t;
+}
+
+function sub(parts) {
+  const node = el("div", "sub");
+  for (const p of parts) node.appendChild(typeof p === "string" ? document.createTextNode(p) : p);
+  return node;
+}
+
+function hbars(container, data, unit) {
+  const max = Math.max(...data.map((d) => d[1]), 0.001);
+  for (const [label, value] of data) {
+    container.appendChild(el("span", "hlbl", label));
+    const track = tipped(el("span", "track"), label + " · " + value + (unit ?? ""));
+    const bar = el("span", "hbar");
+    bar.style.width = (value / max * 100) + "%";
+    track.appendChild(bar);
+    container.appendChild(track);
+    container.appendChild(el("span", "hval", String(value)));
+  }
+}
+
+function renderHealth(s) {
+  const box = $("health");
+  clear(box);
+  if (s.health.byProject.length === 0) return empty(box, "no projects configured yet");
+  s.health.byProject.forEach((h, i) => {
+    if (s.health.byProject.length > 1) box.appendChild(el("div", "subhead", "project " + h.project));
+
+    const tiles = el("div", "tiles");
+    const esc = h.escapes;
+    const escTile = tile("Escapes / story · rolling " + 10, String(esc.rate), null,
+      sub(["band ≤ " + esc.ceiling + " · ", el("span", esc.breach ? "bad" : "ok", esc.breach ? "over band" : "within band")]),
+      "Counted escapes over the last " + esc.ships + " shipped story runs (window 10). Breach over " + esc.ceiling + ".");
+    const meter = el("div", "meter");
+    const fill = el("span", "fill" + (esc.breach ? " over" : ""));
+    fill.style.width = Math.min(100, esc.ceiling > 0 ? (esc.rate / esc.ceiling) * 100 : 0) + "%";
+    meter.appendChild(fill);
+    escTile.appendChild(meter);
+    tiles.appendChild(escTile);
+
+    if (i === 0) {
+      tiles.appendChild(tile("Open escapes", String(s.health.openEscapes), null,
+        sub([s.health.openEscapes > 0 ? "in repair" : "none open"]),
+        "escape-recorded without a linked escape-fixed."));
+      const gi = s.health.gateIntegrityOpen;
+      tiles.appendChild(tile("Gate-integrity incidents", String(gi), null,
+        sub([el("span", gi > 0 ? "bad" : "ok", gi > 0 ? "⚠ open — zero tolerance" : "none open")]),
+        "Zero-tolerance incident class. Every incident is loud until resolved."));
+    }
+
+    const kr = h.killRate;
+    tiles.appendChild(tile("Kill rate at last freeze",
+      kr ? kr.kills + "/" + kr.waves : "—", null,
+      sub([kr ? kr.dispositions + " dispositions" : "no freeze yet"]),
+      "Adversary kills over initial waves at the most recent freeze. 0-kill blocks the freeze."));
+    box.appendChild(tiles);
+
+    box.appendChild(el("div", "subhead", "Review yield per lens · confirmed findings, last " + h.fury.window + " verdicts"));
+    if (h.fury.verdicts === 0) {
+      empty(box, "no verdicts yet");
+    } else {
+      const bars = el("div", "hbars");
+      const data = Object.entries(h.fury.byLens).sort((a, b) => b[1] - a[1]);
+      hbars(bars, data, " confirmed");
+      box.appendChild(bars);
+    }
+
+    box.appendChild(el("div", "subhead", "Tripwire board"));
+    if (!h.tripwires.registryRead && h.tripwires.wires.length === 0) {
+      empty(box, "registry unread — no clone yet; wires appear after the first launch");
+    } else {
+      const wires = el("div", "wires");
+      for (const w of h.tripwires.wires) {
+        const wire = el("div", "wire" + (w.state === "breach" ? " breach" : ""));
+        tipped(wire, w.metric + " " + w.breach.op + " " + w.breach.value + (w.value !== undefined ? " · now " + w.value : ""));
+        wire.appendChild(el("span", "dot " + (w.state === "breach" ? "critical" : "good")));
+        wire.appendChild(el("span", "id", w.id));
+        wire.appendChild(el("span", "st", w.state));
+        wires.appendChild(wire);
+      }
+      box.appendChild(wires);
+      if (!h.tripwires.registryRead) box.appendChild(el("div", "empty", "registry unread — showing open breaches only"));
+    }
+  });
+}
+
+/* ---------- run-time statistics ---------- */
+
+function renderStats(s) {
+  const box = $("stats");
+  clear(box);
+  const st = s.stats;
+  $("stats-note").textContent = "last " + st.ships.length + " shipped stories";
+
+  const hero = el("div", "hero");
+  const num = el("span", "num", st.medianHours !== null ? st.medianHours.toFixed(1) : "—");
+  num.appendChild(el("span", "unit", " h"));
+  hero.appendChild(num);
+  if (st.medianHours !== null && st.priorMedianHours !== null) {
+    const diff = st.medianHours - st.priorMedianHours;
+    hero.appendChild(el("span", "delta " + (diff <= 0 ? "good" : "bad"),
+      (diff <= 0 ? "▼ " : "▲ ") + Math.abs(diff).toFixed(1) + " h vs prior 10"));
+  }
+  box.appendChild(hero);
+  box.appendChild(el("div", "hero-sub", "Median story wall-clock · target ≤ " + st.targetHours + " h"));
+
+  if (st.ships.length > 0) {
+    const wrap = el("div", "colwrap");
+    const chart = el("div", "colchart");
+    const maxHours = Math.max(st.targetHours + 2, ...st.ships.map((x) => x.hours));
+    const MAX = Math.ceil(maxHours);
+    for (let y = 0; y <= MAX; y += 2) {
+      const g = el("div", "gridline");
+      g.style.bottom = (y / MAX * 100) + "%";
+      g.appendChild(el("span", "gridlbl", String(y)));
+      chart.appendChild(g);
+    }
+    const target = el("div", "target");
+    target.style.bottom = (st.targetHours / MAX * 100) + "%";
+    target.appendChild(el("span", "tlbl", "target " + st.targetHours + " h"));
+    chart.appendChild(target);
+    const cols = el("div", "cols");
+    for (const ship of st.ships) {
+      const col = el("div", "col");
+      tipped(col, (ship.storyKey ?? ship.runId) + " · " + ship.hours.toFixed(1) + " h" + (ship.hours > st.targetHours ? " — over target" : ""));
+      const bar = el("div", "bar");
+      bar.style.height = (ship.hours / MAX * 150) + "px";
+      col.appendChild(bar);
+      if (ship.hours > st.targetHours) col.appendChild(el("span", "vlbl", ship.hours.toFixed(1)));
+      cols.appendChild(col);
+    }
+    chart.appendChild(cols);
+    wrap.appendChild(chart);
+    box.appendChild(wrap);
+    box.appendChild(el("div", "axis-note", "wall-clock per shipped story, oldest → newest · hover for story + hours"));
+    const details = el("details", "tbl");
+    details.appendChild(el("summary", null, "Data table"));
+    const table = el("table");
+    const header = el("tr");
+    header.appendChild(el("th", null, "Story"));
+    header.appendChild(el("th", null, "Hours"));
+    table.appendChild(header);
+    for (const ship of st.ships) {
+      const row = el("tr");
+      row.appendChild(el("td", null, ship.storyKey ?? ship.runId));
+      row.appendChild(el("td", null, ship.hours.toFixed(1)));
+      table.appendChild(row);
+    }
+    details.appendChild(table);
+    box.appendChild(details);
+  } else {
+    empty(box, "no ships yet");
+  }
+
+  const tiles = el("div", "tiles");
+  tiles.style.marginTop = "14px";
+  tiles.appendChild(tile("Green ship p50", st.greenShipP50Minutes !== null ? String(Math.round(st.greenShipP50Minutes)) : "—", " min",
+    null, "PR open to merge, p50 over the last ships."));
+  tiles.appendChild(tile("CI critical path p50", st.ciCriticalPathP50Minutes !== null ? String(st.ciCriticalPathP50Minutes) : "—", " min",
+    null, "Median of the longest green check per merge, last 5 merges — the ci-critical-path tripwire metric."));
+  const widths = s.health.byProject.map((h) => h.frontier).filter(Boolean);
+  tiles.appendChild(tile("Frontier width", widths.length > 0 ? widths.map((f) => f.width).join(" · ") : "—", null,
+    sub([widths.length > 0 ? widths.map((f) => f.unfinished).join(" · ") + " unshipped" : "no graph read yet"]),
+    "Possible-not-forced parallelism of the story graph, per project."));
+  box.appendChild(tiles);
+
+  if (st.stageMedians.length > 0) {
+    box.appendChild(el("div", "subhead", "Stage medians · minutes"));
+    const bars = el("div", "hbars");
+    hbars(bars, st.stageMedians.map((m) => [stageLabel(m.stage), Math.round(m.minutes)]), " min");
+    box.appendChild(bars);
+  }
+}
+
+/* ---------- ledger tail ---------- */
+
+function renderTail(s) {
+  const box = $("tail");
+  clear(box);
+  if (s.tail.length === 0) return empty(box, "no events yet");
+  for (const line of s.tail) {
+    const row = el("div", "line");
+    row.appendChild(el("span", "src", line.ledger.replace("run:", "run ")));
+    row.appendChild(el("span", "seq", "#" + line.seq));
+    row.appendChild(el("span", "ev" + (line.loud ? " loudev" : ""), line.event));
+    row.appendChild(el("span", "gist", line.detail));
+    box.appendChild(row);
+  }
+}
+
+/* ---------- fetch loop ---------- */
+
+let countdown = 60;
+
+async function refresh() {
+  countdown = 60;
+  try {
+    const res = await fetch("/snapshot.json", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const snapshot = await res.json();
+    renderHeader(snapshot);
+    renderLoud(snapshot);
+    renderRuns(snapshot);
+    renderEscalations(snapshot);
+    renderHealth(snapshot);
+    renderStats(snapshot);
+    renderTail(snapshot);
+  } catch (error) {
+    $("stamp").className = "stamp mono err";
+    $("stamp").textContent = "fetch failed (" + error.message + ") — retry in 60 s";
+  }
+}
+
+setInterval(() => {
+  countdown -= 1;
+  if (countdown <= 0) { refresh(); return; }
+  $("countdown").textContent = String(countdown);
+}, 1000);
+$("refresh").addEventListener("click", refresh);
+refresh();
+
+/* ---------- tooltip layer ---------- */
+
+const tip = $("tip");
+document.addEventListener("mousemove", (e) => {
+  const target = e.target.closest("[data-tip]");
+  if (!target) { tip.style.display = "none"; return; }
+  tip.textContent = target.dataset.tip;
+  tip.style.display = "block";
+  tip.style.left = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8) + "px";
+  tip.style.top = (e.clientY + 14) + "px";
+});
+</script>
+</body>
+</html>
