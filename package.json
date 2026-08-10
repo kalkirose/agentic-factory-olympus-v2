@@ -9,7 +9,8 @@
     "node": ">=22"
   },
   "bin": {
-    "olympusd": "bin/olympusd.mjs"
+    "olympusd": "bin/olympusd.mjs",
+    "olympusctl": "bin/olympusctl.mjs"
   },
   "scripts": {
     "test": "node --test",

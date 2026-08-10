@@ -87,6 +87,39 @@ export function listShips(paths) {
   return ships.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
 }
 
+/**
+ * Story-lane run history per story key, live and archived. The frontier
+ * classifies cards from this: `shipped` counts runs closed shipped, `spent`
+ * counts runs closed failed or killed, `open` counts the rest. A run whose
+ * key never landed (no `storyKey` payload, no freeze) matches no card.
+ * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ * @returns {Map<string, {open: number, shipped: number, spent: number, runIds: string[]}>}
+ */
+export function storyRunsByKey(paths) {
+  const map = new Map();
+  for (const { dir, archived } of [
+    { dir: paths.runs, archived: false },
+    { dir: paths.archivedRuns, archived: true },
+  ]) {
+    for (const runId of runDirs(dir)) {
+      const path = archived ? archivedRunLedgerPath(paths, runId) : runLedgerPath(paths, runId);
+      const events = readEvents(path);
+      const launch = events.find((e) => e.event === 'run-launched');
+      if (!launch || launch.lane !== 'story') continue;
+      const key = launch.storyKey ?? events.find((e) => e.event === 'freeze')?.storyKey ?? null;
+      if (!key) continue;
+      const entry = map.get(key) ?? { open: 0, shipped: 0, spent: 0, runIds: [] };
+      const closed = events.find((e) => e.event === 'run-closed');
+      if (!closed) entry.open++;
+      else if (closed.state === 'shipped') entry.shipped++;
+      else entry.spent++;
+      entry.runIds.push(runId);
+      map.set(key, entry);
+    }
+  }
+  return map;
+}
+
 function runDirs(dir) {
   let entries;
   try {

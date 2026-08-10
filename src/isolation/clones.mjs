@@ -45,6 +45,16 @@ export async function branchSha(dir, branch) {
 }
 
 /**
+ * Lists the entry names of one tree (non-recursive) at a branch head in the
+ * bare clone. Subdirectories appear as bare names; the frontier reads only
+ * the `.md` files at the top level, so an archive subdirectory stays out.
+ */
+export async function listTreeFiles(dir, branch, path) {
+  const out = await git(['ls-tree', '--name-only', `${branch}:${path}`], { cwd: dir });
+  return out.split('\n').filter((name) => name.length > 0);
+}
+
+/**
  * Reads one file from a branch head in the bare clone. Returns the file text
  * and its git blob id — the blob id names the exact config a run launched
  * with.

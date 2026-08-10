@@ -21,6 +21,9 @@ export function defaultProjectConfig() {
     lanes: {},
     // compose template for the per-run stack; null = the project has no stack
     stack: null,
+    // story graph: where the intent cards live and how phases gate the
+    // launchable frontier; null = no auto-launch, manual launches only
+    graph: null,
     // tripwire registry; the watcher milestone owns the metric semantics
     tripwires: [],
   };
@@ -45,6 +48,7 @@ export function validateProjectConfig(config) {
   validateStringList(config.conventions, 'conventions', err);
   validateLanes(config.lanes, config.commands, err);
   validateStack(config.stack, err);
+  validateGraph(config.graph, err);
   validateTripwires(config.tripwires, err);
   if (isPlainObject(config.lanes) && isPlainObject(config.lanes.story)) {
     if (!Array.isArray(config.repo?.testPaths) || config.repo.testPaths.length === 0) {
@@ -167,6 +171,46 @@ function validateStack(stack, err) {
   }
 }
 
+// The story graph section: intent-card location and phase gates. The phase
+// gate is an auto-launch rule, never an edge — a later phase enters the
+// launchable frontier only after its named card ships.
+function validateGraph(graph, err) {
+  if (graph === undefined || graph === null) return;
+  if (!isPlainObject(graph)) {
+    err('graph', 'must be an object');
+    return;
+  }
+  if (typeof graph.cardsDir !== 'string' || graph.cardsDir.length === 0) {
+    err('graph.cardsDir', 'required string');
+  } else if (/^([a-zA-Z]:)?[\\/]/.test(graph.cardsDir)) {
+    err('graph.cardsDir', 'must be a path relative to the repo root');
+  }
+  if (graph.phases === undefined) return;
+  if (!Array.isArray(graph.phases) || graph.phases.length === 0) {
+    err('graph.phases', 'must be a non-empty array of phases');
+    return;
+  }
+  const seen = new Set();
+  graph.phases.forEach((phase, i) => {
+    if (!isPlainObject(phase)) {
+      err(`graph.phases[${i}]`, 'must be an object');
+      return;
+    }
+    if (typeof phase.name !== 'string' || phase.name.length === 0) {
+      err(`graph.phases[${i}].name`, 'required string');
+    } else if (seen.has(phase.name)) {
+      err(`graph.phases[${i}].name`, `duplicate phase name: ${phase.name}`);
+    } else {
+      seen.add(phase.name);
+    }
+    if (i === 0) {
+      if (phase.after !== undefined) err('graph.phases[0].after', 'the first phase takes no gate');
+    } else if (typeof phase.after !== 'string' || phase.after.length === 0) {
+      err(`graph.phases[${i}].after`, 'a later phase must name the card that opens it');
+    }
+  });
+}
+
 function validateTripwires(tripwires, err) {
   if (tripwires === undefined) return;
   if (!Array.isArray(tripwires)) {
@@ -207,6 +251,7 @@ export function withProjectDefaults(config) {
     repo: { ...base.repo, ...config.repo },
     gates: { ...base.gates, ...config.gates },
     stack: config.stack ?? null,
+    graph: config.graph ? { phases: [{ name: 'launch' }], ...config.graph } : null,
   };
 }
 

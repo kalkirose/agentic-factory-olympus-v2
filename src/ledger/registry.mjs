@@ -72,9 +72,11 @@ export const INSTANCE_EVENTS = new Set([
   'tripwire-breach',
   'eval-review',
   // Instance-scoped escalations: a park that waits on the human but belongs
-  // to no open run (card-invalidated from the ship-time sweep). The queue
-  // milestone owns the answer path; runs park through the engine directive.
+  // to no open run (card-invalidated from the ship-time sweep). The paired
+  // `answer` clears the park and unblocks the card; runs park and answer
+  // through the engine.
   'park',
+  'answer',
   ...SEAT_EVENTS,
   'resolved',
 ]);

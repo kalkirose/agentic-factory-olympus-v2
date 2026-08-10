@@ -3,3 +3,5 @@ node_modules/
 .tmp/
 # local daemon homes used in manual testing
 .daemon-home*/
+# per-machine Claude Code settings; the skill files are versioned
+.claude/settings.local.json

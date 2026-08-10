@@ -22,6 +22,30 @@ export class RunIsolation {
     this.paths = paths;
     this.composeCommand = composeCommand ?? (() => ['docker', 'compose']);
     this.composeRunner = composeRunner;
+    this.cloneLocks = new Map();
+  }
+
+  /**
+   * Serializes work on a project's bare clone. Provision, release, and the
+   * frontier's graph read all go through here: concurrent git commands on
+   * one repository collide on its internal locks (config.lock, worktree
+   * admin files) and fail spuriously, most visibly on Windows.
+   * @param {string} project
+   * @param {() => Promise<T>} fn
+   * @returns {Promise<T>}
+   * @template T
+   */
+  async withClone(project, fn) {
+    const prev = this.cloneLocks.get(project) ?? Promise.resolve();
+    let release;
+    const gate = new Promise((resolve) => (release = resolve));
+    this.cloneLocks.set(project, prev.then(() => gate));
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
   }
 
   /**
@@ -31,15 +55,30 @@ export class RunIsolation {
    *   defaultBranch: string, configPath: string}} opts
    */
   async provision({ runId, project, repoUrl, defaultBranch, configPath }) {
-    const clone = await ensureBareClone(this.paths, project, repoUrl, defaultBranch);
-    await fetchClone(clone);
-    const source = `${project} ${defaultBranch}:${configPath}`;
-    const { blob, text } = await readBlobFromBranch(clone, defaultBranch, configPath);
-    const projectConfig = parseProjectConfig(text, source);
-    const baseSha = await branchSha(clone, defaultBranch);
-    const { path: worktree, branch } = await addRunWorktree(clone, this.paths, runId, defaultBranch);
+    const { clone, blob, projectConfig, baseSha, worktree, branch } = await this.withClone(
+      project,
+      async () => {
+        const dir = await ensureBareClone(this.paths, project, repoUrl, defaultBranch);
+        await fetchClone(dir);
+        const source = `${project} ${defaultBranch}:${configPath}`;
+        const { blob, text } = await readBlobFromBranch(dir, defaultBranch, configPath);
+        const config = parseProjectConfig(text, source);
+        const sha = await branchSha(dir, defaultBranch);
+        const added = await addRunWorktree(dir, this.paths, runId, defaultBranch);
+        return {
+          clone: dir,
+          blob,
+          projectConfig: config,
+          baseSha: sha,
+          worktree: added.path,
+          branch: added.branch,
+        };
+      },
+    );
     let stack = null;
     if (projectConfig.stack) {
+      // The stack rises outside the clone lock — a slow compose up must not
+      // block another run's teardown.
       try {
         const name = await stackUp({
           runId,
@@ -51,7 +90,9 @@ export class RunIsolation {
         });
         stack = { name, composeFile: projectConfig.stack.composeFile };
       } catch (error) {
-        await removeRunWorktrees(clone, this.paths, runId).catch(() => {});
+        await this.withClone(project, () =>
+          removeRunWorktrees(clone, this.paths, runId),
+        ).catch(() => {});
         throw error;
       }
     }
@@ -84,7 +125,9 @@ export class RunIsolation {
     }
     if (owner && existsSync(cloneDir(this.paths, owner))) {
       try {
-        await removeRunWorktrees(cloneDir(this.paths, owner), this.paths, runId);
+        await this.withClone(owner, () =>
+          removeRunWorktrees(cloneDir(this.paths, owner), this.paths, runId),
+        );
       } catch (error) {
         errors.push(`worktree: ${error.message}`);
       }
@@ -150,8 +193,11 @@ export class RunIsolation {
     }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
+      const project = entry.name.replace(/\.git$/, '');
       try {
-        await git(['worktree', 'prune'], { cwd: join(this.paths.clones, entry.name) });
+        await this.withClone(project, () =>
+          git(['worktree', 'prune'], { cwd: join(this.paths.clones, entry.name) }),
+        );
       } catch (error) {
         errors.push(`prune ${entry.name}: ${error.message}`);
       }

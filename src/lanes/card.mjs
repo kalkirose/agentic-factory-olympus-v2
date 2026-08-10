@@ -1,7 +1,8 @@
 // Intent-card parsing. A card is the roadmap artifact for one story: YAML
-// frontmatter (key, title, blocked-by) plus markdown sections. The harness
-// reads only what readiness needs — the key, the edges, and the open
-// decisions. Everything else is seat-facing prose.
+// frontmatter (key, title, blocked-by, phase) plus markdown sections. The
+// harness reads only what readiness and the frontier need — the key, the
+// edges, the phase, and the open decisions. Everything else is seat-facing
+// prose.
 
 /**
  * Parses an intent card. Returns `{card, errors}`; a non-empty errors list
@@ -18,6 +19,8 @@ export function parseIntentCard(text) {
     key,
     title: fields.title ?? null,
     blockedBy: parseList(fields['blocked-by']),
+    // Phase membership for the launch gate; absent = the first phase.
+    phase: fields.phase ?? null,
     openDecisions: sectionItems(body, /open decisions/i),
   };
   return { card, errors };

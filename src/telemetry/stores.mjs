@@ -94,6 +94,25 @@ export function openRunStore(paths, runId) {
 }
 
 /**
+ * Resolves a loud item in a run ledger the engine no longer holds open —
+ * live path first, then the archive. The caller routes open runs through
+ * the engine; two writers on one live ledger would collide on seq.
+ * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ * @param {{actor: string, resolves: number, [k: string]: unknown}} fields
+ */
+export function resolveClosedRun(paths, runId, fields) {
+  const live = runLedgerPath(paths, runId);
+  const path = existsSync(live) ? live : archivedRunLedgerPath(paths, runId);
+  if (!existsSync(path)) throw new Error(`no ledger for run ${runId}`);
+  const store = new TelemetryStore(paths, `run:${runId}`, path, RUN_EVENTS);
+  try {
+    return store.resolve(fields);
+  } finally {
+    store.close();
+  }
+}
+
+/**
  * Moves a closed run's directory — ledger and artifacts together — to the
  * archive. Refuses an open run and an already-archived run id. Close the
  * run's store first; an open file handle blocks the move on Windows.

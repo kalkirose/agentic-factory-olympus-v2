@@ -140,7 +140,7 @@ the verdict record carries the full spectrum + confirmed findings only.
 Done when: a fixture PR ships green hands-off; a forced red-merge and a
 competing merge both produce the specified stamps and routes.
 
-## M9 — Frontier, escalation queue, console — open
+## M9 — Frontier, escalation queue, console — done
 
 - Graph frontier from the project repo's intent cards: edges, roadmap order,
   phase gate.
@@ -300,3 +300,27 @@ never carries a project's specifics.
   git self-lease; loop pushes carry an explicit observed-head lease).
   ADR-0008 records the shapes. 166 tests green. Next: M9 (frontier,
   escalation queue, console).
+- 2026-08-10 — M9 done: frontier, escalation queue, console. Project config
+  gains a `graph` section (cardsDir + ordered phases; a later phase names
+  the card whose ship opens it); cards gain a `phase` field. Frontier under
+  `src/frontier/`: roadmap order derived per sweep (topological,
+  unlock-count tiebreak — hubs early, phase index first, key last), card
+  states shipped/open/spent/parked/blocked/gated/launchable/defect; spent
+  (failed/killed) never auto-relaunches. Auto-launch: per-project arming
+  state machine (disarmed at birth, `arming-changed` on transitions,
+  ledger-replayed), event-keyed sweeps serialized per project (start, arm,
+  close, park via new engine `onParked` hook, config change, console
+  commands), `factory-starvation` loud open-once with daemon-side
+  resolution — only the last queued sweep judges, so mid-chain seams stamp
+  no false episode. New clone lock (`RunIsolation.withClone`) serializes
+  provision, release, and graph reads on a project's bare clone — the
+  launcher made teardown-vs-provision git races routine. Escalation queue
+  reader joins open queued items with full records (FIFO + roadmap
+  tiebreak); `answer` joins `INSTANCE_EVENTS` — instance parks answer by
+  seq, unblocking the card; `resolve` command routes to open runs (liveness
+  recovery re-enters the stage), closed-run ledgers, or the instance
+  ledger. Console: `olympusctl` (status loud-first, queue, frontier
+  no-fetch, answer, arm, pause, launch, kill, resolve) plus the
+  `olympus-console` skill; control writes shared via `control.mjs`.
+  ADR-0009 records the shapes. 184 tests green. Next: M10 (tripwire
+  watcher).

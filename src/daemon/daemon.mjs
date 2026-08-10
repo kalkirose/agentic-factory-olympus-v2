@@ -3,12 +3,15 @@
 // and the run engine that owns every open run.
 import { watch, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { openInstanceStore } from '../telemetry/stores.mjs';
+import { openInstanceStore, resolveClosedRun } from '../telemetry/stores.mjs';
 import { loadInstanceConfig, INSTANCE_CONFIG_FILE } from '../config/instance.mjs';
 import { RunEngine } from '../engine/engine.mjs';
 import { ModelSemaphores } from '../seats/semaphore.mjs';
 import { RunIsolation } from '../isolation/isolation.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
+import { ensureBareClone, readBlobFromBranch } from '../isolation/clones.mjs';
+import { parseIntentCard } from '../lanes/card.mjs';
+import { FrontierLauncher } from '../frontier/autolaunch.mjs';
 import { scaffoldHome, homePaths, runLedgerPath } from './home.mjs';
 import { acquireLock } from './lock.mjs';
 
@@ -36,6 +39,7 @@ export class Daemon {
     this.engine = null;
     this.semaphores = null;
     this.isolation = null;
+    this.frontier = null;
     this.pendingTeardowns = new Set();
     this.launchCounter = 0;
     this.watchers = [];
@@ -46,16 +50,52 @@ export class Daemon {
     this.registerCommand('stop', async (command) => {
       await this.stop({ trigger: 'control', actor: command.actor });
     });
+    // An answer targets a run park (runId) or an instance park (seq).
     this.registerCommand('answer', async (command) => {
-      this.engine.answer({
-        runId: command.runId,
-        actor: command.actor,
-        answer: command.answer,
-        option: command.option,
-      });
+      if (command.runId !== undefined) {
+        this.engine.answer({
+          runId: command.runId,
+          actor: command.actor,
+          answer: command.answer,
+          option: command.option,
+        });
+      } else {
+        this.answerInstancePark(command);
+      }
+      this.frontier.queueSweepAll();
     });
     this.registerCommand('kill', async (command) => {
       this.engine.killRun(command.runId, { actor: command.actor });
+    });
+    this.registerCommand('arm', async (command) => {
+      this.frontier.setArmed(command.project, true, command.actor);
+    });
+    this.registerCommand('pause', async (command) => {
+      this.frontier.setArmed(command.project, false, command.actor);
+    });
+    this.registerCommand('launch', async (command) => {
+      await this.launchCommand(command);
+      this.frontier.queueSweepAll();
+    });
+    // A resolve targets a loud item: an open run (through the engine, with
+    // liveness recovery), a closed run's ledger, or the instance ledger.
+    this.registerCommand('resolve', async (command) => {
+      const { actor, runId, seq, note } = command;
+      if (!Number.isInteger(seq)) throw new Error('resolve requires an integer seq');
+      if (runId !== undefined) {
+        if (this.engine.runs.has(runId)) {
+          this.engine.resolve({ runId, actor, resolves: seq, note });
+        } else {
+          resolveClosedRun(this.paths, runId, {
+            actor,
+            resolves: seq,
+            ...(note !== undefined && { note }),
+          });
+        }
+      } else {
+        this.ledger.resolve({ actor, resolves: seq, ...(note !== undefined && { note }) });
+      }
+      this.frontier.queueSweepAll();
     });
   }
 
@@ -78,13 +118,19 @@ export class Daemon {
       this.engine = new RunEngine(this.paths, {
         instanceStore: this.ledger,
         getSlotCap: (project) => this.config.projects[project]?.slotCap,
-        onClosed: (info) => this.scheduleWorkspaceRelease(info),
+        onClosed: (info) => {
+          this.scheduleWorkspaceRelease(info);
+          this.frontier.queueSweep(info.project);
+        },
+        onParked: (info) => this.frontier.queueSweep(info.project),
         semaphores: this.semaphores,
         seatDefaults: () => ({ claudeCommand: this.config.claudeCommand }),
       });
       for (const [name, lane] of Object.entries(this.lanes)) {
         this.engine.registerLane(name, lane);
       }
+      this.frontier = new FrontierLauncher(this);
+      this.frontier.replayArming();
       const runsResumed = this.engine.resumeOpenRuns();
       this.ledger.append('daemon-started', {
         actor: ACTOR,
@@ -97,6 +143,7 @@ export class Daemon {
       this.watchControl();
       if (this.handleSignals) this.installSignalHandlers();
       this.running = true;
+      this.frontier.queueSweepAll();
       return { runsResumed };
     } catch (error) {
       if (this.engine) {
@@ -153,6 +200,72 @@ export class Daemon {
       throw error;
     }
     return { runId, worktree: ws.worktree, baseSha: ws.baseSha, projectConfig: ws.projectConfig };
+  }
+
+  /**
+   * A console launch: `{project, lane?, card?}`. A story launch reads the
+   * card from the clone for its key, so the frontier's run history matches;
+   * an unreadable card launches anyway — readiness fails it with evidence.
+   */
+  async launchCommand({ actor, project, lane = 'story', card }) {
+    if (typeof actor !== 'string' || actor.length === 0) throw new Error('launch requires an actor');
+    const payload = {};
+    if (card !== undefined) {
+      payload.card = card;
+      const entry = this.config.projects[project];
+      if (entry && lane === 'story') {
+        try {
+          payload.storyKey = await this.isolation.withClone(project, async () => {
+            const dir = await ensureBareClone(
+              this.paths,
+              project,
+              entry.repoUrl,
+              entry.defaultBranch,
+            );
+            const { text } = await readBlobFromBranch(dir, entry.defaultBranch, card);
+            return parseIntentCard(text).card.key ?? undefined;
+          });
+          if (payload.storyKey === undefined) delete payload.storyKey;
+        } catch {
+          delete payload.storyKey;
+          // no key: the run still launches; it just matches no card history
+        }
+      }
+    }
+    return this.launchRun({ project, lane, ...payload });
+  }
+
+  /**
+   * Validates and stamps a human answer to an instance-ledger park (a
+   * card-invalidated card from a ship-time sweep). Mirrors the engine's
+   * run-park validation; the paired `answer` unblocks the card.
+   * @param {{actor: string, seq: number, option?: string, answer?: string}} cmd
+   */
+  answerInstancePark({ actor, seq, option, answer }) {
+    if (typeof actor !== 'string' || actor.length === 0) throw new Error('answer requires an actor');
+    if (!Number.isInteger(seq)) throw new Error('an instance answer requires the park seq');
+    const events = readEvents(this.paths.instanceLedger);
+    const target = events.find((e) => e.seq === seq);
+    if (!target || target.event !== 'park') {
+      throw new Error(`no park at seq ${seq} in the instance ledger`);
+    }
+    if (events.some((e) => e.event === 'answer' && e.parkSeq === seq)) {
+      throw new Error(`park at seq ${seq} is already answered`);
+    }
+    if (option !== undefined) {
+      if (!Array.isArray(target.options) || !target.options.includes(option)) {
+        throw new Error(`option not offered by the escalation record: ${option}`);
+      }
+    } else if (typeof answer !== 'string' || answer.length === 0) {
+      throw new Error('answer requires an option or answer text');
+    }
+    this.ledger.append('answer', {
+      actor,
+      parkSeq: seq,
+      ...(option !== undefined && { option }),
+      ...(answer !== undefined && { answer }),
+      ...(target.card !== undefined && { card: target.card }),
+    });
   }
 
   /** Tears a closed run's workspace down and stamps the outcome. Async. */
@@ -222,6 +335,8 @@ export class Daemon {
     this.config = next;
     this.semaphores.setLimits(this.config.semaphores);
     this.ledger.append('config-changed', { actor: ACTOR, accepted: true, changedKeys });
+    // A raised slot cap or a new project may free launchable work.
+    this.frontier.queueSweepAll();
   }
 
   // -- control channel ------------------------------------------------------
@@ -313,9 +428,10 @@ export class Daemon {
         await this.engine.stop();
         this.engine = null;
       }
-      // In-flight workspace teardowns stamp to the instance ledger; let them
-      // land before the ledger closes.
+      // In-flight workspace teardowns and sweeps stamp to the instance
+      // ledger; let them land before the ledger closes.
       await Promise.allSettled([...this.pendingTeardowns]);
+      if (this.frontier) await this.frontier.drain();
       this.ledger.append('daemon-stopped', { actor: actor ?? ACTOR, trigger });
       this.teardown();
       if (this.onStopped) this.onStopped();

@@ -25,16 +25,18 @@ export class RunEngine {
    * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
    * @param {{instanceStore?: object, getSlotCap: (project: string) => number|undefined,
    *   onClosed?: (info: {runId: string, project: string, lane: string, state: string}) => void,
+   *   onParked?: (info: {runId: string, project: string, lane: string, type: string}) => void,
    *   semaphores?: import('../seats/semaphore.mjs').ModelSemaphores,
    *   seatDefaults?: () => object}} opts
    *   seatDefaults supplies machine-scoped runSeat options (claudeCommand)
    *   read fresh per dispatch, so a live config edit applies.
    */
-  constructor(paths, { instanceStore, getSlotCap, onClosed, semaphores, seatDefaults }) {
+  constructor(paths, { instanceStore, getSlotCap, onClosed, onParked, semaphores, seatDefaults }) {
     this.paths = paths;
     this.instanceStore = instanceStore ?? null;
     this.getSlotCap = getSlotCap;
     this.onClosed = onClosed ?? null;
+    this.onParked = onParked ?? null;
     this.semaphores = semaphores ?? null;
     this.seatDefaults = seatDefaults ?? (() => ({}));
     this.lanes = new Map();
@@ -229,6 +231,12 @@ export class RunEngine {
       gist: gist(`${type}: ${question}`),
     });
     run.parkSeq = line.seq;
+    try {
+      // A park frees its slot; the hook lets the frontier fill it.
+      this.onParked?.({ runId: run.runId, project: run.project, lane: run.lane, type });
+    } catch {
+      // The hook owns its errors; a park never fails on it.
+    }
   }
 
   /**
@@ -260,6 +268,34 @@ export class RunEngine {
     run.parkRecord = null;
     run.store.append('resume', { actor: ACTOR, stage: run.stage });
     this.executeStage(run);
+  }
+
+  /**
+   * Appends the paired `resolved` stamp for a loud item in an open run, from
+   * a console command. When the resolution clears the run's last open
+   * liveness violation, the engine re-enters the recorded stage — the same
+   * recovery a daemon restart would perform after replay.
+   * @param {{runId: string, actor: string, resolves: number, note?: string}} cmd
+   */
+  resolve({ runId, actor, resolves, note }) {
+    const run = this.runs.get(runId);
+    if (!run || run.closed) throw new Error(`no open run: ${runId}`);
+    if (typeof actor !== 'string' || actor.length === 0) throw new Error('resolve requires an actor');
+    const line = run.store.resolve({ actor, resolves, ...(note !== undefined && { note }) });
+    if (line.resolvedEvent === 'liveness-violation' && run.violated) {
+      const events = readEvents(runLedgerPath(this.paths, run.runId));
+      const cleared = new Set(
+        events.filter((e) => e.event === 'resolved').map((e) => e.resolves),
+      );
+      const open = events.filter(
+        (e) => e.event === 'liveness-violation' && !cleared.has(e.seq),
+      );
+      if (open.length === 0) {
+        run.violated = false;
+        if (!run.parked && !run.executing && run.seats.size === 0) this.executeStage(run);
+      }
+    }
+    return line;
   }
 
   // -- close ----------------------------------------------------------------
