@@ -1,6 +1,7 @@
 // Working-tree operations the lanes use: change detection, commits,
 // restore-from-sha, evidence diffs. Commits carry a fixed daemon identity so
 // a run never depends on machine-level git config.
+import { isGlobEntry, underEntry } from '../config/project.mjs';
 import { git } from './git.mjs';
 
 const IDENTITY = [
@@ -44,18 +45,20 @@ export async function headSha(tree) {
 }
 
 /**
- * Restores the given path prefixes to their state at `sha`: tracked files
- * checked out, untracked files under the prefixes removed. A prefix with no
- * entries at the sha is tolerated.
+ * Restores the given path entries to their state at `sha`: tracked files
+ * checked out, untracked files under the entries removed. A glob entry
+ * rides git's `:(glob)` pathspec magic; a plain prefix stays a bare
+ * pathspec. An entry with nothing at the sha is tolerated.
  */
-export async function restorePaths(tree, sha, prefixes) {
-  for (const prefix of prefixes) {
+export async function restorePaths(tree, sha, entries) {
+  for (const entry of entries) {
+    const pathspec = isGlobEntry(entry) ? `:(glob)${entry}` : entry;
     try {
-      await git(['checkout', sha, '--', prefix], { cwd: tree });
+      await git(['checkout', sha, '--', pathspec], { cwd: tree });
     } catch {
-      // The sha holds nothing under this prefix; clean still applies.
+      // The sha holds nothing under this entry; clean still applies.
     }
-    await git(['clean', '-fd', '--', prefix], { cwd: tree });
+    await git(['clean', '-fd', '--', pathspec], { cwd: tree });
   }
 }
 
@@ -143,13 +146,18 @@ export async function resetHard(tree, sha) {
   await git(['clean', '-fd'], { cwd: tree });
 }
 
-/** Files under the given prefixes at a sha. */
-export async function filesAt(tree, sha, prefixes) {
-  const out = await git(['ls-tree', '-r', '--name-only', sha, '--', ...prefixes], { cwd: tree });
-  return out
+/** Files under the given path entries at a sha. */
+export async function filesAt(tree, sha, entries) {
+  // `ls-tree` takes no glob pathspec magic: with a glob entry present, list
+  // the whole tree and filter.
+  const paths = entries.some((e) => isGlobEntry(e)) ? [] : entries;
+  const out = await git(['ls-tree', '-r', '--name-only', sha, '--', ...paths], { cwd: tree });
+  const files = out
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
+  if (paths === entries) return files;
+  return files.filter((file) => entries.some((entry) => underEntry(file, entry)));
 }
 
 function unquote(path) {

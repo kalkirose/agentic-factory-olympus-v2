@@ -20,6 +20,21 @@ test('deny rules cover every edit tool per test path', () => {
   assert.deepEqual(testEditDenyRules(undefined), []);
 });
 
+test('a glob entry passes through unsuffixed; a prefix keeps its suffix', () => {
+  const rules = testEditDenyRules(['tests/', 'src/**/*.test.ts', '**/*.spec.ts']);
+  assert.deepEqual(rules, [
+    'Edit(tests/**)',
+    'Write(tests/**)',
+    'NotebookEdit(tests/**)',
+    'Edit(src/**/*.test.ts)',
+    'Write(src/**/*.test.ts)',
+    'NotebookEdit(src/**/*.test.ts)',
+    'Edit(**/*.spec.ts)',
+    'Write(**/*.spec.ts)',
+    'NotebookEdit(**/*.spec.ts)',
+  ]);
+});
+
 test('denyTools ride the claude argv as disallowed tools', () => {
   const def = seatDef('adversary');
   const { args } = claudeSeatCommand({

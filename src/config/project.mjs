@@ -13,7 +13,8 @@ export const DEFAULT_PROJECT_CONFIG_PATH = '.olympus/project.json';
 export function defaultProjectConfig() {
   return {
     version: 1,
-    // repo facts the harness enforces: path prefixes, relative to the repo root
+    // repo facts the harness enforces: path entries relative to the repo
+    // root — plain prefixes, or glob patterns (see isGlobEntry)
     repo: { testPaths: [], uiPaths: [] },
     // command name → argv; the single home for every runnable command
     commands: {},
@@ -317,6 +318,78 @@ export function parseProjectConfig(text, source) {
     throw new Error(`project config invalid (${source}): ${detail}`);
   }
   return withProjectDefaults(parsed);
+}
+
+// -- repo path entries -------------------------------------------------------
+//
+// A `repo` path entry (`testPaths`, `uiPaths`) is a plain path prefix, or a
+// glob pattern when it carries a metacharacter. Glob semantics follow git's
+// `:(glob)` pathspec magic: `*` and `?` never match `/`; `**/` at a segment
+// boundary matches zero or more directories; a trailing `/**` matches
+// everything inside; `[...]` is a character class (`[!...]` negates).
+
+const GLOB_CHARS = /[*?[\]]/;
+const REGEXP_SPECIALS = '.^$+(){}|\\';
+const globCache = new Map();
+
+/** True when a path entry is a glob pattern rather than a plain prefix. */
+export function isGlobEntry(entry) {
+  return GLOB_CHARS.test(entry);
+}
+
+/** Compiles a glob entry to an anchored RegExp (semantics above). Cached. */
+export function globRegExp(pattern) {
+  const cached = globCache.get(pattern);
+  if (cached) return cached;
+  let re = '^';
+  let i = 0;
+  while (i < pattern.length) {
+    const ch = pattern[i];
+    if (ch === '*') {
+      let j = i;
+      while (pattern[j] === '*') j++;
+      const atBoundary = i === 0 || pattern[i - 1] === '/';
+      if (j - i >= 2 && atBoundary && pattern[j] === '/') {
+        re += '(?:[^/]+/)*';
+        i = j + 1;
+      } else if (j - i >= 2 && atBoundary && j === pattern.length) {
+        re += '.+';
+        i = j;
+      } else {
+        // Asterisks not slash-bounded act as regular asterisks.
+        re += '[^/]*';
+        i = j;
+      }
+    } else if (ch === '?') {
+      re += '[^/]';
+      i++;
+    } else if (ch === '[') {
+      const close = pattern.indexOf(']', i + 2);
+      if (close === -1) {
+        re += '\\[';
+        i++;
+      } else {
+        const body = pattern.slice(i + 1, close);
+        re += '[' + (body[0] === '!' ? '^' + body.slice(1) : body).replaceAll('\\', '\\\\') + ']';
+        i = close + 1;
+      }
+    } else {
+      re += REGEXP_SPECIALS.includes(ch) ? '\\' + ch : ch;
+      i++;
+    }
+  }
+  const compiled = new RegExp(re + '$');
+  globCache.set(pattern, compiled);
+  return compiled;
+}
+
+/** True when a repo-relative file falls under a path entry. */
+export function underEntry(file, entry) {
+  const norm = file.replaceAll('\\', '/');
+  const e = entry.replaceAll('\\', '/');
+  if (isGlobEntry(e)) return globRegExp(e).test(norm);
+  const prefix = e.replace(/\/+$/, '');
+  return norm === prefix || norm.startsWith(prefix + '/');
 }
 
 function isPlainObject(value) {

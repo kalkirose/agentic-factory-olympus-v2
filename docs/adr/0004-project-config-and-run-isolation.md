@@ -8,7 +8,10 @@ Project config, bare clones, run worktrees, and per-run stacks get these
 concrete shapes:
 
 - **Project config schema (version 1).** One JSON in the project repo with
-  the sections `repo` (path prefixes: `testPaths`, `uiPaths`), `commands`
+  the sections `repo` (path entries: `testPaths`, `uiPaths`; an entry is a
+  plain prefix, or a glob pattern when it carries a metacharacter — git
+  `:(glob)` pathspec semantics, so co-located test files are addressable
+  without fencing whole source directories), `commands`
   (name → argv; the single home for every runnable command), `gates.tier1`
   (ordered layers; each names a key in `commands`; `needs` may name earlier
   layers only), `conventions` (one line each), `lanes` (per-lane settings),

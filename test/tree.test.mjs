@@ -71,3 +71,50 @@ test('filesAt lists the files under the prefixes at a sha', async (t) => {
   const sha = await headSha(repo);
   assert.deepEqual(await filesAt(repo, sha, ['tests']), ['tests/a.test.mjs']);
 });
+
+function globRepoFixture(t) {
+  const root = tempDir();
+  const repo = initOriginRepo(join(root, 'repo'), {
+    'src/a.test.mjs': 'base a\n',
+    'src/deep/b.test.mjs': 'base b\n',
+    'src/code.mjs': 'base code\n',
+    'tests/c.test.mjs': 'base c\n',
+  });
+  t.after(() => removeDir(root));
+  return repo;
+}
+
+test('restorePaths takes glob entries: matching files revert, the rest stays', async (t) => {
+  const repo = globRepoFixture(t);
+  const sha = await headSha(repo);
+  writeTree(repo, {
+    'src/a.test.mjs': 'tampered\n',
+    'src/deep/b.test.mjs': 'tampered\n',
+    'src/code.mjs': 'impl change\n',
+    'src/junk.test.mjs': 'junk\n',
+    'src/junk.mjs': 'junk\n',
+  });
+  await restorePaths(repo, sha, ['src/**/*.test.mjs']);
+  const { readFileSync } = await import('node:fs');
+  const content = (file) => readFileSync(join(repo, file), 'utf8').replace(/\r\n/g, '\n');
+  assert.equal(content('src/a.test.mjs'), 'base a\n');
+  assert.equal(content('src/deep/b.test.mjs'), 'base b\n');
+  assert.ok(!existsSync(join(repo, 'src', 'junk.test.mjs')));
+  // Files outside the glob keep their changes.
+  assert.equal(content('src/code.mjs'), 'impl change\n');
+  assert.equal(content('src/junk.mjs'), 'junk\n');
+});
+
+test('filesAt takes glob entries and mixed entry sets', async (t) => {
+  const repo = globRepoFixture(t);
+  const sha = await headSha(repo);
+  assert.deepEqual(await filesAt(repo, sha, ['src/**/*.test.mjs']), [
+    'src/a.test.mjs',
+    'src/deep/b.test.mjs',
+  ]);
+  assert.deepEqual(await filesAt(repo, sha, ['tests', 'src/**/*.test.mjs']), [
+    'src/a.test.mjs',
+    'src/deep/b.test.mjs',
+    'tests/c.test.mjs',
+  ]);
+});

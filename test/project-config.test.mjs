@@ -4,6 +4,8 @@ import {
   validateProjectConfig,
   withProjectDefaults,
   parseProjectConfig,
+  isGlobEntry,
+  underEntry,
 } from '../src/config/project.mjs';
 
 function valid() {
@@ -135,4 +137,55 @@ test('the story lane names its commands and requires test paths', () => {
   const okLint = valid();
   okLint.lanes.story.lintCommand = 'lint';
   assert.deepEqual(validateProjectConfig(okLint), []);
+});
+
+test('glob test paths validate clean', () => {
+  const config = valid();
+  config.repo.testPaths = ['test/', 'src/**/*.test.ts', '**/*.spec.ts'];
+  assert.deepEqual(validateProjectConfig(config), []);
+});
+
+test('isGlobEntry: metacharacters make a glob; plain prefixes stay prefixes', () => {
+  assert.equal(isGlobEntry('tests'), false);
+  assert.equal(isGlobEntry('e2e/'), false);
+  assert.equal(isGlobEntry('src/**/*.test.ts'), true);
+  assert.equal(isGlobEntry('**/*.spec.ts'), true);
+  assert.equal(isGlobEntry('a/b?.mjs'), true);
+  assert.equal(isGlobEntry('a/[ab].mjs'), true);
+});
+
+test('underEntry: a prefix contains its subtree and itself only', () => {
+  assert.ok(underEntry('tests/a.test.mjs', 'tests'));
+  assert.ok(underEntry('tests/deep/a.test.mjs', 'tests/'));
+  assert.ok(underEntry('tests', 'tests'));
+  assert.ok(!underEntry('tests2/a.test.mjs', 'tests'));
+  assert.ok(underEntry('tests\\deep\\a.test.mjs', 'tests'));
+});
+
+test('underEntry: glob semantics match git :(glob) pathspec magic', () => {
+  // `*` never crosses a slash.
+  assert.ok(underEntry('src/a.test.ts', 'src/*.test.ts'));
+  assert.ok(!underEntry('src/deep/a.test.ts', 'src/*.test.ts'));
+  // `/**/` matches zero or more directories.
+  assert.ok(underEntry('src/a.test.ts', 'src/**/*.test.ts'));
+  assert.ok(underEntry('src/deep/nest/a.test.ts', 'src/**/*.test.ts'));
+  assert.ok(!underEntry('src/deep/a.ts', 'src/**/*.test.ts'));
+  assert.ok(!underEntry('other/a.test.ts', 'src/**/*.test.ts'));
+  // A leading `**/` matches at the root too.
+  assert.ok(underEntry('a.spec.ts', '**/*.spec.ts'));
+  assert.ok(underEntry('deep/nest/a.spec.ts', '**/*.spec.ts'));
+  assert.ok(!underEntry('deep/a.spec.ts.bak', '**/*.spec.ts'));
+  // A trailing `/**` matches everything inside, not the directory itself.
+  assert.ok(underEntry('e2e/deep/a.mjs', 'e2e/**'));
+  assert.ok(!underEntry('e2e', 'e2e/**'));
+  // `?` matches one character inside a segment; `[...]` is a class.
+  assert.ok(underEntry('src/a1.mjs', 'src/a?.mjs'));
+  assert.ok(!underEntry('src/a/b.mjs', 'src/a?.mjs'));
+  assert.ok(underEntry('src/ab.mjs', 'src/a[bc].mjs'));
+  assert.ok(!underEntry('src/ad.mjs', 'src/a[bc].mjs'));
+  // Asterisks not slash-bounded act as regular asterisks.
+  assert.ok(underEntry('src/axxb.mjs', 'src/a**b.mjs'));
+  assert.ok(!underEntry('src/ax/xb.mjs', 'src/a**b.mjs'));
+  // Literal dots never widen the match.
+  assert.ok(!underEntry('src/aXtest.ts', 'src/a.test.ts'));
 });

@@ -77,9 +77,14 @@ adversary, freeze — gets these concrete shapes:
 - **Test-edit boundary.** `testEditDenyRules(testPaths)` produces
   `Edit`/`Write`/`NotebookEdit` deny rules over every test path;
   `runSeat({denyTools})` carries them into the claude argv as disallowed
-  tools. The adversary seat gets them now; the dev seats get the same rules
-  when they land. The restore-before-evaluate step backs the tool-level
-  deny with a structural guarantee on the evaluation path.
+  tools. A plain prefix entry covers its subtree (`prefix/**`); a glob
+  entry is already a complete pattern and passes through unsuffixed. The
+  adversary seat gets them now; the dev seats get the same rules when they
+  land. The restore-before-evaluate step backs the tool-level deny with a
+  structural guarantee on the evaluation path: the restore rides git
+  pathspecs (`:(glob)` magic for glob entries), and every other test-path
+  read (suite checks, conflict-hunk routing, the freeze file set) matches
+  entries with the same semantics.
 - **Command environment.** The lane command runner strips
   `NODE_TEST_CONTEXT` from the child environment: under an inherited test
   context a child `node --test` reports exit 0 for a red suite — a false

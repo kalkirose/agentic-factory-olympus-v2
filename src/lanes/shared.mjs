@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { readEvents } from '../ledger/ledger.mjs';
 import { runLedgerPath } from '../daemon/home.mjs';
-import { parseProjectConfig } from '../config/project.mjs';
+import { parseProjectConfig, underEntry } from '../config/project.mjs';
 import { cloneDir } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 
@@ -102,12 +102,9 @@ export function commandFail(run) {
   return { close: { state: 'failed', reason: 'suite-command-error', error: run.error } };
 }
 
-export function underAny(file, prefixes) {
-  const norm = file.replaceAll('\\', '/');
-  return prefixes.some((p) => {
-    const prefix = p.replaceAll('\\', '/').replace(/\/+$/, '');
-    return norm === prefix || norm.startsWith(prefix + '/');
-  });
+/** True when the file falls under any path entry (prefix or glob). */
+export function underAny(file, entries) {
+  return entries.some((entry) => underEntry(file, entry));
 }
 
 export function briefLines(brief) {
