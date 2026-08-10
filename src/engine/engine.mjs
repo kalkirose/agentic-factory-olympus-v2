@@ -15,6 +15,7 @@ import { runLedgerPath } from '../daemon/home.mjs';
 import { openRunStore, archiveRun } from '../telemetry/stores.mjs';
 import { deriveRunState } from './replay.mjs';
 import { superviseSeat } from './supervise.mjs';
+import { runSeat } from '../seats/runner.mjs';
 
 const ACTOR = 'daemon';
 const GIST_MAX = 120;
@@ -23,13 +24,19 @@ export class RunEngine {
   /**
    * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
    * @param {{instanceStore?: object, getSlotCap: (project: string) => number|undefined,
-   *   onClosed?: (info: {runId: string, project: string, lane: string, state: string}) => void}} opts
+   *   onClosed?: (info: {runId: string, project: string, lane: string, state: string}) => void,
+   *   semaphores?: import('../seats/semaphore.mjs').ModelSemaphores,
+   *   seatDefaults?: () => object}} opts
+   *   seatDefaults supplies machine-scoped runSeat options (claudeCommand)
+   *   read fresh per dispatch, so a live config edit applies.
    */
-  constructor(paths, { instanceStore, getSlotCap, onClosed }) {
+  constructor(paths, { instanceStore, getSlotCap, onClosed, semaphores, seatDefaults }) {
     this.paths = paths;
     this.instanceStore = instanceStore ?? null;
     this.getSlotCap = getSlotCap;
     this.onClosed = onClosed ?? null;
+    this.semaphores = semaphores ?? null;
+    this.seatDefaults = seatDefaults ?? (() => ({}));
     this.lanes = new Map();
     this.runs = new Map();
     this.stopped = false;
@@ -121,6 +128,13 @@ export class RunEngine {
     const lane = this.lanes.get(run.lane);
     const handler = lane.handlers[run.stage];
     run.executing = true;
+    const supervise = (opts) => {
+      const seat = superviseSeat(run.store, opts);
+      run.seat = seat;
+      return seat.done.finally(() => {
+        if (run.seat === seat) run.seat = null;
+      });
+    };
     const ctx = {
       runId: run.runId,
       project: run.project,
@@ -130,13 +144,16 @@ export class RunEngine {
       lastAnswer: run.lastAnswer,
       store: run.store,
       paths: this.paths,
-      supervise: (opts) => {
-        const seat = superviseSeat(run.store, opts);
-        run.seat = seat;
-        return seat.done.finally(() => {
-          if (run.seat === seat) run.seat = null;
-        });
-      },
+      supervise,
+      // Dispatch through the engine's supervise wrapper so the liveness
+      // invariant sees the seat as an in-flight child.
+      runSeat: (opts) =>
+        runSeat(run.store, {
+          ...this.seatDefaults(),
+          semaphores: this.semaphores ?? undefined,
+          ...opts,
+          supervise,
+        }),
     };
     Promise.resolve()
       .then(() => handler(ctx))

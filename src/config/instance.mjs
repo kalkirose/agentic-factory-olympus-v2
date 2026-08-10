@@ -14,6 +14,8 @@ export function defaultInstanceConfig() {
     semaphores: {},
     // argv that runs compose on this machine
     composeCommand: ['docker', 'compose'],
+    // argv that runs the claude CLI on this machine
+    claudeCommand: ['claude'],
     // project name → project entry
     projects: {},
     // notification-stream wiring; consoles read the stream indexes directly
@@ -60,12 +62,13 @@ export function validateInstanceConfig(config) {
   if (config.streams !== undefined && !isPlainObject(config.streams)) {
     err('streams', 'must be an object');
   }
-  if (config.composeCommand !== undefined) {
+  for (const key of ['composeCommand', 'claudeCommand']) {
+    if (config[key] === undefined) continue;
     const ok =
-      Array.isArray(config.composeCommand) &&
-      config.composeCommand.length > 0 &&
-      config.composeCommand.every((v) => typeof v === 'string' && v.length > 0);
-    if (!ok) err('composeCommand', 'must be a non-empty argv array of strings');
+      Array.isArray(config[key]) &&
+      config[key].length > 0 &&
+      config[key].every((v) => typeof v === 'string' && v.length > 0);
+    if (!ok) err(key, 'must be a non-empty argv array of strings');
   }
   return errors;
 }

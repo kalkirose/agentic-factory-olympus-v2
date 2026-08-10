@@ -6,6 +6,7 @@ import { join, basename } from 'node:path';
 import { openInstanceStore } from '../telemetry/stores.mjs';
 import { loadInstanceConfig, INSTANCE_CONFIG_FILE } from '../config/instance.mjs';
 import { RunEngine } from '../engine/engine.mjs';
+import { ModelSemaphores } from '../seats/semaphore.mjs';
 import { RunIsolation } from '../isolation/isolation.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
 import { scaffoldHome, homePaths, runLedgerPath } from './home.mjs';
@@ -33,6 +34,7 @@ export class Daemon {
     this.lock = null;
     this.ledger = null;
     this.engine = null;
+    this.semaphores = null;
     this.isolation = null;
     this.pendingTeardowns = new Set();
     this.launchCounter = 0;
@@ -72,10 +74,13 @@ export class Daemon {
         composeCommand: () => this.config.composeCommand,
         composeRunner: this.composeRunner,
       });
+      this.semaphores = new ModelSemaphores(this.config.semaphores);
       this.engine = new RunEngine(this.paths, {
         instanceStore: this.ledger,
         getSlotCap: (project) => this.config.projects[project]?.slotCap,
         onClosed: (info) => this.scheduleWorkspaceRelease(info),
+        semaphores: this.semaphores,
+        seatDefaults: () => ({ claudeCommand: this.config.claudeCommand }),
       });
       for (const [name, lane] of Object.entries(this.lanes)) {
         this.engine.registerLane(name, lane);
@@ -214,6 +219,7 @@ export class Daemon {
     const changedKeys = diffKeys(this.config, next);
     if (changedKeys.length === 0) return;
     this.config = next;
+    this.semaphores.setLimits(this.config.semaphores);
     this.ledger.append('config-changed', { actor: ACTOR, accepted: true, changedKeys });
   }
 

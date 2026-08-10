@@ -12,15 +12,30 @@ import { spawn } from 'node:child_process';
 
 /**
  * Spawns and supervises one seat child.
+ *
+ * `parseLine` adapts a child's stdout dialect: it maps one line to
+ * `{cost?, note?, meta?}` or null. Only `cost` and `note` stamp the ledger;
+ * `meta` fields accumulate into the resolved result for the caller (actual
+ * model, session id). `spawnFields` adds caller fields (model, effort,
+ * attempt) to the seat-spawned stamp.
  * @param {import('../telemetry/stores.mjs').TelemetryStore} store
  * @param {{seat: string, cmd: string, args?: string[], cwd?: string,
- *   env?: object, costCeiling?: number}} opts
+ *   env?: object, costCeiling?: number, parseLine?: (line: string) => object|null,
+ *   spawnFields?: object}} opts
  * @returns {{done: Promise<object>, terminate: (reason: string) => void}}
  */
-export function superviseSeat(store, { seat, cmd, args = [], cwd, env, costCeiling }) {
+export function superviseSeat(
+  store,
+  { seat, cmd, args = [], cwd, env, costCeiling, parseLine = parseProgress, spawnFields = {} },
+) {
   if (typeof seat !== 'string' || seat.length === 0) throw new Error('supervise requires a seat id');
   if (typeof cmd !== 'string' || cmd.length === 0) throw new Error('supervise requires a cmd');
-  store.append('seat-spawned', { actor: 'daemon', seat, ...(costCeiling != null && { costCeiling }) });
+  store.append('seat-spawned', {
+    ...spawnFields,
+    actor: 'daemon',
+    seat,
+    ...(costCeiling != null && { costCeiling }),
+  });
   const child = spawn(cmd, args, {
     cwd,
     env: env ? { ...process.env, ...env } : process.env,
@@ -30,18 +45,28 @@ export function superviseSeat(store, { seat, cmd, args = [], cwd, env, costCeili
   let buffer = '';
   let terminatedReason = null;
   let ceilingHit = false;
+  const meta = {};
   child.stdout.on('data', (chunk) => {
     buffer += chunk;
     const lines = buffer.split('\n');
     buffer = lines.pop();
     for (const line of lines) {
-      const progress = parseProgress(line);
+      let progress;
+      try {
+        progress = parseLine(line);
+      } catch {
+        continue; // a parser must never take the seat down
+      }
       if (!progress) continue;
-      if (typeof progress.cost === 'number') cost = progress.cost;
+      if (progress.meta) Object.assign(meta, progress.meta);
+      const hasCost = typeof progress.cost === 'number';
+      if (hasCost) cost = progress.cost;
+      const hasNote = typeof progress.note === 'string';
+      if (!hasCost && !hasNote) continue;
       store.append('seat-progress', {
         actor: seat,
         cost,
-        ...(typeof progress.note === 'string' && { note: progress.note }),
+        ...(hasNote && { note: progress.note }),
       });
       if (costCeiling != null && cost > costCeiling && !ceilingHit && !terminatedReason) {
         ceilingHit = true;
@@ -59,7 +84,7 @@ export function superviseSeat(store, { seat, cmd, args = [], cwd, env, costCeili
       settled = true;
       if (terminatedReason) {
         store.append('seat-terminated', { actor: 'daemon', seat, reason: terminatedReason, cost });
-        resolve({ terminated: true, reason: terminatedReason, cost });
+        resolve({ terminated: true, reason: terminatedReason, cost, meta });
       } else if (ceilingHit) {
         store.append('seat-failure', {
           actor: 'daemon',
@@ -68,19 +93,19 @@ export function superviseSeat(store, { seat, cmd, args = [], cwd, env, costCeili
           cost,
           costCeiling,
         });
-        resolve({ failed: true, reason: 'cost-ceiling', cost });
+        resolve({ failed: true, reason: 'cost-ceiling', cost, meta });
       } else if (code === 0) {
-        resolve({ failed: false, code, cost });
+        resolve({ failed: false, code, cost, meta });
       } else {
         store.append('seat-failure', { actor: 'daemon', seat, reason: 'exit', code, signal, cost });
-        resolve({ failed: true, reason: 'exit', code, signal, cost });
+        resolve({ failed: true, reason: 'exit', code, signal, cost, meta });
       }
     });
     child.on('error', (error) => {
       if (settled) return;
       settled = true;
       store.append('seat-failure', { actor: 'daemon', seat, reason: 'spawn', error: error.message });
-      resolve({ failed: true, reason: 'spawn', error: error.message, cost });
+      resolve({ failed: true, reason: 'spawn', error: error.message, cost, meta });
     });
   });
   return {

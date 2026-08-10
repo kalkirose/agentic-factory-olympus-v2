@@ -76,7 +76,7 @@ loud.
 Done when: a run launch on a fixture repo yields a clean worktree + stack,
 and close removes both; config changes on `main` apply at the next launch.
 
-## M5 — Seat runtime — open
+## M5 — Seat runtime — done
 
 - Headless seat child runner over the `claude` CLI; two-block prompt assembly
   (shared core + per-seat role block).
@@ -223,3 +223,15 @@ never carries a project's specifics.
   run artifact, teardown at close via the engine `onClosed` hook with a
   `workspace-released` stamp, orphan sweep at daemon start. ADR-0004 records
   the shapes. 88 tests green. Next: M5 (seat runtime).
+- 2026-08-10 — M5 done: seat runtime under `src/seats/`. Seat map as a closed
+  registry (Opus 5 xhigh default; verdict triage, Fury verifier, eval on
+  Fable 5; web + Explore allowances per policy); file contracts with an owned
+  flat draft-07-safe validator, one corrective re-prompt (session resume when
+  the transcript names a session id) then seat-failure; global per-model
+  semaphores with `semaphore-wait`/`semaphore-granted` pairing and live-edit
+  pickup; claude CLI adapter (argv builder, no fallback flags; stream-json →
+  progress + actual model) with `model-substituted` (new registry event) and
+  model-mismatch as seat-failure; `ctx.runSeat` dispatch keeps the liveness
+  invariant seeing the child. ADR-0005 records the shapes and names the CLI
+  verification items. 117 tests green. Next: M6 (story-lane pre-freeze
+  chain).

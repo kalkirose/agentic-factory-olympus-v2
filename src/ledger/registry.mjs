@@ -9,6 +9,7 @@ const SEAT_EVENTS = [
   'seat-report',
   'seat-failure',
   'seat-terminated',
+  'model-substituted',
   'semaphore-wait',
   'semaphore-granted',
 ];

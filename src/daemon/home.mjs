@@ -52,3 +52,12 @@ export function runLedgerPath(paths, runId) {
 export function archivedRunLedgerPath(paths, runId) {
   return join(paths.archivedRuns, runId, 'ledger.jsonl');
 }
+
+/**
+ * The named ledger path for a seat's JSON report — a run artifact that
+ * archives with the run. The orchestrator names it in the seat prompt.
+ * @param {ReturnType<typeof homePaths>} paths
+ */
+export function runReportPath(paths, runId, name) {
+  return join(paths.runs, runId, 'reports', `${name}.json`);
+}
