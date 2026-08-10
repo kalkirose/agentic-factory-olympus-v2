@@ -9,13 +9,23 @@
 const GIST_MAX = 120;
 
 /**
- * Builds the child-process spec for one seat invocation.
+ * Builds the child-process spec for one seat invocation. `denyTools` adds
+ * caller rules to the disallowed set — the test-edit boundary rides here.
  * @param {{claudeCommand?: string[], prompt: string, model: string,
- *   effort: string, def: {web: boolean, explore: number}, resume?: string}} opts
+ *   effort: string, def: {web: boolean, explore: number}, resume?: string,
+ *   denyTools?: string[]}} opts
  * @returns {{cmd: string, args: string[], parseLine: typeof parseClaudeLine}}
  */
-export function claudeSeatCommand({ claudeCommand = ['claude'], prompt, model, effort, def, resume }) {
-  const disallowed = [];
+export function claudeSeatCommand({
+  claudeCommand = ['claude'],
+  prompt,
+  model,
+  effort,
+  def,
+  resume,
+  denyTools = [],
+}) {
+  const disallowed = [...denyTools];
   if (!def.web) disallowed.push('WebSearch', 'WebFetch');
   if (!(def.explore > 0)) disallowed.push('Task');
   const args = [

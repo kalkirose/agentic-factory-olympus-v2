@@ -23,6 +23,7 @@ export const RUN_EVENTS = new Set([
   // spec + suite
   'spec-born',
   'spec-gate-round',
+  'suite-committed',
   'adversary-wave',
   'survivor-disposition',
   'red-state-check',

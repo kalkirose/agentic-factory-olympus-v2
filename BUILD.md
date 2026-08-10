@@ -92,7 +92,7 @@ Done when: a fixture seat completes the contract loop end to end, a broken
 report triggers exactly one re-prompt then seat-failure, and semaphore waits
 stamp correctly under contention.
 
-## M6 — Story-lane pre-freeze chain — open
+## M6 — Story-lane pre-freeze chain — done
 
 - Readiness process (mechanical checks; self-park at spec-birth escalation).
 - Spec-birth seat (grounded authoring from the intent card; AFK; two
@@ -235,3 +235,24 @@ never carries a project's specifics.
   invariant seeing the child. ADR-0005 records the shapes and names the CLI
   verification items. 117 tests green. Next: M6 (story-lane pre-freeze
   chain).
+- 2026-08-10 — M6 done: story-lane pre-freeze chain under `src/lanes/`.
+  `storyLane({afterFreeze})` composes readiness → spec birth → spec gate →
+  suite → adversary → freeze; every handler re-derives its position from
+  ledger + git (restart-safe). Readiness parses the intent card (frontmatter
+  + open-decisions section) and runs the reference lint. Born spec is a run
+  artifact at `runs/<id>/spec.md`. Spec gate: cap 2 counted rounds,
+  amended-sections re-check, intent conflict parks without burning a round,
+  exhaustion closes failed. Suite seat under a lane-level contract loop (one
+  corrective on boundary/red-class/coverage defects, then seat-failure);
+  commits stamped `suite-committed` (new registry event; phases author /
+  amendment / strengthening / fix). Adversary: 3 waves in disposable
+  worktrees at the suite sha, test paths restored from the sha before every
+  evaluation (tamper structurally void), survivor amendment with killing
+  tests + dispositions, 0/3 → strengthen then `second-zero-kill` park,
+  unkilled gaps park with accept/fail options. Red-state check with one fix
+  round; freeze record (sha, file set, kill counts, dispositions, red
+  state) as the completion signal. Test-edit boundary: deny rules over
+  test paths ride the claude argv (`denyTools`). Command runner scrubs
+  `NODE_TEST_CONTEXT` (inherited context turns a red `node --test` child
+  into a false green). ADR-0006 records the shapes. 136 tests green. Next:
+  M7 (verdict, repair, review).

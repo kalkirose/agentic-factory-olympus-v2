@@ -18,7 +18,7 @@ function valid() {
       ],
     },
     conventions: ['write to the ledger'],
-    lanes: { story: { greenTarget: 1 } },
+    lanes: { story: { suiteCommand: 'test', greenTarget: 1 } },
     stack: { composeFile: 'compose.harness.yml', env: { NODE_ENV: 'test' } },
     tripwires: [{ id: 'escapes', metric: 'escapes-rolling', window: { count: 10, of: 'ships' } }],
   };
@@ -112,4 +112,19 @@ test('parseProjectConfig returns a defaults-filled config', () => {
   const config = parseProjectConfig(JSON.stringify({ version: 1 }), 'fixture');
   assert.equal(config.stack, null);
   assert.deepEqual(config.gates.tier1, []);
+});
+
+test('the story lane names its commands and requires test paths', () => {
+  const noSuite = valid();
+  delete noSuite.lanes.story.suiteCommand;
+  assert.deepEqual(errorPaths(noSuite), ['lanes.story.suiteCommand']);
+  const badLint = valid();
+  badLint.lanes.story.lintCommand = 'nope';
+  assert.deepEqual(errorPaths(badLint), ['lanes.story.lintCommand']);
+  const noTests = valid();
+  noTests.repo.testPaths = [];
+  assert.deepEqual(errorPaths(noTests), ['repo.testPaths']);
+  const okLint = valid();
+  okLint.lanes.story.lintCommand = 'lint';
+  assert.deepEqual(validateProjectConfig(okLint), []);
 });

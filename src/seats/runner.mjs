@@ -24,7 +24,7 @@ const ACTOR = 'daemon';
  *   substitute?: {model: string, reason: string},
  *   semaphores?: import('./semaphore.mjs').ModelSemaphores,
  *   cwd?: string, env?: object, costCeiling?: number,
- *   claudeCommand?: string[],
+ *   claudeCommand?: string[], denyTools?: string[],
  *   commandFor?: (opts: object) => {cmd: string, args: string[], parseLine?: Function},
  *   supervise?: (opts: object) => Promise<object>}} opts
  *   commandFor substitutes the claude argv builder (tests, fixture seats).
@@ -44,6 +44,7 @@ export async function runSeat(store, opts) {
     env,
     costCeiling,
     claudeCommand,
+    denyTools,
     commandFor = claudeSeatCommand,
     supervise = (superviseOpts) => superviseSeat(store, superviseOpts).done,
   } = opts;
@@ -81,6 +82,7 @@ export async function runSeat(store, opts) {
         model,
         effort: def.effort,
         def,
+        denyTools,
         attempt,
         resume,
       });

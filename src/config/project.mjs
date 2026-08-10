@@ -43,9 +43,14 @@ export function validateProjectConfig(config) {
   validateCommands(config.commands, err);
   validateGates(config.gates, config.commands, err);
   validateStringList(config.conventions, 'conventions', err);
-  validateLanes(config.lanes, err);
+  validateLanes(config.lanes, config.commands, err);
   validateStack(config.stack, err);
   validateTripwires(config.tripwires, err);
+  if (isPlainObject(config.lanes) && isPlainObject(config.lanes.story)) {
+    if (!Array.isArray(config.repo?.testPaths) || config.repo.testPaths.length === 0) {
+      err('repo.testPaths', 'the story lane requires at least one test path');
+    }
+  }
   return errors;
 }
 
@@ -112,14 +117,31 @@ function validateGates(gates, commands, err) {
   });
 }
 
-function validateLanes(lanes, err) {
+function validateLanes(lanes, commands, err) {
   if (lanes === undefined) return;
   if (!isPlainObject(lanes)) {
     err('lanes', 'must be an object');
     return;
   }
   for (const [name, lane] of Object.entries(lanes)) {
-    if (!isPlainObject(lane)) err(`lanes.${name}`, 'must be an object');
+    if (!isPlainObject(lane)) {
+      err(`lanes.${name}`, 'must be an object');
+      continue;
+    }
+    if (name === 'story') validateStoryLane(lane, commands, err);
+  }
+}
+
+// The story lane's settings, validated as deep as the pre-freeze chain reads.
+function validateStoryLane(lane, commands, err) {
+  const names = isPlainObject(commands) ? commands : {};
+  if (typeof lane.suiteCommand !== 'string' || !names[lane.suiteCommand]) {
+    err('lanes.story.suiteCommand', 'must name a key in commands');
+  }
+  if (lane.lintCommand !== undefined) {
+    if (typeof lane.lintCommand !== 'string' || !names[lane.lintCommand]) {
+      err('lanes.story.lintCommand', 'must name a key in commands');
+    }
   }
 }
 
