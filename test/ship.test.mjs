@@ -297,7 +297,7 @@ function shipFixture(t, { seats = {}, pollMs = 30, forgeOpts = {}, spawnRepair =
         return spawnRepair(info, fixtureHolder);
       }
     : null;
-  const shipLane = shipStep({ forge, pollMs, spawnRepair: spawner });
+  const shipLane = shipStep({ forgeFor: () => forge, pollMs, spawnRepair: spawner });
   const post = postFreeze({ afterVerdict: shipLane });
   const done = { stages: ['done'], handlers: { done: async () => ({ close: { state: 'shipped' } }) } };
   const lanes = {

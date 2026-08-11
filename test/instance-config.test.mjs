@@ -46,6 +46,19 @@ test('withDefaults fills project defaults without mutation', () => {
   assert.equal(raw.projects.demo.defaultBranch, undefined);
 });
 
+test('the machine argv keys default and validate alike', () => {
+  const filled = withDefaults({ version: 1 });
+  assert.deepEqual(filled.composeCommand, ['docker', 'compose']);
+  assert.deepEqual(filled.claudeCommand, ['claude']);
+  assert.deepEqual(filled.ghCommand, ['gh']);
+  const errors = validateInstanceConfig({ version: 1, ghCommand: 'gh' });
+  assert.deepEqual(
+    errors.map((e) => e.path),
+    ['ghCommand'],
+  );
+  assert.deepEqual(validateInstanceConfig({ version: 1, ghCommand: ['gh', '--repo-cache'] }), []);
+});
+
 test('an invalid file throws with detail', (t) => {
   const home = tempDir();
   t.after(() => removeDir(home));

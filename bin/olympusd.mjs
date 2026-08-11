@@ -6,6 +6,7 @@
 // The OS service manager owns daemonization and restarts (see
 // docs/service-wiring.md).
 import { Daemon } from '../src/daemon/daemon.mjs';
+import { assembleLanes } from '../src/lanes/assemble.mjs';
 import { homePaths } from '../src/daemon/home.mjs';
 import { writeControlCommand } from '../src/daemon/control.mjs';
 import { readLock, pidAlive } from '../src/daemon/lock.mjs';
@@ -30,7 +31,10 @@ if (!command || !home) usage();
 const paths = homePaths(home);
 
 if (command === 'start') {
-  const daemon = new Daemon(home, { handleSignals: true });
+  // The reader closes over the daemon, whose config the start reads and every
+  // live edit replaces; the lanes resolve each run's forge through it.
+  const lanes = assembleLanes({ instanceConfig: () => daemon.config });
+  const daemon = new Daemon(home, { handleSignals: true, lanes });
   daemon.onStopped = () => process.exit(0);
   const { runsResumed } = await daemon.start();
   console.log(`olympusd: started (pid ${process.pid}, home ${home})`);

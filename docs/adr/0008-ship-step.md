@@ -6,16 +6,29 @@ Status: accepted (2026-08-10)
 
 The ship step — PR open through ledger close — gets these concrete shapes:
 
-- **Lane composition.** `shipStep({forge, pollMs, spawnRepair})` supplies the
-  two stages after the verdict: `ship` and `close-out`. It plugs into
+- **Lane composition.** `shipStep({forgeFor, pollMs, spawnRepair})` supplies
+  the two stages after the verdict: `ship` and `close-out`. It plugs into
   `postFreeze({afterVerdict})` and `repairLane({afterVerdict})` unchanged; a
   mode flag derived from the launch payload (`card` present = story) selects
   the differences (card sweep, test-edit boundary, re-freeze stamps).
+  `lanes/assemble.mjs` builds the whole graph — story as
+  `storyLane → postFreeze → shipStep`, repair as `repairLane → shipStep` —
+  and the daemon binary registers it on the engine at start.
 - **The forge interface.** All forge traffic goes through one injected
   object: `preflight`, `openPr` (idempotent per head branch), `armAutoMerge`,
   `prState`, `checkRuns`, `rerunFailed`, `checkOutput`. `ship/forge.mjs`
   implements it over the `gh` CLI with an injectable runner; tests substitute
   a fake with the same shape. A forge for another host is one new module.
+- **The forge is per run, not per graph.** The engine registers lanes once at
+  daemon start, while one instance holds many projects, each with its own
+  repository. `shipStep` therefore takes a resolver, `forgeFor(ctx)`, and the
+  ship stages resolve the forge from the run's project on entry, out of the
+  live instance config — a forge bound at composition would send every
+  project's PRs to one repository. Resolution is the first act of
+  `shipBase`, before any clone read, so a project the instance cannot forge
+  for fails on the cheapest fact. The gh argv is instance config
+  (`ghCommand`, default `['gh']`): by the ownership test it describes the
+  machine, like `composeCommand` and `claudeCommand`.
 - **Preflight, then arm at open.** Before the PR opens, the preflight
   requires auto-merge allowed and a non-empty required-check set on the base
   branch. Anything less parks `provisioning-gate` — hands-off ship without
@@ -148,3 +161,10 @@ close-out.
 
 If a forge for a non-GitHub host is needed, the interface in `ship/forge.mjs`
 is the contract; the ship step never imports the gh adapter directly.
+
+If per-run forge resolution proves too costly (a forge that must authenticate
+or cache per repository), the resolver memoizes per project inside
+`lanes/assemble.mjs` and drops the cached entry on a config change. Trigger:
+measurable ship-stage latency in the forge calls, or a forge implementation
+that holds a session. Reversal cost: low — the resolver signature does not
+change, and the lanes stay assembled once.

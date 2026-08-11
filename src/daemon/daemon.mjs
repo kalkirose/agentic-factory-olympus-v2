@@ -28,7 +28,8 @@ export class Daemon {
    * @param {{handleSignals?: boolean, lanes?: Record<string, object>,
    *   composeRunner?: Function, evalSeatDefaults?: () => object}} opts
    *   lanes: lane name → {stages, handlers}, registered on the run engine at
-   *   start. Concrete lanes land with their milestones. composeRunner
+   *   start; `lanes/assemble.mjs` builds the graph the daemon binary passes,
+   *   and a fixture graph substitutes it in tests. composeRunner
    *   substitutes the compose child process (tests only); evalSeatDefaults
    *   substitutes the eval seat's dispatch defaults (tests only).
    */

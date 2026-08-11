@@ -1,5 +1,5 @@
 // The ship step: the run ends at close-out, not at the green verdict.
-// `shipStep({forge})` supplies the two stages after the verdict — `ship`
+// `shipStep({forgeFor})` supplies the two stages after the verdict — `ship`
 // (PR open with auto-merge armed, the check watcher, the CI red route, the
 // competing-merge update, the merge round) and `close-out` (red-merge breach
 // conversion, merge-commit checks to terminal, the card sweep, the escape
@@ -87,28 +87,32 @@ export const CARD_SWEEP_SCHEMA = {
 /**
  * Builds the ship continuation for `postFreeze({afterVerdict})` and
  * `repairLane({afterVerdict})`.
- * @param {{forge: object, pollMs?: number,
+ * @param {{forgeFor: (ctx: object) => object, pollMs?: number,
  *   spawnRepair?: (info: object) => Promise<string|null>}} opts
- *   `forge` implements the interface in ship/forge.mjs. `spawnRepair`
- *   launches one repair-lane run per converted escape at a red-merge breach;
- *   a spawn failure leaves the open escape as the tracking record.
+ *   `forgeFor` resolves the forge of one run from the run's project; the
+ *   resolved object implements the interface in ship/forge.mjs. The lane
+ *   graph registers once per daemon while the instance holds many projects,
+ *   each with its own repository, so the forge is per run and never bound
+ *   here. `spawnRepair` launches one repair-lane run per converted escape at
+ *   a red-merge breach; a spawn failure leaves the open escape as the
+ *   tracking record.
  */
-export function shipStep({ forge, pollMs = 15000, spawnRepair = null } = {}) {
-  if (!forge) throw new Error('shipStep requires a forge');
+export function shipStep({ forgeFor, pollMs = 15000, spawnRepair = null } = {}) {
+  if (typeof forgeFor !== 'function') throw new Error('shipStep requires a forgeFor resolver');
   return {
     stages: ['ship', 'close-out'],
     handlers: {
-      ship: shipHandler({ forge, pollMs }),
-      'close-out': closeOutHandler({ forge, pollMs, spawnRepair }),
+      ship: shipHandler({ forgeFor, pollMs }),
+      'close-out': closeOutHandler({ forgeFor, pollMs, spawnRepair }),
     },
   };
 }
 
 // -- the ship stage ----------------------------------------------------------
 
-function shipHandler({ forge, pollMs }) {
+function shipHandler({ forgeFor, pollMs }) {
   return async function ship(ctx) {
-    const base = await shipBase(ctx, forge);
+    const base = await shipBase(ctx, forgeFor);
     for (;;) {
       if (ctx.stopped()) return null;
       const events = runEvents(ctx);
@@ -132,7 +136,7 @@ function shipHandler({ forge, pollMs }) {
         if (directive) return directive;
         continue;
       }
-      const st = await forge.prState(opened.pr);
+      const st = await base.forge.prState(opened.pr);
       if (st.state === 'closed') {
         return { close: { state: 'failed', reason: 'pr-closed', pr: opened.pr } };
       }
@@ -618,9 +622,9 @@ function freshBase(base, resetSha) {
 
 // -- close-out ---------------------------------------------------------------
 
-function closeOutHandler({ forge, pollMs, spawnRepair }) {
+function closeOutHandler({ forgeFor, pollMs, spawnRepair }) {
   return async function closeOut(ctx) {
-    const base = await shipBase(ctx, forge);
+    const base = await shipBase(ctx, forgeFor);
     const merged = findLast(runEvents(ctx), 'merged');
     if (!merged) return { close: { state: 'failed', reason: 'no-merge-record' } };
     if (merged.red && !runEvents(ctx).some((e) => e.event === 'red-merge-breach')) {
@@ -986,7 +990,11 @@ async function incomingBrief(base, mainSha) {
 
 // -- shared derivations ------------------------------------------------------
 
-async function shipBase(ctx, forge) {
+async function shipBase(ctx, forgeFor) {
+  // The forge resolves first: the project's repository is the cheapest fact
+  // to settle, and a project the instance cannot forge for never reaches the
+  // clone read.
+  const forge = forgeFor(ctx);
   const config = await loadProjectConfig(ctx);
   const worktree = ctx.payload.worktree;
   const cardPath = typeof ctx.payload.card === 'string' ? ctx.payload.card : null;

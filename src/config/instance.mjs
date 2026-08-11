@@ -16,6 +16,8 @@ export function defaultInstanceConfig() {
     composeCommand: ['docker', 'compose'],
     // argv that runs the claude CLI on this machine
     claudeCommand: ['claude'],
+    // argv that runs the gh CLI on this machine (the forge adapter)
+    ghCommand: ['gh'],
     // project name → project entry
     projects: {},
     // notification-stream wiring; consoles read the stream indexes directly
@@ -62,7 +64,7 @@ export function validateInstanceConfig(config) {
   if (config.streams !== undefined && !isPlainObject(config.streams)) {
     err('streams', 'must be an object');
   }
-  for (const key of ['composeCommand', 'claudeCommand']) {
+  for (const key of ['composeCommand', 'claudeCommand', 'ghCommand']) {
     if (config[key] === undefined) continue;
     const ok =
       Array.isArray(config[key]) &&
