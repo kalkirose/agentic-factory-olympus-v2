@@ -237,13 +237,26 @@ export class Daemon {
   }
 
   /**
-   * A console launch: `{project, lane?, card?}`. A story launch reads the
-   * card from the clone for its key, so the frontier's run history matches;
-   * an unreadable card launches anyway — readiness fails it with evidence.
+   * A console launch: `{project, lane?, card?, ticket?}`. A story launch reads
+   * the card from the clone for its key, so the frontier's run history
+   * matches; an unreadable card launches anyway — readiness fails it with
+   * evidence. The repair lane's intake ticket is its spec, so lane and ticket
+   * must agree: the mismatch is refused here, before any provisioning, rather
+   * than at the fix seat of a run that already holds a slot and a workspace.
+   * @param {{actor: string, project: string, lane?: string, card?: string,
+   *   ticket?: string}} command
    */
-  async launchCommand({ actor, project, lane = 'story', card }) {
+  async launchCommand({ actor, project, lane = 'story', card, ticket }) {
     if (typeof actor !== 'string' || actor.length === 0) throw new Error('launch requires an actor');
+    if (lane === 'repair') {
+      if (typeof ticket !== 'string' || ticket.length === 0) {
+        throw new Error('a repair launch requires a ticket path');
+      }
+    } else if (ticket !== undefined) {
+      throw new Error(`a ticket applies to the repair lane only (lane: ${lane})`);
+    }
     const payload = {};
+    if (ticket !== undefined) payload.ticket = ticket;
     if (card !== undefined) {
       payload.card = card;
       const entry = this.config.projects[project];

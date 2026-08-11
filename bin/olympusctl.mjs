@@ -9,10 +9,15 @@
 //   olympusctl answer   --home <dir> (--run <id> | --seq <n>) (--option <o> | --text <t>)
 //   olympusctl arm      --home <dir> --project <name>
 //   olympusctl pause    --home <dir> --project <name>
-//   olympusctl launch   --home <dir> --project <name> [--card <path>] [--lane <name>]
+//   olympusctl launch   --home <dir> --project <name> [--lane <name>]
+//                       [--card <path>] [--ticket <path>]
 //   olympusctl kill     --home <dir> --run <id>
 //   olympusctl resolve  --home <dir> [--run <id>] --seq <n> [--note <text>]
 // --home falls back to OLYMPUSD_HOME; --actor defaults to console:<os user>.
+// The intake ticket is the repair lane's spec: --lane repair requires
+// --ticket, and no other lane accepts one. A repo-relative ticket path names
+// a ticket committed in the run worktree; an absolute path names a ticket in
+// the daemon home.
 import { userInfo } from 'node:os';
 import { homePaths } from '../src/daemon/home.mjs';
 import { writeControlCommand } from '../src/daemon/control.mjs';
@@ -40,6 +45,7 @@ function parseArgs(argv) {
     ['--text', 'text'],
     ['--card', 'card'],
     ['--lane', 'lane'],
+    ['--ticket', 'ticket'],
     ['--note', 'note'],
   ]);
   for (let i = 0; i < rest.length; i++) {
@@ -67,7 +73,13 @@ function queueCommand(paths, command) {
 }
 
 const { command, opts } = parseArgs(process.argv.slice(2));
-if (!command) fail('usage: olympusctl <status|queue|frontier|answer|arm|pause|launch|kill|resolve> --home <dir>');
+if (!command) {
+  fail(
+    'usage: olympusctl <status|queue|frontier|answer|arm|pause|launch|kill|resolve> --home <dir>\n' +
+      '       launch: --project <name> [--lane <name>] [--card <path>] [--ticket <path>]\n' +
+      '       --lane repair requires --ticket; no other lane accepts one',
+  );
+}
 if (!opts.home) fail('--home (or OLYMPUSD_HOME) is required');
 const paths = homePaths(opts.home);
 const actor = opts.actor ?? `console:${userInfo().username}`;
@@ -112,12 +124,24 @@ if (command === 'status') {
 } else if (command === 'arm' || command === 'pause') {
   queueCommand(paths, { command, actor, project: need(opts, 'project') });
 } else if (command === 'launch') {
+  const project = need(opts, 'project');
+  const lane = opts.lane ?? 'story';
+  // Lane and ticket must agree here, before the command reaches the inbox: a
+  // repair run without its ticket has no spec, and a ticket on any other lane
+  // is a typed intent the run would drop in silence.
+  if (lane === 'repair' && opts.ticket === undefined) {
+    fail('--lane repair requires --ticket <path>');
+  }
+  if (lane !== 'repair' && opts.ticket !== undefined) {
+    fail(`--ticket applies to --lane repair only (lane: ${lane})`);
+  }
   queueCommand(paths, {
     command: 'launch',
     actor,
-    project: need(opts, 'project'),
+    project,
     ...(opts.lane !== undefined && { lane: opts.lane }),
     ...(opts.card !== undefined && { card: opts.card }),
+    ...(opts.ticket !== undefined && { ticket: opts.ticket }),
   });
 } else if (command === 'kill') {
   queueCommand(paths, { command: 'kill', actor, runId: need(opts, 'run') });

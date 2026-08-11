@@ -96,3 +96,44 @@ test('olympusctl writes control commands and renders status', (t) => {
   assert.equal(pause.project, 'alpha');
   assert.match(pause.actor, /^console:/);
 });
+
+test('a repair launch carries its ticket; lane and ticket must agree', (t) => {
+  const { root, paths } = seededHome(t);
+  const bin = join(import.meta.dirname, '..', 'bin', 'olympusctl.mjs');
+  const home = join(root, 'home');
+  const ctl = (args) =>
+    execFileSync(process.execPath, [bin, ...args], { encoding: 'utf8', windowsHide: true });
+  const refused = (args) => {
+    try {
+      ctl(args);
+    } catch (error) {
+      return { status: error.status, stderr: error.stderr };
+    }
+    throw new Error(`expected olympusctl to refuse: ${args.join(' ')}`);
+  };
+
+  const args = ['--project', 'alpha', '--lane', 'repair', '--ticket', 'tickets/t1.md'];
+  ctl(['launch', '--home', home, ...args]);
+  const file = readdirSync(paths.control).find((f) => f.startsWith('launch'));
+  const launch = JSON.parse(readFileSync(join(paths.control, file), 'utf8'));
+  assert.equal(launch.lane, 'repair');
+  assert.equal(launch.ticket, 'tickets/t1.md');
+
+  // A repair run without its ticket has no spec, and a ticket the lane drops
+  // is a silent surprise: both are refused before the inbox, exit code 2.
+  const noTicket = refused(['launch', '--home', home, '--project', 'alpha', '--lane', 'repair']);
+  assert.equal(noTicket.status, 2);
+  assert.match(noTicket.stderr, /--lane repair requires --ticket/);
+  const wrongLane = refused([
+    'launch',
+    '--home',
+    home,
+    '--project',
+    'alpha',
+    '--ticket',
+    'tickets/t1.md',
+  ]);
+  assert.equal(wrongLane.status, 2);
+  assert.match(wrongLane.stderr, /--ticket applies to --lane repair only \(lane: story\)/);
+  assert.equal(readdirSync(paths.control).filter((f) => f.endsWith('.json')).length, 1);
+});

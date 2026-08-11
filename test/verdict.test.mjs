@@ -191,6 +191,17 @@ function verdictFixture(t, opts) {
       const { runId, worktree } = await daemon.launchRun({ project: 'proj', lane: 'story', ...payload });
       return { runId, worktree };
     },
+    /** The console path: the launch a `launch` control command performs. */
+    async launchFromConsole(command = {}) {
+      await daemon.start();
+      daemon.engine.seatDefaults = () => ({ commandFor: fixture.commandFor });
+      const { runId, worktree } = await daemon.launchCommand({
+        actor: 'console:test',
+        project: 'proj',
+        ...command,
+      });
+      return { runId, worktree };
+    },
   };
 }
 
@@ -818,7 +829,7 @@ test('the repair cap exhausts into a stall and the fresh pass', async (t) => {
   assert.equal(renders[4].verdict, 'green');
 });
 
-test('the repair lane wires the generalist review and frees the dev seat to write tests', async (t) => {
+test('a console launch reaches the repair fix seat, which reviews generally and may write tests', async (t) => {
   const seats = {
     dev: () => ({
       files: { 'src/g.mjs': 'export const g = (x) => x + 1;\n', 'tests/g.test.mjs': G_TEST },
@@ -839,12 +850,17 @@ test('the repair lane wires the generalist review and frees the dev seat to writ
     commands: { suite: SUITE_CMD },
     originFiles: { 'tickets/t1.md': '## Defect\n\ng(x) is missing; add g(x) = x + 1 with a regression test.\n' },
   });
-  const { runId } = await fx.launch({ lane: 'repair', ticket: 'tickets/t1.md' });
+  const { runId, worktree } = await fx.launchFromConsole({
+    lane: 'repair',
+    ticket: 'tickets/t1.md',
+  });
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
-  // The ticket is the spec; the fix seat may write tests.
+  // The ticket is the spec; the fix seat may write tests. A repo-relative
+  // ticket resolves inside the run worktree.
   const dev = fx.calls.find((c) => c.seat === 'dev');
   assert.ok(dev.prompt.includes('intake ticket'));
+  assert.ok(dev.prompt.includes(join(worktree, 'tickets/t1.md')));
   assert.ok(dev.prompt.includes('regression test'));
   assert.equal(dev.denyTools, undefined);
   // Generalist review replaces the Fury fan-out; the LOW stays advisory.

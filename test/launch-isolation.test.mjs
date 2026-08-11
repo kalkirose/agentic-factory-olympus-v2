@@ -140,6 +140,48 @@ test('an invalid config on main fails the launch and no run starts', async (t) =
   await assert.rejects(() => daemon.launchRun({ project: 'alpha', lane: 'nope' }), /unknown lane/);
 });
 
+test('a console launch carries the ticket into the repair payload', async (t) => {
+  const payloads = [];
+  const lane = {
+    stages: ['work'],
+    handlers: {
+      work: async (ctx) => {
+        payloads.push(ctx.payload);
+        return { close: { state: 'shipped' } };
+      },
+    },
+  };
+  const { daemon } = fixture(t, {
+    lanes: { story: lane, repair: lane },
+    composeRunner: fakeComposeRunner(),
+  });
+  await daemon.start();
+  await daemon.launchCommand({
+    actor: 'console:tester',
+    project: 'alpha',
+    lane: 'repair',
+    ticket: 'tickets/t1.md',
+  });
+  await waitFor(() => payloads.length === 1, { label: 'repair stage handler entered' });
+  assert.equal(payloads[0].ticket, 'tickets/t1.md');
+  // The ticket is the repair lane's spec: a mismatch is refused before the
+  // launch provisions anything.
+  await assert.rejects(
+    () => daemon.launchCommand({ actor: 'console:tester', project: 'alpha', lane: 'repair' }),
+    /repair launch requires a ticket/,
+  );
+  await assert.rejects(
+    () =>
+      daemon.launchCommand({
+        actor: 'console:tester',
+        project: 'alpha',
+        ticket: 'tickets/t1.md',
+      }),
+    /ticket applies to the repair lane only \(lane: story\)/,
+  );
+  assert.equal(payloads.length, 1);
+});
+
 test('orphaned workspaces are swept and stamped at daemon start', async (t) => {
   const { paths, daemon } = fixture(t, { lanes: {}, composeRunner: fakeComposeRunner() });
   mkdirSync(join(workspaceRoot(paths, 'dead-run'), 'tree'), { recursive: true });

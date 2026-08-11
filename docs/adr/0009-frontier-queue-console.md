@@ -85,6 +85,14 @@ shapes:
   the daemon home. The `olympus-console` skill wraps the CLI for a Claude
   session and covers the live instance-config edit (edit `instance.json`,
   verify the `config-changed` stamp).
+- **Launch payload per lane.** `launch` carries the lane's spec: `--card` for
+  a story run, `--ticket` for a repair run (the intake ticket is that lane's
+  spec — repo-relative names a ticket committed in the run worktree,
+  absolute names one in the daemon home). Lane and ticket must agree:
+  `--lane repair` without a ticket and a ticket on any other lane are refused
+  by the console (exit 2) and again by the daemon's launch handler, before
+  provisioning. A launch that cannot reach its spec must never take a slot,
+  a workspace, and a stack to die at its first seat.
 
 ## Why roadmap order is computed instead of read from a file
 
