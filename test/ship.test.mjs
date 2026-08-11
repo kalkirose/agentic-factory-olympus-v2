@@ -750,7 +750,7 @@ test('parseGitHubRepo handles the common remote shapes', () => {
 test('the gh adapter builds the documented argv and maps the answers', async () => {
   const calls = [];
   const answers = [
-    JSON.stringify({ autoMergeAllowed: true }),
+    'true\n', // `gh api --jq .allow_auto_merge` prints the bare boolean
     JSON.stringify({ strict: true, contexts: ['ci', 'e2e'] }),
     JSON.stringify({
       state: 'OPEN',
@@ -767,7 +767,7 @@ test('the gh adapter builds the documented argv and maps the answers', async () 
   const forge = gitHubForge({ repo: 'acme/widgets', runner });
   const pf = await forge.preflight('main');
   assert.deepEqual(pf, { autoMergeAllowed: true, strict: true, requiredChecks: ['ci', 'e2e'] });
-  assert.deepEqual(calls[0].slice(0, 4), ['gh', 'repo', 'view', 'acme/widgets']);
+  assert.deepEqual(calls[0], ['gh', 'api', 'repos/acme/widgets', '--jq', '.allow_auto_merge']);
   assert.equal(calls[1][2], 'repos/acme/widgets/branches/main/protection/required_status_checks');
   const st = await forge.prState(7);
   assert.deepEqual(st, {
@@ -777,4 +777,31 @@ test('the gh adapter builds the documented argv and maps the answers', async () 
     behindBase: true,
     autoMergeArmed: true,
   });
+});
+
+test('the preflight reads the auto-merge capability over the repository api', async () => {
+  const calls = [];
+  const runner = async (argv) => {
+    calls.push(argv);
+    if (argv.includes('.allow_auto_merge')) return { code: 0, output: 'false\n' };
+    return { code: 0, output: JSON.stringify({ strict: true, contexts: ['ci'] }) };
+  };
+  const pf = await gitHubForge({ repo: 'acme/widgets', runner }).preflight('main');
+  assert.equal(pf.autoMergeAllowed, false);
+  // `gh repo view --json` carries no autoMergeAllowed field. A call that asks
+  // for one exits non-zero and takes the whole ship stage down with it, so no
+  // preflight call may name that field or reach for `repo view` again.
+  assert.ok(!calls.some((argv) => argv.includes('autoMergeAllowed')));
+  assert.ok(!calls.some((argv) => argv[1] === 'repo'));
+});
+
+test('an unreadable auto-merge capability reads as off, never as a stage failure', async () => {
+  const runner = async (argv) =>
+    argv.includes('.allow_auto_merge')
+      ? { code: 1, output: 'gh: Not Found (HTTP 404)' }
+      : { code: 0, output: JSON.stringify({ strict: true, contexts: ['ci'] }) };
+  const pf = await gitHubForge({ repo: 'acme/widgets', runner }).preflight('main');
+  // Same posture as the protection read beside it: the ship step parks the
+  // provisioning gate, and the daemon never self-clears it.
+  assert.deepEqual(pf, { autoMergeAllowed: false, strict: true, requiredChecks: ['ci'] });
 });

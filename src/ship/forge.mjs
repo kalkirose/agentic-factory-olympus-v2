@@ -54,13 +54,19 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
 
   return {
     async preflight(base) {
-      const repoView = await ghJson(['repo', 'view', repo, '--json', 'autoMergeAllowed']);
+      // The auto-merge capability is a REST repository field: `gh repo view
+      // --json` has no autoMergeAllowed field, and a call that names one
+      // fails the stage. The read takes the api route of the protection
+      // call below.
+      const allowAutoMerge = await ghJson(['api', `repos/${repo}`, '--jq', '.allow_auto_merge'], {
+        allowFail: true, // unreadable reads as off; the ship step parks on it
+      });
       const protection = await ghJson(
         ['api', `repos/${repo}/branches/${base}/protection/required_status_checks`],
         { allowFail: true }, // 404 = no protection; the ship step parks on it
       );
       return {
-        autoMergeAllowed: repoView?.autoMergeAllowed === true,
+        autoMergeAllowed: allowAutoMerge === true,
         strict: protection?.strict === true,
         requiredChecks: protection?.contexts ?? [],
       };
