@@ -102,12 +102,24 @@ The two structured fields are the only stable signal, and they are the whole
 signal. Message text is user-facing copy and can be rewritten at any release,
 so matching on it would make a release note a harness outage.
 
-## Why the fallback direction cannot breach the effort floor
+## What the degrade costs, and what it holds
 
-The degrade only ever moves a seat from the certification model to the
-default model, which raises capability, and it holds the seat's configured
-effort. No path lowers either. A degrade in the other direction has no code
-to run down.
+The degrade moves a seat from the certification model to the default model.
+That is a capability reduction, not an upgrade: the certification model is
+the more capable of the two, which is why the seats that judge are pinned to
+it in the first place. The degrade buys availability and pays for it in
+judgment quality.
+
+Two things it does not cost. The seat's configured effort is held, so the
+effort floor stands. And the default model is not below the tier a judging
+seat is allowed to run on, so no seat lands somewhere doctrine forbids. A
+degrade in the other direction has no code to run down.
+
+This is why the stamp is load-bearing rather than decorative. A reader of the
+ledger has to be able to see that a given verdict was certified by the
+fallback model rather than the configured one, because the two are not
+equivalent. An unstamped degrade would silently lower the bar on exactly the
+seats whose judgment the run's certification rests on.
 
 ## Why a degrade does not remember the rejection window
 
