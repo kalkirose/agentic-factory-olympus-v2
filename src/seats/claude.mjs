@@ -11,6 +11,8 @@ const GIST_MAX = 120;
 /**
  * Builds the child-process spec for one seat invocation. `denyTools` adds
  * caller rules to the disallowed set — the test-edit boundary rides here.
+ * `cmd` stays the name the config declares; the supervisor resolves it
+ * against the host at spawn time.
  * @param {{claudeCommand?: string[], prompt: string, model: string,
  *   effort: string, def: {web: boolean, explore: number}, resume?: string,
  *   denyTools?: string[]}} opts

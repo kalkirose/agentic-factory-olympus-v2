@@ -5,6 +5,7 @@
 // this module passes — no fixed host ports, nothing shared between runs.
 import { execFile } from 'node:child_process';
 import { join } from 'node:path';
+import { resolveArgv } from '../engine/executable.mjs';
 
 const NAME_PREFIX = 'oly-';
 
@@ -58,11 +59,18 @@ function runCompose(runner, composeCommand, args, env) {
   }
   const [cmd, ...prefix] = composeCommand;
   if (runner) return runner(cmd, [...prefix, ...args], env);
+  const childEnv = { ...process.env, ...env };
+  // The compose command names a tool; the host decides which file that is.
+  const spec = resolveArgv([cmd, ...prefix, ...args], { env: childEnv });
   return new Promise((resolve, reject) => {
     execFile(
-      cmd,
-      [...prefix, ...args],
-      { env: { ...process.env, ...env }, windowsHide: true },
+      spec.file,
+      spec.args,
+      {
+        env: childEnv,
+        windowsHide: true,
+        ...(spec.windowsVerbatimArguments && { windowsVerbatimArguments: true }),
+      },
       (error, stdout, stderr) => {
         if (error) {
           reject(new Error(`${cmd} ${args.join(' ')} failed: ${String(stderr).trim() || error.message}`));

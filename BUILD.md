@@ -374,3 +374,17 @@ never carries a project's specifics.
   retries the whole window. No code path reads a proposal. ADR-0012 records
   the shapes. 214 tests green. All milestones done — next effort: cutover
   (private side, out of scope here).
+- 2026-08-11 — shakedown defect: a configured command whose tool exists only
+  as a Windows shim could not run. `spawn` without a shell cannot execute a
+  `.cmd`, and Node does no PATHEXT lookup, so a bare `pnpm` threw
+  `spawn pnpm ENOENT` and every Tier-1 gate layer failed on a host without
+  `pnpm.exe`. One resolver (`src/engine/executable.mjs`) now stands between
+  config and every spawn of a configured argv: project commands
+  (`lanes/exec.mjs`, and the forge through it), seat commands
+  (`engine/supervise.mjs`, so `claudeCommand`), and the compose command
+  (`isolation/stacks.mjs`). Real executables win over shims across the whole
+  PATH; a shim runs under `cmd.exe /d /s /c` with a command line the resolver
+  escapes for both parses, never `shell: true`; arguments carrying a newline
+  or NUL are refused instead of truncated. Off Windows nothing changes.
+  ADR-0013 records the rule. 257 tests green; CI covers the search rule, the
+  escaping, and the pass-through, and Windows-only tests cover the real spawn.

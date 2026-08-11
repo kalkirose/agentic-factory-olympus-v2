@@ -9,6 +9,7 @@
 //   seat-terminated — the orchestrator ended the seat deliberately (run kill,
 //                     daemon stop); not a failure of the seat.
 import { spawn } from 'node:child_process';
+import { resolveArgv } from './executable.mjs';
 
 /**
  * Spawns and supervises one seat child.
@@ -36,10 +37,22 @@ export function superviseSeat(
     seat,
     ...(costCeiling != null && { costCeiling }),
   });
-  const child = spawn(cmd, args, {
+  const childEnv = env ? { ...process.env, ...env } : process.env;
+  // The seat command (`claudeCommand`) names a tool; the host decides which
+  // file that is. A resolution refusal is a spawn failure like any other.
+  let spec;
+  try {
+    spec = resolveArgv([cmd, ...args], { env: childEnv });
+  } catch (error) {
+    const failure = { failed: true, reason: 'spawn', error: error.message, cost: 0, meta: {} };
+    store.append('seat-failure', { actor: 'daemon', seat, reason: 'spawn', error: error.message });
+    return { done: Promise.resolve(failure), terminate() {} };
+  }
+  const child = spawn(spec.file, spec.args, {
     cwd,
-    env: env ? { ...process.env, ...env } : process.env,
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
+    ...(spec.windowsVerbatimArguments && { windowsVerbatimArguments: true }),
   });
   let cost = 0;
   let buffer = '';

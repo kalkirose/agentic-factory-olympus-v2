@@ -3,6 +3,7 @@
 // every runnable command. The result carries the exit code and an output
 // tail; the caller judges the code, this module never does.
 import { spawn } from 'node:child_process';
+import { resolveArgv } from '../engine/executable.mjs';
 
 /**
  * Runs one command to completion.
@@ -22,11 +23,20 @@ export function runCommand(argv, { cwd, env, outputLimit = 4000 } = {}) {
     // exit 0 for a red suite — a false green on the evaluation path.
     const base = { ...process.env, ...env };
     delete base.NODE_TEST_CONTEXT;
-    const child = spawn(argv[0], argv.slice(1), {
+    // The command table names the tool, the host decides which file that is.
+    let spec;
+    try {
+      spec = resolveArgv(argv, { env: base });
+    } catch (error) {
+      resolve({ code: null, output: '', error: error.message });
+      return;
+    }
+    const child = spawn(spec.file, spec.args, {
       cwd,
       env: base,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
+      ...(spec.windowsVerbatimArguments && { windowsVerbatimArguments: true }),
     });
     let output = '';
     const collect = (chunk) => {

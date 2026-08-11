@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { superviseSeat } from '../src/engine/supervise.mjs';
 import { openRunStore } from '../src/telemetry/stores.mjs';
 import { scaffoldHome, runLedgerPath } from '../src/daemon/home.mjs';
@@ -111,3 +113,34 @@ test('a spawn error stamps seat-failure on the spawn route', async (t) => {
   const failure = readEvents(runLedgerPath(paths, 'r1')).find((e) => e.event === 'seat-failure');
   assert.equal(failure.reason, 'spawn');
 });
+
+// The seat command comes from config the same way a gate command does, so a
+// tool that exists only as a Windows shim has to run here too.
+test(
+  'a seat command that is a Windows shim runs and reports progress',
+  { skip: process.platform === 'win32' ? false : 'runs on Windows only' },
+  async (t) => {
+    const { paths, store } = setup(t);
+    const dir = tempDir();
+    t.after(() => removeDir(dir));
+    writeFileSync(
+      join(dir, 'seattool.mjs'),
+      `console.log(JSON.stringify({cost: 3, note: process.argv[2]}));\n`,
+    );
+    writeFileSync(join(dir, 'seattool.cmd'), `@echo off\r\nnode "%~dp0seattool.mjs" %*\r\n`);
+    const seat = superviseSeat(store, {
+      seat: 'dev-1',
+      cmd: 'seattool',
+      args: ['a note & not a command'],
+      env: { PATH: `${dir};${process.env.PATH}` },
+    });
+    const result = await seat.done;
+    assert.equal(result.failed, false);
+    assert.equal(result.cost, 3);
+    const progress = readEvents(runLedgerPath(paths, 'r1')).filter(
+      (e) => e.event === 'seat-progress',
+    );
+    assert.equal(progress.length, 1);
+    assert.equal(progress[0].note, 'a note & not a command');
+  },
+);
