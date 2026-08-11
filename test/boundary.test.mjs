@@ -46,7 +46,8 @@ test('denyTools ride the claude argv as disallowed tools', () => {
   });
   const at = args.indexOf('--disallowedTools');
   assert.notEqual(at, -1);
-  const disallowed = args.slice(at + 1, -1); // the prompt is the last arg
+  // The value list runs to the flag that closes it; the prompt is last.
+  const disallowed = args.slice(at + 1, args.indexOf('--dangerously-skip-permissions'));
   assert.ok(disallowed.includes('Edit(tests/**)'));
   assert.ok(disallowed.includes('Write(tests/**)'));
   assert.ok(disallowed.includes('NotebookEdit(tests/**)'));

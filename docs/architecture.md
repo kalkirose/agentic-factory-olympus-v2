@@ -106,7 +106,10 @@ Two levels; the ownership test decides placement.
 - **Model integrity.** Model-switch flags off on every seat; a classifier flag
   is a seat-failure on the harness route, never a silent downgrade. Outage →
   orchestrator re-dispatch on the default model, recorded with the substitute
-  named. The ledger records the actual model from the transcript.
+  named. A model that refuses the work (read from the seat's own stream, not
+  from an exit code) degrades to the default model at the same effort, stamped
+  `model-degraded`; the default model refusing too is a loud failure. The
+  ledger records the actual model from the transcript.
 - **Semaphores.** The daemon holds a global concurrency semaphore per model
   across all runs. A seat waits on the semaphore; it never fails on it.
 - **Web tools.** Web search on spec-birth and dev seats only. Judgment seats

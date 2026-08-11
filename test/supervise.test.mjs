@@ -60,6 +60,59 @@ test('a nonzero exit stamps seat-failure with the code', async (t) => {
   assert.equal(failure.code, 3);
 });
 
+test('a failed seat records what it emitted, so the cause reads from the ledger', async (t) => {
+  const { paths, store } = setup(t);
+  const seat = superviseSeat(store, {
+    seat: 'dev-1',
+    ...nodeSeat(
+      `console.log(JSON.stringify({type: 'system', subtype: 'init'}));
+       console.error('Error: input must be provided as a prompt argument');
+       process.exit(1);`,
+    ),
+  });
+  const result = await seat.done;
+  assert.equal(result.failed, true);
+  const failure = readEvents(runLedgerPath(paths, 'r1')).find((e) => e.event === 'seat-failure');
+  assert.ok(failure.stderrTail.includes('input must be provided'));
+  assert.ok(failure.stdoutTail.some((line) => line.includes('init')));
+  assert.equal(result.stderrTail, failure.stderrTail);
+});
+
+test('the recorded evidence is bounded — a ledger, not a log sink', async (t) => {
+  const { paths, store } = setup(t);
+  const seat = superviseSeat(store, {
+    seat: 'dev-1',
+    ...nodeSeat(
+      `for (let i = 0; i < 40; i++) console.log('x'.repeat(4000) + ' line ' + i);
+       console.error('y'.repeat(20000) + 'THE LAST WORD');
+       process.exit(1);`,
+    ),
+  });
+  await seat.done;
+  const failure = readEvents(runLedgerPath(paths, 'r1')).find((e) => e.event === 'seat-failure');
+  assert.equal(failure.stdoutTail.length, 3);
+  for (const line of failure.stdoutTail) assert.ok(line.length <= 200);
+  assert.ok(failure.stderrTail.length <= 600);
+  // The end of the stream is kept: the last thing a dying child says names the
+  // cause, and the last stdout lines are the ones nearest the failure.
+  assert.ok(failure.stderrTail.endsWith('THE LAST WORD'));
+  assert.ok(failure.stdoutTail.at(-1).startsWith('xxx'));
+});
+
+test('a clean seat records no evidence at all', async (t) => {
+  const { paths, store } = setup(t);
+  const seat = superviseSeat(store, {
+    seat: 'dev-1',
+    ...nodeSeat(`console.error('a warning nobody needs'); console.log('{"cost":1}');`),
+  });
+  const result = await seat.done;
+  assert.equal(result.failed, false);
+  assert.equal(result.stderrTail, undefined);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  assert.ok(!events.some((e) => e.event === 'seat-failure'));
+  assert.ok(!events.some((e) => e.stderrTail !== undefined));
+});
+
 test('a progress line cannot shadow envelope fields', async (t) => {
   const { paths, store } = setup(t);
   const seat = superviseSeat(store, {

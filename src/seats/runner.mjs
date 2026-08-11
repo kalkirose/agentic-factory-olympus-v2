@@ -7,10 +7,17 @@
 // Model integrity: a substitute dispatch stamps `model-substituted` before
 // the spawn; a transcript model that differs from the requested model is a
 // seat-failure on the harness route, never a silent downgrade.
+//
+// Availability degrade: a seat whose model refuses the work (the stream says
+// the model is unavailable) retries once on the default model at the same
+// effort, and stamps `model-degraded` first. Effort never drops. The fallback
+// only ever moves a seat from the certification model to the default model,
+// which raises capability, so no floor is at risk. The default model refusing
+// too is a loud failure, not a second retry.
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { superviseSeat } from '../engine/supervise.mjs';
-import { seatDef } from './seatmap.mjs';
+import { seatDef, DEFAULT_MODEL } from './seatmap.mjs';
 import { checkReportSchema, validateReport, readReport } from './contract.mjs';
 import { assembleSeatPrompt, correctivePrompt } from './prompt.mjs';
 import { claudeSeatCommand } from './claude.mjs';
@@ -57,7 +64,7 @@ export async function runSeat(store, opts) {
     const detail = schemaErrors.map((e) => `${e.path}: ${e.message}`).join('; ');
     throw new Error(`report schema outside the flat subset: ${detail}`);
   }
-  const model = substitute?.model ?? def.model;
+  let model = substitute?.model ?? def.model;
   if (substitute && substitute.model !== def.model) {
     if (typeof substitute.reason !== 'string' || substitute.reason.length === 0) {
       throw new Error('a substitute dispatch requires a reason');
@@ -71,11 +78,15 @@ export async function runSeat(store, opts) {
     });
   }
   mkdirSync(dirname(reportPath), { recursive: true });
-  const release = semaphores ? await semaphores.acquire(model, { store, seat }) : () => {};
+  let release = semaphores ? await semaphores.acquire(model, { store, seat }) : () => {};
   try {
     let prompt = assembleSeatPrompt({ seat, def, reportPath, schema, roleBlock });
     let resume;
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    let degraded = false;
+    // One dispatch: build the argv for the model in force and supervise the
+    // child. `seat-spawned` carries the model actually spawned, so a degraded
+    // retry reads as its own spawn on the model that judged the work.
+    const dispatch = (attempt) => {
       const spec = commandFor({
         claudeCommand,
         prompt,
@@ -86,7 +97,7 @@ export async function runSeat(store, opts) {
         attempt,
         resume,
       });
-      const result = await supervise({
+      return supervise({
         seat,
         cmd: spec.cmd,
         args: spec.args,
@@ -99,8 +110,48 @@ export async function runSeat(store, opts) {
           effort: def.effort,
           attempt,
           ...(attempt === 2 && { corrective: true }),
+          ...(degraded && { degraded: true }),
         },
       });
+    };
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      let result = await dispatch(attempt);
+      if (result.reason === 'model-unavailable') {
+        if (!degraded && model !== DEFAULT_MODEL) {
+          store.append('model-degraded', {
+            actor: ACTOR,
+            seat,
+            requested: model,
+            used: DEFAULT_MODEL,
+            reason: result.unavailable,
+            attempt,
+            ...(typeof result.resetsAt === 'number' && { resetsAt: result.resetsAt }),
+          });
+          // The semaphore counts seats per model; the retry belongs to the
+          // default model's cap, not the one that refused.
+          release();
+          model = DEFAULT_MODEL;
+          degraded = true;
+          release = semaphores ? await semaphores.acquire(model, { store, seat }) : () => {};
+          // A rejected model wrote no transcript to resume into.
+          resume = undefined;
+          result = await dispatch(attempt);
+        }
+        if (result.reason === 'model-unavailable') {
+          store.append('seat-failure', {
+            actor: ACTOR,
+            seat,
+            reason: 'model-unavailable',
+            model,
+            cause: result.unavailable,
+            ...(degraded && { degraded: true }),
+            ...(typeof result.resetsAt === 'number' && { resetsAt: result.resetsAt }),
+            ...(result.stderrTail && { stderrTail: result.stderrTail }),
+            ...(result.stdoutTail && { stdoutTail: result.stdoutTail }),
+          });
+          return { ok: false, ...result, model };
+        }
+      }
       if (result.failed || result.terminated) return { ok: false, ...result };
       const actual = result.meta?.model;
       if (typeof actual === 'string' && actual !== model) {

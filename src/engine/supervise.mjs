@@ -5,11 +5,28 @@
 //
 // Stamp semantics:
 //   seat-failure    — the seat failed: nonzero exit, spawn error, or a cost
-//                     ceiling breach.
+//                     ceiling breach. Every one carries a bounded tail of what
+//                     the child last emitted, so the cause is readable from the
+//                     run's own evidence without re-running anything by hand.
 //   seat-terminated — the orchestrator ended the seat deliberately (run kill,
 //                     daemon stop); not a failure of the seat.
+//
+// One outcome stamps nothing here: a child whose stream said the model is
+// unavailable resolves with reason `model-unavailable` and leaves the stamp to
+// the runner, which owns the choice between a degrade and a failure. Only the
+// runner supplies a parser that can raise `meta.unavailable`, so no other
+// caller can reach that path.
 import { spawn } from 'node:child_process';
 import { resolveArgv } from './executable.mjs';
+
+// Bounds for the failure evidence. A ledger records what a reader needs to
+// name the cause, not the transcript: the last stderr and the tail of stdout,
+// both clipped. Stream-json lines run to kilobytes; the leading characters
+// carry the event type and the start of its payload, which is the part that
+// identifies what happened.
+const STDERR_TAIL_CHARS = 600;
+const STDOUT_TAIL_LINES = 3;
+const STDOUT_LINE_CHARS = 200;
 
 /**
  * Spawns and supervises one seat child.
@@ -58,12 +75,18 @@ export function superviseSeat(
   let buffer = '';
   let terminatedReason = null;
   let ceilingHit = false;
+  let stderrTail = '';
+  const stdoutTail = [];
   const meta = {};
   child.stdout.on('data', (chunk) => {
     buffer += chunk;
     const lines = buffer.split('\n');
     buffer = lines.pop();
     for (const line of lines) {
+      if (line.trim()) {
+        stdoutTail.push(clip(line, STDOUT_LINE_CHARS));
+        if (stdoutTail.length > STDOUT_TAIL_LINES) stdoutTail.shift();
+      }
       let progress;
       try {
         progress = parseLine(line);
@@ -87,7 +110,11 @@ export function superviseSeat(
       }
     }
   });
-  child.stderr.resume();
+  // The stream is consumed, not discarded: an unread pipe fills and stalls the
+  // child, and the last of it is the evidence a failed seat leaves behind.
+  child.stderr.on('data', (chunk) => {
+    stderrTail = clipHead(stderrTail + chunk, STDERR_TAIL_CHARS);
+  });
   let settled = false;
   const done = new Promise((resolve) => {
     // 'close' (not 'exit'): stdout is fully drained first, so every progress
@@ -95,6 +122,7 @@ export function superviseSeat(
     child.on('close', (code, signal) => {
       if (settled) return;
       settled = true;
+      const tail = evidence(stderrTail, stdoutTail);
       if (terminatedReason) {
         store.append('seat-terminated', { actor: 'daemon', seat, reason: terminatedReason, cost });
         resolve({ terminated: true, reason: terminatedReason, cost, meta });
@@ -105,20 +133,50 @@ export function superviseSeat(
           reason: 'cost-ceiling',
           cost,
           costCeiling,
+          ...tail,
         });
-        resolve({ failed: true, reason: 'cost-ceiling', cost, meta });
+        resolve({ failed: true, reason: 'cost-ceiling', cost, meta, ...tail });
+      } else if (meta.unavailable) {
+        // The exit code is not consulted. The same rejection was measured
+        // exiting 0 and 1 depending on how the CLI was invoked; the stream
+        // said the model refused the work, and that is the whole signal.
+        resolve({
+          failed: true,
+          reason: 'model-unavailable',
+          unavailable: meta.unavailable,
+          ...(typeof meta.resetsAt === 'number' && { resetsAt: meta.resetsAt }),
+          code,
+          cost,
+          meta,
+          ...tail,
+        });
       } else if (code === 0) {
         resolve({ failed: false, code, cost, meta });
       } else {
-        store.append('seat-failure', { actor: 'daemon', seat, reason: 'exit', code, signal, cost });
-        resolve({ failed: true, reason: 'exit', code, signal, cost, meta });
+        store.append('seat-failure', {
+          actor: 'daemon',
+          seat,
+          reason: 'exit',
+          code,
+          signal,
+          cost,
+          ...tail,
+        });
+        resolve({ failed: true, reason: 'exit', code, signal, cost, meta, ...tail });
       }
     });
     child.on('error', (error) => {
       if (settled) return;
       settled = true;
-      store.append('seat-failure', { actor: 'daemon', seat, reason: 'spawn', error: error.message });
-      resolve({ failed: true, reason: 'spawn', error: error.message, cost, meta });
+      const tail = evidence(stderrTail, stdoutTail);
+      store.append('seat-failure', {
+        actor: 'daemon',
+        seat,
+        reason: 'spawn',
+        error: error.message,
+        ...tail,
+      });
+      resolve({ failed: true, reason: 'spawn', error: error.message, cost, meta, ...tail });
     });
   });
   return {
@@ -129,6 +187,25 @@ export function superviseSeat(
       child.kill();
     },
   };
+}
+
+// The failure evidence, omitted whole when the child emitted nothing.
+function evidence(stderrTail, stdoutTail) {
+  const stderr = stderrTail.trim();
+  return {
+    ...(stderr.length > 0 && { stderrTail: stderr }),
+    ...(stdoutTail.length > 0 && { stdoutTail: [...stdoutTail] }),
+  };
+}
+
+function clip(text, max) {
+  return text.length > max ? text.slice(0, max - 1) + '…' : text;
+}
+
+// Keeps the end, not the start: the last thing a dying child says is the part
+// that names the cause.
+function clipHead(text, max) {
+  return text.length > max ? '…' + text.slice(text.length - max + 1) : text;
 }
 
 // Only `cost` and `note` cross from a child line into the ledger — a child

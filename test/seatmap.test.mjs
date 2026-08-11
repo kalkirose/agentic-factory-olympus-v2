@@ -86,6 +86,10 @@ test('the claude argv names the model and blocks tools per policy, never a fallb
   });
   assert.equal(judgment.cmd, 'claude');
   assert.equal(judgment.args.at(-1), 'P');
+  // The prompt is a trailing positional and `--disallowedTools` takes a
+  // variadic value list, so a boolean flag has to close the list. Without it
+  // the list eats the prompt and the seat dies at argument parsing.
+  assert.equal(judgment.args.at(-2), '--dangerously-skip-permissions');
   assert.ok(judgment.args.includes('--model'));
   assert.ok(judgment.args.includes(CERTIFICATION_MODEL));
   assert.ok(judgment.args.includes('stream-json'));
@@ -107,6 +111,10 @@ test('the claude argv names the model and blocks tools per policy, never a fallb
   assert.ok(!dev.args.includes('--disallowedTools'));
   assert.ok(dev.args.includes('--resume'));
   assert.ok(dev.args.includes('session-1'));
+  // A resumed session id is one value, not a list, and still may not sit
+  // between the last flag and the prompt.
+  assert.equal(dev.args.at(-1), 'P');
+  assert.equal(dev.args.at(-2), '--dangerously-skip-permissions');
 });
 
 test('the stream-json parser maps init, assistant, and result lines', () => {
@@ -128,4 +136,102 @@ test('the stream-json parser maps init, assistant, and result lines', () => {
   assert.equal(result.meta.outcome, 'success');
   assert.equal(parseClaudeLine('narration, not JSON'), null);
   assert.equal(parseClaudeLine(''), null);
+});
+
+// The two lines below keep the shape of a real rejected stream: a rate-limit
+// event at status `rejected`, then a synthetic assistant message standing in
+// for the answer. The result event that follows them calls itself `success`
+// and the exit code varies with how the CLI was invoked, so neither can carry
+// this decision.
+test('a rejected rate-limit event marks the model unavailable, with its reset', () => {
+  const rejected = parseClaudeLine(
+    JSON.stringify({
+      type: 'rate_limit_event',
+      rate_limit_info: {
+        status: 'rejected',
+        resetsAt: 1786557600,
+        rateLimitType: 'seven_day_overage_included',
+        overageStatus: 'rejected',
+        isUsingOverage: false,
+      },
+      session_id: 's1',
+    }),
+  );
+  assert.deepEqual(rejected, { meta: { unavailable: 'rate-limit', resetsAt: 1786557600 } });
+});
+
+test('the synthetic rejection message marks the model unavailable and keeps its text', () => {
+  const synthetic = parseClaudeLine(
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        model: '<synthetic>',
+        role: 'assistant',
+        stop_reason: 'stop_sequence',
+        content: [{ type: 'text', text: 'You have reached your limit. Switch models to continue.' }],
+      },
+      error: 'rate_limit',
+      is_api_error_message: true,
+      session_id: 's1',
+    }),
+  );
+  assert.equal(synthetic.meta.unavailable, 'rate-limit');
+  assert.ok(synthetic.note.startsWith('You have reached your limit'));
+});
+
+test('a healthy stream never marks a model unavailable', () => {
+  // The same event type rides a healthy stream at status `allowed`.
+  const allowed = parseClaudeLine(
+    JSON.stringify({
+      type: 'rate_limit_event',
+      rate_limit_info: { status: 'allowed', resetsAt: 1786557600 },
+      session_id: 's1',
+    }),
+  );
+  assert.equal(allowed, null);
+  const warning = parseClaudeLine(
+    JSON.stringify({
+      type: 'rate_limit_event',
+      rate_limit_info: { status: 'allowed_warning', resetsAt: 1786557600 },
+    }),
+  );
+  assert.equal(warning, null);
+  // An ordinary assistant turn carries no error field at all.
+  const turn = parseClaudeLine(
+    JSON.stringify({
+      type: 'assistant',
+      message: { model: 'claude-opus-5', content: [{ type: 'text', text: 'reading the diff' }] },
+    }),
+  );
+  assert.equal(turn.note, 'reading the diff');
+  assert.equal(turn.meta, undefined);
+  // A different API error is not a rate limit and must not degrade the seat.
+  const overloaded = parseClaudeLine(
+    JSON.stringify({
+      type: 'assistant',
+      message: { model: '<synthetic>', content: [{ type: 'text', text: 'API Error: overloaded' }] },
+      error: 'overloaded',
+      is_api_error_message: true,
+    }),
+  );
+  assert.equal(overloaded.meta, undefined);
+  // The rate-limit copy alone, without the structured markers, is just text.
+  const copy = parseClaudeLine(
+    JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: "You've reached your limit, the user said" }] },
+    }),
+  );
+  assert.equal(copy.meta, undefined);
+  // The result event of a rejected stream still calls itself a success.
+  const result = parseClaudeLine(
+    JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      is_error: true,
+      api_error_status: 429,
+      total_cost_usd: 0,
+    }),
+  );
+  assert.equal(result.meta.unavailable, undefined);
 });

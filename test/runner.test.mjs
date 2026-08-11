@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { runSeat } from '../src/seats/runner.mjs';
+import { parseClaudeLine } from '../src/seats/claude.mjs';
 import { ModelSemaphores } from '../src/seats/semaphore.mjs';
 import { DEFAULT_MODEL, CERTIFICATION_MODEL } from '../src/seats/seatmap.mjs';
 import { RunEngine } from '../src/engine/engine.mjs';
@@ -55,6 +56,269 @@ function fixtureParse(line) {
     return null;
   }
 }
+
+// -- availability degrade ----------------------------------------------------
+
+const RESETS_AT = 1786557600;
+
+// A seat child that speaks real stream-json and is read by the real parser, so
+// the degrade decision is driven by the stream shapes a rejected model emits.
+function claudeFixtureCommand({ report, reportPath, lines = [], exitCode = 0 }) {
+  const script = [
+    ...(report !== undefined
+      ? [
+          `require('fs').writeFileSync(${JSON.stringify(reportPath)}, ${JSON.stringify(JSON.stringify(report))});`,
+        ]
+      : []),
+    ...lines.map((line) => `console.log(${JSON.stringify(JSON.stringify(line))});`),
+    `process.exit(${exitCode});`,
+  ].join('\n');
+  return { cmd: process.execPath, args: ['-e', script], parseLine: parseClaudeLine };
+}
+
+const initLine = (model) => ({ type: 'system', subtype: 'init', session_id: 's1', model });
+
+// The stream a rejected model emits: the rate-limit event, then a synthetic
+// message in place of the answer, then a result that calls itself a success.
+const rejectionLines = [
+  initLine(CERTIFICATION_MODEL),
+  {
+    type: 'rate_limit_event',
+    rate_limit_info: {
+      status: 'rejected',
+      resetsAt: RESETS_AT,
+      rateLimitType: 'seven_day_overage_included',
+      overageStatus: 'rejected',
+    },
+    session_id: 's1',
+  },
+  {
+    type: 'assistant',
+    message: {
+      model: '<synthetic>',
+      content: [{ type: 'text', text: 'You have reached your limit. Switch models to continue.' }],
+    },
+    error: 'rate_limit',
+    is_api_error_message: true,
+    session_id: 's1',
+  },
+  {
+    type: 'result',
+    subtype: 'success',
+    is_error: true,
+    api_error_status: 429,
+    terminal_reason: 'api_error',
+    total_cost_usd: 0,
+  },
+];
+
+const healthyLines = (model) => [
+  initLine(model),
+  { type: 'rate_limit_event', rate_limit_info: { status: 'allowed', resetsAt: RESETS_AT } },
+  { type: 'assistant', message: { model, content: [{ type: 'text', text: 'judging the diff' }] } },
+  { type: 'result', subtype: 'success', total_cost_usd: 0.5 },
+];
+
+test('a rejected model degrades to the default model at the same effort', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'verdict-triage');
+  const calls = [];
+  const result = await runSeat(store, {
+    seat: 'verdict-triage',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: (opts) => {
+      calls.push(opts);
+      return opts.model === CERTIFICATION_MODEL
+        ? claudeFixtureCommand({ reportPath, lines: rejectionLines, exitCode: 1 })
+        : claudeFixtureCommand({
+            report: { verdict: 'pass' },
+            reportPath,
+            lines: healthyLines(DEFAULT_MODEL),
+          });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.model, DEFAULT_MODEL);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].model, CERTIFICATION_MODEL);
+  assert.equal(calls[1].model, DEFAULT_MODEL);
+  // Effort never drops; the fallback only ever raises capability.
+  assert.equal(calls[0].effort, 'xhigh');
+  assert.equal(calls[1].effort, 'xhigh');
+  // The rejected attempt wrote no transcript worth resuming into.
+  assert.equal(calls[1].resume, undefined);
+  assert.equal(calls[1].attempt, 1);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  const degrades = events.filter((e) => e.event === 'model-degraded');
+  assert.equal(degrades.length, 1);
+  assert.equal(degrades[0].seat, 'verdict-triage');
+  assert.equal(degrades[0].requested, CERTIFICATION_MODEL);
+  assert.equal(degrades[0].used, DEFAULT_MODEL);
+  assert.equal(degrades[0].reason, 'rate-limit');
+  assert.equal(degrades[0].resetsAt, RESETS_AT);
+  assert.equal(degrades[0].attempt, 1);
+  // seat-spawned names the model that ran, so no reader is misled about who
+  // judged the work, and the degrade stamp sits before the second spawn.
+  const spawned = events.filter((e) => e.event === 'seat-spawned');
+  assert.equal(spawned.length, 2);
+  assert.equal(spawned[0].model, CERTIFICATION_MODEL);
+  assert.equal(spawned[0].degraded, undefined);
+  assert.equal(spawned[1].model, DEFAULT_MODEL);
+  assert.equal(spawned[1].degraded, true);
+  assert.ok(degrades[0].seq < spawned[1].seq);
+  assert.equal(events.find((e) => e.event === 'seat-report').model, DEFAULT_MODEL);
+  // The rejected attempt is not a seat failure; the seat produced its report.
+  assert.ok(!events.some((e) => e.event === 'seat-failure'));
+});
+
+test('a rejection is read from the stream, not the exit code', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'eval');
+  const calls = [];
+  const result = await runSeat(store, {
+    seat: 'eval',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: (opts) => {
+      calls.push(opts);
+      // The rejected model exits 0 here — measured from a terminal — and the
+      // degrade must fire exactly as it does on the exit-1 path.
+      return opts.model === CERTIFICATION_MODEL
+        ? claudeFixtureCommand({ reportPath, lines: rejectionLines, exitCode: 0 })
+        : claudeFixtureCommand({
+            report: { verdict: 'pass' },
+            reportPath,
+            lines: healthyLines(DEFAULT_MODEL),
+          });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.model, DEFAULT_MODEL);
+  assert.equal(calls.length, 2);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  assert.equal(events.filter((e) => e.event === 'model-degraded').length, 1);
+  // A clean exit must not send the seat down the corrective re-prompt route
+  // against a model that answered nothing.
+  assert.ok(!events.some((e) => e.event === 'seat-spawned' && e.corrective));
+});
+
+test('a healthy seat never degrades', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'verdict-triage');
+  let calls = 0;
+  const result = await runSeat(store, {
+    seat: 'verdict-triage',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: () => {
+      calls++;
+      return claudeFixtureCommand({
+        report: { verdict: 'pass' },
+        reportPath,
+        lines: healthyLines(CERTIFICATION_MODEL),
+      });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.model, CERTIFICATION_MODEL);
+  assert.equal(calls, 1);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  assert.ok(!events.some((e) => e.event === 'model-degraded'));
+  assert.equal(events.filter((e) => e.event === 'seat-spawned').length, 1);
+  assert.equal(events.find((e) => e.event === 'seat-report').model, CERTIFICATION_MODEL);
+});
+
+test('both models rejected fails loudly with the evidence, and never loops', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'fury-verifier');
+  const calls = [];
+  const result = await runSeat(store, {
+    seat: 'fury-verifier',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: (opts) => {
+      calls.push(opts.model);
+      return claudeFixtureCommand({ reportPath, lines: rejectionLines, exitCode: 1 });
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'model-unavailable');
+  // Exactly one degrade attempt: the configured model, then the default.
+  assert.deepEqual(calls, [CERTIFICATION_MODEL, DEFAULT_MODEL]);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  assert.equal(events.filter((e) => e.event === 'model-degraded').length, 1);
+  const failures = events.filter((e) => e.event === 'seat-failure');
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].reason, 'model-unavailable');
+  assert.equal(failures[0].model, DEFAULT_MODEL);
+  assert.equal(failures[0].cause, 'rate-limit');
+  assert.equal(failures[0].degraded, true);
+  assert.equal(failures[0].resetsAt, RESETS_AT);
+  // The evidence rides the failure: the reader sees what the seat emitted.
+  assert.ok(failures[0].stdoutTail.some((line) => line.includes('rate_limit')));
+  assert.ok(!events.some((e) => e.event === 'seat-report'));
+});
+
+test('a rejection on the default model degrades nothing and fails once', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev');
+  let calls = 0;
+  const result = await runSeat(store, {
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: () => {
+      calls++;
+      return claudeFixtureCommand({ reportPath, lines: rejectionLines, exitCode: 1 });
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'model-unavailable');
+  assert.equal(calls, 1);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  assert.ok(!events.some((e) => e.event === 'model-degraded'));
+  const failure = events.find((e) => e.event === 'seat-failure');
+  assert.equal(failure.model, DEFAULT_MODEL);
+  assert.equal(failure.degraded, undefined);
+});
+
+test('a degrade moves the seat onto the default model semaphore', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'verdict-triage');
+  const semaphores = new ModelSemaphores({ [DEFAULT_MODEL]: 1, [CERTIFICATION_MODEL]: 1 });
+  const result = await runSeat(store, {
+    seat: 'verdict-triage',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    semaphores,
+    commandFor: (opts) =>
+      opts.model === CERTIFICATION_MODEL
+        ? claudeFixtureCommand({ reportPath, lines: rejectionLines, exitCode: 1 })
+        : claudeFixtureCommand({
+            report: { verdict: 'pass' },
+            reportPath,
+            lines: healthyLines(DEFAULT_MODEL),
+          }),
+  });
+  assert.equal(result.ok, true);
+  const granted = readEvents(runLedgerPath(paths, 'r1')).filter(
+    (e) => e.event === 'semaphore-granted',
+  );
+  assert.deepEqual(
+    granted.map((e) => e.model),
+    [CERTIFICATION_MODEL, DEFAULT_MODEL],
+  );
+  // The refused model's slot is handed back, not held for the whole session.
+  assert.equal(semaphores.held.get(CERTIFICATION_MODEL), 0);
+  assert.equal(semaphores.held.get(DEFAULT_MODEL), 0);
+});
 
 test('a fixture seat completes the contract loop end to end', async (t) => {
   const { paths, store } = setup(t);

@@ -47,7 +47,12 @@ of them is a design decision, not an implementation detail.
   event.
 - **Model integrity.** No silent model swaps. The ledger records each seat's
   actual model from the transcript, never from config. A substitute model is
-  an explicit ledger event.
+  an explicit ledger event. A seat whose model is unavailable degrades to the
+  default model at the same effort rather than failing the run — stamped,
+  never silent. Effort never drops.
+- **A failed seat leaves evidence.** Every seat failure records a bounded
+  tail of what the seat emitted. Nothing that runs unattended may die in a
+  way that only a human at a terminal can diagnose.
 
 ## The human
 

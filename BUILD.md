@@ -388,3 +388,24 @@ never carries a project's specifics.
   or NUL are refused instead of truncated. Off Windows nothing changes.
   ADR-0013 records the rule. 257 tests green; CI covers the search rule, the
   escaping, and the pass-through, and Windows-only tests cover the real spawn.
+- 2026-08-11 — shakedown defect: a seat died in under three seconds with
+  nothing in the ledger but `reason: exit, code: 1, cost: 0`, and the run
+  closed failed. The ledger held no evidence, so the cause took a hand-run of
+  the CLI to find. Three changes, one theme — a seat that dies must say why,
+  and one seat must not take a run down.
+  First, `--disallowedTools` takes a variadic value list, which consumed the
+  trailing prompt: every seat with a tool policy died at argument parsing,
+  while the dev seats (no policy, so no flag) ran fine. A boolean flag now
+  closes the list, asserted in the seat-map test.
+  Second, every `seat-failure` now carries a bounded tail of what the child
+  emitted — the last 600 characters of stderr, the last 3 stdout lines
+  clipped to 200 each. The defect above reads straight off that tail.
+  Third, a seat whose model refuses the work degrades once to the default
+  model at the same effort and stamps `model-degraded` (`requested`, `used`,
+  `reason`, `resetsAt`), rather than failing the run; `seat-spawned` names
+  the model that actually ran. Detection reads two structured stream fields —
+  a `rate_limit_event` at status `rejected`, and the synthetic assistant
+  message carrying `error: "rate_limit"` — never the exit code, which was
+  measured as both 0 and 1 for the same rejection, and never the message
+  text. The default model refusing too is a loud failure with the evidence.
+  ADR-0005 records all three. 269 tests green.
