@@ -108,7 +108,14 @@ export const SPEC_GATE_SCHEMA = {
           section: { type: 'string' },
           finding: { type: 'string' },
           evidence: { type: 'string' },
+          // Where the defect can be settled, not how much it matters.
+          // "blocking": the spec is wrong, unassertable, or would force a
+          // defective implementation. "note": prose the suite proves against
+          // running code. An absent severity is read as blocking.
+          severity: { type: 'string', enum: ['blocking', 'note'] },
         },
+        // `severity` is not required: an omitted value reads as blocking, so
+        // a seat that never learned the field cannot weaken a gate.
         required: ['section', 'finding', 'evidence'],
       },
     },
@@ -294,6 +301,24 @@ async function specBirth(ctx) {
 // Counted rounds the gate runs on its own authority. Beyond it the run parks.
 const SPEC_GATE_ROUNDS = 2;
 
+/** Findings that hold the spec. An absent severity reads as blocking. */
+function blockingFindings(findings) {
+  return (findings ?? []).filter((f) => f.severity !== 'note');
+}
+
+/** Every note the gate raised across its rounds, in the order it raised them. */
+function gateNotes(events) {
+  const notes = [];
+  for (const e of events) {
+    if (e.event !== 'seat-report' || e.seat !== 'spec-gate') continue;
+    const report = readJson(e.path);
+    for (const f of report?.findings ?? []) {
+      if (f.severity === 'note') notes.push(f);
+    }
+  }
+  return notes;
+}
+
 /** Extra rounds the owner bought, one per exhaustion park answered "round". */
 function grantedRounds(events) {
   let granted = 0;
@@ -333,7 +358,7 @@ async function specGate(ctx) {
       // The parking round stamps nothing, so its findings have no other route
       // into the amendment. They travel with the conflict answer or they die.
       const parked = readJson(lastSeatReportEvent(events, 'spec-gate').path);
-      const findings = parked?.findings ?? [];
+      const findings = blockingFindings(parked?.findings);
       const brief =
         findings.length > 0
           ? `${conflictBrief(conflict)}\n${findingsBrief(findings)}`
@@ -355,9 +380,14 @@ async function specGate(ctx) {
       const asked = exhaustionPark(events, last.seq);
       if (!asked) {
         return parkDirective('spec-gate-exhausted', {
+          // Two counts, never one total: only the blocking count holds the
+          // spec here. A merged number would read as a longer defect list
+          // than the run actually has.
           question:
-            `The spec gate spent ${rounds.length} rounds. The last one found ` +
-            `${last.findings} findings. The spec stands at ${base.specPath}. ` +
+            `The spec gate spent ${rounds.length} rounds. The last one ended with ` +
+            `blocking findings: ${last.findings}; notes: ${last.notes ?? 0}. ` +
+            'Notes do not hold the spec; they travel to the suite seat as proof obligations. ' +
+            `The spec stands at ${base.specPath}. ` +
             'Answer "round" for one more amendment and re-check, or "abandon" to close the run.',
           options: ['round', 'abandon'],
           refs: [base.cardPath],
@@ -371,8 +401,8 @@ async function specGate(ctx) {
     // gate re-checks the amended sections only.
     const amendReport = seatReportAfter(events, 'spec-birth', last.seq);
     if (!amendReport) {
-      const findings = readJson(lastSeatReportEvent(events, 'spec-gate').path)?.findings ?? [];
-      const amend = await amendSpec(ctx, base, findingsBrief(findings));
+      const report = readJson(lastSeatReportEvent(events, 'spec-gate').path);
+      const amend = await amendSpec(ctx, base, findingsBrief(blockingFindings(report?.findings)));
       if (!amend.ok) return seatFail('spec-birth', amend);
       continue;
     }
@@ -403,12 +433,17 @@ async function gateRound(ctx, base, { round, sections }) {
       }),
     };
   }
-  const verdict = result.report.findings.length > 0 ? 'findings' : 'pass';
+  // Blocking findings hold the spec. Notes are prose the suite proves against
+  // running code, so they travel to the suite seat rather than buy a round of
+  // document editing. Nothing is waived: an unresolved note is a suite defect.
+  const blocking = blockingFindings(result.report.findings);
+  const notes = result.report.findings.length - blocking.length;
   ctx.store.append('spec-gate-round', {
     actor: ACTOR,
     round,
-    verdict,
-    findings: result.report.findings.length,
+    verdict: blocking.length > 0 ? 'findings' : 'pass',
+    findings: blocking.length,
+    notes,
   });
   return { directive: null };
 }
@@ -942,6 +977,14 @@ function gateRole(base, sections) {
     "- grounding: spot-check the spec's claims against the repository;",
     "- scope: the spec must not widen past the card's scope boundary;",
     '- encodability: every acceptance criterion must be assertable by a test.',
+    // The severity says where a defect can be settled, not how much it
+    // matters. A document defect is settled in the document; a claim about
+    // the tree is settled by a test that runs, never by prose a human
+    // retypes every round.
+    'Class every finding with "severity":',
+    '- "blocking": the spec is wrong, a clause is not assertable, or the shape it states would force a defective implementation. A blocking finding holds the spec and buys an amendment round.',
+    '- "note": prose the suite can prove against running code — a count of occurrences in the tree, the size of a pattern set, a name the code carries. A note does not hold the spec. It travels to the suite seat, which proves it with a test or reports it as unprovable.',
+    'Never use "note" to pass a finding you cannot defend as suite-provable. When you are unsure which one a finding is, class it "blocking". An omitted severity counts as blocking.',
     'Report "intentConflict" on every pass: {"conflict": false, "detail": ""} when the spec and the card agree.',
     'Set "conflict": true only when the spec and the card\'s intent disagree, and put the disagreement in "detail"; do not list it as a finding. A true value stops the run and waits for a human, so a note, an observation, or the word "none" belongs in the summary instead.',
     sections && sections.length > 0
@@ -966,6 +1009,26 @@ function suiteReportLines(base) {
     `The suite runs with: ${base.suiteArgv.join(' ')}`,
     'In the report, list every suite file and class every expected red.',
     'The suite must be red against the current tree only because the feature is absent.',
+    ...noteLines(base),
+  ];
+}
+
+/**
+ * The spec-gate notes, carried to every suite invocation. A note is an
+ * obligation, not a waiver: the gate found a claim it could not settle by
+ * reading, so the suite settles it against running code. Every suite seat
+ * gets them — author, amendment, strengthening, red-state fix — because each
+ * one runs in fresh context and each one can delete the test that discharges
+ * a note without ever knowing the obligation existed.
+ */
+function noteLines(base) {
+  const notes = base.gateNotes ?? [];
+  if (notes.length === 0) return [];
+  return [
+    'The spec gate raised these notes. A note is not a waiver. Each one names a fact the spec asserts in prose, and you own the proof.',
+    'Prove each note with a test that asserts the fact against running code, and name that test in your summary.',
+    'If a note cannot be proven by a test, report it as unprovable in your summary and give the reason. Leave no note unanswered.',
+    ...notes.map((n) => `- [${n.section}] ${n.finding} (evidence: ${n.evidence})`),
   ];
 }
 
@@ -1039,6 +1102,9 @@ async function laneBase(ctx) {
     cardPath,
     cardText,
     card,
+    // Derived from the ledger like every other position in this lane, so a
+    // restart mid-suite re-reads the same notes instead of losing them.
+    gateNotes: gateNotes(runEvents(ctx)),
     testPaths: config.repo.testPaths,
     suiteArgv: config.commands[story.suiteCommand],
     env: runEnv(ctx, config),

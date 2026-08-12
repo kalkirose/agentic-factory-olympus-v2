@@ -35,12 +35,27 @@ adversary, freeze — gets these concrete shapes:
   the presence of text: a field whose only "no" is emptiness collects prose
   that means "no conflict", and that prose stops the run. The parking round
   stamps nothing, so its findings ride into the amendment beside the conflict
-  answer instead of dying with the round. Findings open after the last counted round park the
-  run (`spec-gate-exhausted`, options `round` and `abandon`). `round` buys
-  exactly one more amendment plus re-check, and the next cap parks again;
-  `abandon` closes the run `failed` with the same reason. The park question
-  carries the round count, the finding count, and the spec path, so the
-  answer needs nothing else.
+  answer instead of dying with the round. Blocking findings open after the
+  last counted round park the run (`spec-gate-exhausted`, options `round` and
+  `abandon`). `round` buys exactly one more amendment plus re-check, and the
+  next cap parks again; `abandon` closes the run `failed` with the same
+  reason. The park question carries the round count, the blocking count and
+  the note count as separate numbers, and the spec path, so the answer needs
+  nothing else.
+- **Two finding channels at the gate.** Every gate finding carries a
+  `severity`. `blocking` means the spec is wrong, a clause is not assertable,
+  or the shape it states would force a defective implementation; it holds the
+  spec and buys an amendment round. `note` means prose the suite can prove
+  against running code — a count of occurrences in the tree, the size of a
+  pattern set, a name the code carries; it does not hold the spec. The field
+  is optional in the schema and an omitted value reads as blocking, so a seat
+  that never learned the field cannot weaken the gate. Only blocking findings
+  reach an amendment brief, on either route into it. Notes are collected
+  across every round from the ledger and delivered to the suite seat — author,
+  amendment, strengthening and red-state fix alike — as obligations: prove the
+  fact with a test and name that test, or report it as unprovable. A note is
+  never a waiver, and the `spec-gate-round` stamp counts the two channels
+  apart.
 - **The spec seat is told what runs the suite.** The birth role block carries
   the suite command and the test paths, the same two facts the suite seat
   gets. The spec writes the test plan, so a spec without them can name a
@@ -103,6 +118,35 @@ adversary, freeze — gets these concrete shapes:
   green on the evaluation path. The daemon's own runtime context must never
   leak into a verdict.
 
+## Why the gate has two finding channels
+
+A gate that parks on any finding parks on every spec. A run stopped that way
+on a gate report whose own summary called its findings none blocking: the
+harness could count findings, but it could not read them. One channel forces
+a choice between two failures. The gate either blocks bad specs and blocks
+good ones with them, or it drops the bar and lets an unassertable clause
+through. Neither is acceptable, so the channel splits.
+
+The split is by the place a defect can be settled, not by how much it
+matters. A wrong claim, a clause no test can assert, a shape that would force
+a defective implementation — each is a defect in the document, and the
+document is the only place to repair it. Those still block, and the cap over
+them is unchanged.
+
+The other kind is a claim about the tree. The spec says the tree holds three
+helpers; the tree holds two. A round of document repair settles that for one
+minute: a human retypes the number, the next commit moves it, and no part of
+the run ever checks it again. A test checks it on every run. So the note goes
+to the seat that writes tests, and the suite proves the fact against running
+code or reports it as unprovable. A fact about the tree is proven by a test,
+never by prose that a human retypes each round.
+
+Nothing is waived and nothing is dropped. The round stamp counts notes apart
+from blocking findings, the ledger holds them, and every suite invocation
+that can delete the test which discharges a note gets the note first. The
+default guards the bar: an omitted severity reads as blocking, so the channel
+opens only when the gate names it.
+
 ## Why the gate parks on exhaustion instead of closing
 
 The original rule closed the run, on the reasoning that a spec which still
@@ -134,6 +178,20 @@ failed run is cheap to relaunch. Deterministic re-runs (the red-state
 command itself) stay unlimited — they judge nothing and cost minutes.
 
 ## Fallback paths
+
+If the note channel becomes an escape hatch — the gate classes a real spec
+defect `note` and the suite cannot prove it — the channel closes and every
+finding blocks again. Trigger: two runs in which a note reaches the suite seat
+and the suite reports that note unprovable. Reversal cost: low —
+`blockingFindings` returns the whole list and the gate role loses four lines.
+
+If a discharged note cannot be told apart from an ignored one, the suite
+report gains a structured field for it (one entry per note, with the test that
+proves it or the reason it is unprovable) and the lane checks the entries
+against the note list. The summary carries that answer today, which keeps the
+suite schema and every fixture unchanged. Trigger: an eval review that cannot
+tell from the report whether a note was discharged. Reversal cost: low —
+one optional field plus one deterministic check in `suiteChecks`.
 
 If accept/fail proves too coarse for unkilled gaps (the human wants another
 amendment round instead), add an `amend-again` option resolving to one more

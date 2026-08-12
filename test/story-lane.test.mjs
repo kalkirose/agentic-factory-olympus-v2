@@ -343,7 +343,10 @@ title: Alpha
           },
     'spec-gate': () => ({
       report: {
-        findings: [{ section: 'Goal', finding: 'ungrounded claim', evidence: 'src/base.mjs' }],
+        findings: [
+          { section: 'Goal', finding: 'ungrounded claim', evidence: 'src/base.mjs' },
+          { section: 'Scope', finding: 'two helpers, not three', evidence: 'src/base.mjs', severity: 'note' },
+        ],
         summary: 'defects',
       },
     }),
@@ -356,6 +359,8 @@ title: Alpha
   // The cap parks for the owner; abandoning there closes the run.
   const exhausted = await waitParked(fx.paths, runId, 'spec-gate-exhausted');
   assert.ok(exhausted.question.includes('spent 2 rounds'));
+  // The park counts the two channels apart: only the blocking count held it.
+  assert.ok(exhausted.question.includes('blocking findings: 1; notes: 1'));
   assert.deepEqual(exhausted.options, ['round', 'abandon']);
   fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   const events = await waitClosed(fx.paths, runId);
@@ -424,6 +429,112 @@ test('the owner buys one more spec-gate round, and the next cap parks again', as
   // The bought round is an amendment plus a re-check, like any other round.
   assert.ok(fx.calls.some((c) => c.label === 'spec-birth-3'));
   assert.ok(fx.calls.some((c) => c.label === 'spec-gate-3'));
+});
+
+test('blocking findings hold the spec; notes pass it and reach the suite seat', async (t) => {
+  const seats = {
+    'spec-birth': ({ prompt }) =>
+      prompt.includes('Amend the born spec')
+        ? { report: { amendedSections: ['Goal'], summary: 'amended' } }
+        : {
+            files: { [specPathFrom(prompt)]: '# Spec\n\nf(x) returns 2*x.\n' },
+            report: { outcome: 'spec-born', summary: 'born' },
+          },
+    'spec-gate': ({ label }) =>
+      label === 'spec-gate-1'
+        ? {
+            report: {
+              findings: [
+                // No severity at all: a seat that never learned the field
+                // cannot weaken the gate, so this one blocks.
+                { section: 'Goal', finding: 'ungrounded claim', evidence: 'src/base.mjs' },
+                {
+                  section: 'Acceptance',
+                  finding: 'criterion 3 is not assertable',
+                  evidence: 'spec section 3',
+                  severity: 'blocking',
+                },
+                {
+                  section: 'Scope',
+                  finding: 'the spec says three helpers; the tree carries two',
+                  evidence: 'src/base.mjs',
+                  severity: 'note',
+                },
+              ],
+              summary: 'two defects and one count',
+            },
+          }
+        : {
+            report: {
+              findings: [
+                {
+                  section: 'Scope',
+                  finding: 'the pattern set has four members',
+                  evidence: 'src/base.mjs',
+                  severity: 'note',
+                },
+              ],
+              summary: 'none blocking',
+            },
+          },
+    suite: () => ({
+      files: { 'tests/feature.test.mjs': STRONG_TEST },
+      report: {
+        suiteFiles: ['tests/feature.test.mjs'],
+        reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        summary: 'authored; both counts asserted',
+      },
+    }),
+    adversary: ({ label }) => {
+      const wave = Number(/-w(\d+)$/.exec(label)[1]);
+      if (wave === 1) {
+        return {
+          files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
+          report: { approach: 'stub', wrongness: 'f returns 0' },
+        };
+      }
+      if (wave === 2) return { report: { approach: 'absent', wrongness: 'no implementation' } };
+      return {
+        files: { 'src/feature.mjs': 'export const f = (x) => x;\n' },
+        report: { approach: 'identity', wrongness: 'f returns x' },
+      };
+    },
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!events.some((e) => e.event === 'park'));
+  // Round 1 blocks on two findings and counts the note apart; round 2 carries
+  // a note only, so the gate passes the spec instead of spending the cap.
+  const rounds = events.filter((e) => e.event === 'spec-gate-round');
+  assert.deepEqual(
+    rounds.map((e) => [e.round, e.verdict, e.findings, e.notes]),
+    [
+      [1, 'findings', 2, 1],
+      [2, 'pass', 0, 1],
+    ],
+  );
+  // The amendment brief carries the blocking findings and nothing else: a
+  // note is never settled by editing the document.
+  const amend = fx.calls.find((c) => c.label === 'spec-birth-2');
+  assert.ok(amend.prompt.includes('ungrounded claim'));
+  assert.ok(amend.prompt.includes('criterion 3 is not assertable'));
+  assert.ok(!amend.prompt.includes('three helpers'));
+  // Every note from every round reaches the suite seat, in order, as an
+  // obligation to prove against running code.
+  const suite = fx.calls.find((c) => c.label === 'suite-1');
+  assert.ok(suite.prompt.includes('A note is not a waiver'));
+  assert.ok(suite.prompt.includes('the spec says three helpers; the tree carries two'));
+  assert.ok(suite.prompt.includes('the pattern set has four members'));
+  assert.ok(
+    suite.prompt.indexOf('three helpers') < suite.prompt.indexOf('four members'),
+    'notes reached the suite seat out of order',
+  );
+  // The suite never sees a blocking finding: that one was fixed in the spec.
+  assert.ok(!suite.prompt.includes('criterion 3 is not assertable'));
+  const freeze = events.find((e) => e.event === 'freeze');
+  assert.equal(freeze.killCount, 3);
 });
 
 test('a grounding conflict parks spec birth; a bad red class takes one corrective round', async (t) => {

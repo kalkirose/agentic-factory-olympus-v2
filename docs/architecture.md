@@ -129,7 +129,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - **Spec gate**: one fresh-context round on the born spec (grounding
   spot-checks, scope against the card, AC encodability), evidence-cited. The
   birth seat amends; the gate re-checks amended sections only. Cap 2 rounds.
-  An intent conflict escalates instead of burning a round.
+  An intent conflict escalates instead of burning a round. Findings carry a
+  severity: blocking findings hold the spec; notes do not, and travel to the
+  suite seat as obligations to prove against running code. An omitted
+  severity is blocking.
 - **Adversary**: fixed 3 waves of throwaway wrong implementations, all
   evaluated to verdict, in disposable worktrees. A survivor is a demonstrated
   suite gap: one targeted amendment round (a killing test per survivor), then
