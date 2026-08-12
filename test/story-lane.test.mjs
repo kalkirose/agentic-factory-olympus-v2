@@ -508,12 +508,21 @@ test('an intent conflict never burns a round; a seat crash closes the run failed
       label === 'spec-gate-1'
         ? {
             report: {
-              findings: [],
+              findings: [
+                { section: 'Goal', finding: 'ungrounded claim', evidence: 'src/base.mjs' },
+              ],
               summary: 'conflict',
-              intentConflict: 'The spec drops the card constraint.',
+              intentConflict: { conflict: true, detail: 'The spec drops the card constraint.' },
             },
           }
-        : { report: { findings: [], summary: 'clean' } },
+        : {
+            report: {
+              findings: [],
+              summary: 'clean',
+              // Prose that means "no conflict" must not park the run.
+              intentConflict: { conflict: false, detail: 'None on intent; the card is honored.' },
+            },
+          },
     suite: () => ({ exitCode: 3 }),
   };
   const fx = storyFixture(t, { seats });
@@ -531,6 +540,8 @@ test('an intent conflict never burns a round; a seat crash closes the run failed
   // conflict burned no round from the cap of two.
   const amend = fx.calls.find((c) => c.label === 'spec-birth-2');
   assert.ok(amend.prompt.includes('Keep the card constraint'));
+  // The parking round stamps nothing, so its findings ride the conflict brief.
+  assert.ok(amend.prompt.includes('ungrounded claim'));
   const rounds = events.filter((e) => e.event === 'spec-gate-round');
   assert.deepEqual(
     rounds.map((e) => [e.round, e.verdict]),

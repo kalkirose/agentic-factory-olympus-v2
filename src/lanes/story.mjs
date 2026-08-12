@@ -112,9 +112,21 @@ export const SPEC_GATE_SCHEMA = {
         required: ['section', 'finding', 'evidence'],
       },
     },
-    intentConflict: { type: 'string' },
+    // A conflict says so with a boolean. A field whose only "no" is emptiness
+    // gets prose that means "no conflict" and parks the run for a human.
+    intentConflict: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        conflict: { type: 'boolean' },
+        detail: { type: 'string' },
+      },
+      required: ['conflict', 'detail'],
+    },
     summary: { type: 'string' },
   },
+  // `intentConflict` stays optional: an absent field is no conflict, so a seat
+  // that omits it cannot park the run by accident.
   required: ['findings', 'summary'],
 };
 
@@ -318,7 +330,15 @@ async function specGate(ctx) {
     // the conflict never burns a counted round.
     const conflict = answeredPark(events, 'intent-conflict');
     if (conflict?.answer && !seatReportAfter(events, 'spec-birth', conflict.answer.seq)) {
-      const amend = await amendSpec(ctx, base, conflictBrief(conflict));
+      // The parking round stamps nothing, so its findings have no other route
+      // into the amendment. They travel with the conflict answer or they die.
+      const parked = readJson(lastSeatReportEvent(events, 'spec-gate').path);
+      const findings = parked?.findings ?? [];
+      const brief =
+        findings.length > 0
+          ? `${conflictBrief(conflict)}\n${findingsBrief(findings)}`
+          : conflictBrief(conflict);
+      const amend = await amendSpec(ctx, base, brief);
       if (!amend.ok) return seatFail('spec-birth', amend);
       continue;
     }
@@ -375,10 +395,10 @@ async function gateRound(ctx, base, { round, sections }) {
   });
   if (!result.ok) return { directive: seatFail('spec-gate', result) };
   const conflict = result.report.intentConflict;
-  if (typeof conflict === 'string' && conflict.trim().length > 0) {
+  if (conflict?.conflict === true) {
     return {
       directive: parkDirective('intent-conflict', {
-        question: conflict.trim(),
+        question: conflict.detail?.trim() || result.report.summary,
         refs: [base.cardPath],
       }),
     };
@@ -922,7 +942,8 @@ function gateRole(base, sections) {
     "- grounding: spot-check the spec's claims against the repository;",
     "- scope: the spec must not widen past the card's scope boundary;",
     '- encodability: every acceptance criterion must be assertable by a test.',
-    'If the spec and the card\'s intent disagree, put the disagreement in "intentConflict"; do not list it as a finding.',
+    'Report "intentConflict" on every pass: {"conflict": false, "detail": ""} when the spec and the card agree.',
+    'Set "conflict": true only when the spec and the card\'s intent disagree, and put the disagreement in "detail"; do not list it as a finding. A true value stops the run and waits for a human, so a note, an observation, or the word "none" belongs in the summary instead.',
     sections && sections.length > 0
       ? `Re-check only these amended sections: ${sections.join('; ')}`
       : 'Review the whole spec.',

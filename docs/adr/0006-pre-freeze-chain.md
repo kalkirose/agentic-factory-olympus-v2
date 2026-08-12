@@ -31,7 +31,11 @@ adversary, freeze — gets these concrete shapes:
   authority: round 1 reviews the whole spec; the birth seat amends; round 2
   re-checks the amended sections only. An intent conflict stamps no round —
   it parks, the answer directs one amendment, and the counted ladder resumes
-  with its budget intact. Findings open after the last counted round park the
+  with its budget intact. The conflict is a boolean in the seat report, never
+  the presence of text: a field whose only "no" is emptiness collects prose
+  that means "no conflict", and that prose stops the run. The parking round
+  stamps nothing, so its findings ride into the amendment beside the conflict
+  answer instead of dying with the round. Findings open after the last counted round park the
   run (`spec-gate-exhausted`, options `round` and `abandon`). `round` buys
   exactly one more amendment plus re-check, and the next cap parks again;
   `abandon` closes the run `failed` with the same reason. The park question
