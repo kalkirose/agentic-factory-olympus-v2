@@ -112,6 +112,7 @@ export const PARK_TYPES = new Set([
   'open-decisions', // open decisions at build start
   'grounding-conflict', // spec birth
   'intent-conflict', // spec gate
+  'spec-gate-exhausted', // spec gate, counted rounds spent
   'unkilled-gap-survivor', // adversary survivor without a killing test
   'second-zero-kill', // second 0/N adversary round
   'second-stall', // response ladder

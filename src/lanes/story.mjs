@@ -277,7 +277,36 @@ async function specBirth(ctx) {
   return { next: 'spec-gate' };
 }
 
-// -- spec gate (seat, cap 2 counted rounds) ----------------------------------
+// -- spec gate (seat, 2 counted rounds, then the owner) ----------------------
+
+// Counted rounds the gate runs on its own authority. Beyond it the run parks.
+const SPEC_GATE_ROUNDS = 2;
+
+/** Extra rounds the owner bought, one per exhaustion park answered "round". */
+function grantedRounds(events) {
+  let granted = 0;
+  for (const e of events) {
+    if (e.event !== 'park' || e.type !== 'spec-gate-exhausted') continue;
+    const answer = events.find((a) => a.event === 'answer' && a.parkSeq === e.seq);
+    if (answer?.option === 'round') granted++;
+  }
+  return granted;
+}
+
+/**
+ * The exhaustion park raised after a given round, with its answer. Keyed on
+ * the round rather than on the type alone: a bought round is spent, so the
+ * next cap must ask again instead of reading the answer that bought it.
+ */
+function exhaustionPark(events, afterSeq) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.event !== 'park' || e.type !== 'spec-gate-exhausted' || e.seq <= afterSeq) continue;
+    const answer = events.slice(i + 1).find((a) => a.event === 'answer' && a.parkSeq === e.seq);
+    return { park: e, answer: answer ?? null };
+  }
+  return null;
+}
 
 async function specGate(ctx) {
   const base = await laneBase(ctx);
@@ -299,10 +328,26 @@ async function specGate(ctx) {
       if (r.directive) return r.directive;
       continue;
     }
-    if (rounds.length >= 2) {
-      return { close: { state: 'failed', reason: 'spec-gate-exhausted' } };
+    // The cap is where the human enters, not where the spec dies. An
+    // exhausted gate holds a spec that is a known list of findings away from
+    // done, so the owner buys another round or abandons it deliberately.
+    if (rounds.length >= SPEC_GATE_ROUNDS + grantedRounds(events)) {
+      const asked = exhaustionPark(events, last.seq);
+      if (!asked) {
+        return parkDirective('spec-gate-exhausted', {
+          question:
+            `The spec gate spent ${rounds.length} rounds. The last one found ` +
+            `${last.findings} findings. The spec stands at ${base.specPath}. ` +
+            'Answer "round" for one more amendment and re-check, or "abandon" to close the run.',
+          options: ['round', 'abandon'],
+          refs: [base.cardPath],
+        });
+      }
+      if (asked.answer?.option !== 'round') {
+        return { close: { state: 'failed', reason: 'spec-gate-exhausted' } };
+      }
     }
-    // One counted round with findings open: the birth seat amends, then the
+    // A counted round with findings open: the birth seat amends, then the
     // gate re-checks the amended sections only.
     const amendReport = seatReportAfter(events, 'spec-birth', last.seq);
     if (!amendReport) {
@@ -312,7 +357,7 @@ async function specGate(ctx) {
       continue;
     }
     const sections = readJson(amendReport.path)?.amendedSections ?? [];
-    const r = await gateRound(ctx, base, { round: 2, sections });
+    const r = await gateRound(ctx, base, { round: rounds.length + 1, sections });
     if (r.directive) return r.directive;
   }
 }
@@ -823,6 +868,10 @@ function birthRole(base, resolved) {
     'Ground every claim in the repository as it stands; cite file paths for grounding claims.',
     `Write the spec as markdown to this absolute path: ${base.specPath}`,
     "Stay inside the card's scope boundary. Encode every acceptance criterion so a test can assert it.",
+    // The spec writes the test plan, so it needs the two facts that decide
+    // where a test can live and what will run it. Without them a plan can
+    // name a runner the suite seat is not allowed to reach.
+    ...suiteFacts(base),
     'If the repository state conflicts with the card\'s intent, do not author around the conflict: set outcome "grounding-conflict" and describe the conflict.',
     'Otherwise set outcome "spec-born".',
   ];
@@ -878,6 +927,16 @@ function gateRole(base, sections) {
       ? `Re-check only these amended sections: ${sections.join('; ')}`
       : 'Review the whole spec.',
   ].join('\n');
+}
+
+/** The two facts that bound any test plan: what runs the suite, and where a
+ * test file may live. The spec seat and the suite seat both need them. */
+function suiteFacts(base) {
+  return [
+    `The acceptance suite runs with: ${base.suiteArgv.join(' ')}`,
+    `Suite files live only under: ${base.testPaths.join(', ')}`,
+    'Every clause the suite asserts must be reachable by that command. A test plan that names a runner outside it cannot be authored.',
+  ];
 }
 
 function suiteReportLines(base) {

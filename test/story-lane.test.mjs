@@ -209,10 +209,15 @@ async function waitClosed(paths, runId) {
   return readEvents(archivedRunLedgerPath(paths, runId));
 }
 
-function waitParked(paths, runId, type) {
+function waitParked(paths, runId, type, nth = 1) {
   return waitFor(
-    () => readEvents(runLedgerPath(paths, runId)).find((e) => e.event === 'park' && e.type === type),
-    { label: `park ${type}`, attempts: 400, intervalMs: 100 },
+    () => {
+      const parks = readEvents(runLedgerPath(paths, runId)).filter(
+        (e) => e.event === 'park' && e.type === type,
+      );
+      return parks.length >= nth ? parks[nth - 1] : undefined;
+    },
+    { label: `park ${type} #${nth}`, attempts: 400, intervalMs: 100 },
   );
 }
 
@@ -348,6 +353,11 @@ title: Alpha
   const park = await waitParked(fx.paths, runId, 'open-decisions');
   assert.ok(park.question.includes('Pick the rounding mode'));
   fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'round half up' });
+  // The cap parks for the owner; abandoning there closes the run.
+  const exhausted = await waitParked(fx.paths, runId, 'spec-gate-exhausted');
+  assert.ok(exhausted.question.includes('spent 2 rounds'));
+  assert.deepEqual(exhausted.options, ['round', 'abandon']);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   const events = await waitClosed(fx.paths, runId);
   const closed = events.find((e) => e.event === 'run-closed');
   assert.equal(closed.state, 'failed');
@@ -356,6 +366,10 @@ title: Alpha
   const birth = fx.calls.find((c) => c.label === 'spec-birth-1');
   assert.ok(birth.prompt.includes('Decisions already made'));
   assert.ok(birth.prompt.includes('round half up'));
+  // The spec seat writes the test plan, so it is told what runs the suite and
+  // where a test file may live.
+  assert.ok(birth.prompt.includes('The acceptance suite runs with: node --test tests/*.test.mjs'));
+  assert.ok(birth.prompt.includes('Suite files live only under: tests'));
   // Two counted rounds, the second scoped to the amended sections.
   const rounds = events.filter((e) => e.event === 'spec-gate-round');
   assert.deepEqual(
@@ -369,6 +383,47 @@ title: Alpha
   assert.ok(amend.prompt.includes('ungrounded claim'));
   const recheck = fx.calls.find((c) => c.label === 'spec-gate-2');
   assert.ok(recheck.prompt.includes('Re-check only these amended sections: Goal'));
+});
+
+test('the owner buys one more spec-gate round, and the next cap parks again', async (t) => {
+  const seats = {
+    'spec-birth': ({ prompt }) =>
+      prompt.includes('Amend the born spec')
+        ? { report: { amendedSections: ['Goal'], summary: 'amended' } }
+        : {
+            files: { [specPathFrom(prompt)]: '# Spec\n' },
+            report: { outcome: 'spec-born', summary: 'born' },
+          },
+    'spec-gate': () => ({
+      report: {
+        findings: [{ section: 'Goal', finding: 'still ungrounded', evidence: 'src/base.mjs' }],
+        summary: 'defects',
+      },
+    }),
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const first = await waitParked(fx.paths, runId, 'spec-gate-exhausted');
+  assert.ok(first.question.includes('spent 2 rounds'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'round' });
+  // The bought round runs, and the cap moves by exactly one.
+  const second = await waitParked(fx.paths, runId, 'spec-gate-exhausted', 2);
+  assert.ok(second.question.includes('spent 3 rounds'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').reason, 'spec-gate-exhausted');
+  const rounds = events.filter((e) => e.event === 'spec-gate-round');
+  assert.deepEqual(
+    rounds.map((e) => [e.round, e.verdict]),
+    [
+      [1, 'findings'],
+      [2, 'findings'],
+      [3, 'findings'],
+    ],
+  );
+  // The bought round is an amendment plus a re-check, like any other round.
+  assert.ok(fx.calls.some((c) => c.label === 'spec-birth-3'));
+  assert.ok(fx.calls.some((c) => c.label === 'spec-gate-3'));
 });
 
 test('a grounding conflict parks spec birth; a bad red class takes one corrective round', async (t) => {

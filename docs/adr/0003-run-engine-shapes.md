@@ -38,7 +38,7 @@ The run engine from the locked design gets these concrete shapes:
   name an offered option or carry answer text. The `answer` stamp carries
   who (actor) and when (ts); `resume` re-runs the parked stage with the
   answer in context.
-- **Park catalog as code.** The eight park types live in the closed
+- **Park catalog as code.** The nine park types live in the closed
   registry beside the event sets. An off-catalog park is a liveness
   violation, not a new touchpoint.
 

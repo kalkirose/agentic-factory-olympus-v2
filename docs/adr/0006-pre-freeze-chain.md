@@ -27,12 +27,20 @@ adversary, freeze — gets these concrete shapes:
   `spec-born` or `grounding-conflict`. A valid report whose spec file is
   missing or empty is a seat contract breach (`artifact-missing`), not a
   park. The spec archives with the run and is never written back.
-- **Spec-gate accounting.** Cap 2 counted rounds: round 1 reviews the whole
-  spec; the birth seat amends; round 2 re-checks the amended sections only.
-  An intent conflict stamps no round — it parks, the answer directs one
-  amendment, and the counted ladder resumes with its budget intact. Findings
-  open after round 2 close the run `failed` (`spec-gate-exhausted`); the
-  relaunched run births a fresh spec, so repair-in-place buys nothing.
+- **Spec-gate accounting.** Two counted rounds run on the gate's own
+  authority: round 1 reviews the whole spec; the birth seat amends; round 2
+  re-checks the amended sections only. An intent conflict stamps no round —
+  it parks, the answer directs one amendment, and the counted ladder resumes
+  with its budget intact. Findings open after the last counted round park the
+  run (`spec-gate-exhausted`, options `round` and `abandon`). `round` buys
+  exactly one more amendment plus re-check, and the next cap parks again;
+  `abandon` closes the run `failed` with the same reason. The park question
+  carries the round count, the finding count, and the spec path, so the
+  answer needs nothing else.
+- **The spec seat is told what runs the suite.** The birth role block carries
+  the suite command and the test paths, the same two facts the suite seat
+  gets. The spec writes the test plan, so a spec without them can name a
+  runner the suite seat is not allowed to reach.
 - **Lane-level contract loop.** A deterministic defect in a seat's work
   product — a change outside the test paths, a declared suite file that does
   not exist, an expected red not classed `feature-absence`, a survivor with
@@ -91,13 +99,26 @@ adversary, freeze — gets these concrete shapes:
   green on the evaluation path. The daemon's own runtime context must never
   leak into a verdict.
 
-## Why the gate closes on exhaustion instead of parking
+## Why the gate parks on exhaustion instead of closing
 
-The touchpoint catalog is closed at eight park events, and cap-2 exhaustion
-is not one of them. A spec that still fails its gate after one amendment is
-a birth defect; the cheap route is a fresh birth on relaunch, not a human
-repairing a bad spec through a queue. The close state and reason are
-stamped, so the pattern is visible if it recurs.
+The original rule closed the run, on the reasoning that a spec which still
+fails after one amendment is a birth defect and a fresh birth is cheaper than
+human repair. The first real story disproved the premise. The gate had
+verified the grounding of a 741-line spec across four passes, its own summary
+called that grounding strong, and the run closed with a list of five known
+findings and about $21 of seat work in it. A fresh birth does not inherit any
+of that: it starts from the card and re-derives everything, including the
+defects the gate already named.
+
+So exhaustion is a decision, not a defect. The human knows what a relaunch
+costs and what the last report says; the machine knows neither. The park
+carries the round count, the finding count, and the spec path, and offers
+`round` or `abandon`. It frees the slot like any other park.
+
+The cap still holds. `round` grants exactly one more round, counted by the
+answered parks themselves, so the ledger is the only state and a restart
+replays it. Nothing is unbounded: every extra round costs the owner an
+explicit answer.
 
 ## Why suite-defect fixes are capped pre-freeze
 
@@ -115,10 +136,11 @@ amendment round instead), add an `amend-again` option resolving to one more
 amendment cycle. Trigger: gap parks answered `fail` where a retry was
 wanted. Reversal cost: moderate — per-round amendment bookkeeping.
 
-If closing on spec-gate exhaustion churns relaunches on the same card,
-convert the exhaustion to a park by map-level decision (a ninth catalog
-entry). Trigger: repeated `spec-gate-exhausted` closes on one card.
-Reversal cost: low — the close directive becomes a park directive.
+If the exhaustion park costs more human attention than it saves — the owner
+answers `abandon` nearly every time, or the parks queue up unanswered — the
+directive returns to a close. Trigger: three consecutive exhaustion parks
+answered `abandon`. Reversal cost: low — the park directive becomes a close
+directive again, and the catalog entry can stay.
 
 If the `--disallowedTools` rule syntax does not hold at the live shakedown,
 the ADR-0005 fallback applies: a deny hook in the seat's settings file. The

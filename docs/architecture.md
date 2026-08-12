@@ -213,10 +213,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 
 ## Escalations and the human
 
-- **Touchpoint catalog** (closed, eight park events): open decisions at build
+- **Touchpoint catalog** (closed, nine park events): open decisions at build
   start; grounding conflict at spec birth; intent conflict at spec gate;
-  unkilled-gap survivor; second 0/3 adversary round; second stall; card
-  invalidated at ship-time sweep; provisioning gate.
+  spec-gate exhaustion; unkilled-gap survivor; second 0/3 adversary round;
+  second stall; card invalidated at ship-time sweep; provisioning gate.
 - Park = stamped escalation record (question, context refs, options) + a
   queued-stream event. The answer is a state change from any console session;
   the daemon validates, stamps who and when, resumes at the parked state.
