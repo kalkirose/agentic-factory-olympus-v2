@@ -427,3 +427,21 @@ never carries a project's specifics.
   they are evidence about a discarded tree — but the stamp names them, and
   escapes never lived in a run ledger. ADR-0014 records the shapes. 282 tests
   green.
+- 2026-08-13 — shakedown defect: three runs died to conditions a human could
+  have cleared in a minute. A suite seat's second invalid report closed a run
+  that held a frozen suite and a full verdict; a triage seat named a persisting
+  finding id that was not in the open prior set, and that bookkeeping mismatch
+  closed a run after a complete dev pass. The two closes discarded more than
+  $150 of sound work. A run now reaches `run-closed` through the ship path, a
+  human kill, or a human answering a park with its abandon option, and nothing
+  else. Every other failure parks under one of three new types — `seat-failure`,
+  `stage-blocked`, `command-error` — each offering `retry` and `abandon`. The
+  park carries the close it replaced (`reason` and `detail`), so `abandon`
+  fails the run on the original reason; an abandon guard at every stage entry
+  applies the answer before the stage spends anything. One answer buys one
+  attempt, counted from the answered parks in the ledger the way the spec-gate
+  cap counts its rounds, and the failure that follows parks again. Judging
+  seats are covered: a triage or verifier seat that fails its own checks parks,
+  because a judge is not the run. A structural test asserts the whole closed
+  set, so a future close path fails CI until it is added deliberately.
+  ADR-0015 records the rule. 294 tests green.

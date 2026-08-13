@@ -13,7 +13,8 @@
 // state, so a daemon restart resumes mid-chain without memory. Deterministic
 // defects in a seat's work product (boundary breaches, wrong red classes,
 // uncovered survivors) take the contract-loop route: one corrective
-// invocation, then seat-failure.
+// invocation, then the seat-failure park — no condition the lane meets on its
+// own closes a run (ADR-0015).
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { runReportPath } from '../daemon/home.mjs';
@@ -46,6 +47,11 @@ import {
   lastSeatReportEvent,
   readJson,
   parkDirective,
+  withAbandonGuard,
+  attemptLimit,
+  failureBrief,
+  blocked,
+  commandError,
   seatFail,
   commandFail,
   underAny,
@@ -70,7 +76,7 @@ export function storyLane({ afterFreeze }) {
   const postFreeze = afterFreeze.stages[0];
   return {
     stages: [...PRE_FREEZE_STAGES, ...afterFreeze.stages],
-    handlers: {
+    handlers: withAbandonGuard({
       readiness: readinessHandler(postFreeze),
       'spec-birth': specBirth,
       'spec-gate': specGate,
@@ -78,7 +84,7 @@ export function storyLane({ afterFreeze }) {
       adversary,
       freeze: freezeHandler(postFreeze),
       ...afterFreeze.handlers,
-    },
+    }),
   };
 }
 
@@ -233,22 +239,29 @@ function readinessHandler(postFreezeStage) {
     }
     const worktree = ctx.payload.worktree;
     if (typeof worktree !== 'string' || !existsSync(worktree)) {
-      return { close: { state: 'failed', reason: 'no-worktree' } };
+      return blocked(ctx, 'no-worktree', `The run worktree is gone: ${worktree ?? '(none)'}`);
     }
     const config = await loadProjectConfig(ctx);
     const story = config.lanes.story;
-    if (!story) return { close: { state: 'failed', reason: 'story-lane-unconfigured' } };
+    if (!story) {
+      return blocked(ctx, 'story-lane-unconfigured', 'The project config names no story lane.');
+    }
     const cardPath = ctx.payload.card;
     if (typeof cardPath !== 'string' || cardPath.length === 0) {
-      return { close: { state: 'failed', reason: 'no-card' } };
+      return blocked(ctx, 'no-card', 'The launch named no intent card.');
     }
     const file = join(worktree, cardPath);
     if (!existsSync(file)) {
-      return { close: { state: 'failed', reason: 'card-missing', card: cardPath } };
+      return blocked(ctx, 'card-missing', `No intent card at ${cardPath}.`, { card: cardPath });
     }
     const { card, errors } = parseIntentCard(readFileSync(file, 'utf8'));
     if (errors.length > 0) {
-      return { close: { state: 'failed', reason: 'card-invalid', errors } };
+      return blocked(
+        ctx,
+        'card-invalid',
+        `The intent card at ${cardPath} does not parse:\n${errors.map((e) => `- ${e}`).join('\n')}`,
+        { errors },
+      );
     }
     if (story.lintCommand) {
       const lint = await runCommand(config.commands[story.lintCommand], {
@@ -256,10 +269,17 @@ function readinessHandler(postFreezeStage) {
         env: runEnv(ctx, config),
       });
       if (lint.code === null) {
-        return { close: { state: 'failed', reason: 'lint-command-error', error: lint.error } };
+        return commandError(
+          ctx,
+          'lint-command-error',
+          `The card lint command could not run: ${lint.error}`,
+          { error: lint.error },
+        );
       }
       if (lint.code !== 0) {
-        return { close: { state: 'failed', reason: 'readiness-lint', output: lint.output } };
+        return blocked(ctx, 'readiness-lint', `The card lint is red:\n${lint.output}`, {
+          output: lint.output,
+        });
       }
     }
     if (card.openDecisions.length > 0) {
@@ -290,23 +310,23 @@ async function inheritFreeze(ctx, nextStage) {
   if (events.some((e) => e.event === 'freeze-inherited')) return { next: nextStage };
   const worktree = ctx.payload.worktree;
   if (typeof worktree !== 'string' || !existsSync(worktree)) {
-    return { close: { state: 'failed', reason: 'no-worktree' } };
+    return blocked(ctx, 'no-worktree', `The run worktree is gone: ${worktree ?? '(none)'}`);
   }
   const config = await loadProjectConfig(ctx);
   const story = config.lanes.story;
-  if (!story) return { close: { state: 'failed', reason: 'story-lane-unconfigured' } };
+  if (!story) {
+    return blocked(ctx, 'story-lane-unconfigured', 'The project config names no story lane.');
+  }
   let prior;
   try {
     prior = readInheritance(ctx.paths, ctx.payload.resumeFrom);
   } catch (error) {
-    return {
-      close: {
-        state: 'failed',
-        reason: 'inherit-invalid',
-        from: ctx.payload.resumeFrom,
-        detail: error.message,
-      },
-    };
+    return blocked(
+      ctx,
+      'inherit-invalid',
+      `The freeze of run ${ctx.payload.resumeFrom} cannot be inherited: ${error.message}`,
+      { from: ctx.payload.resumeFrom, cause: error.message },
+    );
   }
   // The artifacts travel as files: the spec the gate passed, and the record
   // that certified the suite. The record is copied verbatim — it names the run
@@ -321,14 +341,12 @@ async function inheritFreeze(ctx, nextStage) {
   if (typeof base !== 'string') {
     // No base means no way to tell whether the freeze still applies. The
     // launch always records one, so this is a refusal, never a skip.
-    return {
-      close: {
-        state: 'failed',
-        reason: 'inherit-invalid',
-        from: prior.runId,
-        detail: 'the launch recorded no base sha',
-      },
-    };
+    return blocked(
+      ctx,
+      'inherit-invalid',
+      `The freeze of run ${prior.runId} cannot be inherited: the launch recorded no base sha.`,
+      { from: prior.runId, cause: 'the launch recorded no base sha' },
+    );
   }
   if (prior.baseSha !== base) {
     const directive = await advanceBase(ctx, {
@@ -339,7 +357,7 @@ async function inheritFreeze(ctx, nextStage) {
       base,
       from: sha,
     });
-    if (directive.close) return directive;
+    if (!directive.sha) return directive; // a refusal: park or the abandon close
     sha = directive.sha;
   }
   ctx.store.append('freeze-inherited', {
@@ -383,14 +401,14 @@ async function advanceBase(ctx, { worktree, config, story, prior, base, from }) 
   const moved = await changedInRange(worktree, prior.baseSha, base);
   const suiteMoved = moved.filter((file) => underAny(file, testPaths));
   if (suiteMoved.length > 0) {
-    return {
-      close: {
-        state: 'failed',
-        reason: 'inherit-suite-diverged',
-        from: prior.runId,
-        files: suiteMoved,
-      },
-    };
+    return blocked(
+      ctx,
+      'inherit-suite-diverged',
+      `${ctx.payload.defaultBranch ?? 'main'} edited the frozen suite of run ${prior.runId}; ` +
+        'the suite that was proven is not the suite that would run:\n' +
+        suiteMoved.map((f) => `- ${f}`).join('\n'),
+      { from: prior.runId, files: suiteMoved },
+    );
   }
   const defaultBranch = ctx.payload.defaultBranch ?? 'main';
   const merged = await mergeIntoTree(
@@ -400,14 +418,14 @@ async function advanceBase(ctx, { worktree, config, story, prior, base, from }) 
   );
   if (!merged.ok) {
     await abortMerge(worktree).catch(() => {});
-    return {
-      close: {
-        state: 'failed',
-        reason: 'inherit-base-conflict',
-        from: prior.runId,
-        files: merged.conflicts,
-      },
-    };
+    return blocked(
+      ctx,
+      'inherit-base-conflict',
+      `The merge of ${defaultBranch} under the inherited freeze of run ${prior.runId} ` +
+        'conflicts:\n' +
+        merged.conflicts.map((f) => `- ${f}`).join('\n'),
+      { from: prior.runId, files: merged.conflicts },
+    );
   }
   ctx.store.append('branch-update', {
     actor: ACTOR,
@@ -419,13 +437,17 @@ async function advanceBase(ctx, { worktree, config, story, prior, base, from }) 
     cwd: worktree,
     env: runEnv(ctx, config),
   });
-  if (run.code === null) return commandFail(run);
+  if (run.code === null) return commandFail(ctx, run);
   const red = run.code !== 0;
   ctx.store.append('red-state-check', { actor: ACTOR, sha: merged.sha, result: red ? 'red' : 'green' });
   if (!red) {
-    return {
-      close: { state: 'failed', reason: 'inherit-red-state-green', from: prior.runId, sha: merged.sha },
-    };
+    return blocked(
+      ctx,
+      'inherit-red-state-green',
+      `The frozen suite of run ${prior.runId} is green on the advanced base (${merged.sha}); ` +
+        'red state is the freeze\'s core claim.',
+      { from: prior.runId, sha: merged.sha },
+    );
   }
   return { sha: merged.sha };
 }
@@ -445,7 +467,7 @@ async function specBirth(ctx) {
     cwd: base.worktree,
     env: base.env,
   });
-  if (!result.ok) return seatFail('spec-birth', result);
+  if (!result.ok) return seatFail(ctx, 'spec-birth', result);
   if (result.report.outcome === 'grounding-conflict') {
     return parkDirective('grounding-conflict', {
       question: result.report.conflict?.trim() || result.report.summary,
@@ -459,9 +481,7 @@ async function specBirth(ctx) {
       reason: 'artifact-missing',
       path: base.specPath,
     });
-    return {
-      close: { state: 'failed', reason: 'seat-failure', seat: 'spec-birth', cause: 'artifact-missing' },
-    };
+    return seatFail(ctx, 'spec-birth', { reason: 'artifact-missing' });
   }
   ctx.store.append('spec-born', {
     actor: ACTOR,
@@ -539,7 +559,7 @@ async function specGate(ctx) {
           ? `${conflictBrief(conflict)}\n${findingsBrief(findings)}`
           : conflictBrief(conflict);
       const amend = await amendSpec(ctx, base, brief);
-      if (!amend.ok) return seatFail('spec-birth', amend);
+      if (!amend.ok) return seatFail(ctx, 'spec-birth', amend);
       continue;
     }
     if (last?.verdict === 'pass') return { next: 'suite' };
@@ -578,7 +598,7 @@ async function specGate(ctx) {
     if (!amendReport) {
       const report = readJson(lastSeatReportEvent(events, 'spec-gate').path);
       const amend = await amendSpec(ctx, base, findingsBrief(blockingFindings(report?.findings)));
-      if (!amend.ok) return seatFail('spec-birth', amend);
+      if (!amend.ok) return seatFail(ctx, 'spec-birth', amend);
       continue;
     }
     const sections = readJson(amendReport.path)?.amendedSections ?? [];
@@ -598,7 +618,7 @@ async function gateRound(ctx, base, { round, sections }) {
     cwd: base.worktree,
     env: base.env,
   });
-  if (!result.ok) return { directive: seatFail('spec-gate', result) };
+  if (!result.ok) return { directive: seatFail(ctx, 'spec-gate', result) };
   const conflict = result.report.intentConflict;
   if (conflict?.conflict === true) {
     return {
@@ -657,10 +677,13 @@ async function suiteStage(ctx) {
 
 /**
  * The lane-level contract loop for the suite seat: one corrective invocation
- * on a deterministic defect in the work product, then seat-failure.
+ * on a deterministic defect in the work product, then the seat-failure park.
+ * A retry bought at that park is one invocation carrying the defect list, not
+ * a second corrective round.
  */
 async function suiteSeatWithChecks(ctx, base, { schema, buildRole, checks }) {
-  let brief = null;
+  const limit = attemptLimit(runEvents(ctx), 'suite');
+  let brief = limit === 1 ? failureBrief(runEvents(ctx), 'suite') : null;
   for (let attempt = 1; ; attempt++) {
     const events = runEvents(ctx);
     const n = invocationCount(events, 'suite') + 1;
@@ -672,14 +695,12 @@ async function suiteSeatWithChecks(ctx, base, { schema, buildRole, checks }) {
       cwd: base.worktree,
       env: base.env,
     });
-    if (!result.ok) return { fail: seatFail('suite', result) };
+    if (!result.ok) return { fail: seatFail(ctx, 'suite', result) };
     const defects = await checks(result.report);
     if (defects.length === 0) return { report: result.report };
-    if (attempt === 2) {
+    if (attempt >= limit) {
       ctx.store.append('seat-failure', { actor: ACTOR, seat: 'suite', reason: 'suite-defect', defects });
-      return {
-        fail: { close: { state: 'failed', reason: 'seat-failure', seat: 'suite', cause: 'suite-defect' } },
-      };
+      return { fail: seatFail(ctx, 'suite', { reason: 'suite-defect' }) };
     }
     brief = defects;
   }
@@ -883,12 +904,12 @@ async function runWave(ctx, base, clone, { round, wave }) {
     env: base.env,
     denyTools: testEditDenyRules(base.testPaths),
   });
-  if (!result.ok) return seatFail('adversary', result);
+  if (!result.ok) return seatFail(ctx, 'adversary', result);
   // Restore the suite from the sha before evaluation — a tampered test file
   // is structurally void, not detected.
   await restorePaths(tree, sha, base.testPaths);
   const run = await runCommand(base.suiteArgv, { cwd: tree, env: base.env });
-  if (run.code === null) return commandFail(run);
+  if (run.code === null) return commandFail(ctx, run);
   const killed = run.code !== 0;
   ctx.store.append('adversary-wave', {
     actor: ACTOR,
@@ -906,11 +927,17 @@ async function runWave(ctx, base, clone, { round, wave }) {
 async function rerunWave(ctx, base, clone, { round, wave, sha }) {
   const tree = waveTreePath(ctx, round, wave);
   if (!existsSync(tree)) {
-    return { close: { state: 'failed', reason: 'wave-tree-missing', round, wave } };
+    return blocked(
+      ctx,
+      'wave-tree-missing',
+      `The survivor tree of round ${round} wave ${wave} is gone; the killing test ` +
+        'has nothing to re-run against.',
+      { round, wave },
+    );
   }
   await restorePaths(tree, sha, base.testPaths);
   const run = await runCommand(base.suiteArgv, { cwd: tree, env: base.env });
-  if (run.code === null) return commandFail(run);
+  if (run.code === null) return commandFail(ctx, run);
   const killed = run.code !== 0;
   ctx.store.append('adversary-wave', {
     actor: ACTOR,
@@ -1021,15 +1048,13 @@ function freezeHandler(nextStage) {
     for (let attempt = 1; ; attempt++) {
       const sha = await headSha(base.worktree);
       const run = await runCommand(base.suiteArgv, { cwd: base.worktree, env: base.env });
-      if (run.code === null) return commandFail(run);
+      if (run.code === null) return commandFail(ctx, run);
       const red = run.code !== 0;
       ctx.store.append('red-state-check', { actor: ACTOR, sha, result: red ? 'red' : 'green' });
       if (red) break;
       if (attempt === 2) {
         ctx.store.append('seat-failure', { actor: ACTOR, seat: 'suite', reason: 'red-state-green' });
-        return {
-          close: { state: 'failed', reason: 'seat-failure', seat: 'suite', cause: 'red-state-green' },
-        };
+        return seatFail(ctx, 'suite', { reason: 'red-state-green' });
       }
       const { report, fail } = await suiteSeatWithChecks(ctx, base, {
         schema: SUITE_SCHEMA,

@@ -47,8 +47,11 @@ import {
   runEnv,
   runEvents,
   answeredPark,
+  answeredPath,
   invocationCount,
   parkDirective,
+  withAbandonGuard,
+  blocked,
   underAny,
   briefLines,
   gist,
@@ -101,10 +104,10 @@ export function shipStep({ forgeFor, pollMs = 15000, spawnRepair = null } = {}) 
   if (typeof forgeFor !== 'function') throw new Error('shipStep requires a forgeFor resolver');
   return {
     stages: ['ship', 'close-out'],
-    handlers: {
+    handlers: withAbandonGuard({
       ship: shipHandler({ forgeFor, pollMs }),
       'close-out': closeOutHandler({ forgeFor, pollMs, spawnRepair }),
-    },
+    }),
   };
 }
 
@@ -138,7 +141,13 @@ function shipHandler({ forgeFor, pollMs }) {
       }
       const st = await base.forge.prState(opened.pr);
       if (st.state === 'closed') {
-        return { close: { state: 'failed', reason: 'pr-closed', pr: opened.pr } };
+        return blocked(
+          ctx,
+          'pr-closed',
+          `PR #${opened.pr} was closed without a merge. Re-open it and answer "retry", ` +
+            'or "abandon" to close the run.',
+          { pr: opened.pr },
+        );
       }
       if (st.state === 'merged') {
         await stampMerged(ctx, base, opened, st);
@@ -626,7 +635,9 @@ function closeOutHandler({ forgeFor, pollMs, spawnRepair }) {
   return async function closeOut(ctx) {
     const base = await shipBase(ctx, forgeFor);
     const merged = findLast(runEvents(ctx), 'merged');
-    if (!merged) return { close: { state: 'failed', reason: 'no-merge-record' } };
+    if (!merged) {
+      return blocked(ctx, 'no-merge-record', 'Close-out found no merge record in the ledger.');
+    }
     if (merged.red && !runEvents(ctx).some((e) => e.event === 'red-merge-breach')) {
       await breachFlow(ctx, base, merged, spawnRepair);
     }
@@ -1009,7 +1020,9 @@ async function shipBase(ctx, forgeFor) {
       // The card text is a nicety here; the run id carries the identity.
     }
   }
-  const ticket = ctx.payload.ticket;
+  // The repair lane's ticket may have been corrected in a `stage-blocked`
+  // answer; the ship step names the same spec the verdict judged against.
+  const ticket = answeredPath(runEvents(ctx), 'ticket-missing') ?? ctx.payload.ticket;
   const specRef = cardPath
     ? join(ctx.paths.runs, ctx.runId, 'spec.md')
     : typeof ticket === 'string'

@@ -10,7 +10,17 @@
 // implementation pass; every later cycle of the pass reviews the repair diff
 // with the generalist seat and resolution-checks prior confirmed HIGHs.
 import { runReportPath } from '../daemon/home.mjs';
-import { ACTOR, runEvents, readJson, seatFail, underAny, briefLines, gist } from './shared.mjs';
+import {
+  ACTOR,
+  runEvents,
+  readJson,
+  attemptLimit,
+  failureBrief,
+  seatFail,
+  underAny,
+  briefLines,
+  gist,
+} from './shared.mjs';
 
 export const FURY_SEATS = Object.freeze({
   'fury-spec': ['spec'],
@@ -230,61 +240,58 @@ function stampReviewFinding(ctx, cycle, finding, { advisory }) {
   });
 }
 
-/** One review seat with resume-by-report: a stamped report is never re-run. */
-async function reviewSeat(ctx, { seat, label, schema, roleBlock, cwd, env }) {
+/**
+ * One review seat with resume-by-report: a stamped report is never re-run.
+ * `fresh` opts out of the shortcut for a retry the human bought — that report
+ * is the one the coverage check refused, so replaying it buys nothing.
+ */
+async function reviewSeat(ctx, { seat, label, schema, roleBlock, cwd, env, fresh = false }) {
   const reportPath = runReportPath(ctx.paths, ctx.runId, label);
   const events = runEvents(ctx);
-  const prior = events.find(
-    (e) => e.event === 'seat-report' && e.seat === seat && e.path === reportPath,
-  );
+  const prior = fresh
+    ? null
+    : events.find((e) => e.event === 'seat-report' && e.seat === seat && e.path === reportPath);
   if (prior) {
     const report = readJson(reportPath);
     if (report) return { report };
   }
   const result = await ctx.runSeat({ seat, roleBlock, reportPath, schema, cwd, env });
-  if (!result.ok) return { fail: seatFail(seat, result) };
+  if (!result.ok) return { fail: seatFail(ctx, seat, result) };
   return { report: result.report };
 }
 
 /**
  * The verifier seat over one cycle's items: confirm-or-refute for new HIGHs,
  * resolved-or-unresolved for prior confirmed HIGHs. Coverage is a
- * deterministic check — one corrective invocation, then seat-failure.
+ * deterministic check — one corrective invocation, then the seat-failure park.
  */
 async function verifierSeat(ctx, base, { cycle, items }) {
-  let brief = null;
+  const limit = attemptLimit(runEvents(ctx), 'fury-verifier');
+  let brief = limit === 1 ? failureBrief(runEvents(ctx), 'fury-verifier') : null;
   for (let attempt = 1; ; attempt++) {
-    const label = `fury-verifier-c${cycle}${attempt === 2 ? '-r' : ''}`;
+    const corrective = attempt === 2 || limit === 1;
     const outcome = await reviewSeat(ctx, {
       seat: 'fury-verifier',
-      label,
+      label: `fury-verifier-c${cycle}${corrective ? '-r' : ''}`,
       schema: VERIFIER_SCHEMA,
       roleBlock: verifierRole(base, items, brief),
       cwd: base.worktree,
       env: base.env,
+      fresh: limit === 1,
     });
     if (outcome.fail) return outcome;
     const defects = verifierCoverageDefects(items, outcome.report.results);
     if (defects.length === 0) {
       return { results: new Map(outcome.report.results.map((r) => [r.id, r])) };
     }
-    if (attempt === 2) {
+    if (attempt >= limit) {
       ctx.store.append('seat-failure', {
         actor: ACTOR,
         seat: 'fury-verifier',
         reason: 'verifier-coverage',
         defects,
       });
-      return {
-        fail: {
-          close: {
-            state: 'failed',
-            reason: 'seat-failure',
-            seat: 'fury-verifier',
-            cause: 'verifier-coverage',
-          },
-        },
-      };
+      return { fail: seatFail(ctx, 'fury-verifier', { reason: 'verifier-coverage' }) };
     }
     brief = defects;
   }

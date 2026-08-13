@@ -1,6 +1,8 @@
 # ADR-0006: Story-lane pre-freeze chain shapes
 
 Status: accepted (2026-08-10)
+Superseded in part by ADR-0015: a seat-failure parks the run instead of
+closing it, and every readiness refusal parks as well.
 
 ## Decision
 

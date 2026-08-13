@@ -42,6 +42,12 @@ import {
   seatReportAfter,
   readJson,
   parkDirective,
+  withAbandonGuard,
+  attemptLimit,
+  failureBrief,
+  answeredPath,
+  blocked,
+  commandError,
   seatFail,
   underAny,
   briefLines,
@@ -60,11 +66,11 @@ export function postFreeze({ afterVerdict }) {
   requireContinuation(afterVerdict, 'postFreeze');
   return {
     stages: ['implementation', 'verdict', ...afterVerdict.stages],
-    handlers: {
+    handlers: withAbandonGuard({
       implementation: implementationHandler('story'),
       verdict: verdictHandler('story', afterVerdict.stages[0]),
       ...afterVerdict.handlers,
-    },
+    }),
   };
 }
 
@@ -78,11 +84,11 @@ export function repairLane({ afterVerdict }) {
   requireContinuation(afterVerdict, 'repairLane');
   return {
     stages: ['fix', 'verdict', ...afterVerdict.stages],
-    handlers: {
+    handlers: withAbandonGuard({
       fix: implementationHandler('repair'),
       verdict: verdictHandler('repair', afterVerdict.stages[0]),
       ...afterVerdict.handlers,
-    },
+    }),
   };
 }
 
@@ -147,7 +153,7 @@ function implementationHandler(mode) {
       env: base.env,
       ...(mode === 'story' && { denyTools: testEditDenyRules(base.testPaths) }),
     });
-    if (!result.ok) return seatFail('dev', result);
+    if (!result.ok) return seatFail(ctx, 'dev', result);
     // Structural test-edit guarantee: the frozen suite is restored from its
     // sha before the tree is committed or judged.
     if (mode === 'story') await restorePaths(base.worktree, base.suiteSha, base.testPaths);
@@ -213,7 +219,14 @@ async function runCycle(ctx, base, mode, { cycle }) {
   });
   if (spectrum.error) {
     return {
-      directive: { close: { state: 'failed', reason: 'gate-command-error', error: spectrum.error } },
+      directive: commandError(
+        ctx,
+        'gate-command-error',
+        `A Tier-1 gate command could not run: ${spectrum.error}\n` +
+          'Repair the environment, then answer "retry" for one more spectrum, or ' +
+          '"abandon" to close the run.',
+        { error: spectrum.error },
+      ),
     };
   }
   const reds = persistentReds(spectrum.results);
@@ -311,10 +324,14 @@ async function runCycle(ctx, base, mode, { cycle }) {
  * with CI checks as the red layers (`ci:<check>`); the routes stay the same.
  */
 export async function triageStep(ctx, base, { cycle, reds, priorOpen }) {
-  const stamped = runEvents(ctx).filter(
+  const events = runEvents(ctx);
+  const stamped = events.filter(
     (e) => e.event === 'finding' && e.cycle === cycle && e.source === 'triage',
   );
-  if (stamped.length > 0 || triageReportedFor(ctx, cycle)) {
+  // A retry the human bought re-invokes the seat: the stamped report is the
+  // one the checks refused, so replaying it buys nothing.
+  const retrying = attemptLimit(events, 'verdict-triage') === 1;
+  if (stamped.length > 0 || (!retrying && triageReportedFor(ctx, cycle))) {
     // Resumed after the stamp (or after an empty-findings report): rebuild.
     const report = readJson(runReportPath(ctx.paths, ctx.runId, `verdict-triage-c${cycle}`)) ?? {};
     const persisting = new Set(report.persisting ?? []);
@@ -640,7 +657,7 @@ async function runDevSeat(ctx, base, mode, { seat, roleBlock, pass = null, phase
     env: base.env,
     ...(mode === 'story' && { denyTools: testEditDenyRules(base.testPaths) }),
   });
-  if (!result.ok) return { fail: seatFail(seat, result) };
+  if (!result.ok) return { fail: seatFail(ctx, seat, result) };
   if (mode === 'story') {
     await restorePaths(base.worktree, currentSuiteSha(runEvents(ctx)), base.testPaths);
   }
@@ -670,7 +687,7 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
       cwd: base.worktree,
       env: base.env,
     });
-    if (!amend.ok) return { fail: seatFail('spec-birth', amend) };
+    if (!amend.ok) return { fail: seatFail(ctx, 'spec-birth', amend) };
   }
   const { report, fail } = await seatWithChecks(ctx, {
     seat: 'suite',
@@ -730,10 +747,13 @@ function resolveGateIntegrity(ctx, openIds) {
 
 /**
  * The lane-level contract loop: one corrective invocation on a deterministic
- * defect in the work product, then seat-failure.
+ * defect in the work product, then the seat-failure park. It governs judging
+ * seats too — a judge that cannot deliver a usable verdict is not the run
+ * failing, so the human buys the retry or abandons the run.
  */
 async function seatWithChecks(ctx, { seat, label, schema, cwd, env, buildRole, checks }) {
-  let brief = null;
+  const limit = attemptLimit(runEvents(ctx), seat);
+  let brief = limit === 1 ? failureBrief(runEvents(ctx), seat) : null;
   for (let attempt = 1; ; attempt++) {
     const events = runEvents(ctx);
     const n = invocationCount(events, seat) + 1;
@@ -745,16 +765,12 @@ async function seatWithChecks(ctx, { seat, label, schema, cwd, env, buildRole, c
       cwd,
       env,
     });
-    if (!result.ok) return { fail: seatFail(seat, result) };
+    if (!result.ok) return { fail: seatFail(ctx, seat, result) };
     const defects = await checks(result.report);
     if (defects.length === 0) return { report: result.report };
-    if (attempt === 2) {
+    if (attempt >= limit) {
       ctx.store.append('seat-failure', { actor: ACTOR, seat, reason: 'work-product-defect', defects });
-      return {
-        fail: {
-          close: { state: 'failed', reason: 'seat-failure', seat, cause: 'work-product-defect' },
-        },
-      };
+      return { fail: seatFail(ctx, seat, { reason: 'work-product-defect' }) };
     }
     brief = defects;
   }
@@ -871,14 +887,20 @@ async function verdictBase(ctx, mode) {
   const worktree = ctx.payload.worktree;
   const layers = config.gates.tier1;
   if (!Array.isArray(layers) || layers.length === 0) {
-    return { fail: { close: { state: 'failed', reason: 'no-tier1-gates' } } };
+    return {
+      fail: blocked(ctx, 'no-tier1-gates', 'The project config declares no Tier-1 gate layers.'),
+    };
   }
   const events = runEvents(ctx);
   if (mode === 'story') {
     // Either anchor serves: a freeze this run earned, or one it inherited.
     // Both name the suite sha and the pre-implementation tree.
     const freeze = freezeAnchor(events);
-    if (!freeze) return { fail: { close: { state: 'failed', reason: 'no-freeze-record' } } };
+    if (!freeze) {
+      return {
+        fail: blocked(ctx, 'no-freeze-record', 'The run holds no freeze record to judge against.'),
+      };
+    }
     return {
       config,
       worktree,
@@ -894,12 +916,22 @@ async function verdictBase(ctx, mode) {
   }
   // The intake ticket is the spec. A repo-relative path names a committed
   // ticket; an absolute path names a daemon-home ticket (red-merge repair
-  // spawns write these — the defect is not in the tree it escaped from).
-  const ticket = ctx.payload.ticket;
+  // spawns write these — the defect is not in the tree it escaped from). A
+  // `stage-blocked` answer may hand over a corrected absolute path.
+  const ticket = answeredPath(events, 'ticket-missing') ?? ctx.payload.ticket;
   const ticketPath =
     typeof ticket === 'string' ? (isAbsolute(ticket) ? ticket : join(worktree, ticket)) : null;
   if (!ticketPath || !existsSync(ticketPath)) {
-    return { fail: { close: { state: 'failed', reason: 'ticket-missing', ticket } } };
+    return {
+      fail: blocked(
+        ctx,
+        'ticket-missing',
+        `No intake ticket at ${ticketPath ?? '(no path)'}. Answer "retry" after placing ` +
+          'the ticket, answer with a corrected absolute ticket path, or "abandon" to ' +
+          'close the run.',
+        { ...(typeof ticket === 'string' && { ticket }) },
+      ),
+    };
   }
   return {
     config,

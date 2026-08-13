@@ -121,7 +121,15 @@ export const PARK_TYPES = new Set([
   'second-stall', // response ladder
   'card-invalidated', // ship-time card sweep
   'provisioning-gate',
+  // Terminal-state discipline (ADR-0015): a recoverable failure parks with
+  // `retry` / `abandon` instead of closing the run.
+  'seat-failure', // a seat work product past its corrective invocation
+  'stage-blocked', // a stage precondition the run cannot settle itself
+  'command-error', // a configured command could not run at all
 ]);
 
-// Terminal run states. Every one of them stamps `run-closed`.
+// Terminal run states. Every one of them stamps `run-closed`. A run reaches
+// one of them through the ship path, a human kill, or a human answering a
+// park with its abandon option — never through a condition the run met on
+// its own (ADR-0015).
 export const CLOSE_STATES = new Set(['shipped', 'failed', 'killed']);

@@ -829,6 +829,73 @@ test('the repair cap exhausts into a stall and the fresh pass', async (t) => {
   assert.equal(renders[4].verdict, 'green');
 });
 
+test('a triage seat that fails its own checks parks the run; a judge is not the run', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': BAD_FEATURE }, report: { summary: 'implemented' } }),
+    // Names a layer that is not a persistent red, and covers none that is.
+    'verdict-triage': () => ({
+      report: {
+        findings: [
+          { class: 'code-defect', layers: ['ghost'], summary: 'broken ghost', evidence: 'none' },
+        ],
+        persisting: [],
+        summary: 'triaged',
+      },
+    }),
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, { seats, gates: [{ name: 'unit', command: 'suite' }] });
+  const { runId } = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'seat-failure');
+  assert.deepEqual(park.options, ['retry', 'abandon']);
+  assert.equal(park.detail.seat, 'verdict-triage');
+  assert.equal(park.detail.cause, 'work-product-defect');
+  // The corrective invocation ran before the park; the answer buys one more.
+  const triageCalls = () => fx.calls.filter((c) => c.seat === 'verdict-triage').length;
+  assert.equal(triageCalls(), 2);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'retry' });
+  await waitFor(
+    () =>
+      readEvents(runLedgerPath(fx.paths, runId)).filter(
+        (e) => e.event === 'park' && e.type === 'seat-failure',
+      ).length >= 2,
+    { label: 'second seat-failure park', attempts: 600, intervalMs: 100 },
+  );
+  assert.equal(triageCalls(), 3);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const closed = (await waitClosed(fx.paths, runId)).find((e) => e.event === 'run-closed');
+  assert.equal(closed.state, 'failed');
+  assert.equal(closed.reason, 'seat-failure');
+  assert.equal(closed.seat, 'verdict-triage');
+});
+
+test('a missing intake ticket parks, and the answer hands over a corrected path', async (t) => {
+  const seats = {
+    dev: () => ({
+      files: { 'src/g.mjs': 'export const g = (x) => x + 1;\n', 'tests/g.test.mjs': G_TEST },
+      report: { summary: 'fixed with a regression test' },
+    }),
+    'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [{ name: 'unit', command: 'suite' }],
+    commands: { suite: SUITE_CMD },
+  });
+  const { runId } = await fx.launchFromConsole({ lane: 'repair', ticket: 'tickets/gone.md' });
+  const park = await waitParked(fx.paths, runId, 'stage-blocked');
+  assert.equal(park.reason, 'ticket-missing');
+  assert.deepEqual(park.options, ['retry', 'abandon']);
+  assert.ok(!fx.calls.some((c) => c.seat === 'dev'));
+  // The answer carries the ticket itself: an absolute path the daemon holds.
+  const corrected = join(fx.paths.runs, runId, 'ticket.md');
+  writeFileSync(corrected, '## Defect\n\ng(x) is missing; add g(x) = x + 1 with a regression test.\n');
+  fx.daemon.engine.answer({ runId, actor: 'operator', answer: corrected });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(fx.calls.find((c) => c.seat === 'dev').prompt.includes(corrected));
+});
+
 test('a console launch reaches the repair fix seat, which reviews generally and may write tests', async (t) => {
   const seats = {
     dev: () => ({

@@ -1,6 +1,9 @@
 # ADR-0003: Run engine shapes
 
 Status: accepted (2026-08-10)
+Superseded in part by ADR-0015: the park catalog holds twelve types, and
+the close directive is reserved for the ship path, a kill, and an abandoned
+park.
 
 ## Decision
 

@@ -86,7 +86,11 @@ test('a project the instance cannot forge for names its defect', () => {
   );
 });
 
-test('the ship stage resolves its forge per run, from the live config', async () => {
+test('the ship stage resolves its forge per run, from the live config', async (t) => {
+  const home = tempDir();
+  t.after(() => removeDir(home));
+  const paths = scaffoldHome(home);
+  const ctx = { project: 'gamma', runId: 'r1', paths };
   let config = twoProjectConfig();
   let reads = 0;
   const lanes = assembleLanes({
@@ -98,14 +102,14 @@ test('the ship stage resolves its forge per run, from the live config', async ()
   // The stage resolves through the run's project; an instance that holds no
   // such project fails there, before any clone read.
   await assert.rejects(
-    () => lanes.story.handlers.ship({ project: 'gamma' }),
+    () => lanes.story.handlers.ship(ctx),
     /no instance-config entry for project: gamma/,
   );
   assert.equal(reads, 1);
   // A config edit reaches the next resolution: nothing is bound at assembly.
   config = withDefaults({ version: 1, projects: { gamma: { repoUrl: '/srv/repos/gamma.git' } } });
   await assert.rejects(
-    () => lanes.repair.handlers.ship({ project: 'gamma' }),
+    () => lanes.repair.handlers.ship(ctx),
     /project gamma has no GitHub repository/,
   );
   assert.equal(reads, 2);

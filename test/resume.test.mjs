@@ -161,6 +161,23 @@ async function waitClosed(paths, runId) {
   return readEvents(archivedRunLedgerPath(paths, runId));
 }
 
+function waitParked(paths, runId, type) {
+  return waitFor(
+    () =>
+      readEvents(runLedgerPath(paths, runId)).find((e) => e.event === 'park' && e.type === type),
+    { label: `park ${type}`, attempts: 400, intervalMs: 100 },
+  );
+}
+
+/** A refusal parks; the owner abandons it, and the close names the reason. */
+async function abandon(fx, runId) {
+  const park = await waitParked(fx.paths, runId, 'stage-blocked');
+  assert.deepEqual(park.options, ['retry', 'abandon']);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const events = await waitClosed(fx.paths, runId);
+  return { park, events, closed: events.find((e) => e.event === 'run-closed') };
+}
+
 function waitReleased(paths, runId) {
   return waitFor(
     () =>
@@ -415,8 +432,8 @@ test('an advance into the test paths refuses and names the diverged files', asyn
     lane: 'story',
     resumeFrom: PRIOR,
   });
-  const events = await waitClosed(fx.paths, runId);
-  const closed = events.find((e) => e.event === 'run-closed');
+  const { park, events, closed } = await abandon(fx, runId);
+  assert.ok(park.question.includes('tests/other.test.mjs'));
   assert.equal(closed.reason, 'inherit-suite-diverged');
   assert.deepEqual(closed.files, ['tests/other.test.mjs']);
   assert.ok(!events.some((e) => e.event === 'freeze-inherited'));
@@ -434,9 +451,8 @@ test('a base advance that greens the frozen suite refuses', async (t) => {
     lane: 'story',
     resumeFrom: PRIOR,
   });
-  const events = await waitClosed(fx.paths, runId);
+  const { events, closed } = await abandon(fx, runId);
   assert.equal(events.find((e) => e.event === 'red-state-check').result, 'green');
-  const closed = events.find((e) => e.event === 'run-closed');
   assert.equal(closed.reason, 'inherit-red-state-green');
   assert.ok(!events.some((e) => e.event === 'freeze-inherited'));
 });
@@ -454,8 +470,7 @@ test('a merge conflict with the advanced base refuses and names the files', asyn
     lane: 'story',
     resumeFrom: PRIOR,
   });
-  const events = await waitClosed(fx.paths, runId);
-  const closed = events.find((e) => e.event === 'run-closed');
+  const { events, closed } = await abandon(fx, runId);
   assert.equal(closed.reason, 'inherit-base-conflict');
   assert.deepEqual(closed.files, ['src/base.mjs']);
   assert.ok(!events.some((e) => e.event === 'freeze-inherited'));

@@ -606,7 +606,7 @@ test('a grounding conflict parks spec birth; a bad red class takes one correctiv
   assert.equal(freeze.dispositions, 0);
 });
 
-test('an intent conflict never burns a round; a seat crash closes the run failed', async (t) => {
+test('an intent conflict never burns a round; a seat crash parks, and abandon closes', async (t) => {
   const seats = {
     'spec-birth': ({ label, prompt }) =>
       prompt.includes('Amend the born spec')
@@ -641,6 +641,11 @@ test('an intent conflict never burns a round; a seat crash closes the run failed
   const park = await waitParked(fx.paths, runId, 'intent-conflict');
   assert.ok(park.question.includes('drops the card constraint'));
   fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'Keep the card constraint.' });
+  // The crashed seat parks with the recoverable options; only the answer closes.
+  const crashed = await waitParked(fx.paths, runId, 'seat-failure');
+  assert.deepEqual(crashed.options, ['retry', 'abandon']);
+  assert.equal(crashed.detail.seat, 'suite');
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   const events = await waitClosed(fx.paths, runId);
   const closed = events.find((e) => e.event === 'run-closed');
   assert.equal(closed.state, 'failed');

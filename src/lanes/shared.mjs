@@ -3,6 +3,7 @@
 // the small directive constructors. Every lane re-derives its position from
 // the run ledger and the git state — nothing here holds cross-stage memory.
 import { readFileSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
 import { runLedgerPath } from '../daemon/home.mjs';
 import { parseProjectConfig, underEntry } from '../config/project.mjs';
@@ -103,20 +104,166 @@ export function parkDirective(type, { question, options, refs }) {
   return { park: { type, question, ...(options && { options }), ...(refs && { refs }) } };
 }
 
-export function seatFail(seat, result) {
+// -- recoverable failures (ADR-0015) -----------------------------------------
+
+// Terminal-state discipline: a run reaches `run-closed` through the ship
+// path, a human kill, or a human answering a park with its abandon option.
+// Every other failure parks under one of these types, so a run holding sound
+// work waits for a decision instead of dying with the condition it met.
+export const RECOVERY_PARKS = new Set(['seat-failure', 'stage-blocked', 'command-error']);
+export const RECOVERY_OPTIONS = Object.freeze(['retry', 'abandon']);
+
+/** The run's latest recovery park of any type, with its answer. */
+export function lastRecoveryPark(events) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.event !== 'park' || !RECOVERY_PARKS.has(e.type)) continue;
+    const answer = events.slice(i + 1).find((a) => a.event === 'answer' && a.parkSeq === e.seq);
+    return { park: e, answer: answer ?? null };
+  }
+  return null;
+}
+
+/**
+ * The abandon route: a recovery park answered `abandon` closes the run with
+ * the reason and detail its park recorded. Checked at every stage entry, so
+ * the answer lands before the stage spends anything else.
+ */
+export function abandonedClose(events) {
+  const asked = lastRecoveryPark(events);
+  if (asked?.answer?.option !== 'abandon') return null;
   return {
     close: {
       state: 'failed',
-      reason: 'seat-failure',
-      seat,
-      ...(result.reason ? { cause: result.reason } : {}),
+      reason: asked.park.reason ?? 'abandoned',
+      ...(asked.park.detail ?? {}),
+      abandoned: asked.park.seq,
     },
   };
 }
 
-export function commandFail(run) {
-  // The command could not run at all — an environment defect, not a verdict.
-  return { close: { state: 'failed', reason: 'suite-command-error', error: run.error } };
+const GUARDED = Symbol('abandon-guard');
+
+/**
+ * Wraps a lane's handlers with the abandon guard. Every stage entry answers
+ * the same question first: did the human abandon the run at its last park?
+ * Idempotent — a composed lane wraps its continuation's handlers again, and
+ * one guard per stage is enough.
+ * @param {Record<string, Function>} handlers
+ */
+export function withAbandonGuard(handlers) {
+  return Object.fromEntries(
+    Object.entries(handlers).map(([stage, handler]) => {
+      if (handler[GUARDED]) return [stage, handler];
+      const guarded = (ctx) => abandonedClose(runEvents(ctx)) ?? handler(ctx);
+      guarded[GUARDED] = true;
+      return [stage, guarded];
+    }),
+  );
+}
+
+/**
+ * Routes a recoverable failure: the run parks with `retry` and `abandon`
+ * instead of closing. One answer buys one attempt — the failure that follows
+ * a bought retry parks again, so no arm loops on its own authority.
+ */
+export function recover(ctx, { type, reason, question, refs, ...detail }) {
+  const abandoned = abandonedClose(runEvents(ctx));
+  if (abandoned) return abandoned;
+  return {
+    park: {
+      type,
+      reason,
+      question,
+      options: [...RECOVERY_OPTIONS],
+      ...(refs && { refs }),
+      ...(Object.keys(detail).length > 0 && { detail }),
+    },
+  };
+}
+
+/** A stage precondition the run cannot settle itself. */
+export function blocked(ctx, reason, question, detail = {}) {
+  return recover(ctx, { type: 'stage-blocked', reason, question, ...detail });
+}
+
+/** A configured command that could not run at all — an environment defect. */
+export function commandError(ctx, reason, question, detail = {}) {
+  return recover(ctx, { type: 'command-error', reason, question, ...detail });
+}
+
+/**
+ * A seat that could not deliver a usable work product past its corrective
+ * invocation. The failure evidence stays in the ledger; a bought retry
+ * carries it into the next invocation's brief.
+ */
+export function seatFail(ctx, seat, result) {
+  const cause = result.reason ?? null;
+  return recover(ctx, {
+    type: 'seat-failure',
+    reason: 'seat-failure',
+    seat,
+    ...(cause && { cause }),
+    question:
+      `The ${seat} seat failed after its corrective invocation` +
+      (cause ? ` (${cause})` : '') +
+      `. Answer "retry" for one fresh ${seat} invocation carrying the failure ` +
+      'evidence, or "abandon" to close the run.',
+  });
+}
+
+export function commandFail(ctx, run) {
+  return commandError(
+    ctx,
+    'suite-command-error',
+    `The suite command could not run: ${run.error}\n` +
+      'Repair the environment, then answer "retry" for one more attempt, or ' +
+      '"abandon" to close the run.',
+    { error: run.error },
+  );
+}
+
+/**
+ * The attempt budget of a lane contract loop. A bought retry is one fresh
+ * invocation, not a second corrective round: the corrective round already ran
+ * before the park that bought it.
+ */
+export function attemptLimit(events, seat) {
+  const asked = lastRecoveryPark(events);
+  if (!asked?.answer || asked.park.type !== 'seat-failure' || asked.park.detail?.seat !== seat) {
+    return 2;
+  }
+  return events.some((e) => e.event === 'seat-spawned' && e.seq > asked.answer.seq) ? 2 : 1;
+}
+
+/** The failure evidence a bought retry carries into the seat's brief. */
+export function failureBrief(events, seat) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.event !== 'seat-failure' || e.seat !== seat) continue;
+    if (Array.isArray(e.defects)) return e.defects;
+    if (Array.isArray(e.errors)) return e.errors;
+    return [e.cause ? `${e.reason}: ${e.cause}` : e.reason];
+  }
+  return null;
+}
+
+/**
+ * A corrected absolute path carried by the answer to a `stage-blocked` park
+ * raised for one reason. The repair lane's intake ticket is the one input a
+ * human can hand over in the answer itself; the ledger holds it, so a restart
+ * and every later stage resolve the same path.
+ */
+export function answeredPath(events, reason) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.event !== 'park' || e.type !== 'stage-blocked' || e.reason !== reason) continue;
+    const text = events.slice(i + 1).find((a) => a.event === 'answer' && a.parkSeq === e.seq)?.answer;
+    if (typeof text !== 'string') return null;
+    const trimmed = text.trim();
+    return trimmed.length > 0 && isAbsolute(trimmed) ? trimmed : null;
+  }
+  return null;
 }
 
 /** True when the file falls under any path entry (prefix or glob). */

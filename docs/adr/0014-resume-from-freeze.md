@@ -1,6 +1,8 @@
 # ADR-0014: Resume a launch from a prior run's freeze
 
 Status: accepted (2026-08-13)
+Superseded in part by ADR-0015: the base-divergence refusals park the run
+instead of closing it; abandon closes on the same reason.
 
 ## Decision
 

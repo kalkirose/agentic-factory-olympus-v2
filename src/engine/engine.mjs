@@ -205,7 +205,7 @@ export class RunEngine {
       return;
     }
     if (directive.park) {
-      const { type, question, options, refs } = directive.park;
+      const { type, question, options, refs, reason, detail } = directive.park;
       if (!PARK_TYPES.has(type)) {
         this.stampViolation(run, `park type not in the catalog: ${type}`);
         return;
@@ -214,7 +214,7 @@ export class RunEngine {
         this.stampViolation(run, `park at ${run.stage} carries no question`);
         return;
       }
-      this.park(run, { type, question, options, refs });
+      this.park(run, { type, question, options, refs, reason, detail });
       return;
     }
     if (directive.close) {
@@ -231,7 +231,10 @@ export class RunEngine {
 
   // -- park / answer / resume -----------------------------------------------
 
-  park(run, { type, question, options, refs }) {
+  // `reason` and `detail` belong to a recoverable failure: they carry the
+  // close the run would have taken, so the abandon answer closes on the
+  // original condition rather than on whatever the resumed stage meets.
+  park(run, { type, question, options, refs, reason, detail }) {
     run.parked = true;
     run.parkRecord = { type, question, options };
     const line = run.store.append('park', {
@@ -240,6 +243,8 @@ export class RunEngine {
       question,
       ...(options && { options }),
       ...(refs && { refs }),
+      ...(reason && { reason }),
+      ...(detail && { detail }),
       gist: gist(`${type}: ${question}`),
     });
     run.parkSeq = line.seq;

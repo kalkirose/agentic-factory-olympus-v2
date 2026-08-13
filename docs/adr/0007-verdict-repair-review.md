@@ -1,6 +1,8 @@
 # ADR-0007: Verdict, repair, and review shapes
 
 Status: accepted (2026-08-10)
+Superseded in part by ADR-0015: a seat-failure and a gate-command spawn
+error park the run instead of closing it.
 
 ## Decision
 
