@@ -5,6 +5,7 @@ import { runSeat } from '../src/seats/runner.mjs';
 import { parseClaudeLine } from '../src/seats/claude.mjs';
 import { ModelSemaphores } from '../src/seats/semaphore.mjs';
 import { DEFAULT_MODEL, CERTIFICATION_MODEL } from '../src/seats/seatmap.mjs';
+import { ONE_TURN_RULE } from '../src/seats/prompt.mjs';
 import { RunEngine } from '../src/engine/engine.mjs';
 import { openRunStore } from '../src/telemetry/stores.mjs';
 import {
@@ -436,6 +437,10 @@ test('a missing report file takes the same corrective route', async (t) => {
   assert.equal(result.reason, 'report-invalid');
   assert.equal(calls.length, 2);
   assert.ok(calls[1].prompt.includes('no report file'));
+  // The corrective brief names the cause the seat cannot see from inside its
+  // own turn: the session ended with nothing written, so the work is gone.
+  assert.ok(calls[1].prompt.includes('ended with no report file'));
+  assert.ok(calls[1].prompt.includes(ONE_TURN_RULE));
 });
 
 test('a transcript model that differs from the request is a seat-failure', async (t) => {

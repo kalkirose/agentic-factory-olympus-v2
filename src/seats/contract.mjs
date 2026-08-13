@@ -160,14 +160,17 @@ function typeOk(type, value) {
 /**
  * Reads a report file. A missing or unparsable file is a validation failure
  * with the same error shape, so the corrective route treats it uniformly.
- * @returns {{value: object} | {errors: Array<{path: string, message: string}>}}
+ * `missing` marks the one case the corrective brief words differently: the
+ * seat wrote nothing at all, so the brief names that cause.
+ * @returns {{value: object} |
+ *   {errors: Array<{path: string, message: string}>, missing?: boolean}}
  */
 export function readReport(path) {
   let text;
   try {
     text = readFileSync(path, 'utf8');
   } catch {
-    return { errors: [{ path: '$', message: `no report file at ${path}` }] };
+    return { missing: true, errors: [{ path: '$', message: `no report file at ${path}` }] };
   }
   try {
     return { value: JSON.parse(text) };

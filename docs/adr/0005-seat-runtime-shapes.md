@@ -66,9 +66,17 @@ assembly, and the headless runner — gets these concrete shapes:
   dies is diagnosable from the run's own ledger, with nothing re-run by hand.
 - **Prompt assembly.** Two blocks. Block one is the shared core: role line,
   scope discipline, narration cadence, ledger discipline, the tool policy
-  lines, and the file contract with path and schema. Block two is the
-  per-seat role block the lane supplies. No verification scaffolding, no
-  forced progress summaries, no reasoning-echo asks.
+  lines, the one-turn execution rule, and the file contract with path and
+  schema. Block two is the per-seat role block the lane supplies. No
+  verification scaffolding, no forced progress summaries, no reasoning-echo
+  asks.
+- **One-turn execution.** Every seat is told to run each command
+  synchronously and read its result in the same turn: no background work, no
+  armed watcher, no wait on an event from outside the turn. A long command is
+  allowed; a wait for a command the seat cannot see finish is not. The report
+  is written before the seat stops. When a report is missing rather than
+  malformed, the corrective brief names the missing report as the cause and
+  restates the rule.
 - **Supervision extension.** `superviseSeat` takes a `parseLine` adapter
   (child stdout dialect → `{cost, note, meta}`) and `spawnFields` (model,
   effort, attempt on the `seat-spawned` stamp). Only `cost` and `note`
@@ -92,6 +100,16 @@ session that wrote the report already holds the content. Resume is cheaper
 and keeps effort constant inside the seat session. When no session id was
 captured, the corrective prompt stands alone — it carries the errors, the
 path, and the schema.
+
+## Why the one-turn rule sits in the core block
+
+A headless session ends when the model stops, and the machine kills every
+child command the seat left behind. A seat cannot read that fact off its own
+environment: from inside the turn, a backgrounded command and an armed
+watcher look like sound practice. The failure they produce is the worst shape
+available — the seat spends a full session, the command dies unrecorded, and
+the contract sees only a missing report. So the rule is stated to every seat
+rather than left to the seat that happens to run a long gate.
 
 ## Why the exit code carries no part of the availability decision
 

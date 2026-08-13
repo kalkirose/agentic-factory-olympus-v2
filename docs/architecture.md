@@ -98,11 +98,15 @@ Two levels; the ownership test decides placement.
   JSON report to the named ledger path; a deterministic process validates it
   (flat, draft-07-safe schemas). One corrective re-prompt, then seat-failure.
 - **Prompts.** Two blocks: a shared core (role line, ledger discipline, file
-  contract, scope discipline, narration cadence, concise reports) plus a
-  per-seat role block with judgment criteria only. No verification
-  scaffolding, no forced progress summaries, no reasoning-echo asks.
-  Subagents banned; exception: dev seats may spawn read-only Explore
+  contract, scope discipline, narration cadence, one-turn execution, concise
+  reports) plus a per-seat role block with judgment criteria only. No
+  verification scaffolding, no forced progress summaries, no reasoning-echo
+  asks. Subagents banned; exception: dev seats may spawn read-only Explore
   subagents, cap 2.
+- **One turn, one session.** Every command runs synchronously inside the
+  seat's turn. No background work, no armed watcher, no wait on an outside
+  event: the session ends when the seat stops and the machine kills the rest.
+  The report is written before the seat stops.
 - **Model integrity.** Model-switch flags off on every seat; a classifier flag
   is a seat-failure on the harness route, never a silent downgrade. Outage →
   orchestrator re-dispatch on the default model, recorded with the substitute

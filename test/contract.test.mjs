@@ -112,9 +112,13 @@ test('readReport reports a missing file and bad JSON as validation errors', (t) 
   t.after(() => removeDir(dir));
   const missing = readReport(join(dir, 'none.json'));
   assert.ok(missing.errors[0].message.includes('no report file'));
+  // Only the wrote-nothing case is flagged; the corrective brief words it
+  // differently from a report that exists and is wrong.
+  assert.equal(missing.missing, true);
   const bad = join(dir, 'bad.json');
   writeFileSync(bad, '{nope');
   assert.ok(readReport(bad).errors[0].message.includes('not valid JSON'));
+  assert.equal(readReport(bad).missing, undefined);
   const good = join(dir, 'good.json');
   writeFileSync(good, '{"verdict":"pass"}');
   assert.deepEqual(readReport(good).value, { verdict: 'pass' });

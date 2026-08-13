@@ -7,7 +7,7 @@ import {
   CERTIFICATION_MODEL,
   DEFAULT_EFFORT,
 } from '../src/seats/seatmap.mjs';
-import { assembleSeatPrompt, correctivePrompt } from '../src/seats/prompt.mjs';
+import { assembleSeatPrompt, correctivePrompt, ONE_TURN_RULE } from '../src/seats/prompt.mjs';
 import { claudeSeatCommand, parseClaudeLine } from '../src/seats/claude.mjs';
 
 const SCHEMA = {
@@ -67,6 +67,28 @@ test('the prompt carries both blocks, the report path, and the policy lines', ()
   assert.ok(dev.includes('at most 2 read-only Explore subagents'));
 });
 
+// A headless session ends when the model stops and the machine kills whatever
+// the seat left running, so a seat that backgrounds a command and waits for it
+// loses the command and the report together. Every seat is told, not just the
+// seats that happen to run long gates.
+test('every seat prompt carries the one-turn execution rule', () => {
+  for (const seat of Object.keys(SEATS)) {
+    const prompt = assembleSeatPrompt({
+      seat,
+      def: seatDef(seat),
+      reportPath: 'r.json',
+      schema: SCHEMA,
+      roleBlock: 'ROLE',
+    });
+    assert.ok(prompt.includes(ONE_TURN_RULE), seat);
+  }
+  assert.ok(ONE_TURN_RULE.includes('synchronously'));
+  assert.ok(ONE_TURN_RULE.includes('Do not put work in the background'));
+  assert.ok(ONE_TURN_RULE.includes('Do not arm a watcher'));
+  assert.ok(ONE_TURN_RULE.includes('wait for an event from outside your own turn'));
+  assert.ok(ONE_TURN_RULE.includes('Write your report before you stop'));
+});
+
 test('the corrective prompt names the errors and the same file', () => {
   const prompt = correctivePrompt({
     reportPath: 'r.json',
@@ -75,6 +97,21 @@ test('the corrective prompt names the errors and the same file', () => {
   });
   assert.ok(prompt.includes('$.verdict: required field missing'));
   assert.ok(prompt.includes('r.json'));
+  // A malformed report is not the missing-report case; the rule stays out.
+  assert.ok(!prompt.includes(ONE_TURN_RULE));
+});
+
+test('a corrective for a missing report names that cause and restates the rule', () => {
+  const prompt = correctivePrompt({
+    reportPath: 'r.json',
+    schema: SCHEMA,
+    missing: true,
+    errors: [{ path: '$', message: 'no report file at r.json' }],
+  });
+  assert.ok(prompt.includes('ended with no report file'));
+  assert.ok(prompt.includes('no report file at r.json'));
+  assert.ok(prompt.includes(ONE_TURN_RULE));
+  assert.ok(prompt.includes('write your JSON report to this file before you stop: r.json'));
 });
 
 test('the claude argv names the model and blocks tools per policy, never a fallback', () => {

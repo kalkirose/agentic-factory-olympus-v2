@@ -1,9 +1,22 @@
 // Two-block prompt assembly. Block one is the shared core: role line, scope
-// discipline, narration cadence, tool policy, and the file contract with the
-// named report path and schema. Block two is the per-seat role block —
-// judgment criteria plus dispatch context, supplied by the lane. No
-// verification scaffolding, no forced progress summaries, no reasoning-echo
-// asks enter here or in any role block.
+// discipline, narration cadence, tool policy, the one-turn execution rule, and
+// the file contract with the named report path and schema. Block two is the
+// per-seat role block — judgment criteria plus dispatch context, supplied by
+// the lane. No verification scaffolding, no forced progress summaries, no
+// reasoning-echo asks enter here or in any role block.
+
+// A seat is a headless session: it ends when the model stops, and the machine
+// kills every child command the seat left behind. A seat that starts a long
+// command in the background and then waits for it loses the command and the
+// report together, and the run pays the whole seat for nothing. The rule is
+// stated to every seat because no seat can read it off its own environment.
+export const ONE_TURN_RULE = [
+  'Run every command synchronously and read its result in the same turn.',
+  'Do not put work in the background. Do not arm a watcher, and do not wait for an event from outside your own turn.',
+  'Your session ends when you stop, and the machine kills every command that still runs.',
+  'A long command is acceptable. A command whose end you cannot see is not.',
+  'Write your report before you stop. A turn that ends with no report breaks the contract, whatever work it did.',
+].join('\n');
 
 /**
  * @param {{seat: string, def: {web: boolean, explore: number},
@@ -26,6 +39,7 @@ export function assembleSeatPrompt({ seat, def, reportPath, schema, roleBlock })
     'Do not write to any ledger file; the orchestrator records your progress and your report.',
     web,
     subagents,
+    ONE_TURN_RULE,
     'File contract: as your final act, write your JSON report to this file, then stop:',
     reportPath,
     'The report must satisfy this JSON schema:',
@@ -38,12 +52,23 @@ export function assembleSeatPrompt({ seat, def, reportPath, schema, roleBlock })
 /**
  * The corrective re-prompt after a failed report validation — the one retry
  * the contract allows. Sent into the same seat session where possible.
+ *
+ * A seat that wrote no file at all gets a different opening: the brief names
+ * the missing report as the cause and restates the one-turn rule, because the
+ * common way to end a turn with no report is to leave work running behind it.
+ * @param {{reportPath: string, schema: object, missing?: boolean,
+ *   errors: Array<{path: string, message: string}>}} opts
  */
-export function correctivePrompt({ reportPath, schema, errors }) {
+export function correctivePrompt({ reportPath, schema, errors, missing = false }) {
   return [
-    'Your report did not validate. The errors:',
+    missing
+      ? 'Your session ended with no report file, so nothing you did was recorded. What the check found:'
+      : 'Your report did not validate. The errors:',
     ...errors.map((e) => `- ${e.path}: ${e.message}`),
-    `Write a corrected JSON report to the same file, then stop: ${reportPath}`,
+    ...(missing ? [ONE_TURN_RULE] : []),
+    missing
+      ? `Do the work again in this turn, and write your JSON report to this file before you stop: ${reportPath}`
+      : `Write a corrected JSON report to the same file, then stop: ${reportPath}`,
     'The report must satisfy this JSON schema:',
     JSON.stringify(schema, null, 2),
   ].join('\n');

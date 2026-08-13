@@ -178,7 +178,7 @@ export async function runSeat(store, opts) {
         return { ok: true, report: read.value, model: actual ?? model, cost: result.cost };
       }
       if (attempt === 1) {
-        prompt = correctivePrompt({ reportPath, schema, errors });
+        prompt = correctivePrompt({ reportPath, schema, errors, missing: read.missing === true });
         resume = result.meta?.sessionId;
         continue;
       }
