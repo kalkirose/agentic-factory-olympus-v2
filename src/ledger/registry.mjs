@@ -68,7 +68,15 @@ export const RUN_EVENTS = new Set([
 export const INSTANCE_EVENTS = new Set([
   'daemon-started',
   'daemon-stopped',
+  // A start that found no clean stop behind it: the previous instance died
+  // where the ledger goes silent, and the seq it carries is that point
+  // (ADR-0016). Every ordinary exit path stamps `daemon-stopped`, so this
+  // event means a death no exit path saw.
+  'daemon-crash-detected',
   'launch',
+  // A launch the daemon refused. The console's reason file says why to
+  // whoever asked; this says it to everyone reading the instance ledger.
+  'launch-rejected',
   'workspace-released',
   'arming-changed',
   'config-changed',

@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, renameSync, readdirSync, existsSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { homePaths, runLedgerPath, scaffoldHome } from '../src/daemon/home.mjs';
+import { readLock } from '../src/daemon/lock.mjs';
 import { Ledger, readEvents } from '../src/ledger/ledger.mjs';
 import { RUN_EVENTS } from '../src/ledger/registry.mjs';
 import { tempDir, removeDir, waitFor } from './helpers.mjs';
@@ -157,4 +159,121 @@ test('control files from before start are archived as stale', async (t) => {
   assert.equal(daemon.running, true);
   assert.equal(readdirSync(homePaths(home).control).filter((f) => f.endsWith('.json')).length, 0);
   await daemon.stop();
+});
+
+// -- exit stamping -----------------------------------------------------------
+// Every way a daemon can end has to reach the same stamp; a start that finds
+// none knows the previous instance died where nothing was watching (ADR-0016).
+
+const DAEMON_URL = new URL('../src/daemon/daemon.mjs', import.meta.url).href;
+
+/** Runs a daemon in a child process and resolves its exit code and stderr. */
+function runDaemonProcess(home, body) {
+  const source = `
+    const { Daemon } = await import(${JSON.stringify(DAEMON_URL)});
+    const daemon = new Daemon(${JSON.stringify(home)}, { handleSignals: true });
+    await daemon.start();
+    ${body}
+  `;
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', source], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.stdout.on('data', () => {});
+    child.on('close', (code) => resolve({ code, stderr, pid: child.pid }));
+  });
+}
+
+test('an exit that reached no stop path still stamps the stop', async (t) => {
+  const home = tempDir();
+  t.after(() => removeDir(home));
+  const { code } = await runDaemonProcess(home, 'process.exit(0);');
+  assert.equal(code, 0);
+  const last = instanceEvents(home).at(-1);
+  assert.equal(last.event, 'daemon-stopped');
+  assert.equal(last.trigger, 'exit');
+});
+
+test('a fault stamps the stop and leaves with a failing code', async (t) => {
+  const home = tempDir();
+  t.after(() => removeDir(home));
+  const { code } = await runDaemonProcess(home, 'setTimeout(() => { throw new Error("boom"); }, 0);');
+  assert.equal(code, 1);
+  const last = instanceEvents(home).at(-1);
+  assert.equal(last.event, 'daemon-stopped');
+  assert.equal(last.trigger, 'fault');
+  assert.match(last.error, /boom/);
+});
+
+test('a death nothing could stamp is named at the next start', async (t) => {
+  const home = tempDir();
+  t.after(() => removeDir(home));
+  // SIGKILL runs no handler on any platform: the instance ends mid-life with
+  // the ledger's tail wherever it happened to be.
+  const killed = runDaemonProcess(home, 'setInterval(() => {}, 1 << 30);');
+  const paths = homePaths(home);
+  const pid = await waitFor(() => readLock(paths.lock)?.pid, { label: 'the daemon to hold its lock' });
+  await waitFor(() => instanceEvents(home).some((e) => e.event === 'daemon-started'), {
+    label: 'the daemon to stamp its start',
+  });
+  process.kill(pid, 'SIGKILL');
+  await killed;
+  assert.ok(!instanceEvents(home).some((e) => e.event === 'daemon-stopped'));
+
+  const before = instanceEvents(home);
+  const daemon = new Daemon(home);
+  await daemon.start();
+  await daemon.stop();
+  const events = instanceEvents(home);
+  const crash = events.find((e) => e.event === 'daemon-crash-detected');
+  assert.equal(crash.lastSeq, before.at(-1).seq);
+  assert.equal(crash.lastEvent, before.at(-1).event);
+  assert.equal(crash.startedSeq, before.find((e) => e.event === 'daemon-started').seq);
+  // It lands before this instance says anything of its own, and the clean stop
+  // that follows leaves nothing for the start after this one to detect.
+  assert.equal(events[crash.seq].event, 'daemon-started');
+  const after = new Daemon(home);
+  await after.start();
+  await after.stop();
+  assert.equal(instanceEvents(home).filter((e) => e.event === 'daemon-crash-detected').length, 1);
+});
+
+test('a home with no history has nothing to have crashed', async (t) => {
+  const home = tempDir();
+  const daemon = new Daemon(home);
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  assert.equal(instanceEvents(home)[0].event, 'daemon-started');
+  assert.ok(!instanceEvents(home).some((e) => e.event === 'daemon-crash-detected'));
+});
+
+test('a console break belongs to whoever it was aimed at, not to the daemon', async (t) => {
+  const home = tempDir();
+  const daemon = new Daemon(home, { handleSignals: true });
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  // Windows delivers a console control event to a whole process group and says
+  // nothing about the member it was meant for, so a break aimed at a seat
+  // arrives here too. It is listened for — unhandled it is fatal — and then
+  // deliberately dropped.
+  assert.ok(process.listeners('SIGBREAK').includes(daemon.signalHandler));
+  daemon.signalHandler('SIGBREAK');
+  assert.equal(daemon.running, true);
+  assert.equal(daemon.stopPromise, null);
+  assert.ok(!instanceEvents(home).some((e) => e.event === 'daemon-stopped'));
+  // The signals that do mean this daemon still end it, and still stamp.
+  await daemon.stop({ trigger: 'signal', actor: 'daemon', signal: 'SIGTERM' });
+  const stopped = instanceEvents(home).at(-1);
+  assert.equal(stopped.event, 'daemon-stopped');
+  assert.equal(stopped.signal, 'SIGTERM');
 });

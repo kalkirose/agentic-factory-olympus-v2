@@ -445,3 +445,25 @@ never carries a project's specifics.
   because a judge is not the run. A structural test asserts the whole closed
   set, so a future close path fails CI until it is added deliberately.
   ADR-0015 records the rule. 294 tests green.
+- 2026-08-14 — shakedown defect: Windows process lifecycle. A console kill of a
+  run took the daemon with it three times, and the instance ledger showed it
+  only as a `launch` followed by a `daemon-started` with no `daemon-stopped`
+  between. Measured on the host: a child spawned without `detached` shares its
+  parent's console process group, a console control event is delivered to the
+  group rather than to the process it names, and a daemon that listens for
+  neither SIGBREAK nor SIGHUP dies of the default action with nothing written
+  (exit `0xC000013A`). A separate measurement on the same host: `child.kill()`
+  is `TerminateProcess` on the one process the handle names, and a Windows seat
+  is usually `cmd.exe` running a shim, so the tool and everything it started
+  survived the kill and held the run worktree — fourteen orphans from one dead
+  run, `git worktree remove` refused twice. A seat now spawns into its own
+  process group wherever it can, the daemon listens for SIGBREAK and drops it,
+  every deliberate termination is a tree kill, and workspace release ends what
+  is standing in the workspace before it removes anything, stamping the count
+  and the image names on `workspace-released`. Every exit path stamps
+  `daemon-stopped`, down to an `exit` handler and a fault handler that stamps
+  and leaves nonzero; a start whose ledger does not end in a clean stop stamps
+  `daemon-crash-detected` with the last seq the dead instance wrote. A launch
+  the daemon refuses stamps `launch-rejected` with the reason and the run id it
+  would have had, so a refusal is no longer a reason file and nothing else.
+  ADR-0016 records the measurements and their limits. 319 tests green.

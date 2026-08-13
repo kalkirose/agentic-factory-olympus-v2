@@ -3,10 +3,11 @@
 // main applies at the next launch, orphaned workspaces are swept at start.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath } from '../src/daemon/home.mjs';
+import { writeControlCommand } from '../src/daemon/control.mjs';
 import { workspaceRoot } from '../src/isolation/worktrees.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import {
@@ -191,4 +192,34 @@ test('orphaned workspaces are swept and stamped at daemon start', async (t) => {
   assert.equal(released.runId, 'dead-run');
   assert.equal(released.orphan, true);
   assert.equal(released.ok, true);
+});
+
+test('a launch the daemon refuses is stamped, not only left in a reason file', async (t) => {
+  const lanes = { solo: { stages: ['work'], handlers: { work: async () => ({ close: { state: 'shipped' } }) } } };
+  const { origin, paths, daemon } = fixture(t, { lanes, composeRunner: fakeComposeRunner() });
+  await daemon.start();
+  // The config on main no longer parses, so provisioning refuses the launch
+  // after the run already has a name — the state the console cannot see.
+  commitTree(origin, { [CONFIG_PATH]: projectConfigJson({ version: 2 }) }, 'break config');
+  const name = writeControlCommand(paths, {
+    actor: 'operator',
+    command: 'launch',
+    project: 'alpha',
+    lane: 'solo',
+  });
+  const stamped = await waitFor(
+    () => readEvents(paths.instanceLedger).find((e) => e.event === 'launch-rejected'),
+    { label: 'the refusal to be stamped' },
+  );
+  assert.equal(stamped.requestedBy, 'operator');
+  assert.equal(stamped.project, 'alpha');
+  assert.equal(stamped.lane, 'solo');
+  assert.match(stamped.reason, /project config invalid.*version/);
+  // The run that would have existed is named, so the refusal can be tied to
+  // the workspace and ledger a reader goes looking for.
+  assert.match(stamped.runId, /^alpha-/);
+  assert.ok(!existsSync(join(paths.runs, stamped.runId)));
+  // The console's own feedback is untouched.
+  assert.ok(readdirSync(paths.controlRejected).some((f) => f.endsWith(`${name}.reason.txt`)));
+  assert.ok(!readEvents(paths.instanceLedger).some((e) => e.event === 'launch'));
 });

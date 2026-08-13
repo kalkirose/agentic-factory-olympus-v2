@@ -18,6 +18,7 @@
 // caller can reach that path.
 import { spawn } from 'node:child_process';
 import { resolveArgv } from './executable.mjs';
+import { seatSpawnOptions, terminateTree } from './processes.mjs';
 
 // Bounds for the failure evidence. A ledger records what a reader needs to
 // name the cause, not the transcript: the last stderr and the tail of stdout,
@@ -69,6 +70,11 @@ export function superviseSeat(
     cwd,
     env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
+    // A seat runs in its own process group wherever it can, so nothing aimed
+    // at a seat can reach the daemon through it. `windowsVerbatimArguments` is
+    // set by the resolver for exactly the commands that run under `cmd.exe`,
+    // which are the ones that cannot take it.
+    ...seatSpawnOptions({ viaShim: spec.windowsVerbatimArguments === true }),
     ...(spec.windowsVerbatimArguments && { windowsVerbatimArguments: true }),
   });
   let cost = 0;
@@ -106,7 +112,7 @@ export function superviseSeat(
       });
       if (costCeiling != null && cost > costCeiling && !ceilingHit && !terminatedReason) {
         ceilingHit = true;
-        child.kill();
+        void terminateTree(child);
       }
     }
   });
@@ -184,7 +190,9 @@ export function superviseSeat(
     terminate(reason) {
       if (terminatedReason || ceilingHit) return;
       terminatedReason = reason;
-      child.kill();
+      // The reason is recorded before the kill lands, so the stamp the child's
+      // close writes is the same one whether the tree kill is quick or slow.
+      void terminateTree(child);
     },
   };
 }

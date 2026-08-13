@@ -172,3 +172,75 @@ test('orphan run ids: workspace dirs without an open run', (t) => {
   const isolation = new RunIsolation(paths, {});
   assert.deepEqual(isolation.orphanRunIds(new Set(['live-run'])), ['dead-run']);
 });
+
+// -- the process sweep that precedes every removal ---------------------------
+
+/** Records sweeps instead of ending anything. */
+function fakeSweep(result = { count: 0, names: [] }) {
+  const roots = [];
+  const sweep = async (root) => {
+    roots.push(root);
+    return result;
+  };
+  sweep.roots = roots;
+  return sweep;
+}
+
+test('release sweeps the workspace before it tries to remove anything', async (t) => {
+  const { origin, paths } = fixture(t);
+  // The sweep runs while the workspace is still there to hold processes, and
+  // the paths it is given name that workspace and nothing wider.
+  const seen = [];
+  const sweepProcesses = async (root) => {
+    seen.push({ root, workspaceStillThere: existsSync(root) });
+    return { count: 2, names: ['esbuild.exe', 'node.exe'] };
+  };
+  const isolation = new RunIsolation(paths, {
+    composeRunner: fakeComposeRunner(),
+    sweepProcesses,
+  });
+  await isolation.provision({
+    runId: 'r10',
+    project: 'alpha',
+    repoUrl: origin,
+    defaultBranch: 'main',
+    configPath: CONFIG_PATH,
+  });
+  const { errors, swept } = await isolation.release('r10');
+  assert.deepEqual(errors, []);
+  assert.deepEqual(seen, [{ root: workspaceRoot(paths, 'r10'), workspaceStillThere: true }]);
+  // What it ended travels back to the caller, which is what stamps it.
+  assert.deepEqual(swept, { count: 2, names: ['esbuild.exe', 'node.exe'] });
+  assert.ok(!existsSync(workspaceRoot(paths, 'r10')));
+});
+
+test('a workspace that is already gone is not swept at all', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const paths = scaffoldHome(join(root, 'home'));
+  const sweep = fakeSweep();
+  const isolation = new RunIsolation(paths, { sweepProcesses: sweep });
+  const { errors, swept } = await isolation.release('never-provisioned');
+  assert.deepEqual(errors, []);
+  assert.equal(swept, null);
+  assert.deepEqual(sweep.roots, []);
+});
+
+test('a sweep that could not run is reported and the release goes on', async (t) => {
+  const { origin, paths } = fixture(t);
+  const isolation = new RunIsolation(paths, {
+    composeRunner: fakeComposeRunner(),
+    sweepProcesses: async () => ({ count: 0, names: [], error: 'could not enumerate: no CIM' }),
+  });
+  await isolation.provision({
+    runId: 'r11',
+    project: 'alpha',
+    repoUrl: origin,
+    defaultBranch: 'main',
+    configPath: CONFIG_PATH,
+  });
+  const { errors } = await isolation.release('r11');
+  assert.deepEqual(errors, ['sweep: could not enumerate: no CIM']);
+  // Reported, not fatal: everything the release could still do, it did.
+  assert.ok(!existsSync(workspaceRoot(paths, 'r11')));
+});

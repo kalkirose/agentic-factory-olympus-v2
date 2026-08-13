@@ -28,6 +28,22 @@ import { acquireLock } from './lock.mjs';
 
 const ACTOR = 'daemon';
 const CONFIG_DEBOUNCE_MS = 150; // collapses editor multi-writes; not a detector
+// The events that bound one instance's life. A tail that is not a clean stop
+// is a death nothing recorded.
+const LIFECYCLE_EVENTS = new Set(['daemon-started', 'daemon-stopped']);
+// The signals that mean this daemon: a console interrupt at its own console, a
+// service manager's stop, a console going away under it. SIGHUP is Windows's
+// console-close and needs a handler of its own, because unhandled it kills the
+// process with nothing written.
+const STOP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+// Windows delivers a console control event to a whole process group and says
+// nothing about which member it was meant for, so a break aimed at a seat
+// arrives here as well. Unhandled it is fatal; handled and ignored it is what
+// it should always have been — somebody else's business. The daemon's own stop
+// is the control inbox, and SIGINT still works at its console.
+const IGNORED_SIGNALS = ['SIGBREAK'];
+const EXIT_SIGNALS = [...STOP_SIGNALS, ...IGNORED_SIGNALS];
+const FAULT_MAX = 600; // a stamp carries the head of a stack, not the stack
 
 export class Daemon {
   /**
@@ -65,6 +81,10 @@ export class Daemon {
     this.commands = new Map();
     this.configTimer = null;
     this.stopPromise = null;
+    this.stopStamped = false;
+    this.signalHandler = null;
+    this.exitHandler = null;
+    this.faultHandler = null;
     this.onStopped = null;
     this.registerCommand('stop', async (command) => {
       await this.stop({ trigger: 'control', actor: command.actor });
@@ -125,6 +145,7 @@ export class Daemon {
   async start() {
     if (this.running) throw new Error('daemon already started');
     scaffoldHome(this.paths.home);
+    this.stopStamped = false;
     this.lock = acquireLock(this.paths.lock);
     try {
       this.config = loadInstanceConfig(this.paths.home);
@@ -168,6 +189,10 @@ export class Daemon {
       }
       this.frontier = new FrontierLauncher(this);
       this.frontier.replayArming();
+      // Before this instance writes anything of its own: whatever the last
+      // one left behind is still the tail, and a tail that is not a clean
+      // stop is the only trace an unstamped death leaves.
+      this.stampCrashIfUnstopped();
       const runsResumed = this.engine.resumeOpenRuns();
       this.ledger.append('daemon-started', {
         actor: ACTOR,
@@ -217,40 +242,47 @@ export class Daemon {
     const inherit =
       payload.resumeFrom !== undefined ? this.resolveResume(project, lane, payload) : null;
     runId = runId ?? `${project}-${Date.now().toString(36)}-${++this.launchCounter}`;
-    if (this.engine.runs.has(runId)) throw new Error(`run ${runId} is already live`);
-    if (readEvents(runLedgerPath(this.paths, runId)).length > 0) {
-      throw new Error(`run ${runId} already has a ledger`);
-    }
-    if (inherit) await this.requireFrozenTree(project, entry, inherit);
-    const ws = await this.isolation.provision({
-      runId,
-      project,
-      repoUrl: entry.repoUrl,
-      defaultBranch: entry.defaultBranch,
-      configPath: entry.projectConfigPath,
-      ...(inherit && { baseCommit: inherit.frozenSha }),
-    });
-    // The launch read the config fresh from the default branch; the tripwire
-    // registry the watcher evaluates is the registry that just shipped.
-    this.tripwires.setRegistry(project, ws.projectConfig.tripwires);
+    // Past this point the run has a name, and every refusal carries it: the
+    // rejection stamp names the run that would have existed.
     try {
-      this.engine.launch({
+      if (this.engine.runs.has(runId)) throw new Error(`run ${runId} is already live`);
+      if (readEvents(runLedgerPath(this.paths, runId)).length > 0) {
+        throw new Error(`run ${runId} already has a ledger`);
+      }
+      if (inherit) await this.requireFrozenTree(project, entry, inherit);
+      const ws = await this.isolation.provision({
         runId,
         project,
-        lane,
-        worktree: ws.worktree,
-        branch: ws.branch,
-        baseSha: ws.baseSha,
+        repoUrl: entry.repoUrl,
         defaultBranch: entry.defaultBranch,
-        configBlob: ws.configBlob,
-        ...(ws.stack && { stack: ws.stack.name }),
-        ...payload,
+        configPath: entry.projectConfigPath,
+        ...(inherit && { baseCommit: inherit.frozenSha }),
       });
+      // The launch read the config fresh from the default branch; the tripwire
+      // registry the watcher evaluates is the registry that just shipped.
+      this.tripwires.setRegistry(project, ws.projectConfig.tripwires);
+      try {
+        this.engine.launch({
+          runId,
+          project,
+          lane,
+          worktree: ws.worktree,
+          branch: ws.branch,
+          baseSha: ws.baseSha,
+          defaultBranch: entry.defaultBranch,
+          configBlob: ws.configBlob,
+          ...(ws.stack && { stack: ws.stack.name }),
+          ...payload,
+        });
+      } catch (error) {
+        await this.isolation.release(runId, { project }).catch(() => {});
+        throw error;
+      }
+      return { runId, worktree: ws.worktree, baseSha: ws.baseSha, projectConfig: ws.projectConfig };
     } catch (error) {
-      await this.isolation.release(runId, { project }).catch(() => {});
+      if (error instanceof Error) error.runId ??= runId;
       throw error;
     }
-    return { runId, worktree: ws.worktree, baseSha: ws.baseSha, projectConfig: ws.projectConfig };
   }
 
   /**
@@ -434,8 +466,9 @@ export class Daemon {
 
   async releaseWorkspace(runId, { project, orphan = false, keepBranch = false } = {}) {
     let errors;
+    let swept;
     try {
-      ({ errors } = await this.isolation.release(runId, { project, keepBranch }));
+      ({ errors, swept } = await this.isolation.release(runId, { project, keepBranch }));
     } catch (error) {
       errors = [error.message];
     }
@@ -445,6 +478,9 @@ export class Daemon {
       ok: errors.length === 0,
       ...(orphan && { orphan }),
       ...(keepBranch && { keptBranch: true }),
+      // What the release had to end before it could delete anything. Silent
+      // when the workspace held nothing, which is the ordinary case.
+      ...(swept?.count > 0 && { swept: { count: swept.count, names: swept.names } }),
       ...(errors.length > 0 && { errors }),
     });
   }
@@ -549,8 +585,32 @@ export class Daemon {
             join(this.paths.controlRejected, basename(file) + '.reason.txt'),
             error.message + '\n',
           );
+          this.stampRejectedLaunch(command, error);
         }
       }
+    }
+  }
+
+  /**
+   * Stamps a refused launch. A reason file alone reaches only the console that
+   * wrote the command; a run that never started is otherwise absent from every
+   * ledger, and the instance ledger is where a reader looks for what the
+   * factory did with its slots.
+   */
+  stampRejectedLaunch(command, error) {
+    if (command.command !== 'launch') return;
+    try {
+      this.ledger.append('launch-rejected', {
+        actor: ACTOR,
+        requestedBy: command.actor,
+        project: command.project,
+        lane: command.lane ?? 'story',
+        ...(error.runId !== undefined && { runId: error.runId }),
+        ...(command.card !== undefined && { card: command.card }),
+        reason: error.message,
+      });
+    } catch {
+      // A stamp never changes how the control file itself is handled.
     }
   }
 
@@ -570,15 +630,73 @@ export class Daemon {
 
   // -- lifecycle ------------------------------------------------------------
 
+  /**
+   * The exit paths. Every one of them ends at a `daemon-stopped` stamp, so a
+   * start that finds none knows the previous instance died where no path saw
+   * it (ADR-0016).
+   *
+   * Every signal the host can deliver is handled, including the one the daemon
+   * refuses to act on: an unhandled console signal has a default action, and
+   * the default action tears the process down mid-write with nothing recorded.
+   *
+   * The `exit` stamp is the floor under all of them. It is a synchronous
+   * append to an already-open descriptor, which is the only kind of work an
+   * exit handler can still do.
+   */
   installSignalHandlers() {
-    this.signalHandler = () => {
-      this.stop({ trigger: 'signal', actor: ACTOR }).then(() => process.exit(0));
+    this.signalHandler = (signal) => {
+      // Only the signals that mean this daemon end it. Anything else is
+      // listened for so it has no default action, and then dropped.
+      if (!STOP_SIGNALS.includes(signal)) return;
+      this.stop({ trigger: 'signal', actor: ACTOR, signal }).then(() => process.exit(0));
     };
-    process.on('SIGINT', this.signalHandler);
-    process.on('SIGTERM', this.signalHandler);
+    for (const signal of EXIT_SIGNALS) process.on(signal, this.signalHandler);
+    this.exitHandler = () => this.stampStop({ trigger: 'exit' });
+    process.on('exit', this.exitHandler);
+    // A fault is a stop the daemon did not choose: stamp it, then leave with a
+    // code the service manager reads as a failure rather than a clean end.
+    this.faultHandler = (error) => {
+      this.stampStop({ trigger: 'fault', error: String(error?.stack ?? error).slice(0, FAULT_MAX) });
+      process.exit(1);
+    };
+    process.on('uncaughtException', this.faultHandler);
+    process.on('unhandledRejection', this.faultHandler);
   }
 
-  async stop({ trigger, actor } = { trigger: 'api', actor: ACTOR }) {
+  /**
+   * Appends `daemon-stopped` unless this instance already has. Safe to call
+   * from an exit handler: it throws nothing and writes at most once.
+   */
+  stampStop(fields) {
+    if (this.stopStamped || !this.ledger) return;
+    this.stopStamped = true;
+    try {
+      this.ledger.append('daemon-stopped', { actor: ACTOR, ...fields });
+    } catch {
+      // A ledger that cannot be written is not a reason to fail an exit.
+    }
+  }
+
+  /**
+   * Stamps `daemon-crash-detected` when the tail of the instance ledger is not
+   * a clean stop. The seq it carries is the last thing the dead instance
+   * managed to write — where a reader starts looking.
+   */
+  stampCrashIfUnstopped() {
+    const events = readEvents(this.paths.instanceLedger);
+    const last = events.at(-1);
+    if (!last) return; // a home with no history has nothing to have crashed
+    const lifecycle = events.filter((e) => LIFECYCLE_EVENTS.has(e.event)).at(-1);
+    if (lifecycle?.event === 'daemon-stopped') return;
+    this.ledger.append('daemon-crash-detected', {
+      actor: ACTOR,
+      lastSeq: last.seq,
+      lastEvent: last.event,
+      ...(lifecycle && { startedSeq: lifecycle.seq }),
+    });
+  }
+
+  async stop({ trigger, actor, signal } = { trigger: 'api', actor: ACTOR }) {
     if (!this.running) return this.stopPromise;
     this.running = false;
     this.stopPromise = (async () => {
@@ -594,7 +712,7 @@ export class Daemon {
       if (this.frontier) await this.frontier.drain();
       if (this.tripwires) await this.tripwires.stop();
       if (this.evals) await this.evals.stop();
-      this.ledger.append('daemon-stopped', { actor: actor ?? ACTOR, trigger });
+      this.stampStop({ actor: actor ?? ACTOR, trigger, ...(signal && { signal }) });
       this.teardown();
       if (this.onStopped) this.onStopped();
     })();
@@ -606,9 +724,17 @@ export class Daemon {
     for (const watcher of this.watchers) watcher.close();
     this.watchers = [];
     if (this.signalHandler) {
-      process.off('SIGINT', this.signalHandler);
-      process.off('SIGTERM', this.signalHandler);
+      for (const signal of EXIT_SIGNALS) process.off(signal, this.signalHandler);
       this.signalHandler = null;
+    }
+    if (this.exitHandler) {
+      process.off('exit', this.exitHandler);
+      this.exitHandler = null;
+    }
+    if (this.faultHandler) {
+      process.off('uncaughtException', this.faultHandler);
+      process.off('unhandledRejection', this.faultHandler);
+      this.faultHandler = null;
     }
     if (this.ledger) {
       this.ledger.close();

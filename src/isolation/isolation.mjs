@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import { parseProjectConfig } from '../config/project.mjs';
 import { runLedgerPath } from '../daemon/home.mjs';
+import { sweepPathHolders } from '../engine/processes.mjs';
 import { git } from './git.mjs';
 import { cloneDir, ensureBareClone, fetchClone, branchSha, readBlobFromBranch } from './clones.mjs';
 import { addRunWorktree, removeRunWorktrees, workspaceRoot } from './worktrees.mjs';
@@ -16,12 +17,15 @@ import { stackUp, stackDown } from './stacks.mjs';
 export class RunIsolation {
   /**
    * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
-   * @param {{composeCommand?: () => string[], composeRunner?: Function}} opts
+   * @param {{composeCommand?: () => string[], composeRunner?: Function,
+   *   sweepProcesses?: Function}} opts
+   *   sweepProcesses substitutes the process sweep (tests only).
    */
-  constructor(paths, { composeCommand, composeRunner } = {}) {
+  constructor(paths, { composeCommand, composeRunner, sweepProcesses } = {}) {
     this.paths = paths;
     this.composeCommand = composeCommand ?? (() => ['docker', 'compose']);
     this.composeRunner = composeRunner;
+    this.sweepProcesses = sweepProcesses ?? sweepPathHolders;
     this.cloneLocks = new Map();
   }
 
@@ -118,11 +122,11 @@ export class RunIsolation {
   }
 
   /**
-   * Releases a run workspace: stack down, worktrees removed, workspace root
-   * gone. `keepBranch` leaves the run branch in the clone — the caller sets
-   * it for a run whose work never reached the remote. Collects errors instead
-   * of stopping at the first: teardown runs every step it can.
-   * Returns { errors, record }.
+   * Releases a run workspace: stack down, processes swept, worktrees removed,
+   * workspace root gone. `keepBranch` leaves the run branch in the clone — the
+   * caller sets it for a run whose work never reached the remote. Collects
+   * errors instead of stopping at the first: teardown runs every step it can.
+   * Returns { errors, record, swept }.
    */
   async release(runId, { project, keepBranch = false } = {}) {
     const errors = [];
@@ -139,6 +143,16 @@ export class RunIsolation {
         errors.push(`stack: ${error.message}`);
       }
     }
+    const root = workspaceRoot(this.paths, runId);
+    // Before anything tries to delete the workspace: a seat that exited on its
+    // own can leave descendants standing in it, and every removal below fails
+    // for as long as they do. A workspace that is already gone holds nothing,
+    // so it costs no enumeration.
+    let swept = null;
+    if (existsSync(root)) {
+      swept = await this.sweepProcesses(root);
+      if (swept.error) errors.push(`sweep: ${swept.error}`);
+    }
     if (owner && existsSync(cloneDir(this.paths, owner))) {
       try {
         await this.withClone(owner, () =>
@@ -148,7 +162,6 @@ export class RunIsolation {
         errors.push(`worktree: ${error.message}`);
       }
     }
-    const root = workspaceRoot(this.paths, runId);
     if (existsSync(root)) {
       try {
         rmSync(root, { recursive: true, force: true, maxRetries: 3 });
@@ -169,7 +182,7 @@ export class RunIsolation {
         errors.push(`run dir: ${error.message}`);
       }
     }
-    return { errors, record };
+    return { errors, record, swept };
   }
 
   /**
