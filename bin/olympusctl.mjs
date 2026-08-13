@@ -11,6 +11,7 @@
 //   olympusctl pause    --home <dir> --project <name>
 //   olympusctl launch   --home <dir> --project <name> [--lane <name>]
 //                       [--card <path>] [--ticket <path>]
+//                       [--resume-from <runId>]
 //   olympusctl kill     --home <dir> --run <id>
 //   olympusctl resolve  --home <dir> [--run <id>] --seq <n> [--note <text>]
 // --home falls back to OLYMPUSD_HOME; --actor defaults to console:<os user>.
@@ -18,6 +19,9 @@
 // --ticket, and no other lane accepts one. A repo-relative ticket path names
 // a ticket committed in the run worktree; an absolute path names a ticket in
 // the daemon home.
+// --resume-from names a prior story run whose freeze the new run inherits:
+// story lane only, and the prior run supplies the card, so --card is refused
+// beside it.
 import { userInfo } from 'node:os';
 import { homePaths } from '../src/daemon/home.mjs';
 import { writeControlCommand } from '../src/daemon/control.mjs';
@@ -46,6 +50,7 @@ function parseArgs(argv) {
     ['--card', 'card'],
     ['--lane', 'lane'],
     ['--ticket', 'ticket'],
+    ['--resume-from', 'resumeFrom'],
     ['--note', 'note'],
   ]);
   for (let i = 0; i < rest.length; i++) {
@@ -77,7 +82,9 @@ if (!command) {
   fail(
     'usage: olympusctl <status|queue|frontier|answer|arm|pause|launch|kill|resolve> --home <dir>\n' +
       '       launch: --project <name> [--lane <name>] [--card <path>] [--ticket <path>]\n' +
-      '       --lane repair requires --ticket; no other lane accepts one',
+      '               [--resume-from <runId>]\n' +
+      '       --lane repair requires --ticket; no other lane accepts one\n' +
+      '       --resume-from is story-lane only and takes no --card',
   );
 }
 if (!opts.home) fail('--home (or OLYMPUSD_HOME) is required');
@@ -126,9 +133,16 @@ if (command === 'status') {
 } else if (command === 'launch') {
   const project = need(opts, 'project');
   const lane = opts.lane ?? 'story';
-  // Lane and ticket must agree here, before the command reaches the inbox: a
-  // repair run without its ticket has no spec, and a ticket on any other lane
-  // is a typed intent the run would drop in silence.
+  // Every combination is settled here, before the command reaches the inbox.
+  // A resume inherits one run's freeze, so it belongs to the story lane and
+  // takes that run's card; naming another card would apply a spec to a story
+  // it was not born for.
+  if (opts.resumeFrom !== undefined) {
+    if (lane !== 'story') fail(`--resume-from applies to --lane story only (lane: ${lane})`);
+    if (opts.card !== undefined) fail('--resume-from takes its card from the prior run; drop --card');
+  }
+  // A repair run without its ticket has no spec, and a ticket on any other
+  // lane is a typed intent the run would drop in silence.
   if (lane === 'repair' && opts.ticket === undefined) {
     fail('--lane repair requires --ticket <path>');
   }
@@ -142,6 +156,7 @@ if (command === 'status') {
     ...(opts.lane !== undefined && { lane: opts.lane }),
     ...(opts.card !== undefined && { card: opts.card }),
     ...(opts.ticket !== undefined && { ticket: opts.ticket }),
+    ...(opts.resumeFrom !== undefined && { resumeFrom: opts.resumeFrom }),
   });
 } else if (command === 'kill') {
   queueCommand(paths, { command: 'kill', actor, runId: need(opts, 'run') });

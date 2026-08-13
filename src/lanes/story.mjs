@@ -4,20 +4,28 @@
 // the completion signal; the stages after freeze land with their milestones
 // and enter through `storyLane({afterFreeze})`.
 //
+// A launch that names a prior run takes the second route through readiness:
+// it inherits that run's freeze — spec, record and frozen suite — stamps the
+// inheritance, and hands the tree straight to the post-freeze stage. No
+// pre-freeze seat runs on that route.
+//
 // Every handler re-derives its position from the run ledger and the git
 // state, so a daemon restart resumes mid-chain without memory. Deterministic
 // defects in a seat's work product (boundary breaches, wrong red classes,
 // uncovered survivors) take the contract-loop route: one corrective
 // invocation, then seat-failure.
-import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { runReportPath } from '../daemon/home.mjs';
 import { cloneDir } from '../isolation/clones.mjs';
 import { addDisposableWorktree, removeWorktree, workspaceRoot } from '../isolation/worktrees.mjs';
 import {
+  abortMerge,
   changedFiles,
+  changedInRange,
   commitAll,
   headSha,
+  mergeIntoTree,
   restorePaths,
   evidenceDiff,
   filesAt,
@@ -25,6 +33,7 @@ import {
 import { testEditDenyRules } from '../seats/boundary.mjs';
 import { parseIntentCard } from './card.mjs';
 import { runCommand } from './exec.mjs';
+import { readInheritance } from './resume.mjs';
 import {
   ACTOR,
   loadProjectConfig,
@@ -58,15 +67,16 @@ export function storyLane({ afterFreeze }) {
   if (!Array.isArray(afterFreeze?.stages) || afterFreeze.stages.length === 0) {
     throw new Error('storyLane requires an afterFreeze continuation');
   }
+  const postFreeze = afterFreeze.stages[0];
   return {
     stages: [...PRE_FREEZE_STAGES, ...afterFreeze.stages],
     handlers: {
-      readiness,
+      readiness: readinessHandler(postFreeze),
       'spec-birth': specBirth,
       'spec-gate': specGate,
       suite: suiteStage,
       adversary,
-      freeze: freezeHandler(afterFreeze.stages[0]),
+      freeze: freezeHandler(postFreeze),
       ...afterFreeze.handlers,
     },
   };
@@ -209,7 +219,75 @@ export const ADVERSARY_SCHEMA = {
 
 // -- readiness (process) -----------------------------------------------------
 
-async function readiness(ctx) {
+/**
+ * Readiness is the lane's admission gate, and it has two routes. A normal
+ * launch is admitted on its intent card and derives everything after it. A
+ * launch that names a prior run is admitted on that run's freeze instead: it
+ * carries the artifacts over, hands the tree to `postFreezeStage`, and runs no
+ * pre-freeze seat at all.
+ */
+function readinessHandler(postFreezeStage) {
+  return async function readiness(ctx) {
+    if (typeof ctx.payload.resumeFrom === 'string') {
+      return inheritFreeze(ctx, postFreezeStage);
+    }
+    const worktree = ctx.payload.worktree;
+    if (typeof worktree !== 'string' || !existsSync(worktree)) {
+      return { close: { state: 'failed', reason: 'no-worktree' } };
+    }
+    const config = await loadProjectConfig(ctx);
+    const story = config.lanes.story;
+    if (!story) return { close: { state: 'failed', reason: 'story-lane-unconfigured' } };
+    const cardPath = ctx.payload.card;
+    if (typeof cardPath !== 'string' || cardPath.length === 0) {
+      return { close: { state: 'failed', reason: 'no-card' } };
+    }
+    const file = join(worktree, cardPath);
+    if (!existsSync(file)) {
+      return { close: { state: 'failed', reason: 'card-missing', card: cardPath } };
+    }
+    const { card, errors } = parseIntentCard(readFileSync(file, 'utf8'));
+    if (errors.length > 0) {
+      return { close: { state: 'failed', reason: 'card-invalid', errors } };
+    }
+    if (story.lintCommand) {
+      const lint = await runCommand(config.commands[story.lintCommand], {
+        cwd: worktree,
+        env: runEnv(ctx, config),
+      });
+      if (lint.code === null) {
+        return { close: { state: 'failed', reason: 'lint-command-error', error: lint.error } };
+      }
+      if (lint.code !== 0) {
+        return { close: { state: 'failed', reason: 'readiness-lint', output: lint.output } };
+      }
+    }
+    if (card.openDecisions.length > 0) {
+      const events = runEvents(ctx);
+      if (!answeredPark(events, 'open-decisions')?.answer) {
+        return parkDirective('open-decisions', {
+          question:
+            `Resolve the open decisions on ${card.key ?? cardPath}:\n` +
+            card.openDecisions.map((d) => `- ${d}`).join('\n'),
+          refs: [cardPath],
+        });
+      }
+    }
+    return { next: 'spec-birth' };
+  };
+}
+
+// -- the resume route --------------------------------------------------------
+
+/**
+ * Admits a run on a prior run's freeze. The card gates are not re-run: the
+ * prior run passed them, and its answers are already written into the spec
+ * this run inherits. The gates that replace them are about the freeze itself,
+ * and each one refuses by name rather than guessing.
+ */
+async function inheritFreeze(ctx, nextStage) {
+  const events = runEvents(ctx);
+  if (events.some((e) => e.event === 'freeze-inherited')) return { next: nextStage };
   const worktree = ctx.payload.worktree;
   if (typeof worktree !== 'string' || !existsSync(worktree)) {
     return { close: { state: 'failed', reason: 'no-worktree' } };
@@ -217,42 +295,139 @@ async function readiness(ctx) {
   const config = await loadProjectConfig(ctx);
   const story = config.lanes.story;
   if (!story) return { close: { state: 'failed', reason: 'story-lane-unconfigured' } };
-  const cardPath = ctx.payload.card;
-  if (typeof cardPath !== 'string' || cardPath.length === 0) {
-    return { close: { state: 'failed', reason: 'no-card' } };
+  let prior;
+  try {
+    prior = readInheritance(ctx.paths, ctx.payload.resumeFrom);
+  } catch (error) {
+    return {
+      close: {
+        state: 'failed',
+        reason: 'inherit-invalid',
+        from: ctx.payload.resumeFrom,
+        detail: error.message,
+      },
+    };
   }
-  const file = join(worktree, cardPath);
-  if (!existsSync(file)) {
-    return { close: { state: 'failed', reason: 'card-missing', card: cardPath } };
+  // The artifacts travel as files: the spec the gate passed, and the record
+  // that certified the suite. The record is copied verbatim — it names the run
+  // that earned it, and evidence is never rewritten to read as this run's own.
+  const runDir = join(ctx.paths.runs, ctx.runId);
+  mkdirSync(runDir, { recursive: true });
+  copyFileSync(prior.specPath, join(runDir, 'spec.md'));
+  copyFileSync(prior.freezePath, join(runDir, 'freeze.json'));
+
+  let sha = await headSha(worktree);
+  const base = ctx.payload.baseSha;
+  if (typeof base !== 'string') {
+    // No base means no way to tell whether the freeze still applies. The
+    // launch always records one, so this is a refusal, never a skip.
+    return {
+      close: {
+        state: 'failed',
+        reason: 'inherit-invalid',
+        from: prior.runId,
+        detail: 'the launch recorded no base sha',
+      },
+    };
   }
-  const { card, errors } = parseIntentCard(readFileSync(file, 'utf8'));
-  if (errors.length > 0) {
-    return { close: { state: 'failed', reason: 'card-invalid', errors } };
-  }
-  if (story.lintCommand) {
-    const lint = await runCommand(config.commands[story.lintCommand], {
-      cwd: worktree,
-      env: runEnv(ctx, config),
+  if (prior.baseSha !== base) {
+    const directive = await advanceBase(ctx, {
+      worktree,
+      config,
+      story,
+      prior,
+      base,
+      from: sha,
     });
-    if (lint.code === null) {
-      return { close: { state: 'failed', reason: 'lint-command-error', error: lint.error } };
-    }
-    if (lint.code !== 0) {
-      return { close: { state: 'failed', reason: 'readiness-lint', output: lint.output } };
-    }
+    if (directive.close) return directive;
+    sha = directive.sha;
   }
-  if (card.openDecisions.length > 0) {
-    const events = runEvents(ctx);
-    if (!answeredPark(events, 'open-decisions')?.answer) {
-      return parkDirective('open-decisions', {
-        question:
-          `Resolve the open decisions on ${card.key ?? cardPath}:\n` +
-          card.openDecisions.map((d) => `- ${d}`).join('\n'),
-        refs: [cardPath],
-      });
-    }
+  ctx.store.append('freeze-inherited', {
+    actor: ACTOR,
+    from: prior.runId,
+    sha,
+    frozenSha: prior.frozenSha,
+    base,
+    priorBase: prior.baseSha,
+    spec: join(runDir, 'spec.md'),
+    record: join(runDir, 'freeze.json'),
+    files: prior.record.suiteFiles?.length ?? 0,
+    killCount: prior.record.killCount ?? 0,
+    // What stays behind. A finding is evidence about the tree it was found
+    // on, and this run discards that tree, so no finding is carried forward
+    // as its own. The prior ledger keeps them, open and readable, and the
+    // stamp names them so the trail from here is one hop. Escapes need no
+    // carry at all: they live in the instance-scoped escapes ledger, which
+    // no run owns and no launch touches.
+    priorFindings: prior.openFindings,
+    priorLoud: prior.openLoud,
+  });
+  return { next: nextStage };
+}
+
+/**
+ * The default branch advanced under the inherited freeze. The freeze's
+ * evidence is a claim about a tree, so a moved tree gets the claim re-derived
+ * where that is possible and refused where it is not:
+ * - main edited the frozen suite: refuse, naming the files. The suite that was
+ *   proven is not the suite that would run.
+ * - the merge conflicts: refuse, naming the files. Resolution is judgment
+ *   work, and it belongs to a run that owns its own spec.
+ * - the merged tree passes the suite: refuse. Red state is the freeze's core
+ *   claim, and a green suite says the feature is already there.
+ * The merge follows the ship step's rule — merge main in, never rewrite the
+ * branch — so the frozen commit stays an ancestor of everything after it.
+ */
+async function advanceBase(ctx, { worktree, config, story, prior, base, from }) {
+  const testPaths = config.repo.testPaths;
+  const moved = await changedInRange(worktree, prior.baseSha, base);
+  const suiteMoved = moved.filter((file) => underAny(file, testPaths));
+  if (suiteMoved.length > 0) {
+    return {
+      close: {
+        state: 'failed',
+        reason: 'inherit-suite-diverged',
+        from: prior.runId,
+        files: suiteMoved,
+      },
+    };
   }
-  return { next: 'spec-birth' };
+  const defaultBranch = ctx.payload.defaultBranch ?? 'main';
+  const merged = await mergeIntoTree(
+    worktree,
+    base,
+    `merge ${defaultBranch} into ${ctx.payload.branch}`,
+  );
+  if (!merged.ok) {
+    await abortMerge(worktree).catch(() => {});
+    return {
+      close: {
+        state: 'failed',
+        reason: 'inherit-base-conflict',
+        from: prior.runId,
+        files: merged.conflicts,
+      },
+    };
+  }
+  ctx.store.append('branch-update', {
+    actor: ACTOR,
+    fromSha: from,
+    toSha: merged.sha,
+    mainSha: base,
+  });
+  const run = await runCommand(config.commands[story.suiteCommand], {
+    cwd: worktree,
+    env: runEnv(ctx, config),
+  });
+  if (run.code === null) return commandFail(run);
+  const red = run.code !== 0;
+  ctx.store.append('red-state-check', { actor: ACTOR, sha: merged.sha, result: red ? 'red' : 'green' });
+  if (!red) {
+    return {
+      close: { state: 'failed', reason: 'inherit-red-state-green', from: prior.runId, sha: merged.sha },
+    };
+  }
+  return { sha: merged.sha };
 }
 
 // -- spec birth (seat) -------------------------------------------------------

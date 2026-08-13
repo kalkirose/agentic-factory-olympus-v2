@@ -409,3 +409,21 @@ never carries a project's specifics.
   measured as both 0 and 1 for the same rejection, and never the message
   text. The default model refusing too is a loud failure with the evidence.
   ADR-0005 records all three. 269 tests green.
+- 2026-08-13 — shakedown gap: every defect found so far lives after the freeze,
+  and each one costs a full re-derivation of spec, suite and adversary waves to
+  reach again. A killed run left its branch, its spec and its freeze record
+  behind, and nothing could use any of it. A story launch now takes
+  `--resume-from <runId>`: it provisions on the frozen commit off that run's
+  branch, carries the born spec and the freeze record into the new run
+  directory, stamps `freeze-inherited` (never a `freeze` it did not earn), and
+  enters at the first post-freeze stage with no pre-freeze seat. A run that
+  closes without shipping now keeps its branch — that branch is the only copy
+  of what it derived. Refusals are named and land before provisioning: no
+  ledger, still open, shipped, no freeze anchor, unreadable record, no born
+  spec, no card, wrong project, branch or commit gone from the clone. An
+  advanced default branch is merged in and the red-state gate re-runs; an
+  advance into the test paths, a merge conflict, or a suite that goes green
+  closes the run with the diverged files named. Open findings do not travel —
+  they are evidence about a discarded tree — but the stamp names them, and
+  escapes never lived in a run ledger. ADR-0014 records the shapes. 282 tests
+  green.

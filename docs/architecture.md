@@ -54,6 +54,14 @@ Two lanes share the machinery:
   + one generalist review round + one verdict + ship. Writes the run ledger
   and the escapes-ledger entry at close.
 
+A story launch may **resume from a prior run's freeze**: it starts on the
+frozen commit, carries the born spec and the freeze record over, stamps
+`freeze-inherited` rather than a freeze it never earned, and enters at the
+first post-freeze stage. A run that did not ship keeps its branch so the
+frozen tree stays reachable. An advanced default branch is merged in and the
+red-state gate re-runs; a suite the advance touched, a merge conflict, or a
+suite that goes green refuses the launch by name.
+
 ## Stores
 
 Three stores plus two indexes, all append-only, all under the daemon home:

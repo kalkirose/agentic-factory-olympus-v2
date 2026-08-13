@@ -29,6 +29,9 @@ export const RUN_EVENTS = new Set([
   'survivor-disposition',
   'red-state-check',
   'freeze',
+  // A launch that inherited a prior run's freeze instead of deriving one.
+  // A resumed run never stamps `freeze`: it did not earn one.
+  'freeze-inherited',
   // verdict
   'implementation-committed',
   'layer-result',

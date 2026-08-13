@@ -30,6 +30,7 @@ import {
 import { testEditDenyRules } from '../seats/boundary.mjs';
 import { runSpectrum, persistentReds } from './spectrum.mjs';
 import { furyRound, generalistReview } from './review.mjs';
+import { freezeAnchor } from './resume.mjs';
 import { SUITE_SCHEMA, SPEC_AMEND_SCHEMA } from './story.mjs';
 import {
   ACTOR,
@@ -874,7 +875,9 @@ async function verdictBase(ctx, mode) {
   }
   const events = runEvents(ctx);
   if (mode === 'story') {
-    const freeze = events.find((e) => e.event === 'freeze');
+    // Either anchor serves: a freeze this run earned, or one it inherited.
+    // Both name the suite sha and the pre-implementation tree.
+    const freeze = freezeAnchor(events);
     if (!freeze) return { fail: { close: { state: 'failed', reason: 'no-freeze-record' } } };
     return {
       config,
@@ -915,7 +918,9 @@ async function verdictBase(ctx, mode) {
 function currentSuiteSha(events) {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
-    if (e.event === 're-freeze' || e.event === 'freeze') return e.sha;
+    if (e.event === 're-freeze' || e.event === 'freeze' || e.event === 'freeze-inherited') {
+      return e.sha;
+    }
   }
   return null;
 }

@@ -22,10 +22,13 @@ export function runBranch(runId) {
   return `run/${runId}`;
 }
 
-/** Creates the run worktree on a fresh run branch off the given base branch. */
-export async function addRunWorktree(clone, paths, runId, baseBranch) {
+/**
+ * Creates the run worktree on a fresh run branch off `base` — the default
+ * branch at launch, or the frozen commit a resumed run inherits.
+ */
+export async function addRunWorktree(clone, paths, runId, base) {
   const path = runWorktreePath(paths, runId);
-  await git(['worktree', 'add', '-b', runBranch(runId), path, baseBranch], { cwd: clone });
+  await git(['worktree', 'add', '-b', runBranch(runId), path, base], { cwd: clone });
   return { path, branch: runBranch(runId) };
 }
 
@@ -42,20 +45,24 @@ export async function removeWorktree(clone, path) {
 }
 
 /**
- * Removes every worktree under the run's root, the run branch, and the root
- * directory itself. The run branch dies with the workspace: shipped work
- * lives on the remote, and the archived ledger records the base sha.
+ * Removes every worktree under the run's root, the root directory itself,
+ * and — unless `keepBranch` — the run branch. A shipped run's work lives on
+ * the remote, so its branch dies with the workspace. A run that closed any
+ * other way pushed nothing: its branch holds the only copy of its frozen
+ * suite, and a later launch can inherit that freeze.
  */
-export async function removeRunWorktrees(clone, paths, runId) {
+export async function removeRunWorktrees(clone, paths, runId, { keepBranch = false } = {}) {
   const root = workspaceRoot(paths, runId);
   for (const path of await listWorktrees(clone)) {
     if (isUnder(root, path)) await removeWorktree(clone, path);
   }
   await git(['worktree', 'prune'], { cwd: clone });
-  try {
-    await git(['branch', '-D', runBranch(runId)], { cwd: clone });
-  } catch {
-    // The branch may not exist (disposables only, or a partial provision).
+  if (!keepBranch) {
+    try {
+      await git(['branch', '-D', runBranch(runId)], { cwd: clone });
+    } catch {
+      // The branch may not exist (disposables only, or a partial provision).
+    }
   }
   rmSync(root, { recursive: true, force: true });
 }

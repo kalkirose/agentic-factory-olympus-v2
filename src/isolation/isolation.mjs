@@ -51,10 +51,14 @@ export class RunIsolation {
   /**
    * Provisions a run workspace. Fails the launch as a whole: an invalid
    * config, a failed fetch, or a failed stack leaves nothing behind.
+   * `baseCommit` starts the run worktree somewhere other than the default
+   * branch head — a resumed run starts on the commit its inherited freeze
+   * names. `baseSha` stays the default-branch head either way: it is the base
+   * the run will merge into, not the commit it started on.
    * @param {{runId: string, project: string, repoUrl: string,
-   *   defaultBranch: string, configPath: string}} opts
+   *   defaultBranch: string, configPath: string, baseCommit?: string}} opts
    */
-  async provision({ runId, project, repoUrl, defaultBranch, configPath }) {
+  async provision({ runId, project, repoUrl, defaultBranch, configPath, baseCommit }) {
     const { clone, blob, projectConfig, baseSha, worktree, branch } = await this.withClone(
       project,
       async () => {
@@ -64,7 +68,7 @@ export class RunIsolation {
         const { blob, text } = await readBlobFromBranch(dir, defaultBranch, configPath);
         const config = parseProjectConfig(text, source);
         const sha = await branchSha(dir, defaultBranch);
-        const added = await addRunWorktree(dir, this.paths, runId, defaultBranch);
+        const added = await addRunWorktree(dir, this.paths, runId, baseCommit ?? defaultBranch);
         return {
           clone: dir,
           blob,
@@ -96,7 +100,17 @@ export class RunIsolation {
         throw error;
       }
     }
-    const record = { runId, project, worktree, branch, baseSha, configPath, configBlob: blob, stack };
+    const record = {
+      runId,
+      project,
+      worktree,
+      branch,
+      baseSha,
+      ...(baseCommit && { baseCommit }),
+      configPath,
+      configBlob: blob,
+      stack,
+    };
     const runDir = join(this.paths.runs, runId);
     mkdirSync(runDir, { recursive: true });
     writeFileSync(join(runDir, 'workspace.json'), JSON.stringify(record, null, 2) + '\n');
@@ -104,11 +118,13 @@ export class RunIsolation {
   }
 
   /**
-   * Releases a run workspace: stack down, worktrees and run branch removed,
-   * workspace root gone. Collects errors instead of stopping at the first —
-   * teardown runs every step it can. Returns { errors, record }.
+   * Releases a run workspace: stack down, worktrees removed, workspace root
+   * gone. `keepBranch` leaves the run branch in the clone — the caller sets
+   * it for a run whose work never reached the remote. Collects errors instead
+   * of stopping at the first: teardown runs every step it can.
+   * Returns { errors, record }.
    */
-  async release(runId, { project } = {}) {
+  async release(runId, { project, keepBranch = false } = {}) {
     const errors = [];
     const record = this.readRecord(runId);
     const owner = record?.project ?? project;
@@ -126,7 +142,7 @@ export class RunIsolation {
     if (owner && existsSync(cloneDir(this.paths, owner))) {
       try {
         await this.withClone(owner, () =>
-          removeRunWorktrees(cloneDir(this.paths, owner), this.paths, runId),
+          removeRunWorktrees(cloneDir(this.paths, owner), this.paths, runId, { keepBranch }),
         );
       } catch (error) {
         errors.push(`worktree: ${error.message}`);

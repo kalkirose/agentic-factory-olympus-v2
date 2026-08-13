@@ -44,6 +44,26 @@ export async function branchSha(dir, branch) {
   return out.trim();
 }
 
+/** True when the clone holds the branch. */
+export async function hasBranch(dir, branch) {
+  try {
+    await branchSha(dir, branch);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** True when the clone holds the commit the sha names. */
+export async function hasCommit(dir, sha) {
+  try {
+    await git(['rev-parse', '--verify', `${sha}^{commit}`], { cwd: dir });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Lists the entry names of one tree (non-recursive) at a branch head in the
  * bare clone. Subdirectories appear as bare names; the frontier reads only

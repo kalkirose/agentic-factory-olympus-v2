@@ -9,9 +9,16 @@ import { RunEngine } from '../engine/engine.mjs';
 import { ModelSemaphores } from '../seats/semaphore.mjs';
 import { RunIsolation } from '../isolation/isolation.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
-import { cloneDir, ensureBareClone, readBlobFromBranch } from '../isolation/clones.mjs';
+import {
+  cloneDir,
+  ensureBareClone,
+  hasBranch,
+  hasCommit,
+  readBlobFromBranch,
+} from '../isolation/clones.mjs';
 import { parseProjectConfig } from '../config/project.mjs';
 import { parseIntentCard } from '../lanes/card.mjs';
+import { readInheritance, closeState } from '../lanes/resume.mjs';
 import { FrontierLauncher } from '../frontier/autolaunch.mjs';
 import { readGraphSource } from '../frontier/source.mjs';
 import { TripwireWatcher } from '../tripwires/watcher.mjs';
@@ -194,6 +201,11 @@ export class Daemon {
    * project config from the default branch, create the run worktree, bring
    * the per-run stack up, then hand the run to the engine. A provisioning
    * failure leaves nothing behind and no run starts.
+   *
+   * `resumeFrom` names a prior run whose freeze this launch inherits. Every
+   * fact that would otherwise be guessed is settled here, before anything is
+   * provisioned: the prior run's own record supplies the card, and the clone
+   * must still hold the branch and the frozen commit.
    * @param {{project: string, lane: string, runId?: string, [k: string]: unknown}} opts
    */
   async launchRun({ project, lane, runId, ...payload }) {
@@ -202,17 +214,21 @@ export class Daemon {
     if (!entry) throw new Error(`unknown project: ${project}`);
     if (!this.engine.lanes.has(lane)) throw new Error(`unknown lane: ${lane}`);
     if (!this.engine.hasFreeSlot(project)) throw new Error(`no free slot for project ${project}`);
+    const inherit =
+      payload.resumeFrom !== undefined ? this.resolveResume(project, lane, payload) : null;
     runId = runId ?? `${project}-${Date.now().toString(36)}-${++this.launchCounter}`;
     if (this.engine.runs.has(runId)) throw new Error(`run ${runId} is already live`);
     if (readEvents(runLedgerPath(this.paths, runId)).length > 0) {
       throw new Error(`run ${runId} already has a ledger`);
     }
+    if (inherit) await this.requireFrozenTree(project, entry, inherit);
     const ws = await this.isolation.provision({
       runId,
       project,
       repoUrl: entry.repoUrl,
       defaultBranch: entry.defaultBranch,
       configPath: entry.projectConfigPath,
+      ...(inherit && { baseCommit: inherit.frozenSha }),
     });
     // The launch read the config fresh from the default branch; the tripwire
     // registry the watcher evaluates is the registry that just shipped.
@@ -238,17 +254,73 @@ export class Daemon {
   }
 
   /**
-   * A console launch: `{project, lane?, card?, ticket?}`. A story launch reads
-   * the card from the clone for its key, so the frontier's run history
-   * matches; an unreadable card launches anyway — readiness fails it with
-   * evidence. The repair lane's intake ticket is its spec, so lane and ticket
+   * Validates a resume and fills the payload from the prior run's own record.
+   * The card is never taken from the caller: a resume that inherits one run's
+   * freeze while naming another run's card would apply a spec to a story it
+   * was not born for.
+   */
+  resolveResume(project, lane, payload) {
+    if (lane !== 'story') {
+      throw new Error(`a resume applies to the story lane only (lane: ${lane})`);
+    }
+    const inherit = readInheritance(this.paths, payload.resumeFrom);
+    if (inherit.project !== project) {
+      throw new Error(
+        `run ${inherit.runId} belongs to project ${inherit.project}, not ${project}`,
+      );
+    }
+    if (payload.card !== undefined && payload.card !== inherit.card) {
+      throw new Error(`a resume takes its card from run ${inherit.runId} (${inherit.card})`);
+    }
+    payload.card = inherit.card;
+    if (inherit.storyKey !== null) payload.storyKey = inherit.storyKey;
+    return inherit;
+  }
+
+  /**
+   * The frozen tree must still be in the clone. The branch is what keeps the
+   * frozen commit reachable, so a missing branch is a refusal even when the
+   * commit still happens to resolve.
+   */
+  async requireFrozenTree(project, entry, inherit) {
+    await this.isolation.withClone(project, async () => {
+      const dir = await ensureBareClone(this.paths, project, entry.repoUrl, entry.defaultBranch);
+      if (!(await hasBranch(dir, inherit.branch))) {
+        throw new Error(
+          `the branch of run ${inherit.runId} (${inherit.branch}) is gone from the clone`,
+        );
+      }
+      if (!(await hasCommit(dir, inherit.frozenSha))) {
+        throw new Error(
+          `the frozen commit of run ${inherit.runId} (${inherit.frozenSha}) is gone from the clone`,
+        );
+      }
+    });
+  }
+
+  /**
+   * A console launch: `{project, lane?, card?, ticket?, resumeFrom?}`. A
+   * story launch reads the card from the clone for its key, so the frontier's
+   * run history matches; an unreadable card launches anyway — readiness fails
+   * it with evidence. The repair lane's intake ticket is its spec, so lane and ticket
    * must agree: the mismatch is refused here, before any provisioning, rather
    * than at the fix seat of a run that already holds a slot and a workspace.
+   * A resume names the run whose freeze it inherits. It belongs to the story
+   * lane, and the prior run supplies the card, so both mismatches are refused
+   * here as well.
    * @param {{actor: string, project: string, lane?: string, card?: string,
-   *   ticket?: string}} command
+   *   ticket?: string, resumeFrom?: string}} command
    */
-  async launchCommand({ actor, project, lane = 'story', card, ticket }) {
+  async launchCommand({ actor, project, lane = 'story', card, ticket, resumeFrom }) {
     if (typeof actor !== 'string' || actor.length === 0) throw new Error('launch requires an actor');
+    if (resumeFrom !== undefined) {
+      if (lane !== 'story') {
+        throw new Error(`a resume applies to the story lane only (lane: ${lane})`);
+      }
+      if (card !== undefined) {
+        throw new Error('a resume takes its card from the prior run; name no card');
+      }
+    }
     if (lane === 'repair') {
       if (typeof ticket !== 'string' || ticket.length === 0) {
         throw new Error('a repair launch requires a ticket path');
@@ -258,6 +330,7 @@ export class Daemon {
     }
     const payload = {};
     if (ticket !== undefined) payload.ticket = ticket;
+    if (resumeFrom !== undefined) payload.resumeFrom = resumeFrom;
     if (card !== undefined) {
       payload.card = card;
       const entry = this.config.projects[project];
@@ -344,9 +417,14 @@ export class Daemon {
     );
   }
 
-  /** Tears a closed run's workspace down and stamps the outcome. Async. */
-  scheduleWorkspaceRelease({ runId, project }) {
-    const task = this.releaseWorkspace(runId, { project })
+  /**
+   * Tears a closed run's workspace down and stamps the outcome. Async.
+   * A run that did not ship keeps its branch: nothing of it reached the
+   * remote, so that branch is the only copy of whatever it derived, and a
+   * later launch can inherit its freeze.
+   */
+  scheduleWorkspaceRelease({ runId, project, state }) {
+    const task = this.releaseWorkspace(runId, { project, keepBranch: state !== 'shipped' })
       .catch(() => {})
       .finally(() => {
         this.pendingTeardowns.delete(task);
@@ -354,10 +432,10 @@ export class Daemon {
     this.pendingTeardowns.add(task);
   }
 
-  async releaseWorkspace(runId, { project, orphan = false } = {}) {
+  async releaseWorkspace(runId, { project, orphan = false, keepBranch = false } = {}) {
     let errors;
     try {
-      ({ errors } = await this.isolation.release(runId, { project }));
+      ({ errors } = await this.isolation.release(runId, { project, keepBranch }));
     } catch (error) {
       errors = [error.message];
     }
@@ -366,6 +444,7 @@ export class Daemon {
       runId,
       ok: errors.length === 0,
       ...(orphan && { orphan }),
+      ...(keepBranch && { keptBranch: true }),
       ...(errors.length > 0 && { errors }),
     });
   }
@@ -377,7 +456,12 @@ export class Daemon {
   async sweepOrphanWorkspaces() {
     const open = new Set(this.engine.runs.keys());
     for (const runId of this.isolation.orphanRunIds(open)) {
-      await this.releaseWorkspace(runId, { orphan: true });
+      // Same branch rule as a normal close; a workspace with no ledger at all
+      // reads as not shipped, which is the safe side of the guess.
+      await this.releaseWorkspace(runId, {
+        orphan: true,
+        keepBranch: closeState(this.paths, runId) !== 'shipped',
+      });
     }
   }
 
