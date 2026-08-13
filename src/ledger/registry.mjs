@@ -45,6 +45,10 @@ export const RUN_EVENTS = new Set([
   'operational-fix',
   // gate integrity (loud)
   'gate-integrity',
+  // A candidate capture the diff policy refused, or one that took a change
+  // back. Loud, because both mean the tree the run judges is not the tree the
+  // seat believed it left behind (ADR-0017).
+  'diff-policy-violation',
   // ship
   'pr-opened',
   'check-transition',
@@ -107,6 +111,7 @@ export const QUEUED_EVENTS = new Set([
 export const LOUD_EVENTS = new Set([
   'liveness-violation',
   'gate-integrity',
+  'diff-policy-violation',
   'red-merge-breach',
   'factory-starvation',
 ]);

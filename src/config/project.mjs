@@ -31,6 +31,9 @@ export function defaultProjectConfig() {
     graph: null,
     // tripwire registry; the watcher milestone owns the metric semantics
     tripwires: [],
+    // lane name → the diff-policy tiers the candidate capture enforces;
+    // an absent lane leaves that lane's capture unpoliced
+    diffPolicy: {},
   };
 }
 
@@ -55,6 +58,7 @@ export function validateProjectConfig(config) {
   validateStack(config.stack, err);
   validateGraph(config.graph, err);
   validateTripwires(config.tripwires, err);
+  validateDiffPolicy(config.diffPolicy, err);
   if (isPlainObject(config.lanes) && isPlainObject(config.lanes.story)) {
     if (!Array.isArray(config.repo?.testPaths) || config.repo.testPaths.length === 0) {
       err('repo.testPaths', 'the story lane requires at least one test path');
@@ -281,6 +285,48 @@ function validateTripwires(tripwires, err) {
       }
     }
   });
+}
+
+// The diff policy the candidate capture enforces, per lane. Only the lanes
+// that run a dev seat take one; a name outside that set is a typo the launch
+// must not swallow, because a policy nobody reads protects nothing.
+const POLICED_LANES = new Set(['story', 'repair']);
+const TIER_KEYS = ['deniedPaths', 'declaredPaths', 'forbiddenPatterns'];
+
+function validateDiffPolicy(policy, err) {
+  if (policy === undefined) return;
+  if (!isPlainObject(policy)) {
+    err('diffPolicy', 'must be an object keyed by lane name');
+    return;
+  }
+  for (const [lane, tiers] of Object.entries(policy)) {
+    const at = (key) => `diffPolicy.${lane}.${key}`;
+    if (!POLICED_LANES.has(lane)) {
+      err(`diffPolicy.${lane}`, `must name a lane with a dev seat: ${[...POLICED_LANES].join(' | ')}`);
+      continue;
+    }
+    if (!isPlainObject(tiers)) {
+      err(`diffPolicy.${lane}`, 'must be an object');
+      continue;
+    }
+    for (const key of Object.keys(tiers)) {
+      if (!TIER_KEYS.includes(key)) err(at(key), `unknown tier: ${TIER_KEYS.join(' | ')}`);
+    }
+    validateStringList(tiers.deniedPaths, at('deniedPaths'), err);
+    validateStringList(tiers.declaredPaths, at('declaredPaths'), err);
+    if (tiers.forbiddenPatterns === undefined) continue;
+    if (!isStringList(tiers.forbiddenPatterns)) {
+      err(at('forbiddenPatterns'), 'must be an array of non-empty strings');
+      continue;
+    }
+    tiers.forbiddenPatterns.forEach((pattern, i) => {
+      try {
+        new RegExp(pattern);
+      } catch (cause) {
+        err(at(`forbiddenPatterns[${i}]`), `must be a valid regular expression: ${cause.message}`);
+      }
+    });
+  }
 }
 
 function validateStringList(value, path, err) {

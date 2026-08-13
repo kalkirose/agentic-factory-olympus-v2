@@ -11,6 +11,7 @@ import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemo
 import { postFreeze, repairLane } from '../src/lanes/verdict.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
+import { openLoud } from '../src/telemetry/readers.mjs';
 import { tempDir, removeDir, waitFor, initOriginRepo, projectConfigJson } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -79,7 +80,7 @@ function fixtureParse(line) {
 
 // A fixture seat child: writes files (relative paths land in the seat's cwd),
 // writes the report, exits. Behaviors dispatch per seat on label and prompt.
-function seatScript({ reportPath, model, report, files = {}, exitCode = 0 }) {
+function seatScript({ reportPath, model, report, files = {}, removes = [], exitCode = 0 }) {
   const stmts = [
     "const fs = require('fs');",
     "const path = require('path');",
@@ -90,6 +91,9 @@ function seatScript({ reportPath, model, report, files = {}, exitCode = 0 }) {
       `fs.mkdirSync(path.dirname(${JSON.stringify(file)}), { recursive: true });`,
       `fs.writeFileSync(${JSON.stringify(file)}, ${JSON.stringify(content)});`,
     );
+  }
+  for (const file of removes) {
+    stmts.push(`fs.rmSync(${JSON.stringify(file)}, { force: true, recursive: true });`);
   }
   if (report !== undefined) {
     stmts.push(
@@ -123,7 +127,7 @@ function seatFixture(seats) {
 }
 
 /** Seeds the freeze boundary: suite files committed, freeze stamped. */
-function seedHandler(files, extra) {
+function seedHandler(files, extra, specText = '# Spec\n\nf(x) returns 2*x.\n') {
   return async (ctx) => {
     const worktree = ctx.payload.worktree;
     for (const [file, content] of Object.entries(files)) {
@@ -132,7 +136,7 @@ function seedHandler(files, extra) {
       writeFileSync(full, content);
     }
     const sha = await commitAll(worktree, 'suite: seed');
-    writeFileSync(join(ctx.paths.runs, ctx.runId, 'spec.md'), '# Spec\n\nf(x) returns 2*x.\n');
+    writeFileSync(join(ctx.paths.runs, ctx.runId, 'spec.md'), specText);
     ctx.store.append('freeze', { actor: 'daemon', sha, killCount: 3, amendmentKills: 0 });
     if (extra) await extra(ctx, worktree);
     return { next: 'implementation' };
@@ -148,6 +152,8 @@ function verdictFixture(t, opts) {
     suiteFiles = { 'tests/feature.test.mjs': STRONG_TEST },
     originFiles = {},
     seedExtra = null,
+    diffPolicy = undefined,
+    specText = undefined,
   } = opts;
   const root = tempDir();
   const origin = initOriginRepo(join(root, 'origin'), {
@@ -157,6 +163,7 @@ function verdictFixture(t, opts) {
       gates: { tier1: gates },
       lanes: { story: { suiteCommand: 'suite' } },
       stack: null,
+      ...(diffPolicy && { diffPolicy }),
     }),
     'src/base.mjs': 'export const base = 1;\n',
     ...originFiles,
@@ -171,7 +178,7 @@ function verdictFixture(t, opts) {
   const lanes = {
     story: {
       stages: ['seed', ...post.stages],
-      handlers: { seed: seedHandler(suiteFiles, seedExtra), ...post.handlers },
+      handlers: { seed: seedHandler(suiteFiles, seedExtra, specText), ...post.handlers },
     },
     repair: repairLane({ afterVerdict: done }),
   };
@@ -941,4 +948,236 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
   const record = readRecord(fx.paths, runId, 1);
   assert.deepEqual(record.spectrum, [{ layer: 'unit', status: 'green' }]);
   assert.deepEqual(record.findings, []);
+});
+
+// -- the diff-policy gate at candidate capture -------------------------------
+
+const POLICY = {
+  story: {
+    deniedPaths: ['.github/**', '.npmrc', 'scripts/**'],
+    declaredPaths: ['**/package.json'],
+    forbiddenPatterns: ['-win32\\.'],
+  },
+  repair: { deniedPaths: ['.olympus/**'], forbiddenPatterns: ['-win32\\.'] },
+};
+
+const SPEC_WITH_BLOCK = [
+  '# Spec',
+  '',
+  'f(x) returns 2*x.',
+  '',
+  '```touched-paths',
+  'src/feature.mjs',
+  'package.json',
+  '```',
+  '',
+].join('\n');
+
+function loudFor(paths, runId, event) {
+  return openLoud(paths).filter((i) => i.ledger === `run:${runId}` && i.event === event);
+}
+
+test('a denied path blocks the capture, stamps loud, and buys one corrective', async (t) => {
+  const seats = {
+    dev: ({ label }) =>
+      label === 'dev-1'
+        ? {
+            files: { 'src/feature.mjs': GOOD_FEATURE, '.npmrc': 'link-workspace-packages=true\n' },
+            report: { summary: 'implemented' },
+          }
+        : { removes: ['.npmrc'], report: { summary: 'implemented without the topology change' } },
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, { seats, diffPolicy: POLICY });
+  const { runId, worktree } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The stamp names the path and the rule that blocked it.
+  const stamp = events.find((e) => e.event === 'diff-policy-violation');
+  assert.equal(stamp.seat, 'dev');
+  assert.equal(stamp.lane, 'story');
+  assert.deepEqual(stamp.violations, [{ path: '.npmrc', rule: 'denied', pattern: '.npmrc' }]);
+  assert.deepEqual(stamp.dropped, []);
+  assert.match(stamp.gist, /\.npmrc/);
+  // The corrective invocation carried the exact violation.
+  const corrective = fx.calls.find((c) => c.label === 'dev-2');
+  assert.ok(corrective, 'the corrective dev invocation ran');
+  assert.match(corrective.prompt, /Correction brief/);
+  assert.match(corrective.prompt, /\.npmrc: the diff policy denies this path to this lane/);
+  // The capture never committed the denied path, and the cleared record
+  // resolves, so the loud strip does not carry a run that answered itself.
+  assert.ok(!existsSync(join(worktree, '.npmrc')));
+  assert.ok(events.some((e) => e.event === 'resolved' && e.resolves === stamp.seq));
+  assert.equal(loudFor(fx.paths, runId, 'diff-policy-violation').length, 0);
+  assert.equal(events.filter((e) => e.event === 'implementation-committed').length, 1);
+});
+
+test('a repeat violation parks seat-failure and the loud record stays open', async (t) => {
+  const seats = {
+    dev: () => ({
+      files: { 'src/feature.mjs': GOOD_FEATURE, 'scripts/gate.mjs': 'process.exit(0);\n' },
+      report: { summary: 'implemented' },
+    }),
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, { seats, diffPolicy: POLICY });
+  const { runId } = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'seat-failure');
+  assert.deepEqual(park.options, ['retry', 'abandon']);
+  assert.equal(park.detail.seat, 'dev');
+  assert.equal(park.detail.cause, 'work-product-defect');
+  // One corrective ran before the park, and no candidate was ever committed.
+  assert.equal(fx.calls.filter((c) => c.seat === 'dev').length, 2);
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  assert.ok(!live.some((e) => e.event === 'implementation-committed'));
+  const failure = live.find((e) => e.event === 'seat-failure');
+  assert.match(failure.defects[0], /scripts\/gate\.mjs: the diff policy denies this path/);
+  assert.equal(loudFor(fx.paths, runId, 'diff-policy-violation').length, 2);
+  // A bought retry carries the violation into the fresh invocation's brief.
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'retry' });
+  await waitFor(
+    () =>
+      readEvents(runLedgerPath(fx.paths, runId)).filter(
+        (e) => e.event === 'park' && e.type === 'seat-failure',
+      ).length >= 2,
+    { label: 'second seat-failure park', attempts: 600, intervalMs: 100 },
+  );
+  const retried = fx.calls.filter((c) => c.seat === 'dev');
+  assert.equal(retried.length, 3);
+  assert.match(retried[2].prompt, /scripts\/gate\.mjs: the diff policy denies this path/);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const closed = (await waitClosed(fx.paths, runId)).find((e) => e.event === 'run-closed');
+  assert.equal(closed.state, 'failed');
+  assert.equal(closed.seat, 'dev');
+});
+
+test('declaredPaths passes a path the spec declares and blocks one it does not', async (t) => {
+  const seats = {
+    dev: ({ label }) =>
+      label === 'dev-1'
+        ? {
+            files: {
+              'src/feature.mjs': GOOD_FEATURE,
+              'package.json': '{"name":"declared"}\n',
+              'apps/api/package.json': '{"name":"undeclared"}\n',
+            },
+            report: { summary: 'implemented' },
+          }
+        : { removes: ['apps'], report: { summary: 'implemented' } },
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, { seats, diffPolicy: POLICY, specText: SPEC_WITH_BLOCK });
+  const { runId, worktree } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // Only the undeclared one was named; the declared one rode through.
+  const stamp = events.find((e) => e.event === 'diff-policy-violation');
+  assert.deepEqual(
+    stamp.violations.map((v) => [v.path, v.rule]),
+    [['apps/api/package.json', 'undeclared']],
+  );
+  assert.ok(existsSync(join(worktree, 'package.json')));
+  assert.match(
+    fx.calls.find((c) => c.label === 'dev-2').prompt,
+    /apps\/api\/package\.json: the diff policy admits this path only when the spec declares it/,
+  );
+});
+
+test('a forbidden path shape blocks even when the spec declares it', async (t) => {
+  const spec = SPEC_WITH_BLOCK.replace('package.json', 'baseline/shot-win32.png');
+  const seats = {
+    dev: ({ label }) =>
+      label === 'dev-1'
+        ? {
+            files: { 'src/feature.mjs': GOOD_FEATURE, 'baseline/shot-win32.png': 'PNG\n' },
+            report: { summary: 'implemented' },
+          }
+        : { removes: ['baseline'], report: { summary: 'implemented' } },
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, { seats, diffPolicy: POLICY, specText: spec });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const stamp = events.find((e) => e.event === 'diff-policy-violation');
+  assert.deepEqual(
+    stamp.violations.map((v) => [v.path, v.rule, v.pattern]),
+    [['baseline/shot-win32.png', 'forbidden', '-win32\\.']],
+  );
+});
+
+test('a change the capture takes back is stamped and named, with no policy declared', async (t) => {
+  // No diffPolicy block at all: the drop record is not a policy tier, it is
+  // the capture refusing to discard a seat's work in silence.
+  const seats = {
+    dev: ({ label }) =>
+      label === 'dev-1'
+        ? {
+            files: { 'src/feature.mjs': GOOD_FEATURE, 'tests/feature.test.mjs': WRONG_TEST },
+            report: { summary: 'implemented, and I relaxed the test' },
+          }
+        : { report: { summary: 'implemented; the test stands' } },
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, { seats });
+  const { runId, worktree } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const stamp = events.find((e) => e.event === 'diff-policy-violation');
+  assert.deepEqual(stamp.dropped, ['tests/feature.test.mjs']);
+  assert.deepEqual(stamp.violations, []);
+  assert.match(
+    fx.calls.find((c) => c.label === 'dev-2').prompt,
+    /tests\/feature\.test\.mjs: the capture took this change back/,
+  );
+  // The frozen suite is what stands in the tree, exactly as before.
+  const restored = readFileSync(join(worktree, 'tests/feature.test.mjs'), 'utf8');
+  assert.equal(restored.replaceAll('\r\n', '\n'), STRONG_TEST);
+});
+
+test('the repair lane keeps its regression test and answers its own tiers', async (t) => {
+  const seats = {
+    dev: ({ label }) =>
+      label === 'dev-1'
+        ? {
+            files: {
+              'src/g.mjs': 'export const g = (x) => x + 1;\n',
+              'tests/g.test.mjs': G_TEST,
+              '.olympus/cards/invented.md': '# a card the fix seat invented\n',
+            },
+            report: { summary: 'fixed' },
+          }
+        : {
+            removes: ['.olympus/cards'],
+            report: { summary: 'fixed without the harness change' },
+          },
+    'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [{ name: 'unit', command: 'suite' }],
+    commands: { suite: SUITE_CMD },
+    diffPolicy: POLICY,
+    originFiles: {
+      'tickets/t1.md':
+        '## Defect\n\ng(x) is missing; add g(x) = x + 1 in src/g.mjs with a regression test.\n',
+    },
+  });
+  const { runId, worktree } = await fx.launchFromConsole({ lane: 'repair', ticket: 'tickets/t1.md' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const stamp = events.find((e) => e.event === 'diff-policy-violation');
+  assert.equal(stamp.lane, 'repair');
+  assert.deepEqual(
+    stamp.violations.map((v) => [v.path, v.rule]),
+    [['.olympus/cards/invented.md', 'denied']],
+  );
+  // The repair lane has no frozen suite to restore, so its regression test is
+  // never taken back.
+  assert.deepEqual(stamp.dropped, []);
+  assert.ok(existsSync(join(worktree, 'tests/g.test.mjs')));
+  assert.match(
+    fx.calls.find((c) => c.label === 'dev-2').prompt,
+    /\.olympus\/cards\/invented\.md: the diff policy denies this path/,
+  );
 });

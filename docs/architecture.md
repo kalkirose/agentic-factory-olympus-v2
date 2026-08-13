@@ -160,6 +160,12 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 
 ## Verdict machinery
 
+- **Candidate capture gate.** Before a dev seat's tree becomes an
+  implementation commit, the changed paths are judged against the lane's
+  optional `diffPolicy` tiers (denied, spec-declared, forbidden patterns).
+  A violation, and any path the capture takes back, stamps a loud
+  `diff-policy-violation` and buys one corrective invocation before the
+  `seat-failure` park. Nothing is ever discarded without a record (ADR-0017).
 - **Deterministic core.** Every Tier-1 check (per-layer suites, lint, types,
   build) runs as a process. Unlimited rounds; a rerun judges nothing.
 - **Full-spectrum verdict.** Every runnable Tier-1 layer runs to completion;
@@ -238,7 +244,8 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - **Escalation queue**: always open, answerable from the record alone,
   presented FIFO with roadmap-order tiebreak, answered in any order.
 - **Streams.** Queued: park events + tripwire breaches. Loud: liveness
-  violation, gate-integrity defect, red-merge breach, factory starvation.
+  violation, gate-integrity defect, diff-policy violation, red-merge breach,
+  factory starvation.
   Consoles render loud first, then queue depth. Pull only.
 
 ## Liveness

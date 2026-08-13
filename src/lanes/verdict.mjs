@@ -15,7 +15,7 @@
 //
 // Every handler re-derives its position from the run ledger and the git
 // state, so a daemon restart resumes mid-verdict without memory.
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { runReportPath } from '../daemon/home.mjs';
 import {
@@ -28,6 +28,14 @@ import {
   resetHard,
 } from '../isolation/tree.mjs';
 import { testEditDenyRules } from '../seats/boundary.mjs';
+import {
+  captureGist,
+  diffPolicyViolations,
+  dropLine,
+  laneDiffPolicy,
+  parseTouchedPaths,
+  violationLine,
+} from '../seats/diffpolicy.mjs';
 import { runSpectrum, persistentReds } from './spectrum.mjs';
 import { furyRound, generalistReview } from './review.mjs';
 import { freezeAnchor } from './resume.mjs';
@@ -143,20 +151,14 @@ function implementationHandler(mode) {
     const events = runEvents(ctx);
     if (events.some((e) => e.event === 'implementation-committed')) return { next: 'verdict' };
     const baseSha = await headSha(base.worktree);
-    const n = invocationCount(events, 'dev') + 1;
-    const result = await ctx.runSeat({
+    // The capture gate holds the structural test-edit guarantee: the frozen
+    // suite is restored from its sha before the tree is committed or judged.
+    const { fail } = await devSeatWithCapture(ctx, base, mode, {
       seat: 'dev',
-      roleBlock: mode === 'story' ? devRole(base) : fixRole(base),
-      reportPath: runReportPath(ctx.paths, ctx.runId, `dev-${n}`),
-      schema: DEV_SCHEMA,
-      cwd: base.worktree,
-      env: base.env,
-      ...(mode === 'story' && { denyTools: testEditDenyRules(base.testPaths) }),
+      buildRole: (brief) => (mode === 'story' ? devRole(base, brief) : fixRole(base, brief)),
+      suiteSha: base.suiteSha,
     });
-    if (!result.ok) return seatFail(ctx, 'dev', result);
-    // Structural test-edit guarantee: the frozen suite is restored from its
-    // sha before the tree is committed or judged.
-    if (mode === 'story') await restorePaths(base.worktree, base.suiteSha, base.testPaths);
+    if (fail) return fail;
     const sha = await commitAll(base.worktree, `implement: ${ctx.runId}`);
     ctx.store.append('implementation-committed', {
       actor: ACTOR,
@@ -602,7 +604,7 @@ function repairStalled(events, renders, last) {
 async function repairRound(ctx, base, mode, { pass, round, open, record }) {
   const result = await runDevSeat(ctx, base, mode, {
     seat: 'repair-dev',
-    roleBlock: repairRole(base, open, record),
+    buildRole: (brief) => repairRole(base, open, record, brief),
   });
   if (result.fail) return result;
   ctx.store.append('repair-round', {
@@ -630,9 +632,13 @@ export async function freshPass(ctx, base, mode, { newPass, trigger, open, last 
     }
     ctx.store.append('fresh-pass', { actor: ACTOR, pass: newPass, trigger });
   }
+  // The stall brief always rides; a capture correction rides with it.
+  const stall = stallBrief(open);
+  const withStall = (brief) => (brief ? [stall, ...(Array.isArray(brief) ? brief : [brief])] : stall);
   const result = await runDevSeat(ctx, base, mode, {
     seat: 'dev',
-    roleBlock: mode === 'story' ? devRole(base, stallBrief(open)) : fixRole(base, stallBrief(open)),
+    buildRole: (brief) =>
+      mode === 'story' ? devRole(base, withStall(brief)) : fixRole(base, withStall(brief)),
     pass: newPass,
     phase: 'fresh',
   });
@@ -644,23 +650,15 @@ export async function freshPass(ctx, base, mode, { newPass, trigger, open, last 
  * One dev-seat pass over the worktree: seat, structural suite restore,
  * commit, `implementation-committed` stamp.
  */
-async function runDevSeat(ctx, base, mode, { seat, roleBlock, pass = null, phase = null }) {
+async function runDevSeat(ctx, base, mode, { seat, buildRole, pass = null, phase = null }) {
   const events = runEvents(ctx);
   const baseSha = await headSha(base.worktree);
-  const n = invocationCount(events, seat) + 1;
-  const result = await ctx.runSeat({
+  const { fail } = await devSeatWithCapture(ctx, base, mode, {
     seat,
-    roleBlock,
-    reportPath: runReportPath(ctx.paths, ctx.runId, `${seat}-${n}`),
-    schema: DEV_SCHEMA,
-    cwd: base.worktree,
-    env: base.env,
-    ...(mode === 'story' && { denyTools: testEditDenyRules(base.testPaths) }),
+    buildRole,
+    suiteSha: mode === 'story' ? currentSuiteSha(events) : null,
   });
-  if (!result.ok) return { fail: seatFail(ctx, seat, result) };
-  if (mode === 'story') {
-    await restorePaths(base.worktree, currentSuiteSha(runEvents(ctx)), base.testPaths);
-  }
+  if (fail) return { fail };
   const sha = await commitAll(base.worktree, `${seat === 'dev' ? 'implement' : 'repair'}: ${ctx.runId}`);
   ctx.store.append('implementation-committed', {
     actor: ACTOR,
@@ -726,6 +724,98 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
   return {};
 }
 
+// -- candidate capture -------------------------------------------------------
+
+/**
+ * The gate between what a dev seat left in the tree and the implementation
+ * commit. Two things can stand in the way, and both are defects the seat
+ * answers in one corrective invocation:
+ *
+ * - a change the lane's diff policy refuses (ADR-0017);
+ * - a change the capture takes back. The structural suite restore is the only
+ *   one today: a story-lane seat that reached a test path past its tool deny
+ *   gets that write reverted. The revert stays unconditional — the frozen
+ *   suite is the thing being judged against — but it is no longer silent. A
+ *   seat that believes a fix landed, and a verdict that re-finds the same
+ *   red, cost a run far more than a park does.
+ *
+ * The restore runs before the record, so the tree is correct whether or not
+ * the capture proceeds.
+ *
+ * @returns {Promise<string[]>} defect lines; empty means the capture proceeds
+ */
+async function captureDefects(ctx, base, mode, { seat }) {
+  const changed = await changedFiles(base.worktree);
+  const dropped = mode === 'story' ? changed.filter((f) => underAny(f, base.testPaths)) : [];
+  if (mode === 'story') {
+    await restorePaths(base.worktree, currentSuiteSha(runEvents(ctx)), base.testPaths);
+  }
+  const tier = laneDiffPolicy(base.config, mode);
+  const kept = changed.filter((f) => !dropped.includes(f));
+  const violations = diffPolicyViolations(kept, tier, declaresPath(base, mode, tier));
+  if (violations.length === 0 && dropped.length === 0) return [];
+  ctx.store.append('diff-policy-violation', {
+    actor: ACTOR,
+    seat,
+    lane: mode,
+    violations,
+    dropped,
+    gist: gist(captureGist({ violations, dropped })),
+  });
+  return [...violations.map(violationLine), ...dropped.map(dropLine)];
+}
+
+/**
+ * Whether the run declared a path, per lane. The story lane reads the born
+ * spec's touched-paths block. The repair lane has no spec, so the intake
+ * ticket answers: a path the ticket names verbatim is declared. Unreadable
+ * source text declares nothing.
+ */
+function declaresPath(base, mode, tier) {
+  if (!tier?.declaredPaths?.length) return () => false;
+  let text;
+  try {
+    text = readFileSync(base.specRef, 'utf8');
+  } catch {
+    return () => false;
+  }
+  if (mode === 'repair') return (path) => text.includes(path);
+  const declared = new Set(parseTouchedPaths(text));
+  return (path) => declared.has(path);
+}
+
+/** Pairs a `resolved` append to every capture record a later capture cleared. */
+function resolveCaptureRecords(ctx) {
+  const events = runEvents(ctx);
+  const resolved = new Set(
+    events.filter((e) => e.event === 'resolved').map((e) => e.resolves),
+  );
+  for (const e of events) {
+    if (e.event !== 'diff-policy-violation' || resolved.has(e.seq)) continue;
+    ctx.store.resolve({ actor: ACTOR, resolves: e.seq });
+  }
+}
+
+/**
+ * One dev-seat invocation and its capture gate, through the lane's corrective
+ * machinery: a refused capture buys one corrective invocation carrying the
+ * exact paths, then the `seat-failure` park.
+ */
+async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
+  const outcome = await seatWithChecks(ctx, {
+    seat,
+    label: null,
+    schema: DEV_SCHEMA,
+    cwd: base.worktree,
+    env: base.env,
+    ...(mode === 'story' && { denyTools: testEditDenyRules(base.testPaths) }),
+    buildRole,
+    checks: () => captureDefects(ctx, base, mode, { seat }),
+  });
+  if (!outcome.fail) resolveCaptureRecords(ctx);
+  return outcome;
+}
+
 // -- gate integrity ----------------------------------------------------------
 
 /** Pairs a `resolved` append to every gate-integrity line whose harness
@@ -751,7 +841,7 @@ function resolveGateIntegrity(ctx, openIds) {
  * seats too — a judge that cannot deliver a usable verdict is not the run
  * failing, so the human buys the retry or abandons the run.
  */
-async function seatWithChecks(ctx, { seat, label, schema, cwd, env, buildRole, checks }) {
+async function seatWithChecks(ctx, { seat, label, schema, cwd, env, denyTools, buildRole, checks }) {
   const limit = attemptLimit(runEvents(ctx), seat);
   let brief = limit === 1 ? failureBrief(runEvents(ctx), seat) : null;
   for (let attempt = 1; ; attempt++) {
@@ -764,6 +854,7 @@ async function seatWithChecks(ctx, { seat, label, schema, cwd, env, buildRole, c
       schema,
       cwd,
       env,
+      ...(denyTools && { denyTools }),
     });
     if (!result.ok) return { fail: seatFail(ctx, seat, result) };
     const defects = await checks(result.report);
@@ -799,7 +890,7 @@ function fixRole(base, brief = null) {
   ].join('\n');
 }
 
-function repairRole(base, open, record) {
+function repairRole(base, open, record, brief = null) {
   return [
     'Repair the candidate tree in place. Fix every open finding below; change nothing else.',
     `The spec: ${base.specRef}`,
@@ -811,6 +902,7 @@ function repairRole(base, open, record) {
       (r) => `- ${r.layer}: ${r.status}${r.attributedTo ? ` (attributed to ${r.attributedTo})` : ''}`,
     ),
     'Do not commit; the orchestrator commits your work.',
+    ...briefLines(brief),
   ].join('\n');
 }
 

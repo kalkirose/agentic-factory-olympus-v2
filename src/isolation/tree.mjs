@@ -13,9 +13,15 @@ const IDENTITY = [
   'commit.gpgsign=false',
 ];
 
-/** Paths changed in the working tree relative to HEAD (staged or not, untracked included). */
+/**
+ * Paths changed in the working tree relative to HEAD (staged or not,
+ * untracked included). `-uall` is load-bearing: git's default collapses a
+ * wholly untracked directory to the directory itself, and every caller here
+ * judges paths — a gate that sees `scripts/` instead of `scripts/gate.mjs`
+ * matches no rule and passes the change through.
+ */
 export async function changedFiles(tree) {
-  const out = await git(['status', '--porcelain'], { cwd: tree });
+  const out = await git(['status', '--porcelain', '-uall'], { cwd: tree });
   const files = [];
   for (const line of out.split('\n')) {
     if (!line.trim()) continue;
