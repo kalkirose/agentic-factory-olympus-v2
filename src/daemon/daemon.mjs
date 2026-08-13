@@ -1,7 +1,7 @@
 // The orchestrator daemon core: home scaffold, single-instance lock,
 // instance config with live edit pickup, instance ledger, control inbox,
 // and the run engine that owns every open run.
-import { watch, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { watch, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { openInstanceStore, resolveClosedRun } from '../telemetry/stores.mjs';
 import { loadInstanceConfig, INSTANCE_CONFIG_FILE } from '../config/instance.mjs';
@@ -144,11 +144,15 @@ export class Daemon {
 
   async start() {
     if (this.running) throw new Error('daemon already started');
-    scaffoldHome(this.paths.home);
+    // The home itself first: the config file and the lock both live in it. The
+    // rest of the tree waits for the config, because the config is what says
+    // where run workspaces provision.
+    mkdirSync(this.paths.home, { recursive: true });
     this.stopStamped = false;
     this.lock = acquireLock(this.paths.lock);
     try {
       this.config = loadInstanceConfig(this.paths.home);
+      this.paths = scaffoldHome(this.paths.home, this.config);
       // The watcher exists before any store opens with its hook; the hooks
       // read `this.tripwires` late so construction order stays simple.
       this.ledger = openInstanceStore(this.paths, {
@@ -528,6 +532,10 @@ export class Daemon {
     }
     const changedKeys = diffKeys(this.config, next);
     if (changedKeys.length === 0) return;
+    // The home layout stays as this instance started it. A live `worktreeRoot`
+    // edit is recorded here and takes effect at the next start: every open run
+    // owns a workspace under the root it provisioned from, and moving the root
+    // under them would strand it.
     this.config = next;
     this.semaphores.setLimits(this.config.semaphores);
     this.ledger.append('config-changed', { actor: ACTOR, accepted: true, changedKeys });

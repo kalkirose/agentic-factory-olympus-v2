@@ -31,7 +31,13 @@ concrete shapes:
   worktrees (adversary waves) sit beside it as `worktrees/<runId>/<tag>`,
   detached at a named sha. At close, every worktree under the run root, the
   root, and the run branch go away. Shipped work lives on the remote; the
-  archived ledger records the base sha.
+  archived ledger records the base sha. The root the runs sit under is the
+  daemon home's own unless instance config names another (`worktreeRoot`, an
+  absolute path) — it describes the machine, like `composeCommand`, and it
+  exists because a platform path ceiling is measured from the root down: a
+  project whose deepest test artifact is long needs the part above it short.
+  The layout settles when the daemon starts, so a live edit applies at the
+  next start and no open run has its workspace moved under it.
 - **Per-run stacks.** Each run's compose project is named `oly-<runId>`
   (sanitized). The template comes from the run worktree, so it rides the
   same sha as the code. The stack derives every name and connection string

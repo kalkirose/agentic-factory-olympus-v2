@@ -22,16 +22,20 @@ import {
 
 const CONFIG_PATH = '.olympus/project.json';
 
-function fixture(t, { lanes, composeRunner }) {
+function fixture(t, { lanes, composeRunner, worktreeRoot }) {
   const root = tempDir();
   const origin = initOriginRepo(join(root, 'origin'), {
     [CONFIG_PATH]: projectConfigJson(),
     'compose.harness.yml': 'services: {}\n',
   });
-  const paths = scaffoldHome(join(root, 'home'));
+  const paths = scaffoldHome(join(root, 'home'), { worktreeRoot });
   writeFileSync(
     paths.instanceConfig,
-    JSON.stringify({ version: 1, projects: { alpha: { repoUrl: origin, slotCap: 2 } } }) + '\n',
+    JSON.stringify({
+      version: 1,
+      ...(worktreeRoot !== undefined && { worktreeRoot }),
+      projects: { alpha: { repoUrl: origin, slotCap: 2 } },
+    }) + '\n',
   );
   const daemon = new Daemon(join(root, 'home'), { lanes, composeRunner });
   t.after(async () => {
@@ -192,6 +196,30 @@ test('orphaned workspaces are swept and stamped at daemon start', async (t) => {
   assert.equal(released.runId, 'dead-run');
   assert.equal(released.orphan, true);
   assert.equal(released.ok, true);
+});
+
+test('the configured worktree root is where the daemon provisions and sweeps', async (t) => {
+  const worktreeRoot = tempDir('olympus-worktrees-');
+  t.after(() => removeDir(worktreeRoot));
+  const lanes = {
+    solo: { stages: ['work'], handlers: { work: async () => ({ close: { state: 'shipped' } }) } },
+  };
+  const { paths, daemon } = fixture(t, {
+    lanes,
+    composeRunner: fakeComposeRunner(),
+    worktreeRoot,
+  });
+  // The config reaches the layout: the start-time sweep looks in the
+  // configured root, and the home never grows a worktrees directory.
+  mkdirSync(join(worktreeRoot, 'dead-run', 'tree'), { recursive: true });
+  await daemon.start();
+  assert.equal(daemon.paths.worktrees, worktreeRoot);
+  await waitFor(() => !existsSync(join(worktreeRoot, 'dead-run')), { label: 'orphan removed' });
+  const { runId, worktree } = await daemon.launchRun({ project: 'alpha', lane: 'solo' });
+  assert.equal(worktree, join(worktreeRoot, runId, 'tree'));
+  await waitFor(() => existsSync(archivedRunLedgerPath(paths, runId)), { label: 'run archived' });
+  await waitFor(() => !existsSync(join(worktreeRoot, runId)), { label: 'workspace released' });
+  assert.ok(!existsSync(join(paths.home, 'worktrees')));
 });
 
 test('a launch the daemon refuses is stamped, not only left in a reason file', async (t) => {

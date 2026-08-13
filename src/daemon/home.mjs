@@ -1,9 +1,20 @@
 // Daemon home layout. All stores sit under this one root — the command
-// center's read-only server and every console read from here.
+// center's read-only server and every console read from here. Run worktrees
+// are the one store that may sit elsewhere: the instance config's
+// `worktreeRoot` moves them off the home, which is how a machine with a low
+// path ceiling keeps a run's deepest test artifact inside it.
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-export function homePaths(home) {
+/**
+ * @param {string} home
+ * @param {{worktreeRoot?: string}} [config] the instance config, once it is
+ *   loaded. Without it the layout is the home's own default, so a paths
+ *   object built for a read — a console, the center's server — names the
+ *   default worktree root. Only the daemon provisions, and it builds its
+ *   paths from the config it read.
+ */
+export function homePaths(home, config) {
   return {
     home,
     instanceConfig: join(home, 'instance.json'),
@@ -19,15 +30,22 @@ export function homePaths(home) {
     controlDone: join(home, 'control', 'done'),
     controlRejected: join(home, 'control', 'rejected'),
     clones: join(home, 'clones'),
-    worktrees: join(home, 'worktrees'),
+    // The one accessor for the run-workspace root. Nothing derives a worktree
+    // path a second way — `isolation/worktrees.mjs` joins the run id onto this.
+    worktrees: config?.worktreeRoot ?? join(home, 'worktrees'),
     evalReports: join(home, 'eval'),
     lock: join(home, 'daemon.lock'),
   };
 }
 
-/** Creates the daemon home directory tree. Idempotent. */
-export function scaffoldHome(home) {
-  const paths = homePaths(home);
+/**
+ * Creates the daemon home directory tree, the run-workspace root included.
+ * Idempotent.
+ * @param {string} home
+ * @param {{worktreeRoot?: string}} [config]
+ */
+export function scaffoldHome(home, config) {
+  const paths = homePaths(home, config);
   for (const dir of [
     paths.home,
     paths.streams,

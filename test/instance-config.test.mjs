@@ -59,6 +59,22 @@ test('the machine argv keys default and validate alike', () => {
   assert.deepEqual(validateInstanceConfig({ version: 1, ghCommand: ['gh', '--repo-cache'] }), []);
 });
 
+test('worktreeRoot is optional, absolute, and passes through untouched', () => {
+  // Absent by default — a config that never names one keeps the home layout.
+  assert.equal(defaultInstanceConfig().worktreeRoot, undefined);
+  assert.equal(withDefaults({ version: 1 }).worktreeRoot, undefined);
+  const root = process.platform === 'win32' ? 'D:\\oly' : '/srv/oly';
+  assert.deepEqual(validateInstanceConfig({ version: 1, worktreeRoot: root }), []);
+  assert.equal(withDefaults({ version: 1, worktreeRoot: root }).worktreeRoot, root);
+  for (const bad of ['worktrees', './w', '', 7]) {
+    assert.deepEqual(
+      validateInstanceConfig({ version: 1, worktreeRoot: bad }).map((e) => e.path),
+      ['worktreeRoot'],
+      `expected ${JSON.stringify(bad)} to be rejected`,
+    );
+  }
+});
+
 test('an invalid file throws with detail', (t) => {
   const home = tempDir();
   t.after(() => removeDir(home));

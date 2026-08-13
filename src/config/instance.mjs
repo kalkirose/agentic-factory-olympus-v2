@@ -2,7 +2,7 @@
 // edits the file live; the daemon validates every edit and keeps the old
 // config when an edit is invalid. Never versioned in a project repo.
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 export const INSTANCE_CONFIG_FILE = 'instance.json';
 
@@ -22,6 +22,11 @@ export function defaultInstanceConfig() {
     projects: {},
     // notification-stream wiring; consoles read the stream indexes directly
     streams: {},
+    // Absent by default, so the layout stays the home's own: `worktreeRoot`,
+    // an absolute path, provisions run workspaces there instead of under
+    // `<home>/worktrees`. A machine whose path ceiling a run's deepest test
+    // artifact would cross sets a short root and every run path shortens with
+    // it.
   };
 }
 
@@ -63,6 +68,15 @@ export function validateInstanceConfig(config) {
   }
   if (config.streams !== undefined && !isPlainObject(config.streams)) {
     err('streams', 'must be an object');
+  }
+  // Absolute only: the daemon's working directory is the service manager's
+  // business, so a relative root would name a different place per start.
+  if (config.worktreeRoot !== undefined) {
+    if (typeof config.worktreeRoot !== 'string' || config.worktreeRoot.length === 0) {
+      err('worktreeRoot', 'must be a non-empty string');
+    } else if (!isAbsolute(config.worktreeRoot)) {
+      err('worktreeRoot', 'must be an absolute path');
+    }
   }
   for (const key of ['composeCommand', 'claudeCommand', 'ghCommand']) {
     if (config[key] === undefined) continue;

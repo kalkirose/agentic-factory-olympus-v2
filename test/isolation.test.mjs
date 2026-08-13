@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { scaffoldHome } from '../src/daemon/home.mjs';
-import { ensureBareClone, fetchClone, branchSha, readBlobFromBranch } from '../src/isolation/clones.mjs';
+import { homePaths, scaffoldHome } from '../src/daemon/home.mjs';
+import { cloneDir, ensureBareClone, fetchClone, branchSha, readBlobFromBranch } from '../src/isolation/clones.mjs';
 import {
   addRunWorktree,
   addDisposableWorktree,
@@ -141,7 +141,7 @@ test('a failed stack up fails the provision and leaves nothing behind', async (t
   );
   assert.ok(!existsSync(workspaceRoot(paths, 'r4')));
   assert.ok(!existsSync(join(paths.runs, 'r4')));
-  const clone = join(paths.clones, 'alpha.git');
+  const clone = cloneDir(paths, 'alpha');
   assert.equal((await listWorktrees(clone)).length, 1);
 });
 
@@ -171,6 +171,64 @@ test('orphan run ids: workspace dirs without an open run', (t) => {
   mkdirSync(join(paths.worktrees, 'live-run'), { recursive: true });
   const isolation = new RunIsolation(paths, {});
   assert.deepEqual(isolation.orphanRunIds(new Set(['live-run'])), ['dead-run']);
+});
+
+// -- where workspaces provision ----------------------------------------------
+
+test('without a configured root the layout is the home\'s own', (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const home = join(root, 'home');
+  assert.equal(scaffoldHome(home).worktrees, join(home, 'worktrees'));
+  // An absent field and no config at all describe the same layout.
+  assert.deepEqual(homePaths(home, {}), homePaths(home));
+  assert.deepEqual(homePaths(home, { worktreeRoot: undefined }), homePaths(home));
+});
+
+test('a configured worktree root carries provision, release and the orphan sweep', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const origin = initOriginRepo(join(root, 'origin'), {
+    [CONFIG_PATH]: projectConfigJson(),
+    'compose.harness.yml': 'services: {}\n',
+  });
+  const home = join(root, 'home');
+  const worktreeRoot = join(root, 'w');
+  const paths = scaffoldHome(home, { worktreeRoot });
+  // Only the workspace root moves; every other store stays in the home, and
+  // the home keeps no empty worktrees directory to mislead an operator.
+  assert.equal(paths.worktrees, worktreeRoot);
+  assert.equal(paths.runs, join(home, 'runs'));
+  assert.ok(existsSync(worktreeRoot));
+  assert.ok(!existsSync(join(home, 'worktrees')));
+
+  const isolation = new RunIsolation(paths, { composeRunner: fakeComposeRunner() });
+  const ws = await isolation.provision({
+    runId: 'r20',
+    project: 'alpha',
+    repoUrl: origin,
+    defaultBranch: 'main',
+    configPath: CONFIG_PATH,
+  });
+  assert.equal(ws.worktree, join(worktreeRoot, 'r20', 'tree'));
+  assert.ok(existsSync(join(ws.worktree, 'compose.harness.yml')));
+  const disposable = await addDisposableWorktree(
+    cloneDir(paths, 'alpha'),
+    paths,
+    'r20',
+    'adv-1',
+    ws.baseSha,
+  );
+  assert.equal(disposable, join(worktreeRoot, 'r20', 'adv-1'));
+
+  // The sweep reads the configured root, not the home.
+  mkdirSync(join(worktreeRoot, 'dead-run'), { recursive: true });
+  assert.deepEqual(isolation.orphanRunIds(new Set(['r20'])), ['dead-run']);
+
+  const { errors } = await isolation.release('r20');
+  assert.deepEqual(errors, []);
+  assert.ok(!existsSync(join(worktreeRoot, 'r20')));
+  assert.equal((await listWorktrees(cloneDir(paths, 'alpha'))).length, 1);
 });
 
 // -- the process sweep that precedes every removal ---------------------------
