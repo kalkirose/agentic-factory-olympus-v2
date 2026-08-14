@@ -3,6 +3,9 @@
 Status: accepted (2026-08-10)
 Superseded in part by ADR-0015: a seat-failure and a gate-command spawn
 error park the run instead of closing it.
+Superseded in part by ADR-0022: only the first cycle of an implementation
+pass runs the full spectrum; later cycles run the targeted set and carry the
+greens no red reaches.
 
 ## Decision
 
@@ -24,7 +27,8 @@ ladder, judgment review — gets these concrete shapes:
   one: `implementation-committed`, `re-freeze`, or `operational-fix`. The
   ladder acts only on a rendered red verdict with no pending trigger, so a
   daemon restart re-derives its place from the ledger alone.
-- **Full spectrum.** Every Tier-1 layer (project config `gates.tier1`) runs
+- **Full spectrum** (ADR-0022 narrows this to the cycles that need it).
+  Every Tier-1 layer (project config `gates.tier1`) runs
   to completion per cycle. A layer whose prerequisite failed stamps
   `not-runnable`, attributed through the `needs` chain to the root red. The
   flake filter re-runs each red layer once; a green re-run stamps `flake`
@@ -101,7 +105,7 @@ ladder, judgment review — gets these concrete shapes:
 ## Why the ladder batches routes instead of one route per cycle
 
 A verdict can carry findings of several classes. Serializing one route per
-cycle would re-run the full spectrum between the re-freeze, the operational
+cycle would re-run the spectrum between the re-freeze, the operational
 fix, and the repair — deterministic re-runs are cheap, but each cycle also
 costs the triage seat. Batching applies every applicable route, then one
 cycle re-judges the joined result. A crash between routes is safe: the

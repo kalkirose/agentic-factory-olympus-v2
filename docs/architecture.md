@@ -198,9 +198,16 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   `seat-failure` park. Nothing is ever discarded without a record (ADR-0017).
 - **Deterministic core.** Every Tier-1 check (per-layer suites, lint, types,
   build) runs as a process. Unlimited rounds; a rerun judges nothing.
-- **Full-spectrum verdict.** Every runnable Tier-1 layer runs to completion;
-  the verdict reports the union of reds. A layer whose prerequisite failed
-  reports not-runnable, attributed to the prerequisite.
+- **Spectrum verdict.** Every runnable Tier-1 layer the cycle runs runs to
+  completion; the verdict reports the union of reds. A layer whose
+  prerequisite failed reports not-runnable, attributed to the prerequisite.
+- **Targeted re-runs.** The first cycle of an implementation pass runs the
+  full spectrum. A later cycle runs the targeted set — every layer the pass
+  has not proven green, plus everything downstream of one through `needs` —
+  and carries the remaining greens forward, marked `carried` in the record so
+  no result reads as a fresh proof. A clean targeted cycle runs every layer it
+  has not yet run, at that sha, before the verdict turns green; a red that
+  confirmation sweep turns up enters triage like any other (ADR-0022).
 - **Flake filter.** Each red layer re-runs once, red-only, by process policy.
   A green re-run writes a flake event, never a finding. Survivors are
   persistent reds; only these enter triage.

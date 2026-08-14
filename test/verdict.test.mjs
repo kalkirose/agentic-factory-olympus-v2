@@ -470,6 +470,167 @@ test('a code defect routes triage → repair round → generalist re-verdict', a
   );
 });
 
+test('a repair cycle runs the reds and their dependents, carries the rest, and confirms before green', async (t) => {
+  const seats = {
+    dev: () => ({
+      files: { 'src/feature.mjs': BAD_FEATURE, 'src/shape.txt': 'bad\n', 'src/quiet.txt': 'ok\n' },
+      report: { summary: 'implemented' },
+    }),
+    'verdict-triage': triageSeat(() => ({ class: 'code-defect' })),
+    ...furyClean(),
+    'repair-dev': ({ label }) =>
+      label === 'repair-dev-1'
+        ? { files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'fixed the unit red' } }
+        : { files: { 'src/shape.txt': 'ok\n' }, report: { summary: 'fixed the shape red' } },
+    'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'shape', command: 'shape' },
+      { name: 'quiet', command: 'quiet' },
+      { name: 'build', command: 'build', needs: ['unit'] },
+    ],
+    commands: {
+      suite: SUITE_CMD,
+      shape: markerCmd('src/shape.txt'),
+      quiet: markerCmd('src/quiet.txt'),
+      build: BUILD_CMD,
+    },
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const ranIn = (cycle) =>
+    events.filter((e) => e.event === 'layer-result' && e.cycle === cycle).map((e) => e.layer);
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.deepEqual(
+    renders.map((e) => [e.cycle, e.sweep, e.verdict]),
+    [
+      [1, 'full', 'red'],
+      [2, 'targeted', 'red'],
+      [3, 'targeted', 'green'],
+    ],
+  );
+  // Cycle 1 proves everything; the reds take unit and shape, and build is not
+  // runnable behind unit.
+  assert.deepEqual(ranIn(1), ['unit', 'shape', 'quiet', 'build']);
+  // Cycle 2 runs the two reds and build, which depends on one of them. The
+  // green quiet layer no red points at carries forward, unrun.
+  assert.deepEqual(ranIn(2), ['unit', 'shape', 'build']);
+  const record2 = readRecord(fx.paths, runId, 2);
+  assert.equal(record2.sweep, 'targeted');
+  assert.ok(!record2.confirmation);
+  assert.deepEqual(
+    record2.spectrum.map((r) => [r.layer, r.status, r.mode]),
+    [
+      ['unit', 'green', 'run'],
+      ['shape', 'red', 'run'],
+      ['quiet', 'green', 'carried'],
+      ['build', 'green', 'run'],
+    ],
+  );
+  // The repair seat is told which greens it is reading are carried.
+  const repair2 = fx.calls.find((c) => c.label === 'repair-dev-2');
+  assert.ok(repair2.prompt.includes('- quiet: green (carried from an earlier cycle, not re-run)'));
+  assert.ok(repair2.prompt.includes('- shape: red'));
+  // Cycle 3 targets the last red alone, then confirms the carried greens at
+  // this sha before the verdict turns green.
+  assert.deepEqual(ranIn(3), ['shape', 'unit', 'quiet', 'build']);
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'layer-result' && e.cycle === 3 && e.confirmation)
+      .map((e) => e.layer),
+    ['unit', 'quiet', 'build'],
+  );
+  const record3 = readRecord(fx.paths, runId, 3);
+  assert.equal(record3.sweep, 'targeted');
+  assert.equal(record3.confirmation, true);
+  assert.equal(record3.verdict, 'green');
+  assert.deepEqual(
+    record3.spectrum.map((r) => [r.layer, r.mode]),
+    [
+      ['unit', 'run'],
+      ['shape', 'run'],
+      ['quiet', 'run'],
+      ['build', 'run'],
+    ],
+  );
+});
+
+test('a red the confirmation sweep turns up enters triage like any other', async (t) => {
+  const seats = {
+    dev: () => ({
+      files: { 'src/feature.mjs': BAD_FEATURE, 'src/extra.txt': 'bad\n', 'src/quiet.txt': 'ok\n' },
+      report: { summary: 'implemented' },
+    }),
+    'verdict-triage': triageSeat(() => ({ class: 'code-defect' })),
+    ...furyClean(),
+    // The first repair clears both reds and breaks a layer no red pointed at.
+    'repair-dev': ({ label }) =>
+      label === 'repair-dev-1'
+        ? {
+            files: {
+              'src/feature.mjs': GOOD_FEATURE,
+              'src/extra.txt': 'ok\n',
+              'src/quiet.txt': 'bad\n',
+            },
+            report: { summary: 'fixed the reds' },
+          }
+        : { files: { 'src/quiet.txt': 'ok\n' }, report: { summary: 'fixed the regression' } },
+    'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'extra', command: 'extra' },
+      { name: 'quiet', command: 'quiet' },
+    ],
+    commands: {
+      suite: SUITE_CMD,
+      extra: markerCmd('src/extra.txt'),
+      quiet: markerCmd('src/quiet.txt'),
+    },
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // Cycle 2 targeted the two reds, found them green, and only then swept the
+  // carried layer — which the repair had broken.
+  const cycle2 = events.filter((e) => e.event === 'layer-result' && e.cycle === 2);
+  assert.deepEqual(
+    cycle2.map((e) => [e.layer, e.status, e.confirmation]),
+    [
+      ['unit', 'green', undefined],
+      ['extra', 'green', undefined],
+      ['quiet', 'red', true],
+    ],
+  );
+  const record2 = readRecord(fx.paths, runId, 2);
+  assert.equal(record2.confirmation, true);
+  assert.equal(record2.verdict, 'red');
+  // The regression is a first sight of a red: triage classed it, and the
+  // ladder answered with a repair round like any other.
+  const regression = events.filter((e) => e.event === 'finding' && e.cycle === 2);
+  assert.equal(regression.length, 1);
+  assert.equal(regression[0].class, 'code-defect');
+  assert.deepEqual(regression[0].layers, ['quiet']);
+  assert.equal(fx.calls.filter((c) => c.seat === 'verdict-triage').length, 2);
+  assert.equal(events.filter((e) => e.event === 'repair-round').length, 2);
+  assert.ok(!events.some((e) => e.event === 'stall'));
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.deepEqual(
+    renders.map((e) => [e.cycle, e.verdict]),
+    [
+      [1, 'red'],
+      [2, 'red'],
+      [3, 'green'],
+    ],
+  );
+});
+
 test('a flaky layer stamps a flake and never reaches triage', async (t) => {
   const seats = {
     dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
@@ -542,6 +703,10 @@ test('a suite defect re-freezes the tests without budget and without a new fury 
   );
   // The second cycle ran against the re-frozen suite sha.
   assert.equal(renders[1].suiteSha, refreeze.sha);
+  // A re-freeze cycle targets like any other: the suite layer the defect made
+  // red, and build behind it. The lint layer carried until the confirmation.
+  assert.equal(renders[1].sweep, 'targeted');
+  assert.equal(renders[1].confirmation, true);
   const record = readRecord(fx.paths, runId, 2);
   assert.deepEqual(
     record.findings.map((f) => [f.id, f.status]),
@@ -799,6 +964,24 @@ test('stall → fresh pass → second stall parks; fail closes the run', async (
     fx.calls.filter((c) => c.seat === 'fury-code-shape').map((c) => c.label),
     ['fury-code-shape-c1', 'fury-code-shape-c3'],
   );
+  // No layer was ever red, so a repair cycle targets nothing and every green
+  // carries. An open finding holds the confirmation sweep back: nothing is
+  // about to be called green.
+  const record2 = readRecord(fx.paths, runId, 2);
+  assert.equal(record2.sweep, 'targeted');
+  assert.ok(!record2.confirmation);
+  assert.deepEqual(
+    record2.spectrum.map((r) => r.mode),
+    ['carried', 'carried', 'carried'],
+  );
+  assert.ok(!events.some((e) => e.event === 'layer-result' && e.cycle === 2));
+  // The fresh pass judges a tree the run has never seen: full spectrum.
+  const record3 = readRecord(fx.paths, runId, 3);
+  assert.equal(record3.sweep, 'full');
+  assert.deepEqual(
+    record3.spectrum.map((r) => r.mode),
+    ['run', 'run', 'run'],
+  );
 });
 
 test('a confirmed approach-level finding takes the fresh pass without a repair round', async (t) => {
@@ -1008,7 +1191,8 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
   assert.equal(renders.length, 1);
   assert.equal(renders[0].verdict, 'green');
   const record = readRecord(fx.paths, runId, 1);
-  assert.deepEqual(record.spectrum, [{ layer: 'unit', status: 'green' }]);
+  assert.equal(record.sweep, 'full');
+  assert.deepEqual(record.spectrum, [{ layer: 'unit', status: 'green', mode: 'run' }]);
   assert.deepEqual(record.findings, []);
 });
 

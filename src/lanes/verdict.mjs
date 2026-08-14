@@ -1,17 +1,18 @@
-// The post-freeze chain: implementation (seat) → verdict (the full-spectrum
-// loop with its response ladder). `postFreeze({afterVerdict})` composes the
+// The post-freeze chain: implementation (seat) → verdict (the spectrum loop
+// with its response ladder). `postFreeze({afterVerdict})` composes the
 // story-lane continuation; `repairLane({afterVerdict})` wires the repair
 // variant — the intake ticket is the spec, the generalist review seat
 // replaces the Fury fan-out, and the dev seat may edit tests (it writes the
 // regression test).
 //
-// The verdict loop per cycle: full Tier-1 spectrum with the flake filter →
-// verdict triage on persistent reds → the judgment review (Fury once per
-// implementation pass; generalist review on repair diffs) → the verdict
-// record. The response ladder acts on the rendered verdict: repair rounds
-// (progress-gated, cap 3), suite-defect re-freeze, env/harness operational
-// fixes, one fresh pass per run, and the second-stall escalation. Re-freeze
-// steps and operational fixes never consume implementation budget.
+// The verdict loop per cycle: the cycle's Tier-1 spectrum with the flake
+// filter → verdict triage on persistent reds → the judgment review (Fury once
+// per implementation pass; generalist review on repair diffs) → the
+// confirmation sweep, when the cycle came out clean on a targeted spectrum →
+// the verdict record. The response ladder acts on the rendered verdict:
+// repair rounds (progress-gated, cap 3), suite-defect re-freeze, env/harness
+// operational fixes, one fresh pass per run, and the second-stall escalation.
+// Re-freeze steps and operational fixes never consume implementation budget.
 //
 // Every handler re-derives its position from the run ledger and the git
 // state, so a daemon restart resumes mid-verdict without memory.
@@ -36,7 +37,7 @@ import {
   parseTouchedPaths,
   violationLine,
 } from '../seats/diffpolicy.mjs';
-import { runSpectrum, persistentReds } from './spectrum.mjs';
+import { runSpectrum, persistentReds, cyclePlan } from './spectrum.mjs';
 import { furyRound, generalistReview } from './review.mjs';
 import { freezeAnchor } from './resume.mjs';
 import { parseIntentCard } from './card.mjs';
@@ -214,27 +215,19 @@ async function runCycle(ctx, base, mode, { cycle }) {
     await restorePaths(base.worktree, suiteSha, base.testPaths, { except: base.frozenExclusions });
   }
   const sha = await headSha(base.worktree);
-  const spectrum = await runSpectrum(ctx, {
+  const gates = {
     layers: base.layers,
     commands: base.commands,
     cwd: base.worktree,
     env: base.env,
     cycle,
     sha,
-  });
-  if (spectrum.error) {
-    return {
-      directive: commandError(
-        ctx,
-        'gate-command-error',
-        `A Tier-1 gate command could not run: ${spectrum.error}\n` +
-          'Repair the environment, then answer "retry" for one more spectrum, or ' +
-          '"abandon" to close the run.',
-        { error: spectrum.error },
-      ),
-    };
-  }
-  const reds = persistentReds(spectrum.results);
+  };
+  // What this cycle runs, and what it carries (ADR-0022).
+  const plan = cyclePlan(startEvents, { cycle, pass, layers: base.layers });
+  let spectrum = await runSpectrum(ctx, { ...gates, run: plan.run, prior: plan.prior });
+  if (spectrum.error) return { directive: gateCommandError(ctx, spectrum.error) };
+  let reds = persistentReds(spectrum.results);
 
   const events = runEvents(ctx);
   const renders = events.filter((e) => e.event === 'verdict-rendered');
@@ -244,16 +237,13 @@ async function runCycle(ctx, base, mode, { cycle }) {
     prevRender && prevRender.pass === pass
       ? prevRender.open.map((id) => index.get(id)).filter(Boolean)
       : [];
+  const triagePrior = priorOpen.filter((f) => f.source === 'triage');
 
   // Verdict triage fires only when persistent reds exist. Findings from a
   // green spectrum resolve mechanically: their evidence is gone.
   let triageOpen = [];
   if (reds.length > 0) {
-    const triaged = await triageStep(ctx, base, {
-      cycle,
-      reds,
-      priorOpen: priorOpen.filter((f) => f.source === 'triage'),
-    });
+    const triaged = await triageStep(ctx, base, { cycle, reds, priorOpen: triagePrior });
     if (triaged.fail) return { directive: triaged.fail };
     triageOpen = triaged.open;
   }
@@ -285,17 +275,41 @@ async function runCycle(ctx, base, mode, { cycle }) {
     ];
   }
 
-  const open = [...triageOpen, ...reviewOpen];
+  let open = [...triageOpen, ...reviewOpen];
+
+  // The confirmation sweep: a targeted cycle proves nothing about the layers
+  // it carried, so no green verdict rests on them. A clean targeted cycle
+  // therefore runs every layer it has not run yet, at this sha, before the
+  // record calls the tree green. A red the sweep turns up is a regression an
+  // edit left in an area no red pointed at, and it enters triage exactly like
+  // a first-cycle red.
+  if (plan.sweep === 'targeted' && reds.length === 0 && open.length === 0) {
+    const confirmed = await runSpectrum(ctx, { ...gates, confirmation: true });
+    if (confirmed.error) return { directive: gateCommandError(ctx, confirmed.error) };
+    spectrum = confirmed;
+    reds = persistentReds(confirmed.results);
+    if (reds.length > 0) {
+      const triaged = await triageStep(ctx, base, { cycle, reds, priorOpen: triagePrior });
+      if (triaged.fail) return { directive: triaged.fail };
+      open = [...triaged.open, ...reviewOpen];
+    }
+  }
+
   const openIds = open.map((f) => f.id);
   resolveGateIntegrity(ctx, openIds);
   const resolvedNow = priorOpen.filter((f) => !openIds.includes(f.id));
   const verdict = reds.length === 0 && open.length === 0 ? 'green' : 'red';
+  const confirmation = runEvents(ctx).some(
+    (e) => e.event === 'layer-result' && e.cycle === cycle && e.confirmation,
+  );
   const record = {
     runId: ctx.runId,
     cycle,
     pass,
     sha,
     ...(suiteSha && { suiteSha }),
+    sweep: plan.sweep,
+    ...(confirmation && { confirmation: true }),
     spectrum: spectrum.results.map(({ output, ...r }) => r),
     flakes: runEvents(ctx)
       .filter((e) => e.event === 'flake' && e.cycle === cycle)
@@ -315,11 +329,25 @@ async function runCycle(ctx, base, mode, { cycle }) {
     pass,
     sha,
     ...(suiteSha && { suiteSha }),
+    sweep: plan.sweep,
+    ...(confirmation && { confirmation: true }),
     verdict,
     open: openIds,
     record: recordPath,
   });
   return {};
+}
+
+/** A gate command that could not run at all: an environment defect. */
+function gateCommandError(ctx, error) {
+  return commandError(
+    ctx,
+    'gate-command-error',
+    `A Tier-1 gate command could not run: ${error}\n` +
+      'Repair the environment, then answer "retry" for one more spectrum, or ' +
+      '"abandon" to close the run.',
+    { error },
+  );
 }
 
 // -- verdict triage (seat) ---------------------------------------------------
@@ -901,10 +929,8 @@ function repairRole(base, open, record, brief = null) {
     'Do not edit or delete test files.',
     'Open findings:',
     ...open.map((f) => `- ${findingLine(f)}`),
-    'Full-spectrum verdict:',
-    ...(record?.spectrum ?? []).map(
-      (r) => `- ${r.layer}: ${r.status}${r.attributedTo ? ` (attributed to ${r.attributedTo})` : ''}`,
-    ),
+    'Tier-1 verdict:',
+    ...(record?.spectrum ?? []).map((r) => `- ${r.layer}: ${r.status}${layerNote(r)}`),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
   ].join('\n');
@@ -971,6 +997,12 @@ function stallBrief(open) {
     'The stall left these findings open:',
     ...open.map((f) => `- ${findingLine(f)}`),
   ].join('\n');
+}
+
+/** What a layer line owes the reader beyond its status. */
+function layerNote(r) {
+  if (r.attributedTo) return ` (attributed to ${r.attributedTo})`;
+  return r.mode === 'carried' ? ' (carried from an earlier cycle, not re-run)' : '';
 }
 
 function findingLine(f) {
