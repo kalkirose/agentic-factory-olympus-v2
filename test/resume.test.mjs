@@ -24,6 +24,8 @@ import {
   commitTree,
   initOriginRepo,
   projectConfigJson,
+  FIXTURE_ACCEPTANCE,
+  FIXTURE_SPEC,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -38,7 +40,7 @@ title: Alpha feature
 ## Goal
 
 Provide f(x) that doubles x in src/feature.mjs.
-`;
+${FIXTURE_ACCEPTANCE}`;
 
 const SUITE_TEST = `import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -211,7 +213,7 @@ async function seedFrozenBranch(root, paths, origin, { extraFiles = {} } = {}) {
  * Writes a closed prior run: ledger, born spec, freeze record. `overrides`
  * bends each part so a test can seed exactly one defect.
  */
-function seedPriorRun(paths, { baseSha, frozenSha, launch = {}, freeze = {}, closed = {}, spec = '# Spec\n\nf(x) returns 2*x.\n', record = {}, archive = true }) {
+function seedPriorRun(paths, { baseSha, frozenSha, launch = {}, freeze = {}, closed = {}, spec = FIXTURE_SPEC, record = {}, archive = true }) {
   const store = openRunStore(paths, PRIOR);
   store.append('run-launched', {
     actor: 'daemon',
@@ -271,7 +273,7 @@ function seedPriorRun(paths, { baseSha, frozenSha, launch = {}, freeze = {}, clo
 test('a resume inherits a real freeze and enters the post-freeze stage seatless', async (t) => {
   const seats = {
     'spec-birth': ({ prompt }) => ({
-      files: { [specPathFrom(prompt)]: '# Spec\n\nf(x) returns 2*x.\n' },
+      files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
       report: { outcome: 'spec-born', summary: 'born' },
     }),
     'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),

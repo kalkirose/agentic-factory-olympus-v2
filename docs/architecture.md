@@ -142,7 +142,18 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - **Spec birth** authors the buildable spec from the intent card, grounded
   against the repo as it exists that day. AFK; escalates only on open
   decisions or a grounding conflict with the card's intent. The born spec is
-  a run artifact — authoritative for its run only, archived at close.
+  a run artifact — authoritative for its run only, archived at close. The
+  spec has a fixed template (ADR-0019): a header, one section per card
+  acceptance criterion in card order (intent, test mapping, named constants,
+  supersedes), one `touched-paths` block with an owner per path, an
+  environment section, 400 lines at most.
+- **Spec lint** (process) runs after birth and after every amendment, before
+  any judging seat spawns: the criterion sections match the card's id set,
+  the cap holds, the touched-paths block parses and its entries clear the
+  lane's diff policy, every planned test file lives under a test path, every
+  superseded file exists, and a dev-owned test-path entry names one file. A
+  failure is a work-product defect — one corrective invocation, then the
+  `seat-failure` park — and never spends a gate round.
 - **Spec gate**: one fresh-context round on the born spec (grounding
   spot-checks, scope against the card, AC encodability), evidence-cited. The
   birth seat amends; the gate re-checks amended sections only. Cap 2 rounds.
@@ -160,7 +171,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   pre-implementation tree, and the freeze report classes every red as
   feature-absence. Any other cause is a suite defect to fix before freeze.
 - **Freeze record**: suite file set at a SHA, kill count, survivor
-  dispositions, red-state record, born-spec ref. The valid record is the
+  dispositions, red-state record, born-spec ref, and the frozen exclusions —
+  the test-path files the spec assigned to the implementing pass. The
+  exclusions leave the dev seats' deny rules and every story-mode restore;
+  the adversary's restore still covers them. The valid record is the
   completion signal.
 
 ## Verdict machinery

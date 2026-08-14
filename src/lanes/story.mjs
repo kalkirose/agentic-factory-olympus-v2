@@ -32,9 +32,11 @@ import {
   filesAt,
 } from '../isolation/tree.mjs';
 import { testEditDenyRules } from '../seats/boundary.mjs';
+import { laneDiffPolicy } from '../seats/diffpolicy.mjs';
 import { parseIntentCard } from './card.mjs';
 import { runCommand } from './exec.mjs';
 import { readInheritance } from './resume.mjs';
+import { SPEC_LINE_CAP, frozenExclusions, lintSpec } from './speclint.mjs';
 import {
   ACTOR,
   loadProjectConfig,
@@ -49,8 +51,7 @@ import {
   readJson,
   parkDirective,
   withAbandonGuard,
-  attemptLimit,
-  failureBrief,
+  seatWithChecks,
   blocked,
   commandError,
   seatFail,
@@ -459,38 +460,62 @@ async function specBirth(ctx) {
   const base = await laneBase(ctx);
   const events = runEvents(ctx);
   if (events.some((e) => e.event === 'spec-born')) return { next: 'spec-gate' };
-  const n = invocationCount(events, 'spec-birth') + 1;
-  const result = await ctx.runSeat({
+  const { report, fail } = await seatWithChecks(ctx, {
     seat: 'spec-birth',
-    roleBlock: birthRole(base, escalationLog(events)),
-    reportPath: runReportPath(ctx.paths, ctx.runId, `spec-birth-${n}`),
     schema: SPEC_BIRTH_SCHEMA,
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
+    buildRole: (brief) => birthRole(base, escalationLog(events), brief),
+    checks: (r) => birthChecks(base, r),
+    defectReason: 'spec-defect',
   });
-  if (!result.ok) return seatFail(ctx, 'spec-birth', result);
-  if (result.report.outcome === 'grounding-conflict') {
+  if (fail) return fail;
+  if (report.outcome === 'grounding-conflict') {
     return parkDirective('grounding-conflict', {
-      question: result.report.conflict?.trim() || result.report.summary,
+      question: report.conflict?.trim() || report.summary,
       refs: [base.cardPath],
     });
-  }
-  if (!existsSync(base.specPath) || readFileSync(base.specPath, 'utf8').trim().length === 0) {
-    ctx.store.append('seat-failure', {
-      actor: ACTOR,
-      seat: 'spec-birth',
-      reason: 'artifact-missing',
-      path: base.specPath,
-    });
-    return seatFail(ctx, 'spec-birth', { reason: 'artifact-missing' });
   }
   ctx.store.append('spec-born', {
     actor: ACTOR,
     specPath: base.specPath,
-    summary: gist(result.report.summary),
+    summary: gist(report.summary),
   });
   return { next: 'spec-gate' };
+}
+
+/**
+ * The birth work product: the file exists, and it holds the template. A
+ * conflict is a refusal to author, so it is checked against nothing.
+ */
+function birthChecks(base, report) {
+  if (report.outcome === 'grounding-conflict') return [];
+  if (!existsSync(base.specPath) || readFileSync(base.specPath, 'utf8').trim().length === 0) {
+    return [`the spec is missing or empty at ${base.specPath}; author it there.`];
+  }
+  return specLintDefects(base);
+}
+
+/**
+ * The spec lint at its two run points: after birth, and after every amendment
+ * (ADR-0019). It runs before the spec gate spawns, so a template defect is
+ * fixed by the seat that wrote it and never spends a gate round.
+ */
+export function specLintDefects(base) {
+  if (!base.card) return [];
+  let text;
+  try {
+    text = readFileSync(base.specPath, 'utf8');
+  } catch {
+    return [`the spec is missing at ${base.specPath}; author it there.`];
+  }
+  return lintSpec(text, {
+    card: base.card,
+    worktree: base.worktree,
+    testPaths: base.testPaths,
+    tier: base.tier,
+  });
 }
 
 // -- spec gate (seat, 2 counted rounds, then the owner) ----------------------
@@ -561,7 +586,7 @@ async function specGate(ctx) {
           ? `${conflictBrief(conflict)}\n${findingsBrief(findings)}`
           : conflictBrief(conflict);
       const amend = await amendSpec(ctx, base, brief);
-      if (!amend.ok) return seatFail(ctx, 'spec-birth', amend);
+      if (amend.fail) return amend.fail;
       continue;
     }
     if (last?.verdict === 'pass') return { next: 'suite' };
@@ -600,7 +625,7 @@ async function specGate(ctx) {
     if (!amendReport) {
       const report = readJson(lastSeatReportEvent(events, 'spec-gate').path);
       const amend = await amendSpec(ctx, base, findingsBrief(blockingFindings(report?.findings)));
-      if (!amend.ok) return seatFail(ctx, 'spec-birth', amend);
+      if (amend.fail) return amend.fail;
       continue;
     }
     const sections = readJson(amendReport.path)?.amendedSections ?? [];
@@ -646,17 +671,21 @@ async function gateRound(ctx, base, { round, sections }) {
   return { directive: null };
 }
 
+/**
+ * One amendment of the born spec. The lint runs again on what comes back: an
+ * amendment that breaks the template is a defect of the same kind as a birth
+ * that never held it, and it takes the same corrective route.
+ */
 async function amendSpec(ctx, base, brief) {
-  const events = runEvents(ctx);
-  const n = invocationCount(events, 'spec-birth') + 1;
-  return ctx.runSeat({
+  return seatWithChecks(ctx, {
     seat: 'spec-birth',
-    roleBlock: amendRole(base, brief),
-    reportPath: runReportPath(ctx.paths, ctx.runId, `spec-birth-${n}`),
     schema: SPEC_AMEND_SCHEMA,
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
+    buildRole: (defects) => amendRole(base, brief, defects),
+    checks: () => specLintDefects(base),
+    defectReason: 'spec-defect',
   });
 }
 
@@ -679,36 +708,19 @@ async function suiteStage(ctx) {
   return { next: 'adversary' };
 }
 
-/**
- * The lane-level contract loop for the suite seat: one corrective invocation
- * on a deterministic defect in the work product, then the seat-failure park.
- * A retry bought at that park is one invocation carrying the defect list, not
- * a second corrective round.
- */
+/** The suite seat on the lane's contract loop: one corrective invocation on a
+ * deterministic defect in the work product, then the seat-failure park. */
 async function suiteSeatWithChecks(ctx, base, { schema, buildRole, checks }) {
-  const limit = attemptLimit(runEvents(ctx), 'suite');
-  let brief = limit === 1 ? failureBrief(runEvents(ctx), 'suite') : null;
-  for (let attempt = 1; ; attempt++) {
-    const events = runEvents(ctx);
-    const n = invocationCount(events, 'suite') + 1;
-    const result = await ctx.runSeat({
-      seat: 'suite',
-      roleBlock: buildRole(brief),
-      reportPath: runReportPath(ctx.paths, ctx.runId, `suite-${n}`),
-      schema,
-      cwd: base.worktree,
-      env: base.env,
-      constitution: base.constitution,
-    });
-    if (!result.ok) return { fail: seatFail(ctx, 'suite', result) };
-    const defects = await checks(result.report);
-    if (defects.length === 0) return { report: result.report };
-    if (attempt >= limit) {
-      ctx.store.append('seat-failure', { actor: ACTOR, seat: 'suite', reason: 'suite-defect', defects });
-      return { fail: seatFail(ctx, 'suite', { reason: 'suite-defect' }) };
-    }
-    brief = defects;
-  }
+  return seatWithChecks(ctx, {
+    seat: 'suite',
+    schema,
+    cwd: base.worktree,
+    env: base.env,
+    constitution: base.constitution,
+    buildRole,
+    checks,
+    defectReason: 'suite-defect',
+  });
 }
 
 async function suiteChecks(base, report) {
@@ -1091,6 +1103,11 @@ function freezeHandler(nextStage) {
       reason: e.reason,
     }));
     const reds = readJson(lastSeatReportEvent(events, 'suite')?.path)?.reds ?? [];
+    // The exclusions: test-path files the spec assigned to the implementing
+    // seat. They are named at the freeze because that is where the frozen set
+    // is fixed, and every reader after it takes the two apart from one record
+    // (ADR-0019). Everything else under the test paths is the frozen suite.
+    const exclusions = frozenExclusions(readFileSync(base.specPath, 'utf8'), base.testPaths);
     const record = {
       runId: ctx.runId,
       project: ctx.project,
@@ -1099,6 +1116,7 @@ function freezeHandler(nextStage) {
       specRef: base.specPath,
       suiteSha: sha,
       suiteFiles,
+      frozenExclusions: exclusions,
       waves: initial.map((e) => ({ round: e.round, wave: e.wave, result: e.result, sha: e.sha })),
       killCount,
       amendmentKills,
@@ -1114,6 +1132,7 @@ function freezeHandler(nextStage) {
       amendmentKills,
       dispositions: dispositions.length,
       files: suiteFiles.length,
+      exclusions: exclusions.length,
       record: recordPath,
     });
     return { next: nextStage };
@@ -1122,12 +1141,13 @@ function freezeHandler(nextStage) {
 
 // -- role blocks -------------------------------------------------------------
 
-function birthRole(base, resolved) {
+function birthRole(base, resolved, brief = null) {
   const lines = [
     'Author the story spec from the intent card below.',
     'Ground every claim in the repository as it stands; cite file paths for grounding claims.',
     `Write the spec as markdown to this absolute path: ${base.specPath}`,
     "Stay inside the card's scope boundary. Encode every acceptance criterion so a test can assert it.",
+    ...templateLines(),
     // The spec writes the test plan, so it needs the two facts that decide
     // where a test can live and what will run it. Without them a plan can
     // name a runner the suite seat is not allowed to reach.
@@ -1141,17 +1161,48 @@ function birthRole(base, resolved) {
       lines.push(`- [${pair.type}] ${pair.question} → ${pair.answer} (${pair.actor})`);
     }
   }
+  lines.push(...briefLines(brief));
   lines.push(`Intent card (${base.cardPath}):`, base.cardText);
   return lines.join('\n');
 }
 
-function amendRole(base, brief) {
+/**
+ * The template. It is stated to the seat that writes the spec and checked
+ * mechanically on what comes back (ADR-0019), so the two never drift.
+ *
+ * Every part of it exists because its absence cost a run. A clause with no
+ * criterion behind it binds the suite, the implementer and the review, and
+ * nothing ever asks where it came from; a test plan without file paths cannot
+ * be checked against the paths the suite may use; a constant restated in three
+ * places is three constants; a clause that contradicts a frozen test is a
+ * deadlock nobody declared. The cap is what keeps the document readable whole.
+ */
+function templateLines() {
+  return [
+    'The spec has a fixed template. Write these parts, in this order, and nothing else:',
+    '1. A header: the card key, the base sha, and the scope exclusions the card states.',
+    '2. One section per acceptance criterion on the card, in card order, each titled with the id of its criterion and holding, in this order:',
+    '   - the intent of the criterion, three sentences at most;',
+    '   - a line "Test mapping:" and under it one list item per asserted behavior, each opening with the repo-relative path of the test file that asserts it;',
+    '   - a line "Named constants:" and under it one list item per constant, written "NAME = value". A constant is named in one place; every other mention refers to it.',
+    '   - a line "Supersedes:" and under it one list item per frozen test this criterion contradicts, written "<path> — keep|supersede — <the clause that replaces it>". Write "- None" when it contradicts none.',
+    '3. One fenced block, opened by ```touched-paths and closed by ```, naming every repo-relative path the work touches: one path per line, each followed by " — dev" or " — suite" for the seat that owns the file. Exactly one such block in the document, and every line names one file.',
+    '4. An environment section naming only the environment variables the card names.',
+    `The whole document runs to ${SPEC_LINE_CAP} lines at most.`,
+    'A criterion that carries no id of its own takes its position as its id: AC-1, AC-2, in card order.',
+    'The card defines WHAT ships. The spec adds only HOW, plus the test encoding. A requirement with no acceptance criterion behind it is a defect, and so is a section that answers no criterion.',
+  ];
+}
+
+function amendRole(base, brief, defects = null) {
   return [
     `Amend the born spec at this absolute path: ${base.specPath}`,
     'Edit the file in place. Keep unaffected sections unchanged.',
     'Report the headings of every section you amended.',
+    ...templateLines(),
     'Brief:',
     brief,
+    ...briefLines(defects),
     `Intent card (${base.cardPath}):`,
     base.cardText,
   ].join('\n');
@@ -1312,6 +1363,10 @@ async function laneBase(ctx) {
     gateNotes: gateNotes(runEvents(ctx)),
     constitution: readConstitution(worktree, config),
     testPaths: config.repo.testPaths,
+    // The lane's diff policy. The spec lint judges the paths the spec plans
+    // against the same tiers the candidate capture judges the diff against, so
+    // a spec cannot plan a path the capture would refuse.
+    tier: laneDiffPolicy(config, 'story'),
     suiteArgv: config.commands[story.suiteCommand],
     env: runEnv(ctx, config),
     specPath: join(ctx.paths.runs, ctx.runId, 'spec.md'),

@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
-import { runLedgerPath } from '../daemon/home.mjs';
+import { runLedgerPath, runReportPath } from '../daemon/home.mjs';
 import {
   DEFAULT_CONSTITUTION_PATH,
   parseProjectConfig,
@@ -119,6 +119,17 @@ export function readJson(path) {
   } catch {
     return null;
   }
+}
+
+/**
+ * The files the run's freeze exempted from the test-edit boundary: test-path
+ * files the spec assigned to the implementing seat (ADR-0019). A run that
+ * inherited a freeze holds the record it inherited, so both routes read the
+ * same file. An absent or older record exempts nothing.
+ */
+export function freezeExclusions(paths, runId) {
+  const record = readJson(join(paths.runs, runId, 'freeze.json'));
+  return Array.isArray(record?.frozenExclusions) ? record.frozenExclusions : [];
 }
 
 export function parkDirective(type, { question, options, refs }) {
@@ -255,6 +266,56 @@ export function attemptLimit(events, seat) {
     return 2;
   }
   return events.some((e) => e.event === 'seat-spawned' && e.seq > asked.answer.seq) ? 2 : 1;
+}
+
+/**
+ * The lane-level contract loop: one corrective invocation on a deterministic
+ * defect in the work product, then the seat-failure park. It governs judging
+ * seats too — a judge that cannot deliver a usable verdict is not the run
+ * failing, so the human buys the retry or abandons the run.
+ *
+ * A retry bought at that park is one invocation carrying the defect list, not
+ * a second corrective round. `defectReason` names the failure in the ledger.
+ */
+export async function seatWithChecks(
+  ctx,
+  {
+    seat,
+    label = null,
+    schema,
+    cwd,
+    env,
+    constitution,
+    denyTools,
+    buildRole,
+    checks,
+    defectReason = 'work-product-defect',
+  },
+) {
+  const limit = attemptLimit(runEvents(ctx), seat);
+  let brief = limit === 1 ? failureBrief(runEvents(ctx), seat) : null;
+  for (let attempt = 1; ; attempt++) {
+    const events = runEvents(ctx);
+    const n = invocationCount(events, seat) + 1;
+    const result = await ctx.runSeat({
+      seat,
+      roleBlock: buildRole(brief),
+      reportPath: runReportPath(ctx.paths, ctx.runId, label ?? `${seat}-${n}`),
+      schema,
+      cwd,
+      env,
+      constitution,
+      ...(denyTools && { denyTools }),
+    });
+    if (!result.ok) return { fail: seatFail(ctx, seat, result) };
+    const defects = await checks(result.report);
+    if (defects.length === 0) return { report: result.report };
+    if (attempt >= limit) {
+      ctx.store.append('seat-failure', { actor: ACTOR, seat, reason: defectReason, defects });
+      return { fail: seatFail(ctx, seat, { reason: defectReason }) };
+    }
+    brief = defects;
+  }
 }
 
 /** The failure evidence a bought retry carries into the seat's brief. */

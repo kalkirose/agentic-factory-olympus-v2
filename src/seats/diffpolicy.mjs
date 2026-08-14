@@ -11,30 +11,36 @@
 import { underEntry } from '../config/project.mjs';
 
 // The declaration contract: a fenced block the spec author writes, one
-// repo-relative path per line. An owner may follow the path after a dash;
-// the owner belongs to a later reader, so the parse drops it.
+// repo-relative path per line, each followed by the seat that owns the file.
+// The gate reads the path; the owner tag is the spec lint's and the freeze's
+// business, so the parse carries it rather than dropping it.
 const FENCE_OPEN = /^```touched-paths\s*$/;
 const FENCE_CLOSE = /^```/;
-const OWNER_SUFFIX = /\s+[—–-]\s+.*$/;
+const OWNER_SUFFIX = /^(.*?)\s+[—–-]\s+(.*)$/;
 
 const patternCache = new Map();
 
 /**
- * The repo-relative paths a spec declares in its ```touched-paths block. That
- * block is the only declaration the gate reads; a path named in prose
- * elsewhere in the spec declares nothing.
+ * The ```touched-paths block of a spec (or ticket), parsed whole. That block
+ * is the only declaration the gate reads; a path named in prose elsewhere
+ * declares nothing.
  *
  * A missing block and a block left unterminated both declare nothing. That is
  * the conservative reading in both directions: an undeclared match against
  * `declaredPaths` is a violation, so a malformed block blocks the capture
- * rather than waving it through.
+ * rather than waving it through. The block counts and the unterminated flag
+ * ride along so a reader that judges the spec itself can say which of the two
+ * it found.
  *
  * @param {string} text spec (or ticket) text
- * @returns {string[]} declared paths, slash-normalized, in document order
+ * @returns {{entries: {path: string, raw: string, owner: string|null}[],
+ *   blocks: number, unterminated: boolean}} entries in document order; `path`
+ *   is slash-normalized, `raw` is the line as written
  */
-export function parseTouchedPaths(text) {
-  if (typeof text !== 'string') return [];
-  const declared = [];
+export function parseTouchedBlock(text) {
+  if (typeof text !== 'string') return { entries: [], blocks: 0, unterminated: false };
+  const entries = [];
+  let blocks = 0;
   let block = null;
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -44,15 +50,28 @@ export function parseTouchedPaths(text) {
     }
     if (FENCE_CLOSE.test(trimmed)) {
       // Only a closed block declares: the push happens at the closing fence.
-      declared.push(...block);
+      entries.push(...block);
+      blocks++;
       block = null;
       continue;
     }
     if (trimmed.length === 0 || trimmed.startsWith('#')) continue;
-    const path = trimmed.replace(OWNER_SUFFIX, '').trim().replaceAll('\\', '/');
-    if (path.length > 0) block.push(path);
+    const owned = OWNER_SUFFIX.exec(trimmed);
+    const raw = (owned ? owned[1] : trimmed).trim();
+    if (raw.length === 0) continue;
+    block.push({ path: raw.replaceAll('\\', '/'), raw, owner: owned ? owned[2].trim() : null });
   }
-  return declared;
+  return { entries, blocks, unterminated: block !== null };
+}
+
+/**
+ * The repo-relative paths a spec declares. The declaration semantics live in
+ * `parseTouchedBlock`; this is the gate's view of them.
+ * @param {string} text spec (or ticket) text
+ * @returns {string[]} declared paths, slash-normalized, in document order
+ */
+export function parseTouchedPaths(text) {
+  return parseTouchedBlock(text).entries.map((entry) => entry.path);
 }
 
 /** One lane's policy tiers, or null when the project declares none. */

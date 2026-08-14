@@ -20,6 +20,8 @@ import {
   waitFor,
   initOriginRepo,
   projectConfigJson,
+  FIXTURE_ACCEPTANCE,
+  FIXTURE_SPEC,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -33,7 +35,7 @@ title: Alpha feature
 ## Goal
 
 Provide f(x) that doubles x in src/feature.mjs.
-`;
+${FIXTURE_ACCEPTANCE}`;
 
 // The closed set of terminal routes. A new entry belongs to a design-level
 // decision recorded in an ADR, never to a call site that found a new way to
@@ -299,7 +301,7 @@ function waitStage(paths, runId, stage) {
 function chainSeats(suiteBehavior) {
   return {
     'spec-birth': ({ prompt }) => ({
-      files: { [specPathFrom(prompt)]: '# Spec\n\nf(x) returns 2*x.\n' },
+      files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
       report: { outcome: 'spec-born', summary: 'born' },
     }),
     'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
@@ -419,7 +421,7 @@ test('a transcript model that differs from the request parks', async (t) => {
     seats: {
       'spec-birth': ({ prompt }) => ({
         model: 'some-other-model',
-        files: { [specPathFrom(prompt)]: '# Spec\n' },
+        files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
         report: { outcome: 'spec-born', summary: 'born' },
       }),
     },
@@ -430,6 +432,55 @@ test('a transcript model that differs from the request parks', async (t) => {
   fx.answer(runId, { option: 'abandon' });
   const closed = (await waitClosed(fx.paths, runId)).find((e) => e.event === 'run-closed');
   assert.equal(closed.cause, 'model-mismatch');
+});
+
+test('a spec-lint park replays across a restart, and one retry buys one invocation', async (t) => {
+  let written = 0;
+  const fx = fixture(t, {
+    seats: {
+      // The first two invocations write prose with no criterion section and no
+      // touched-paths block; the one the retry buys writes the template.
+      'spec-birth': ({ prompt }) => ({
+        files: {
+          [specPathFrom(prompt)]: written++ < 2 ? '# alpha-1 spec\n\nProse only.\n' : FIXTURE_SPEC,
+        },
+        report: { outcome: 'spec-born', summary: 'born' },
+      }),
+      'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
+      suite: () => ({ report: {} }),
+    },
+  });
+  const { runId } = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'seat-failure');
+  assert.equal(park.detail.seat, 'spec-birth');
+  assert.equal(park.detail.cause, 'spec-defect');
+  const specCalls = () => fx.calls.filter((c) => c.seat === 'spec-birth');
+  assert.equal(specCalls().length, 2);
+  // The lint is derived from the ledger and the files, so a restart over a
+  // parked run re-enters nothing and re-lints nothing.
+  const before = readEvents(runLedgerPath(fx.paths, runId));
+  await fx.restart();
+  assert.deepEqual(
+    readEvents(runLedgerPath(fx.paths, runId)).map((e) => e.event),
+    before.map((e) => e.event),
+  );
+  // One answer, one invocation, carrying the lint failures by name.
+  fx.answer(runId, { option: 'retry' });
+  await waitFor(
+    () => readEvents(runLedgerPath(fx.paths, runId)).find((e) => e.event === 'spec-born'),
+    { label: 'spec born', attempts: 400, intervalMs: 100 },
+  );
+  assert.equal(specCalls().length, 3);
+  assert.match(specCalls()[2].prompt, /Correction brief/);
+  assert.match(specCalls()[2].prompt, /touched-paths/);
+  // The chain went on to the gate; the spec was born exactly once.
+  await waitParked(fx.paths, runId, 'seat-failure', 2);
+  const events = readEvents(runLedgerPath(fx.paths, runId));
+  assert.equal(events.filter((e) => e.event === 'spec-born').length, 1);
+  assert.equal(events.filter((e) => e.event === 'spec-gate-round').length, 1);
+  fx.answer(runId, { option: 'abandon' });
+  const closed = (await waitClosed(fx.paths, runId)).find((e) => e.event === 'run-closed');
+  assert.equal(closed.seat, 'suite');
 });
 
 test('a park replays across a daemon restart and the answer still closes the run', async (t) => {

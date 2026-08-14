@@ -39,7 +39,8 @@ import {
 import { runSpectrum, persistentReds } from './spectrum.mjs';
 import { furyRound, generalistReview } from './review.mjs';
 import { freezeAnchor } from './resume.mjs';
-import { SUITE_SCHEMA, SPEC_AMEND_SCHEMA } from './story.mjs';
+import { parseIntentCard } from './card.mjs';
+import { SUITE_SCHEMA, SPEC_AMEND_SCHEMA, specLintDefects } from './story.mjs';
 import {
   ACTOR,
   loadProjectConfig,
@@ -47,17 +48,16 @@ import {
   runEnv,
   runEvents,
   answeredPark,
-  invocationCount,
+  freezeExclusions,
   seatReportAfter,
   readJson,
   parkDirective,
   withAbandonGuard,
   attemptLimit,
-  failureBrief,
   answeredPath,
   blocked,
   commandError,
-  seatFail,
+  seatWithChecks,
   underAny,
   briefLines,
   gist,
@@ -210,7 +210,9 @@ async function runCycle(ctx, base, mode, { cycle }) {
   const suiteSha = mode === 'story' ? currentSuiteSha(startEvents) : null;
   const pass = currentPass(startEvents);
   const impl = lastImplementation(startEvents);
-  if (mode === 'story') await restorePaths(base.worktree, suiteSha, base.testPaths);
+  if (mode === 'story') {
+    await restorePaths(base.worktree, suiteSha, base.testPaths, { except: base.frozenExclusions });
+  }
   const sha = await headSha(base.worktree);
   const spectrum = await runSpectrum(ctx, {
     layers: base.layers,
@@ -629,7 +631,7 @@ export async function freshPass(ctx, base, mode, { newPass, trigger, open, last 
     await resetHard(base.worktree, base.resetSha);
     if (mode === 'story') {
       const suiteSha = currentSuiteSha(events);
-      await restorePaths(base.worktree, suiteSha, base.testPaths);
+      await restorePaths(base.worktree, suiteSha, base.testPaths, { except: base.frozenExclusions });
       await commitAll(base.worktree, `suite carry: ${ctx.runId}`);
     }
     ctx.store.append('fresh-pass', { actor: ACTOR, pass: newPass, trigger });
@@ -678,17 +680,19 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
   // conflict rides the same amendment.
   const deep = findings.filter((f) => f.depth === 'spec' || f.depth === 'intent');
   if (deep.length > 0 && !seatReportAfter(events, 'spec-birth', lastRenderSeq(events))) {
-    const n = invocationCount(events, 'spec-birth') + 1;
-    const amend = await ctx.runSeat({
+    // The template holds after the freeze too: this amendment is re-linted
+    // like every other one, and a defect takes the corrective route (ADR-0019).
+    const amend = await seatWithChecks(ctx, {
       seat: 'spec-birth',
-      roleBlock: specAmendRole(base, deep, intentAnswer),
-      reportPath: runReportPath(ctx.paths, ctx.runId, `spec-birth-${n}`),
       schema: SPEC_AMEND_SCHEMA,
       cwd: base.worktree,
       env: base.env,
       constitution: base.constitution,
+      buildRole: (defects) => specAmendRole(base, deep, intentAnswer, defects),
+      checks: () => specLintDefects({ ...base, specPath: base.specRef }),
+      defectReason: 'spec-defect',
     });
-    if (!amend.ok) return { fail: seatFail(ctx, 'spec-birth', amend) };
+    if (amend.fail) return { fail: amend.fail };
   }
   const { report, fail } = await seatWithChecks(ctx, {
     seat: 'suite',
@@ -750,9 +754,17 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
  */
 async function captureDefects(ctx, base, mode, { seat }) {
   const changed = await changedFiles(base.worktree);
-  const dropped = mode === 'story' ? changed.filter((f) => underAny(f, base.testPaths)) : [];
+  // An exclusion is the seat's own file: the restore leaves it alone, so the
+  // capture keeps it and the diff policy judges it like any other change.
+  const exempt = mode === 'story' ? (base.frozenExclusions ?? []) : [];
+  const dropped =
+    mode === 'story'
+      ? changed.filter((f) => underAny(f, base.testPaths) && !exempt.includes(f))
+      : [];
   if (mode === 'story') {
-    await restorePaths(base.worktree, currentSuiteSha(runEvents(ctx)), base.testPaths);
+    await restorePaths(base.worktree, currentSuiteSha(runEvents(ctx)), base.testPaths, {
+      except: exempt,
+    });
   }
   const tier = laneDiffPolicy(base.config, mode);
   const kept = changed.filter((f) => !dropped.includes(f));
@@ -813,7 +825,12 @@ async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
-    ...(mode === 'story' && { denyTools: testEditDenyRules(base.testPaths) }),
+    ...(mode === 'story' && {
+      denyTools: testEditDenyRules(base.testPaths, {
+        except: base.frozenExclusions,
+        worktree: base.worktree,
+      }),
+    }),
     buildRole,
     checks: () => captureDefects(ctx, base, mode, { seat }),
   });
@@ -835,44 +852,6 @@ function resolveGateIntegrity(ctx, openIds) {
     if (!openIds.includes(e.findingId)) {
       ctx.store.resolve({ actor: ACTOR, resolves: e.seq, findingId: e.findingId });
     }
-  }
-}
-
-// -- seat contract loop ------------------------------------------------------
-
-/**
- * The lane-level contract loop: one corrective invocation on a deterministic
- * defect in the work product, then the seat-failure park. It governs judging
- * seats too — a judge that cannot deliver a usable verdict is not the run
- * failing, so the human buys the retry or abandons the run.
- */
-async function seatWithChecks(
-  ctx,
-  { seat, label, schema, cwd, env, constitution, denyTools, buildRole, checks },
-) {
-  const limit = attemptLimit(runEvents(ctx), seat);
-  let brief = limit === 1 ? failureBrief(runEvents(ctx), seat) : null;
-  for (let attempt = 1; ; attempt++) {
-    const events = runEvents(ctx);
-    const n = invocationCount(events, seat) + 1;
-    const result = await ctx.runSeat({
-      seat,
-      roleBlock: buildRole(brief),
-      reportPath: runReportPath(ctx.paths, ctx.runId, label ?? `${seat}-${n}`),
-      schema,
-      cwd,
-      env,
-      constitution,
-      ...(denyTools && { denyTools }),
-    });
-    if (!result.ok) return { fail: seatFail(ctx, seat, result) };
-    const defects = await checks(result.report);
-    if (defects.length === 0) return { report: result.report };
-    if (attempt >= limit) {
-      ctx.store.append('seat-failure', { actor: ACTOR, seat, reason: 'work-product-defect', defects });
-      return { fail: seatFail(ctx, seat, { reason: 'work-product-defect' }) };
-    }
-    brief = defects;
   }
 }
 
@@ -967,10 +946,11 @@ function refreezeRole(base, findings, record, brief) {
   ].join('\n');
 }
 
-function specAmendRole(base, findings, intentAnswer) {
+function specAmendRole(base, findings, intentAnswer, defects = null) {
   const lines = [
     `Amend the born spec at this absolute path: ${base.specRef}`,
     'Edit the file in place. Keep unaffected sections unchanged.',
+    'The spec keeps its template: one section per acceptance criterion, the test mappings, the named constants, the supersedes, and the single touched-paths block.',
     'Report the headings of every section you amended.',
     'Verdict triage found the spec wrong on these points:',
     ...findings.map((f) => `- ${findingLine(f)}`),
@@ -981,6 +961,7 @@ function specAmendRole(base, findings, intentAnswer) {
       `- ${intentAnswer.option ?? intentAnswer.answer} (${intentAnswer.actor})`,
     );
   }
+  lines.push(...briefLines(defects));
   return lines.join('\n');
 }
 
@@ -1026,6 +1007,12 @@ async function verdictBase(ctx, mode) {
       env: runEnv(ctx, config),
       testPaths: config.repo.testPaths,
       uiPaths: config.repo.uiPaths ?? [],
+      // The freeze's exclusions: test-path files the spec assigned to the dev
+      // seat. They ride into the deny rules and out of every restore, and
+      // nowhere else — the rest of the test paths stay the frozen suite.
+      frozenExclusions: freezeExclusions(ctx.paths, ctx.runId),
+      card: worktreeCard(worktree, ctx.payload.card),
+      tier: laneDiffPolicy(config, 'story'),
       specRef: join(ctx.paths.runs, ctx.runId, 'spec.md'),
       suiteSha: currentSuiteSha(events),
       resetSha: freeze.sha,
@@ -1064,6 +1051,20 @@ async function verdictBase(ctx, mode) {
     resetSha: ctx.payload.baseSha,
     constitution: readConstitution(worktree, config),
   };
+}
+
+/**
+ * The run's intent card, read from the worktree. The spec lint judges the spec
+ * against it, and a card it cannot read leaves the lint with nothing to judge
+ * against, so this answers null rather than an empty card.
+ */
+function worktreeCard(worktree, cardPath) {
+  if (typeof cardPath !== 'string' || cardPath.length === 0) return null;
+  try {
+    return parseIntentCard(readFileSync(join(worktree, cardPath), 'utf8')).card;
+  } catch {
+    return null;
+  }
 }
 
 function currentSuiteSha(events) {

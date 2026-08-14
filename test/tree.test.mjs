@@ -84,6 +84,38 @@ function globRepoFixture(t) {
   return repo;
 }
 
+test('restorePaths leaves the freeze exclusions alone, and covers them without them', async (t) => {
+  const repo = repoFixture(t);
+  writeTree(repo, { 'tests/harness.mjs': 'base harness\n' });
+  const sha = await commitAll(repo, 'harness');
+  writeTree(repo, {
+    'tests/a.test.mjs': 'tampered\n',
+    'tests/harness.mjs': 'dev edit\n',
+    // A new directory the dev pass made for its own file, and junk beside it.
+    'tests/support/fixtures.mjs': 'a file the dev pass created\n',
+    'tests/support/junk.mjs': 'junk\n',
+    'tests/junk.test.mjs': 'junk\n',
+  });
+  const { readFileSync } = await import('node:fs');
+  const content = (file) => readFileSync(join(repo, file), 'utf8').replace(/\r\n/g, '\n');
+  await restorePaths(repo, sha, ['tests'], {
+    except: ['tests/harness.mjs', 'tests/support/fixtures.mjs'],
+  });
+  // The frozen suite reverts; the exempt files keep their edits, and an exempt
+  // file that is not at the sha at all survives the clean — even inside a
+  // directory the pass created.
+  assert.equal(content('tests/a.test.mjs'), 'base test\n');
+  assert.ok(!existsSync(join(repo, 'tests', 'junk.test.mjs')));
+  assert.ok(!existsSync(join(repo, 'tests', 'support', 'junk.mjs')));
+  assert.equal(content('tests/harness.mjs'), 'dev edit\n');
+  assert.equal(content('tests/support/fixtures.mjs'), 'a file the dev pass created\n');
+  // The same restore without the exemption — the adversary's restore — covers
+  // the whole set: the edit reverts and the new file goes.
+  await restorePaths(repo, sha, ['tests']);
+  assert.equal(content('tests/harness.mjs'), 'base harness\n');
+  assert.ok(!existsSync(join(repo, 'tests', 'support', 'fixtures.mjs')));
+});
+
 test('restorePaths takes glob entries: matching files revert, the rest stays', async (t) => {
   const repo = globRepoFixture(t);
   const sha = await headSha(repo);

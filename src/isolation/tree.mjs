@@ -1,6 +1,8 @@
 // Working-tree operations the lanes use: change detection, commits,
 // restore-from-sha, evidence diffs. Commits carry a fixed daemon identity so
 // a run never depends on machine-level git config.
+import { rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { isGlobEntry, underEntry } from '../config/project.mjs';
 import { git } from './git.mjs';
 
@@ -55,16 +57,38 @@ export async function headSha(tree) {
  * checked out, untracked files under the entries removed. A glob entry
  * rides git's `:(glob)` pathspec magic; a plain prefix stays a bare
  * pathspec. An entry with nothing at the sha is tolerated.
+ *
+ * `except` names files the restore leaves alone — the freeze's exclusions
+ * (ADR-0019). They ride as `:(exclude)` pathspecs, so an exempt file keeps
+ * both its edits and its existence: an untracked one survives the clean.
  */
-export async function restorePaths(tree, sha, entries) {
+export async function restorePaths(tree, sha, entries, { except = [] } = {}) {
+  const exempt = new Set((except ?? []).map((file) => file.replaceAll('\\', '/')));
+  const excludes = [...exempt].map((file) => `:(exclude)${file}`);
   for (const entry of entries) {
     const pathspec = isGlobEntry(entry) ? `:(glob)${entry}` : entry;
     try {
-      await git(['checkout', sha, '--', pathspec], { cwd: tree });
+      await git(['checkout', sha, '--', pathspec, ...excludes], { cwd: tree });
     } catch {
-      // The sha holds nothing under this entry; clean still applies.
+      // The sha holds nothing under this entry; the clean still applies.
     }
-    await git(['clean', '-fd', '--', pathspec], { cwd: tree });
+    if (exempt.size === 0) {
+      await git(['clean', '-fd', '--', pathspec], { cwd: tree });
+      continue;
+    }
+    // `clean -d` collapses a wholly untracked directory to the directory
+    // itself, and an exclude pathspec inside it does not save its contents —
+    // an exempt file in a new directory would go with the directory. So the
+    // untracked files are listed and removed one by one instead.
+    const others = await git(
+      ['ls-files', '--others', '--exclude-standard', '-z', '--', pathspec, ...excludes],
+      { cwd: tree },
+    );
+    for (const file of others.split('\0')) {
+      const path = file.trim();
+      if (path.length === 0 || exempt.has(path)) continue;
+      rmSync(join(tree, path), { force: true });
+    }
   }
 }
 

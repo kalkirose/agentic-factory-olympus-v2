@@ -53,6 +53,49 @@ export function initOriginRepo(dir, files) {
   return dir;
 }
 
+// -- story fixtures ----------------------------------------------------------
+
+/** The acceptance-criteria section the fixture intent cards carry. */
+export const FIXTURE_ACCEPTANCE = `
+## Acceptance criteria
+
+- AC-1: f(x) returns 2*x for every number x.
+`;
+
+/**
+ * A spec that holds the template (ADR-0019) for a fixture card with one
+ * acceptance criterion: a header, one criterion section with its mapping,
+ * constants and supersedes, one touched-paths block, an environment section.
+ */
+export const FIXTURE_SPEC = `# alpha-1 spec
+
+Base sha: the launch base. Scope exclusions: none the card states.
+
+## AC-1
+
+f(x) returns twice its input. The suite asserts it on one number.
+
+Test mapping:
+- tests/feature.test.mjs — f(2) is 4
+
+Named constants:
+- FACTOR = 2
+
+Supersedes:
+- None
+
+## Touched paths
+
+\`\`\`touched-paths
+src/feature.mjs — dev
+tests/feature.test.mjs — suite
+\`\`\`
+
+## Environment
+
+None; the card names none.
+`;
+
 /** A valid project config JSON body; override sections per test. */
 export function projectConfigJson(overrides = {}) {
   return (

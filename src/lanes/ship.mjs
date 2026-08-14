@@ -49,6 +49,7 @@ import {
   runEvents,
   answeredPark,
   answeredPath,
+  freezeExclusions,
   invocationCount,
   parkDirective,
   withAbandonGuard,
@@ -493,7 +494,12 @@ async function mergeRound(ctx, base, { fromSha, mainSha, conflicts }) {
       cwd: base.worktree,
       env: base.env,
       constitution: base.constitution,
-      ...(base.storyLane && { denyTools: testEditDenyRules(base.testPaths) }),
+      ...(base.storyLane && {
+        denyTools: testEditDenyRules(base.testPaths, {
+          except: base.frozenExclusions,
+          worktree: base.worktree,
+        }),
+      }),
     });
     if (!result.ok) cause = 'dev seat failed';
   }
@@ -626,6 +632,9 @@ function freshBase(base, resetSha) {
   return {
     worktree: base.worktree,
     testPaths: base.testPaths,
+    // The freeze's exclusions travel with the test paths: a merge-born fresh
+    // pass restores the same suite every other pass restores.
+    frozenExclusions: base.frozenExclusions,
     specRef: base.specRef,
     env: base.env,
     // The dev seat's brief names the Tier-1 gate commands and carries the
@@ -1046,6 +1055,7 @@ async function shipBase(ctx, forgeFor) {
     branch: ctx.payload.branch,
     defaultBranch: ctx.payload.defaultBranch ?? 'main',
     testPaths: config.repo.testPaths ?? [],
+    frozenExclusions: cardPath ? freezeExclusions(ctx.paths, ctx.runId) : [],
     env: runEnv(ctx, config),
     constitution: readConstitution(worktree, config),
     cardPath,

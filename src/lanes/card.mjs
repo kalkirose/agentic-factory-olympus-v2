@@ -1,8 +1,18 @@
 // Intent-card parsing. A card is the roadmap artifact for one story: YAML
 // frontmatter (key, title, blocked-by, phase) plus markdown sections. The
-// harness reads only what readiness and the frontier need — the key, the
-// edges, the phase, and the open decisions. Everything else is seat-facing
-// prose.
+// harness reads only what readiness, the frontier and the spec lint need —
+// the key, the edges, the phase, the open decisions, and the acceptance
+// criteria. Everything else is seat-facing prose.
+
+/**
+ * An acceptance-criterion id: an identifier that carries a digit. The digit is
+ * what separates a labelled criterion from one written as prose, so a
+ * criterion that opens with an ordinary word is never read as a label.
+ * @param {string} token
+ */
+export function isCriterionId(token) {
+  return /^[A-Za-z][A-Za-z0-9._-]*$/.test(token) && /\d/.test(token);
+}
 
 /**
  * Parses an intent card. Returns `{card, errors}`; a non-empty errors list
@@ -22,8 +32,27 @@ export function parseIntentCard(text) {
     // Phase membership for the launch gate; absent = the first phase.
     phase: fields.phase ?? null,
     openDecisions: sectionItems(body, /open decisions/i),
+    acceptance: acceptanceCriteria(body),
   };
   return { card, errors };
+}
+
+/**
+ * The card's acceptance criteria, in card order. A criterion may carry its own
+ * id — the first token of the item, when that token has the shape of one — and
+ * takes its position as its id when it does not. Every card therefore names an
+ * ordered id set, which is the set the spec must mirror section for section.
+ * @returns {{id: string, text: string}[]}
+ */
+function acceptanceCriteria(body) {
+  return sectionItems(body, /acceptance/i).map((item, i) => {
+    const [first, ...rest] = item.split(/\s+/);
+    const token = first.replace(/^[`*]+/, '').replace(/[`*:.]+$/, '');
+    if (rest.length > 0 && isCriterionId(token)) {
+      return { id: token, text: rest.join(' ').replace(/^[—–-]\s*/, '') };
+    }
+    return { id: `AC-${i + 1}`, text: item };
+  });
 }
 
 function splitFrontmatter(text) {

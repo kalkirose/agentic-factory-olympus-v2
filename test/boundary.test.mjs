@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { testEditDenyRules } from '../src/seats/boundary.mjs';
 import { claudeSeatCommand } from '../src/seats/claude.mjs';
 import { seatDef } from '../src/seats/seatmap.mjs';
+import { tempDir, removeDir, writeTree } from './helpers.mjs';
 
 test('deny rules cover every edit tool per test path', () => {
   const rules = testEditDenyRules(['tests', 'e2e/']);
@@ -32,6 +33,44 @@ test('a glob entry passes through unsuffixed; a prefix keeps its suffix', () => 
     'Edit(**/*.spec.ts)',
     'Write(**/*.spec.ts)',
     'NotebookEdit(**/*.spec.ts)',
+  ]);
+});
+
+test('a freeze exclusion narrows the rules to everything but that file', (t) => {
+  const root = tempDir('olympus-boundary-');
+  t.after(() => removeDir(root));
+  writeTree(root, {
+    'tests/a.test.mjs': 'a\n',
+    'tests/b.test.mjs': 'b\n',
+    'tests/unit/c.test.mjs': 'c\n',
+    'tests/support/harness.mjs': 'h\n',
+    'tests/support/util.mjs': 'u\n',
+  });
+  const rules = testEditDenyRules(['tests'], {
+    except: ['tests/support/harness.mjs'],
+    worktree: root,
+  });
+  const edits = rules.filter((r) => r.startsWith('Edit('));
+  assert.deepEqual(edits, [
+    'Edit(tests/a.test.mjs)',
+    'Edit(tests/b.test.mjs)',
+    // Only the directory holding the exemption is walked; the rest collapses.
+    'Edit(tests/support/util.mjs)',
+    'Edit(tests/unit/**)',
+  ]);
+  assert.ok(rules.includes('Write(tests/support/util.mjs)'));
+  assert.ok(!rules.some((r) => r.includes('harness.mjs')));
+  // Without the tree there is nothing to walk, so the boundary stays whole.
+  assert.deepEqual(testEditDenyRules(['tests'], { except: ['tests/support/harness.mjs'] }), [
+    'Edit(tests/**)',
+    'Write(tests/**)',
+    'NotebookEdit(tests/**)',
+  ]);
+  // An exemption under no test path changes nothing.
+  assert.deepEqual(testEditDenyRules(['tests'], { except: ['src/feature.mjs'], worktree: root }), [
+    'Edit(tests/**)',
+    'Write(tests/**)',
+    'NotebookEdit(tests/**)',
   ]);
 });
 

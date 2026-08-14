@@ -18,6 +18,8 @@ import {
   initOriginRepo,
   projectConfigJson,
   fakeComposeRunner,
+  FIXTURE_ACCEPTANCE,
+  FIXTURE_SPEC,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -30,7 +32,7 @@ title: Alpha feature
 ## Goal
 
 Provide f(x) that doubles x in src/feature.mjs.
-`;
+${FIXTURE_ACCEPTANCE}`;
 
 const WEAK_TEST = `import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -227,7 +229,7 @@ function waitParked(paths, runId, type, nth = 1) {
 test('a fixture story reaches a valid freeze record with kills and dispositions', async (t) => {
   const seats = {
     'spec-birth': ({ prompt }) => ({
-      files: { [specPathFrom(prompt)]: '# Spec\n\nf(x) returns 2*x.\n' },
+      files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
       report: { outcome: 'spec-born', summary: 'born' },
     }),
     'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
@@ -348,13 +350,13 @@ title: Alpha
 ## Open decisions
 
 - Pick the rounding mode
-`;
+${FIXTURE_ACCEPTANCE}`;
   const seats = {
     'spec-birth': ({ prompt }) =>
       prompt.includes('Amend the born spec')
         ? { report: { amendedSections: ['Goal'], summary: 'amended' } }
         : {
-            files: { [specPathFrom(prompt)]: '# Spec\n' },
+            files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
             report: { outcome: 'spec-born', summary: 'born' },
           },
     'spec-gate': () => ({
@@ -412,7 +414,7 @@ test('the owner buys one more spec-gate round, and the next cap parks again', as
       prompt.includes('Amend the born spec')
         ? { report: { amendedSections: ['Goal'], summary: 'amended' } }
         : {
-            files: { [specPathFrom(prompt)]: '# Spec\n' },
+            files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
             report: { outcome: 'spec-born', summary: 'born' },
           },
     'spec-gate': () => ({
@@ -453,7 +455,7 @@ test('blocking findings hold the spec; notes pass it and reach the suite seat', 
       prompt.includes('Amend the born spec')
         ? { report: { amendedSections: ['Goal'], summary: 'amended' } }
         : {
-            files: { [specPathFrom(prompt)]: '# Spec\n\nf(x) returns 2*x.\n' },
+            files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
             report: { outcome: 'spec-born', summary: 'born' },
           },
     'spec-gate': ({ label }) =>
@@ -565,7 +567,7 @@ test('a grounding conflict parks spec birth; a bad red class takes one correctiv
             },
           }
         : {
-            files: { [specPathFrom(prompt)]: '# Spec\n' },
+            files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
             report: { outcome: 'spec-born', summary: 'born' },
           },
     'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
@@ -628,7 +630,7 @@ test('an intent conflict never burns a round; a seat crash parks, and abandon cl
       prompt.includes('Amend the born spec')
         ? { report: { amendedSections: ['Scope'], summary: 'aligned' } }
         : {
-            files: { [specPathFrom(prompt)]: '# Spec\n' },
+            files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
             report: { outcome: 'spec-born', summary: 'born' },
           },
     'spec-gate': ({ label }) =>
@@ -686,7 +688,7 @@ test('an intent conflict never burns a round; a seat crash parks, and abandon cl
 test('an unkilled gap blocks the freeze until the human accepts it', async (t) => {
   const seats = {
     'spec-birth': ({ prompt }) => ({
-      files: { [specPathFrom(prompt)]: '# Spec\n' },
+      files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
       report: { outcome: 'spec-born', summary: 'born' },
     }),
     'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
@@ -753,7 +755,7 @@ test('an unkilled gap blocks the freeze until the human accepts it', async (t) =
 test('a second zero-kill round escalates with the survivor set', async (t) => {
   const seats = {
     'spec-birth': ({ prompt }) => ({
-      files: { [specPathFrom(prompt)]: '# Spec\n' },
+      files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
       report: { outcome: 'spec-born', summary: 'born' },
     }),
     'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
@@ -804,7 +806,7 @@ test('a second zero-kill round escalates with the survivor set', async (t) => {
 test('a green red-state check routes one suite fix round before the freeze', async (t) => {
   const seats = {
     'spec-birth': ({ prompt }) => ({
-      files: { [specPathFrom(prompt)]: '# Spec\n' },
+      files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
       report: { outcome: 'spec-born', summary: 'born' },
     }),
     'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
@@ -873,6 +875,81 @@ test('a green red-state check routes one suite fix round before the freeze', asy
   const record = JSON.parse(readFileSync(join(fx.paths.archivedRuns, runId, 'freeze.json'), 'utf8'));
   assert.equal(record.redState.result, 'red');
   assert.deepEqual(record.dispositions.map((d) => [d.wave, d.disposition]), [[2, 'spec-indifferent']]);
+});
+
+test('a spec that breaks the template takes one corrective round, then parks', async (t) => {
+  const seats = {
+    'spec-birth': ({ prompt }) => ({
+      files: { [specPathFrom(prompt)]: '# alpha-1 spec\n\nf(x) returns twice its input.\n' },
+      report: { outcome: 'spec-born', summary: 'born' },
+    }),
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'seat-failure');
+  assert.equal(park.detail.seat, 'spec-birth');
+  assert.equal(park.detail.cause, 'spec-defect');
+  // One corrective invocation, carrying the exact failures by name.
+  const calls = fx.calls.filter((c) => c.seat === 'spec-birth');
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].prompt, /Correction brief/);
+  assert.match(calls[1].prompt, /no section for acceptance criterion AC-1/);
+  assert.match(calls[1].prompt, /declares no ```touched-paths block/);
+  // The template is stated where the spec is written, so the two never drift.
+  assert.match(calls[0].prompt, /The spec has a fixed template/);
+  assert.match(calls[0].prompt, /Test mapping:/);
+  assert.match(calls[0].prompt, /The card defines WHAT ships/);
+  // The lint is a bookend, not a judgment round: no gate seat, no gate round,
+  // and no spec was ever born.
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  assert.ok(!fx.calls.some((c) => c.seat === 'spec-gate'));
+  assert.ok(!live.some((e) => e.event === 'spec-gate-round'));
+  assert.ok(!live.some((e) => e.event === 'spec-born'));
+  const failure = live.find((e) => e.event === 'seat-failure');
+  assert.ok(failure.defects.some((d) => /touched-paths/.test(d)));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const closed = (await waitClosed(fx.paths, runId)).find((e) => e.event === 'run-closed');
+  assert.equal(closed.state, 'failed');
+  assert.equal(closed.seat, 'spec-birth');
+});
+
+test('the freeze records the test-path files the spec gave the dev pass', async (t) => {
+  const spec = FIXTURE_SPEC.replace(
+    'tests/feature.test.mjs — suite',
+    'tests/feature.test.mjs — suite\ntests/support/harness.mjs — dev',
+  );
+  const seats = {
+    'spec-birth': ({ prompt }) => ({
+      files: { [specPathFrom(prompt)]: spec },
+      report: { outcome: 'spec-born', summary: 'born' },
+    }),
+    'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
+    suite: () => ({
+      files: { 'tests/feature.test.mjs': STRONG_TEST },
+      report: {
+        suiteFiles: ['tests/feature.test.mjs'],
+        reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        summary: 'authored',
+      },
+    }),
+    adversary: () => ({
+      files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
+      report: { approach: 'stub', wrongness: 'f returns 0' },
+    }),
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const freeze = events.find((e) => e.event === 'freeze');
+  assert.equal(freeze.exclusions, 1);
+  const record = JSON.parse(readFileSync(join(fx.paths.archivedRuns, runId, 'freeze.json'), 'utf8'));
+  assert.deepEqual(record.frozenExclusions, ['tests/support/harness.mjs']);
+  // The adversary's boundary is unchanged: an exclusion belongs to the dev
+  // pass, and an adversary that edits a test file is still tampering.
+  const adversaries = fx.calls.filter((c) => c.seat === 'adversary');
+  assert.equal(adversaries.length, 3);
+  assert.ok(adversaries.every((c) => c.denyTools.includes('Edit(tests/**)')));
 });
 
 test('the stack env reaches the compose up, the lint command, and the seats', async (t) => {

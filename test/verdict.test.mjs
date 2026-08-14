@@ -36,6 +36,17 @@ test('f doubles', async () => {
 });
 `;
 
+// Reaches a test-path file the freeze exempts: the dev pass owns it, so the
+// suite is green only when that file survives every restore.
+const HARNESS_TEST = `import test from 'node:test';
+import assert from 'node:assert/strict';
+test('f doubles what the harness boots', async () => {
+  const { boot } = await import('./support/harness.mjs');
+  const { f } = await import('../src/feature.mjs');
+  assert.equal(f(boot()), 4);
+});
+`;
+
 const G_TEST = `import test from 'node:test';
 import assert from 'node:assert/strict';
 test('g increments', async () => {
@@ -127,7 +138,7 @@ function seatFixture(seats) {
 }
 
 /** Seeds the freeze boundary: suite files committed, freeze stamped. */
-function seedHandler(files, extra, specText = '# Spec\n\nf(x) returns 2*x.\n') {
+function seedHandler(files, extra, specText = '# Spec\n\nf(x) returns 2*x.\n', exclusions = []) {
   return async (ctx) => {
     const worktree = ctx.payload.worktree;
     for (const [file, content] of Object.entries(files)) {
@@ -137,6 +148,10 @@ function seedHandler(files, extra, specText = '# Spec\n\nf(x) returns 2*x.\n') {
     }
     const sha = await commitAll(worktree, 'suite: seed');
     writeFileSync(join(ctx.paths.runs, ctx.runId, 'spec.md'), specText);
+    writeFileSync(
+      join(ctx.paths.runs, ctx.runId, 'freeze.json'),
+      JSON.stringify({ runId: ctx.runId, suiteSha: sha, frozenExclusions: exclusions }, null, 2) + '\n',
+    );
     ctx.store.append('freeze', { actor: 'daemon', sha, killCount: 3, amendmentKills: 0 });
     if (extra) await extra(ctx, worktree);
     return { next: 'implementation' };
@@ -154,6 +169,7 @@ function verdictFixture(t, opts) {
     seedExtra = null,
     diffPolicy = undefined,
     specText = undefined,
+    exclusions = [],
   } = opts;
   const root = tempDir();
   const origin = initOriginRepo(join(root, 'origin'), {
@@ -178,7 +194,7 @@ function verdictFixture(t, opts) {
   const lanes = {
     story: {
       stages: ['seed', ...post.stages],
-      handlers: { seed: seedHandler(suiteFiles, seedExtra, specText), ...post.handlers },
+      handlers: { seed: seedHandler(suiteFiles, seedExtra, specText, exclusions), ...post.handlers },
     },
     repair: repairLane({ afterVerdict: done }),
   };
@@ -1182,6 +1198,42 @@ test('a change the capture takes back is stamped and named, with no policy decla
     renders.map((e) => [e.cycle, e.verdict]),
     [[1, 'green']],
   );
+});
+
+test('a freeze exclusion is the dev seat\'s file: no deny rule, no restore, no drop', async (t) => {
+  // The frozen suite reaches the dev-owned harness the spec assigned to the
+  // implementing pass. The suite is green only if that file survives the tool
+  // boundary, the capture and every restore between the seat and the gates.
+  const seats = {
+    dev: () => ({
+      files: {
+        'src/feature.mjs': GOOD_FEATURE,
+        'tests/support/harness.mjs': 'export const boot = () => 2;\n',
+      },
+      report: { summary: 'implemented' },
+    }),
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    suiteFiles: { 'tests/feature.test.mjs': HARNESS_TEST },
+    exclusions: ['tests/support/harness.mjs'],
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.deepEqual(
+    events.filter((e) => e.event === 'verdict-rendered').map((e) => [e.cycle, e.verdict]),
+    [[1, 'green']],
+  );
+  // Nothing was taken back and nothing was refused: the exclusion is the
+  // seat's own file, and the rest of the test path is still the frozen suite.
+  assert.ok(!events.some((e) => e.event === 'diff-policy-violation'));
+  assert.equal(events.filter((e) => e.event === 'implementation-committed').length, 1);
+  const dev = fx.calls.find((c) => c.seat === 'dev');
+  assert.ok(dev.denyTools.includes('Edit(tests/feature.test.mjs)'));
+  assert.ok(!dev.denyTools.includes('Edit(tests/**)'));
+  assert.ok(!dev.denyTools.some((rule) => rule.includes('harness.mjs')));
 });
 
 test('the repair lane keeps its regression test and answers its own tiers', async (t) => {
