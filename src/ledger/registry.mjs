@@ -98,6 +98,11 @@ export const INSTANCE_EVENTS = new Set([
   'arming-changed',
   'config-changed',
   'factory-starvation',
+  // Ticketed breach escapes the sweep may not launch, because the project is
+  // paused or was never armed. Loud, because the pause is the owner's and the
+  // daemon never bypasses it; the sweep appends the paired `resolved` when
+  // the repairs launch (ADR-0024).
+  'repairs-owed',
   'tripwire-breach',
   'baseline-proposal',
   'eval-review',
@@ -111,7 +116,14 @@ export const INSTANCE_EVENTS = new Set([
   'resolved',
 ]);
 
-export const ESCAPES_EVENTS = new Set(['escape-recorded', 'escape-fixed']);
+// The escape lifecycle: recorded → ticketed (the repair ticket the harness
+// wrote for it, absolute path) → fixed. The ticket stamp follows the file it
+// names, so a ticketed escape always has a ticket to repair from (ADR-0024).
+export const ESCAPES_EVENTS = new Set([
+  'escape-recorded',
+  'escape-ticketed',
+  'escape-fixed',
+]);
 
 // Stream classing. Every stream-classed append also lands as a pointer in
 // the matching stream index. The full event lives only in its source ledger.
@@ -127,6 +139,7 @@ export const LOUD_EVENTS = new Set([
   'diff-policy-violation',
   'red-merge-breach',
   'factory-starvation',
+  'repairs-owed',
   'budget-breach',
 ]);
 

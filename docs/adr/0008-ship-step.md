@@ -1,6 +1,9 @@
 # ADR-0008: Ship-step shapes
 
 Status: accepted (2026-08-10)
+Superseded in part by ADR-0024: a red-merge breach tickets each escape and
+enqueues its repair for the frontier sweep. `shipStep` takes `enqueueRepair`
+in place of `spawnRepair`, and nothing in the lane graph launches a run.
 
 ## Decision
 

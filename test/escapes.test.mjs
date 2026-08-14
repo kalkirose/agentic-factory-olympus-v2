@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scaffoldHome } from '../src/daemon/home.mjs';
+import { existsSync, readFileSync } from 'node:fs';
+import { scaffoldHome, repairTicketPath } from '../src/daemon/home.mjs';
 import { openEscapesStore } from '../src/telemetry/stores.mjs';
 import {
   recordEscape,
+  ticketEscape,
   fixEscape,
   readEscapeSet,
   openEscapes,
@@ -42,6 +44,59 @@ test('the two-event lifecycle round-trips with final values from the fix', (t) =
   assert.equal(set[0].attribution, 'story-4-2');
   assert.deepEqual(set[0].fixRefs, { pr: 12, runId: 'r9' });
   assert.equal(openEscapes(paths.escapesLedger).length, 0);
+});
+
+test('the scaffold creates the escapes ledger and keeps what it holds', (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const paths = scaffoldHome(dir);
+  // An empty ledger is a measured zero; a missing file is an unmeasurable
+  // hole, and the escapes metric cannot tell one from the other.
+  assert.ok(existsSync(paths.escapesLedger));
+  assert.equal(readFileSync(paths.escapesLedger, 'utf8'), '');
+  assert.ok(existsSync(paths.tickets));
+  const store = openEscapesStore(paths);
+  recordEscape(store, {
+    actor: 'daemon',
+    category: 'chore',
+    defectLine: 'a stale link',
+    detectionSource: 'human-report',
+  });
+  store.close();
+  // A second scaffold (the next daemon start) never truncates it.
+  scaffoldHome(dir);
+  assert.equal(readEscapeSet(paths.escapesLedger).length, 1);
+});
+
+test('a ticket stamp links an absolute path to one recorded escape', (t) => {
+  const { paths, store } = escapesStore(t);
+  const recorded = recordEscape(store, {
+    actor: 'daemon',
+    category: 'product-escape',
+    defectLine: 'f(3) returns 5 in production',
+    detectionSource: 'harness-self',
+    attribution: 'alpha-1',
+    refs: { project: 'proj', runId: 'r1' },
+  });
+  const ticket = repairTicketPath(paths, recorded.seq);
+  assert.throws(
+    () => ticketEscape(store, { actor: 'daemon', escape: 99, ticket }),
+    /no escape-recorded at seq/,
+  );
+  assert.throws(
+    () => ticketEscape(store, { actor: 'daemon', escape: recorded.seq, ticket: 'tickets/x.md' }),
+    /absolute ticket path/,
+  );
+  ticketEscape(store, { actor: 'daemon', escape: recorded.seq, ticket, refs: { runId: 'r1' } });
+  assert.throws(
+    () => ticketEscape(store, { actor: 'daemon', escape: recorded.seq, ticket }),
+    /already carries a ticket/,
+  );
+  store.close();
+  const set = readEscapeSet(paths.escapesLedger);
+  assert.equal(set[0].ticket, ticket);
+  assert.equal(set[0].refs.project, 'proj');
+  assert.equal(set[0].fixed, false);
 });
 
 test('an unfixed escape stays open with its recorded routing hint', (t) => {

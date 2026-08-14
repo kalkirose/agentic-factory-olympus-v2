@@ -254,7 +254,9 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   shared.
 - **The harness never merges red.** A human admin-merge over persistent reds
   is a red-merge breach: recorded loud, open findings convert to
-  escapes-ledger entries, each spawns repair-lane work.
+  escapes-ledger entries, each gets a self-contained repair ticket in the
+  daemon home and is owed a repair-lane run. The breaching run enqueues; the
+  frontier sweep launches, because that run still holds its own slot.
 - Close-out: watch merge-commit checks to terminal states, run the card
   sweep, close the run ledger.
 
@@ -312,6 +314,11 @@ at any hour. A story that is not ready self-parks at spec-birth escalation.
 Phase gates bound the launchable set. The console gives pause, reorder, and a
 kill switch. Zero active runs while parked work exists = factory starvation,
 loud.
+
+Owed breach repairs take their slots first: a sweep launches the ticketed
+escapes that have no repair run before it looks at the story frontier
+(ADR-0024). A pause is never bypassed — a paused project with owed repairs
+goes loud instead, and the stamp resolves when the repairs launch.
 
 ## Tripwires
 

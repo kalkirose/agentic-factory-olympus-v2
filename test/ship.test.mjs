@@ -8,14 +8,20 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
-import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
+import {
+  scaffoldHome,
+  archivedRunLedgerPath,
+  repairTicketPath,
+  runLedgerPath,
+} from '../src/daemon/home.mjs';
 import { postFreeze, repairLane } from '../src/lanes/verdict.mjs';
 import { shipStep } from '../src/lanes/ship.mjs';
 import { gitHubForge, parseGitHubRepo } from '../src/ship/forge.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { openEscapesStore } from '../src/telemetry/stores.mjs';
-import { recordEscape, readEscapeSet } from '../src/telemetry/escapes.mjs';
+import { recordEscape, ticketEscape, readEscapeSet } from '../src/telemetry/escapes.mjs';
+import { owedRepairs } from '../src/frontier/repairs.mjs';
 import { tempDir, removeDir, waitFor, gitSync, initOriginRepo, commitTree, projectConfigJson } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -268,7 +274,7 @@ const BASE_SEATS = {
   }),
 };
 
-function shipFixture(t, { seats = {}, pollMs = 30, forgeOpts = {}, spawnRepair = null, slotCap = 2 } = {}) {
+function shipFixture(t, { seats = {}, pollMs = 30, forgeOpts = {}, enqueue = false, slotCap = 2 } = {}) {
   const root = tempDir();
   const origin = initOriginRepo(join(root, 'origin'), {
     [CONFIG_PATH]: projectConfigJson({
@@ -289,15 +295,19 @@ function shipFixture(t, { seats = {}, pollMs = 30, forgeOpts = {}, spawnRepair =
     JSON.stringify({ version: 1, projects: { proj: { repoUrl: origin, slotCap } } }) + '\n',
   );
   const forge = fakeForge(origin, forgeOpts);
-  const spawnCalls = [];
-  const fixtureHolder = {};
-  const spawner = spawnRepair
-    ? async (info) => {
-        spawnCalls.push(info);
-        return spawnRepair(info, fixtureHolder);
-      }
-    : null;
-  const shipLane = shipStep({ forgeFor: () => forge, pollMs, spawnRepair: spawner });
+  const enqueued = [];
+  const shipLane = shipStep({
+    forgeFor: () => forge,
+    pollMs,
+    // The production hand-off is the daemon's sweep; the fixture records the
+    // call and lets the frontier find the owed work on its own.
+    enqueueRepair: enqueue
+      ? (info) => {
+          enqueued.push(info);
+          daemon.frontier.queueSweep(info.project);
+        }
+      : null,
+  });
   const post = postFreeze({ afterVerdict: shipLane });
   const done = { stages: ['done'], handlers: { done: async () => ({ close: { state: 'shipped' } }) } };
   const lanes = {
@@ -317,7 +327,6 @@ function shipFixture(t, { seats = {}, pollMs = 30, forgeOpts = {}, spawnRepair =
   };
   const daemon = new Daemon(join(root, 'home'), { lanes });
   const fixture = seatFixture({ ...BASE_SEATS, ...seats });
-  fixtureHolder.daemon = daemon;
   t.after(async () => {
     await daemon.stop();
     removeDir(root);
@@ -328,7 +337,7 @@ function shipFixture(t, { seats = {}, pollMs = 30, forgeOpts = {}, spawnRepair =
     paths,
     daemon,
     forge,
-    spawnCalls,
+    enqueued,
     calls: fixture.calls,
     async launch(payload = {}) {
       await daemon.start();
@@ -557,20 +566,13 @@ test('textual conflicts take the merge round; test hunks go to the suite seat', 
   assert.ok(!conflictCall.prompt.includes('tests/feature.test.mjs'));
 });
 
-test('an admin merge over red checks is a breach: loud, escapes, repair spawn', async (t) => {
+test('an admin merge over red checks is a breach: ticket, stamp, enqueue', async (t) => {
   const fx = shipFixture(t, {
     pollMs: 300,
-    spawnRepair: async (info, holder) => {
-      const ticket = join(fx.root, 'ticket.md');
-      writeFileSync(ticket, `# Escape ${info.escapeSeq}\n\n${info.defectLine}\n`);
-      const { runId } = await holder.daemon.launchRun({
-        project: info.project,
-        lane: 'repair',
-        ticket,
-        escapeSeq: info.escapeSeq,
-      });
-      return runId;
-    },
+    enqueue: true,
+    // One slot: the breaching run holds it through its own close-out, which
+    // is why the breach enqueues its repair instead of launching it.
+    slotCap: 1,
     seats: {
       dev: ({ prompt }) => {
         if (prompt.includes('Fix the defect')) {
@@ -584,6 +586,7 @@ test('an admin merge over red checks is a breach: loud, escapes, repair spawn', 
   fx.forge.state.autoChecks = () => [running()];
   fx.forge.state.onRerun = () => {};
   const runId = await fx.launch();
+  fx.daemon.frontier.setArmed('proj', true, 'human');
   const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
   fx.forge.setChecks(opened.sha, [red()]);
   fx.forge.adminMerge();
@@ -594,21 +597,46 @@ test('an admin merge over red checks is a breach: loud, escapes, repair spawn', 
   assert.deepEqual(merged.redChecks, ['ci']);
   const breach = events.find((e) => e.event === 'red-merge-breach');
   assert.equal(breach.escapes.length, 1);
-  assert.equal(breach.spawned.length, 1);
+  assert.deepEqual(breach.ticketed, breach.escapes);
   // loud stream carries the pointer
   const loud = readFileSync(fx.paths.loudStream, 'utf8');
   assert.match(loud, /red-merge-breach/);
-  // the conversion landed in the escapes ledger, attributed to the story
+  // the conversion landed in the escapes ledger, attributed to the story, in
+  // the order the breach owes: recorded, then ticketed
+  const ledger = readEvents(fx.paths.escapesLedger);
+  assert.deepEqual(
+    ledger.map((e) => e.event),
+    ['escape-recorded', 'escape-ticketed'],
+  );
   const escapes = readEscapeSet(fx.paths.escapesLedger);
   assert.equal(escapes.length, 1);
+  assert.equal(escapes[0].seq, breach.escapes[0]);
   assert.equal(escapes[0].category, 'product-escape');
   assert.equal(escapes[0].detectionSource, 'harness-self');
   assert.equal(escapes[0].attribution, 'alpha-1');
-  // the spawned repair run carries the escape linkage and completes
-  assert.equal(fx.spawnCalls.length, 1);
-  assert.equal(fx.spawnCalls[0].escapeSeq, breach.escapes[0]);
-  assert.equal(fx.spawnCalls[0].pr, 7);
-  const repairEvents = await waitClosed(fx.paths, breach.spawned[0]);
+  assert.equal(escapes[0].refs.project, 'proj');
+  // the escape carries the ticket path, and the ticket is self-contained
+  assert.equal(escapes[0].ticket, repairTicketPath(fx.paths, escapes[0].seq));
+  const ticket = readFileSync(escapes[0].ticket, 'utf8');
+  assert.match(ticket, new RegExp(`escape: seq ${escapes[0].seq}`));
+  assert.match(ticket, /merged PR: #7/);
+  assert.match(ticket, new RegExp(`merge commit: ${merged.mergeSha}`));
+  assert.match(ticket, /### ci/);
+  assert.match(ticket, /log tail of ci at/);
+  // the hand-off named the project and the ticketed escapes; nothing launched
+  // from inside the breaching run
+  assert.equal(fx.enqueued.length, 1);
+  assert.equal(fx.enqueued[0].project, 'proj');
+  assert.deepEqual(fx.enqueued[0].escapes, breach.escapes);
+  // the frontier launched the repair once the slot came free
+  const launch = await waitFor(
+    () => readEvents(fx.paths.instanceLedger).find((e) => e.event === 'launch' && e.lane === 'repair'),
+    { attempts: 600, intervalMs: 100, label: 'repair launched' },
+  );
+  const repairEvents = await waitClosed(fx.paths, launch.runId);
+  const repairLaunched = repairEvents.find((e) => e.event === 'run-launched');
+  assert.equal(repairLaunched.escapeSeq, breach.escapes[0]);
+  assert.equal(repairLaunched.ticket, escapes[0].ticket);
   assert.equal(repairEvents.find((e) => e.event === 'run-closed').state, 'shipped');
 });
 
@@ -621,10 +649,17 @@ test('a repair-lane ship stamps the escape fixed at close-out', async (t) => {
     defectLine: 'f(3) returns 5 in production',
     detectionSource: 'human-report',
     attribution: 'alpha-1',
+    refs: { project: 'proj', runId: 'seed' },
   });
-  store.close();
-  const ticket = join(fx.root, 'ticket.md');
+  const ticket = repairTicketPath(fx.paths, recorded.seq);
   writeFileSync(ticket, '# Fix f(3)\n');
+  ticketEscape(store, { actor: 'daemon', escape: recorded.seq, ticket });
+  store.close();
+  // ticketed, unfixed, no repair run: the sweep owes this one
+  assert.deepEqual(
+    owedRepairs(fx.paths, 'proj').map((e) => e.seq),
+    [recorded.seq],
+  );
   fx.forge.state.autoChecks = () => [green()];
   await fx.daemon.start();
   fx.daemon.engine.seatDefaults = () => ({ commandFor: seatFixture(BASE_SEATS).commandFor });
@@ -642,6 +677,8 @@ test('a repair-lane ship stamps the escape fixed at close-out', async (t) => {
   assert.equal(escapes[0].fixed, true);
   assert.equal(escapes[0].fixRefs.runId, runId);
   assert.equal(escapes[0].fixRefs.pr, 7);
+  // the loop closed: a fixed escape is owed to nobody
+  assert.deepEqual(owedRepairs(fx.paths, 'proj'), []);
 });
 
 test('green but no merge: loud gate-integrity, one re-arm, resolution at merge', async (t) => {

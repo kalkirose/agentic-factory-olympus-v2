@@ -1,6 +1,9 @@
 # ADR-0009: Frontier, escalation queue, console shapes
 
 Status: accepted (2026-08-10)
+Superseded in part by ADR-0024: a sweep runs an owed-repair pass before the
+story frontier, and sweeps are queued for every project — a paused one
+launches nothing and still owes the owed-repairs judgment.
 
 ## Decision
 

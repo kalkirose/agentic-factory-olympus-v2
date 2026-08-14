@@ -32,18 +32,21 @@ export function projectForge(config, project, { runner } = {}) {
  * Assembles the lanes the daemon registers:
  *   story  → storyLane → postFreeze → shipStep
  *   repair → repairLane → shipStep
- * @param {{instanceConfig: () => object}} opts `instanceConfig` reads the
- *   live config, so a config edit reaches the next forge resolution.
+ * @param {{instanceConfig: () => object,
+ *   enqueueRepair?: (info: object) => unknown}} opts `instanceConfig` reads
+ *   the live config, so a config edit reaches the next forge resolution.
+ *   `enqueueRepair` hands a red-merge breach's ticketed escapes to the
+ *   daemon's frontier; the daemon binary passes its sweep. Unset, a breach
+ *   still tickets its escapes and the next sweep launches them one trigger
+ *   later — nothing in the lane graph launches a run.
  */
-export function assembleLanes({ instanceConfig } = {}) {
+export function assembleLanes({ instanceConfig, enqueueRepair = null } = {}) {
   if (typeof instanceConfig !== 'function') {
     throw new Error('assembleLanes requires an instanceConfig reader');
   }
-  // `spawnRepair` stays unset: a red-merge breach records its escapes and
-  // spawns nothing, so an open escape is the only tracking record until the
-  // spawner lands.
   const ship = shipStep({
     forgeFor: (ctx) => projectForge(instanceConfig(), ctx.project),
+    enqueueRepair,
   });
   return {
     story: storyLane({ afterFreeze: postFreeze({ afterVerdict: ship }) }),

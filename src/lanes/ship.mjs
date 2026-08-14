@@ -14,10 +14,10 @@
 // state, and the forge, so a daemon restart resumes mid-ship without memory.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
-import { runReportPath } from '../daemon/home.mjs';
+import { repairTicketPath, runReportPath } from '../daemon/home.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
 import { openEscapesStore } from '../telemetry/stores.mjs';
-import { recordEscape, fixEscape, readEscapeSet } from '../telemetry/escapes.mjs';
+import { recordEscape, ticketEscape, fixEscape, readEscapeSet } from '../telemetry/escapes.mjs';
 import { cloneDir, fetchClone, branchSha } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 import {
@@ -93,22 +93,23 @@ export const CARD_SWEEP_SCHEMA = {
  * Builds the ship continuation for `postFreeze({afterVerdict})` and
  * `repairLane({afterVerdict})`.
  * @param {{forgeFor: (ctx: object) => object, pollMs?: number,
- *   spawnRepair?: (info: object) => Promise<string|null>}} opts
+ *   enqueueRepair?: (info: object) => unknown}} opts
  *   `forgeFor` resolves the forge of one run from the run's project; the
  *   resolved object implements the interface in ship/forge.mjs. The lane
  *   graph registers once per daemon while the instance holds many projects,
  *   each with its own repository, so the forge is per run and never bound
- *   here. `spawnRepair` launches one repair-lane run per converted escape at
- *   a red-merge breach; a spawn failure leaves the open escape as the
- *   tracking record.
+ *   here. `enqueueRepair` hands a breach's ticketed escapes to the frontier;
+ *   it never launches, because the breaching run still holds its slot
+ *   through close-out. The owed work is durable without it — the ticketed
+ *   escape is the queue — so a failing hand-off costs a sweep, not a repair.
  */
-export function shipStep({ forgeFor, pollMs = 15000, spawnRepair = null } = {}) {
+export function shipStep({ forgeFor, pollMs = 15000, enqueueRepair = null } = {}) {
   if (typeof forgeFor !== 'function') throw new Error('shipStep requires a forgeFor resolver');
   return {
     stages: ['ship', 'close-out'],
     handlers: withAbandonGuard({
       ship: shipHandler({ forgeFor, pollMs }),
-      'close-out': closeOutHandler({ forgeFor, pollMs, spawnRepair }),
+      'close-out': closeOutHandler({ forgeFor, pollMs, enqueueRepair }),
     }),
   };
 }
@@ -649,7 +650,7 @@ function freshBase(base, resetSha) {
 
 // -- close-out ---------------------------------------------------------------
 
-function closeOutHandler({ forgeFor, pollMs, spawnRepair }) {
+function closeOutHandler({ forgeFor, pollMs, enqueueRepair }) {
   return async function closeOut(ctx) {
     const base = await shipBase(ctx, forgeFor);
     const merged = findLast(runEvents(ctx), 'merged');
@@ -657,7 +658,7 @@ function closeOutHandler({ forgeFor, pollMs, spawnRepair }) {
       return blocked(ctx, 'no-merge-record', 'Close-out found no merge record in the ledger.');
     }
     if (merged.red && !runEvents(ctx).some((e) => e.event === 'red-merge-breach')) {
-      await breachFlow(ctx, base, merged, spawnRepair);
+      await breachFlow(ctx, base, merged, enqueueRepair);
     }
     const directive = await watchMergeCommit(ctx, base, merged, pollMs);
     if (directive === 'stopped') return null;
@@ -672,7 +673,7 @@ function closeOutHandler({ forgeFor, pollMs, spawnRepair }) {
 
 // -- red-merge breach --------------------------------------------------------
 
-async function breachFlow(ctx, base, merged, spawnRepair) {
+async function breachFlow(ctx, base, merged, enqueueRepair) {
   const events = runEvents(ctx);
   const lastRender = findLast(events, 'verdict-rendered');
   const index = findingIndex(events);
@@ -681,9 +682,11 @@ async function breachFlow(ctx, base, merged, spawnRepair) {
       ? lastRender.open.map((id) => index.get(id)).filter(Boolean)
       : [];
   const store = openEscapesStore(ctx.paths, { onAppend: ctx.onAppend });
+  const ticketed = [];
+  let entries = [];
   try {
     // Restart-safe: a crash after recording re-uses the recorded entries.
-    let entries = readEvents(ctx.paths.escapesLedger)
+    entries = readEvents(ctx.paths.escapesLedger)
       .filter((e) => e.event === 'escape-recorded' && e.refs?.runId === ctx.runId)
       .map((e) => e.seq);
     if (entries.length === 0) {
@@ -712,32 +715,35 @@ async function breachFlow(ctx, base, merged, spawnRepair) {
             attribution,
             refs: {
               runId: ctx.runId,
+              // The project the repair launches into. The escapes ledger is
+              // instance-scoped; nothing else in it names the repository the
+              // defect shipped to.
+              project: ctx.project,
               pr: merged.pr,
               ...(line.findingId && { findingId: line.findingId }),
             },
           }).seq,
       );
     }
-    const spawned = [];
-    if (spawnRepair) {
-      const set = readEscapeSet(ctx.paths.escapesLedger);
-      for (const seq of entries) {
-        const escape = set.find((e) => e.seq === seq);
-        if (escape?.fixed) continue;
-        try {
-          const runId = await spawnRepair({
-            escapeSeq: seq,
-            category: escape.category,
-            defectLine: escape.defectLine,
-            project: ctx.project,
-            runId: ctx.runId,
-            pr: merged.pr,
-          });
-          if (runId) spawned.push(runId);
-        } catch {
-          // The open escape stays the tracking record; the console sees it.
-        }
+    // Ticket, then stamp, per escape. The ticket file is written first, so a
+    // ticketed escape always has a ticket to repair from; the stamp is the
+    // last thing that must succeed for the record to stay actionable.
+    const tails = await redCheckTails(base, merged);
+    const set = readEscapeSet(ctx.paths.escapesLedger);
+    for (const seq of entries) {
+      const escape = set.find((e) => e.seq === seq);
+      if (!escape || escape.fixed) continue;
+      if (!escape.ticket) {
+        const ticket = repairTicketPath(ctx.paths, seq);
+        writeFileSync(ticket, breachTicket({ ctx, base, merged, escape, tails }));
+        ticketEscape(store, {
+          actor: ACTOR,
+          escape: seq,
+          ticket,
+          refs: { runId: ctx.runId, project: ctx.project, pr: merged.pr, mergeSha: merged.mergeSha },
+        });
       }
+      ticketed.push(seq);
     }
     ctx.store.append('red-merge-breach', {
       actor: ACTOR,
@@ -745,12 +751,85 @@ async function breachFlow(ctx, base, merged, spawnRepair) {
       sha: merged.sha,
       mergeSha: merged.mergeSha,
       escapes: entries,
-      spawned,
+      ticketed,
       gist: `red merge on PR #${merged.pr}: ${entries.length} escape(s) recorded`,
     });
   } finally {
     store.close();
   }
+  if (!enqueueRepair || ticketed.length === 0) return;
+  try {
+    // The hand-off, never a launch: at slot cap 1 this run still holds its
+    // slot, so an inline launch fails exactly when it matters. It is not
+    // awaited either — the sweep it queues provisions runs of its own, and
+    // this run's close-out is not the place to wait for that. The frontier
+    // derives the owed set from the ledgers, so a hand-off that never lands
+    // costs one sweep, and the run's own close queues the next one.
+    const handed = enqueueRepair({ project: ctx.project, escapes: ticketed, runId: ctx.runId });
+    if (typeof handed?.catch === 'function') handed.catch(() => {});
+  } catch {
+    // The ticketed escape is the record; the sweep finds it either way.
+  }
+}
+
+/** The red checks at the merge, each with the tail of its output. */
+async function redCheckTails(base, merged) {
+  const tails = [];
+  for (const name of merged.redChecks ?? []) {
+    let output;
+    try {
+      output = await base.forge.checkOutput(merged.sha, name);
+    } catch (error) {
+      output = `(the forge would not return the output of ${name}: ${error.message})`;
+    }
+    tails.push({ name, output: String(output ?? '').slice(-LOG_TAIL) });
+  }
+  return tails;
+}
+
+/**
+ * The repair ticket of one breach escape. The repair run reads it from a
+ * fresh worktree of the default branch and can see nothing else — not this
+ * run's ledger, not its spec, not its tree — so the ticket carries every
+ * fact the repair needs: the merged PR, the red checks with their output,
+ * the merge commit, and the escape it closes.
+ */
+function breachTicket({ ctx, base, merged, escape, tails }) {
+  const opened = findLast(runEvents(ctx), 'pr-opened');
+  return [
+    `# Repair ticket: escape ${escape.seq}`,
+    '',
+    'A merge landed on the default branch with a required check red. This',
+    'ticket is the spec of the repair run: fix the defect below and leave a',
+    'regression test that fails without the fix.',
+    '',
+    '## The defect',
+    '',
+    escape.defectLine,
+    '',
+    '## Facts',
+    '',
+    `- escape: seq ${escape.seq} in the escapes ledger`,
+    `- category (a routing hint, not a verdict): ${escape.category}`,
+    `- attributed to: ${escape.attribution}`,
+    `- merged PR: #${merged.pr}${opened?.url ? ` (${opened.url})` : ''}`,
+    `- branch: ${base.branch}`,
+    `- head sha at the merge: ${merged.sha}`,
+    `- merge commit: ${merged.mergeSha}`,
+    `- red at the merge: ${(merged.redChecks ?? []).join(', ') || '(none named)'}`,
+    `- the run that shipped it: ${ctx.runId}`,
+    '',
+    '## The red checks at the merge',
+    ...(tails.length > 0
+      ? tails.flatMap(({ name, output }) => ['', `### ${name}`, '', '```', output.trim(), '```'])
+      : ['', '(the forge named no output)']),
+    '',
+    '## Scope',
+    '',
+    'Stay inside the defect above. The merge commit is on the default branch',
+    'already; repair it forward, never revert it here.',
+    '',
+  ].join('\n');
 }
 
 function escapeCategory(finding) {

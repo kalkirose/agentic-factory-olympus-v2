@@ -1,8 +1,11 @@
 // Escapes ledger: the central, counted record of post-merge defects and
-// chores. Two-event lifecycle — `escape-recorded` at repair-lane launch or
-// red-merge conversion, `escape-fixed` at repair-lane close, linked by seq.
-// The recorded category is a routing hint until fixed; the fix carries the
-// final category and attribution.
+// chores. Three-event lifecycle — `escape-recorded` at repair-lane launch or
+// red-merge conversion, `escape-ticketed` when the harness has written the
+// repair ticket the escape is repaired from, `escape-fixed` at repair-lane
+// close; all three linked by the recorded seq. The recorded category is a
+// routing hint until fixed; the fix carries the final category and
+// attribution.
+import { isAbsolute } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
 
 export const ESCAPE_CATEGORIES = new Set([
@@ -59,6 +62,35 @@ export function recordEscape(store, { actor, category, defectLine, detectionSour
 }
 
 /**
+ * Appends the linked `escape-ticketed` event: the escape now has a repair
+ * ticket, and that ticket is the whole spec of the repair. The stamp follows
+ * the file it names, so a ticketed escape is always repairable — every step
+ * after it may fail and the record stays actionable. Refuses an unknown
+ * target, a relative path, and a second ticket.
+ * @param {import('./stores.mjs').TelemetryStore} store the escapes store
+ * @param {{actor: string, escape: number, ticket: string, refs?: object}} fields
+ *   `escape` is the recorded seq; `ticket` is an absolute path in the daemon
+ *   home — the repair seat reads it from a fresh worktree.
+ */
+export function ticketEscape(store, { actor, escape, ticket, refs }) {
+  if (!Number.isInteger(escape)) {
+    throw new Error('escape-ticketed requires an integer escape seq');
+  }
+  if (typeof ticket !== 'string' || !isAbsolute(ticket)) {
+    throw new Error('escape-ticketed requires an absolute ticket path');
+  }
+  const events = readEvents(store.ledger.path);
+  const target = events.find((e) => e.seq === escape);
+  if (!target || target.event !== 'escape-recorded') {
+    throw new Error(`no escape-recorded at seq ${escape}`);
+  }
+  if (events.some((e) => e.event === 'escape-ticketed' && e.escape === escape)) {
+    throw new Error(`escape at seq ${escape} already carries a ticket`);
+  }
+  return store.append('escape-ticketed', { actor, escape, ticket, ...(refs && { refs }) });
+}
+
+/**
  * Appends the linked `escape-fixed` event with the final category and
  * attribution. Refuses an unknown target and a double fix.
  * @param {import('./stores.mjs').TelemetryStore} store the escapes store
@@ -85,15 +117,18 @@ export function fixEscape(store, { actor, fixes, category, attribution, refs }) 
 }
 
 /**
- * Reads the escapes ledger into one entry per recorded escape, with the fix
- * merged in where one exists. `category` and `attribution` are final values
- * (from the fix when fixed, else from the record).
+ * Reads the escapes ledger into one entry per recorded escape, with the
+ * ticket and the fix merged in where they exist. `category` and
+ * `attribution` are final values (from the fix when fixed, else from the
+ * record); `ticket` is the repair ticket's absolute path, or null.
  */
 export function readEscapeSet(path) {
   const events = readEvents(path);
   const fixes = new Map();
+  const tickets = new Map();
   for (const e of events) {
     if (e.event === 'escape-fixed') fixes.set(e.fixes, e);
+    else if (e.event === 'escape-ticketed') tickets.set(e.escape, e);
   }
   const set = [];
   for (const e of events) {
@@ -106,6 +141,8 @@ export function readEscapeSet(path) {
       detectionSource: e.detectionSource,
       category: fix ? fix.category : e.category,
       attribution: fix ? fix.attribution : e.attribution,
+      refs: e.refs,
+      ticket: tickets.get(e.seq)?.ticket ?? null,
       fixed: Boolean(fix),
       fixRefs: fix ? fix.refs : undefined,
     });

@@ -32,8 +32,13 @@ const paths = homePaths(home);
 
 if (command === 'start') {
   // The reader closes over the daemon, whose config the start reads and every
-  // live edit replaces; the lanes resolve each run's forge through it.
-  const lanes = assembleLanes({ instanceConfig: () => daemon.config });
+  // live edit replaces; the lanes resolve each run's forge through it. A
+  // breach hands its ticketed escapes to the frontier the same way: the sweep
+  // launches the repair when a slot frees, never the breaching run itself.
+  const lanes = assembleLanes({
+    instanceConfig: () => daemon.config,
+    enqueueRepair: ({ project }) => daemon.frontier.queueSweep(project),
+  });
   const daemon = new Daemon(home, { handleSignals: true, lanes });
   daemon.onStopped = () => process.exit(0);
   const { runsResumed } = await daemon.start();

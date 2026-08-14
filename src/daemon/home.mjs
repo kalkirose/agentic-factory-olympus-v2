@@ -3,7 +3,7 @@
 // are the one store that may sit elsewhere: the instance config's
 // `worktreeRoot` moves them off the home, which is how a machine with a low
 // path ceiling keeps a run's deepest test artifact inside it.
-import { mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -30,6 +30,10 @@ export function homePaths(home, config) {
     controlDone: join(home, 'control', 'done'),
     controlRejected: join(home, 'control', 'rejected'),
     clones: join(home, 'clones'),
+    // Repair tickets the harness writes for itself. They outlive the run that
+    // wrote them and the run that reads them, so they live on the home rather
+    // than in either run directory.
+    tickets: join(home, 'tickets'),
     // The one accessor for the run-workspace root. Nothing derives a worktree
     // path a second way — `isolation/worktrees.mjs` joins the run id onto this.
     worktrees: config?.worktreeRoot ?? join(home, 'worktrees'),
@@ -39,8 +43,8 @@ export function homePaths(home, config) {
 }
 
 /**
- * Creates the daemon home directory tree, the run-workspace root included.
- * Idempotent.
+ * Creates the daemon home directory tree, the run-workspace root included,
+ * and the escapes ledger. Idempotent.
  * @param {string} home
  * @param {{worktreeRoot?: string}} [config]
  */
@@ -55,12 +59,29 @@ export function scaffoldHome(home, config) {
     paths.controlDone,
     paths.controlRejected,
     paths.clones,
+    paths.tickets,
     paths.worktrees,
     paths.evalReports,
   ]) {
     mkdirSync(dir, { recursive: true });
   }
+  // The escapes ledger exists by construction, not by its first writer. It is
+  // instance-scoped and rarely written, so a home that never breached had no
+  // file at all — and the escapes-per-story metric read that absence as a
+  // healthy zero while measuring nothing. An empty ledger is a measured zero.
+  // The append never truncates, so a home with history keeps it.
+  appendFileSync(paths.escapesLedger, '');
   return paths;
+}
+
+/**
+ * The path of one escape's repair ticket. The escape seq names it: the ticket
+ * is written once per escape, and the sweep that later launches the repair
+ * derives nothing it does not read from the escapes ledger.
+ * @param {ReturnType<typeof homePaths>} paths
+ */
+export function repairTicketPath(paths, escapeSeq) {
+  return join(paths.tickets, `escape-${escapeSeq}.md`);
 }
 
 /** @param {ReturnType<typeof homePaths>} paths */

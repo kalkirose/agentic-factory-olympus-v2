@@ -4,6 +4,10 @@
 // config change, and console commands; never on a timer. Sweeps serialize
 // per project through a promise chain, so two triggers never race a launch.
 //
+// A sweep has two passes: owed breach repairs first, then the story
+// frontier. Repairs come first because they are defects on code that already
+// shipped, and both passes spend the same slots.
+//
 // Arming is a per-project state machine: disarmed at birth, toggled by the
 // `arm` and `pause` commands, every transition stamped `arming-changed`,
 // replayed from the instance ledger at daemon start.
@@ -17,6 +21,7 @@ import { storyRunsByKey } from '../telemetry/readers.mjs';
 import { openCardParks } from '../telemetry/queue.mjs';
 import { readGraphSource } from './source.mjs';
 import { computeFrontier } from './graph.mjs';
+import { owedRepairs, repairLaunch } from './repairs.mjs';
 
 const ACTOR = 'daemon';
 const GIST_MAX = 120;
@@ -50,8 +55,11 @@ export class FrontierLauncher {
     if (this.isArmed(project) === armed) return;
     this.armed.set(project, armed);
     this.daemon.ledger.append('arming-changed', { actor, project, armed });
-    if (armed) this.queueSweep(project);
-    else this.clearStarvation(project);
+    if (!armed) this.clearStarvation(project);
+    // Both directions sweep. Arming launches what is owed and launchable;
+    // pausing is the moment owed repairs become starved, and the sweep is
+    // where that is said out loud.
+    this.queueSweep(project);
   }
 
   /** Chains one sweep for the project; concurrent triggers coalesce in order. */
@@ -63,9 +71,13 @@ export class FrontierLauncher {
     return next;
   }
 
+  /**
+   * Every project, armed or not: a paused project launches nothing, and the
+   * sweep still owes it the owed-repairs judgment.
+   */
   queueSweepAll() {
     for (const project of Object.keys(this.daemon.config.projects)) {
-      if (this.isArmed(project)) this.queueSweep(project);
+      this.queueSweep(project);
     }
   }
 
@@ -77,9 +89,24 @@ export class FrontierLauncher {
   async sweep(project) {
     this.pending.set(project, this.pending.get(project) - 1);
     const d = this.daemon;
-    if (!d.running || !this.isArmed(project)) return;
+    if (!d.running) return;
     const entry = d.config.projects[project];
-    if (!entry || !d.engine.lanes.has('story')) return;
+    if (!entry) return;
+    // One sweep, one arming: the passes are separated by launches, and a
+    // sweep that judged its repairs paused must not fill slots with stories
+    // because the owner armed in between. That transition queues its own
+    // sweep. Each launch still re-reads the live state before it spends.
+    const armed = this.isArmed(project);
+    const waiting = await this.repairPass(project, armed);
+    if (!armed || !d.running || !d.engine.lanes.has('story')) return;
+    if (waiting > 0) {
+      // Repairs are owed and every slot is taken. The story frontier waits:
+      // a slot that frees while this sweep reads the graph belongs to the
+      // repair, and the close that frees it queues the sweep that takes it.
+      // The factory is provably busy, so nothing here is starvation.
+      this.clearStarvation(project);
+      return;
+    }
     let source;
     try {
       source = await d.isolation.withClone(project, () =>
@@ -108,6 +135,47 @@ export class FrontierLauncher {
       }
     }
     this.settle(project, source);
+  }
+
+  /**
+   * The repair pass: the owed breach repairs of one project, oldest escape
+   * first, while slots allow. Returns how many are still waiting on a slot —
+   * the story pass stands down for those. Nothing is retried here: a repair
+   * that found no slot stays owed and the next sweep launches it, which is
+   * also how a daemon that restarted mid-breach catches up.
+   *
+   * A paused project launches nothing. A breach repair is a defect on shipped
+   * code, but a pause is a deliberate act of the owner, and the daemon never
+   * overrides one; the owed set goes loud instead.
+   */
+  async repairPass(project, armed) {
+    const d = this.daemon;
+    if (!d.engine.lanes.has('repair')) return 0;
+    const owed = owedRepairs(d.paths, project);
+    if (owed.length === 0) return 0;
+    if (!armed) {
+      this.noteOwedRepairs(project, owed);
+      return 0;
+    }
+    let waiting = 0;
+    for (let i = 0; i < owed.length; i++) {
+      if (!d.running || !this.isArmed(project)) break;
+      if (!d.engine.hasFreeSlot(project)) {
+        waiting = owed.length - i;
+        break;
+      }
+      try {
+        await d.launchRun(repairLaunch(owed[i]));
+      } catch {
+        // One failed launch ends the pass; the escape stays owed and the next
+        // trigger retries it. The refusal stamps itself, and the story
+        // frontier keeps moving — a repair that cannot launch at all must not
+        // stop everything else.
+        break;
+      }
+    }
+    this.clearOwedRepairs(project);
+    return waiting;
   }
 
   /**
@@ -172,6 +240,45 @@ export class FrontierLauncher {
   clearStarvation(project) {
     for (const e of this.openStarvation(project)) {
       this.daemon.ledger.resolve({ actor: ACTOR, resolves: e.seq, project });
+    }
+  }
+
+  // -- owed repairs a paused project cannot launch --------------------------
+
+  openOwedRepairs(project) {
+    const events = readEvents(this.daemon.paths.instanceLedger);
+    const resolved = new Set(events.filter((e) => e.event === 'resolved').map((e) => e.resolves));
+    return events.filter(
+      (e) => e.event === 'repairs-owed' && e.project === project && !resolved.has(e.seq),
+    );
+  }
+
+  /**
+   * Stamps the owed escapes a paused project starves. Dedupe is by escape
+   * seq: a seq an open item already names never stamps twice, and a breach
+   * that lands during the pause stamps for its own seqs alone.
+   */
+  noteOwedRepairs(project, owed) {
+    const named = new Set(this.openOwedRepairs(project).flatMap((e) => e.escapes));
+    const escapes = owed.map((e) => e.seq).filter((seq) => !named.has(seq));
+    if (escapes.length === 0) return;
+    this.daemon.ledger.append('repairs-owed', {
+      actor: ACTOR,
+      project,
+      escapes,
+      reason: `${project} is not armed; ${escapes.length} ticketed escape(s) await a repair run`,
+      gist: gist(`repairs-owed: ${project} — escape ${escapes.join(', ')} ticketed, not launched`),
+    });
+  }
+
+  /** Resolves an open item once none of the escapes it names is still owed. */
+  clearOwedRepairs(project) {
+    const open = this.openOwedRepairs(project);
+    if (open.length === 0) return;
+    const still = new Set(owedRepairs(this.daemon.paths, project).map((e) => e.seq));
+    for (const item of open) {
+      if (item.escapes.some((seq) => still.has(seq))) continue;
+      this.daemon.ledger.resolve({ actor: ACTOR, resolves: item.seq, project });
     }
   }
 }
