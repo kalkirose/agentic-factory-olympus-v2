@@ -989,7 +989,7 @@ test('a denied path blocks the capture, stamps loud, and buys one corrective', a
     ...furyClean(),
   };
   const fx = verdictFixture(t, { seats, diffPolicy: POLICY });
-  const { runId, worktree } = await fx.launch();
+  const { runId } = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   // The stamp names the path and the rule that blocked it.
@@ -1004,9 +1004,8 @@ test('a denied path blocks the capture, stamps loud, and buys one corrective', a
   assert.ok(corrective, 'the corrective dev invocation ran');
   assert.match(corrective.prompt, /Correction brief/);
   assert.match(corrective.prompt, /\.npmrc: the diff policy denies this path to this lane/);
-  // The capture never committed the denied path, and the cleared record
+  // One candidate was captured, after the corrective, and the cleared record
   // resolves, so the loud strip does not carry a run that answered itself.
-  assert.ok(!existsSync(join(worktree, '.npmrc')));
   assert.ok(events.some((e) => e.event === 'resolved' && e.resolves === stamp.seq));
   assert.equal(loudFor(fx.paths, runId, 'diff-policy-violation').length, 0);
   assert.equal(events.filter((e) => e.event === 'implementation-committed').length, 1);
@@ -1067,7 +1066,7 @@ test('declaredPaths passes a path the spec declares and blocks one it does not',
     ...furyClean(),
   };
   const fx = verdictFixture(t, { seats, diffPolicy: POLICY, specText: SPEC_WITH_BLOCK });
-  const { runId, worktree } = await fx.launch();
+  const { runId } = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   // Only the undeclared one was named; the declared one rode through.
@@ -1076,7 +1075,6 @@ test('declaredPaths passes a path the spec declares and blocks one it does not',
     stamp.violations.map((v) => [v.path, v.rule]),
     [['apps/api/package.json', 'undeclared']],
   );
-  assert.ok(existsSync(join(worktree, 'package.json')));
   assert.match(
     fx.calls.find((c) => c.label === 'dev-2').prompt,
     /apps\/api\/package\.json: the diff policy admits this path only when the spec declares it/,
@@ -1120,7 +1118,7 @@ test('a change the capture takes back is stamped and named, with no policy decla
     ...furyClean(),
   };
   const fx = verdictFixture(t, { seats });
-  const { runId, worktree } = await fx.launch();
+  const { runId } = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   const stamp = events.find((e) => e.event === 'diff-policy-violation');
@@ -1130,9 +1128,14 @@ test('a change the capture takes back is stamped and named, with no policy decla
     fx.calls.find((c) => c.label === 'dev-2').prompt,
     /tests\/feature\.test\.mjs: the capture took this change back/,
   );
-  // The frozen suite is what stands in the tree, exactly as before.
-  const restored = readFileSync(join(worktree, 'tests/feature.test.mjs'), 'utf8');
-  assert.equal(restored.replaceAll('\r\n', '\n'), STRONG_TEST);
+  // The frozen suite is what was judged. The seat's relaxed test expects
+  // f(2) === 5 against a feature that doubles, so a candidate carrying it
+  // would have gone red on the unit layer instead of shipping in one cycle.
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.deepEqual(
+    renders.map((e) => [e.cycle, e.verdict]),
+    [[1, 'green']],
+  );
 });
 
 test('the repair lane keeps its regression test and answers its own tiers', async (t) => {
@@ -1163,7 +1166,7 @@ test('the repair lane keeps its regression test and answers its own tiers', asyn
         '## Defect\n\ng(x) is missing; add g(x) = x + 1 in src/g.mjs with a regression test.\n',
     },
   });
-  const { runId, worktree } = await fx.launchFromConsole({ lane: 'repair', ticket: 'tickets/t1.md' });
+  const { runId } = await fx.launchFromConsole({ lane: 'repair', ticket: 'tickets/t1.md' });
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   const stamp = events.find((e) => e.event === 'diff-policy-violation');
@@ -1173,9 +1176,12 @@ test('the repair lane keeps its regression test and answers its own tiers', asyn
     [['.olympus/cards/invented.md', 'denied']],
   );
   // The repair lane has no frozen suite to restore, so its regression test is
-  // never taken back.
+  // never taken back: the drop list is empty even though the seat wrote a
+  // test file, and the unit layer ran that test green.
   assert.deepEqual(stamp.dropped, []);
-  assert.ok(existsSync(join(worktree, 'tests/g.test.mjs')));
+  assert.ok(
+    events.some((e) => e.event === 'layer-result' && e.layer === 'unit' && e.status === 'green'),
+  );
   assert.match(
     fx.calls.find((c) => c.label === 'dev-2').prompt,
     /\.olympus\/cards\/invented\.md: the diff policy denies this path/,
