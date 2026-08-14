@@ -74,6 +74,10 @@ function fixtureTree(t) {
   writeFileSync(join(dir, 'tests', 'feature.test.mjs'), 'export {};\n');
   mkdirSync(join(dir, 'tests', 'support'), { recursive: true });
   writeFileSync(join(dir, 'tests', 'support', 'harness.mjs'), 'export {};\n');
+  // A route tree of the shape a web framework builds: a group directory in
+  // parentheses, a parameter directory in brackets.
+  mkdirSync(join(dir, 'tests', 'routes', '(shop)', '[step]'), { recursive: true });
+  writeFileSync(join(dir, 'tests', 'routes', '(shop)', '[step]', 'page.test.mjs'), 'export {};\n');
   t.after(() => removeDir(dir));
   return dir;
 }
@@ -126,6 +130,25 @@ test('(a) the header may name the card key without becoming a section', (t) => {
   assert.deepEqual(lint(t, spec({ header: '# alpha-1' })), []);
 });
 
+test('(a) a renumbered section title is answered with the ids the card carries', (t) => {
+  // The failure a positional renumbering produces: every card id missing, every
+  // written id unknown. Each message carries the list the seat needed.
+  const sections = [
+    section('AC-3', ['tests/feature.test.mjs — f(2) is 4']),
+    section('AC-4', ['tests/feature.test.mjs — f("x") throws']),
+  ].join('\n');
+  const defects = lint(t, spec({ sections }));
+  assert.equal(defects.length, 4);
+  for (const defect of defects) {
+    assert.ok(
+      defect.includes('expected sections, in card order: AC-1, AC-2'),
+      defect,
+    );
+  }
+  assert.ok(defects.some((d) => /no section for acceptance criterion AC-1/.test(d)));
+  assert.ok(defects.some((d) => /section AC-3 answers no acceptance criterion/.test(d)));
+});
+
 // -- (b) the hard cap --------------------------------------------------------
 
 test('(b) a spec past the cap is named with its length', (t) => {
@@ -158,8 +181,10 @@ test('(c) an unclean path and a bad owner tag are each named', (t) => {
     ['/src/feature.mjs — dev', /is not relative to the repository root/],
     ['src\\feature.mjs — dev', /carries a backslash/],
     ['../outside.mjs — dev', /walks out of the repository/],
+    ['./src/feature.mjs — dev', /carries a "\." segment/],
     ['src/ — dev', /ends in a slash/],
     ['src/*.mjs — dev', /is a glob/],
+    ['src/feature?.mjs — dev', /is a glob/],
     ['src/feature.mjs', /names no owner/],
     ['src/feature.mjs — author', /names the owner "author"/],
   ];
@@ -170,6 +195,21 @@ test('(c) an unclean path and a bad owner tag are each named', (t) => {
       `${line}: ${defects.join(' | ')}`,
     );
   }
+});
+
+test('(c) a route path written with brackets, parentheses and spaces is a path', (t) => {
+  // Only `*` and `?` mark a pattern. Everything else here is a character the
+  // path carries, and a spec that had to drop such a file to pass the lint
+  // would be a spec the lint distorted.
+  const touched = [
+    '```touched-paths',
+    'src/routes/(shop)/checkout/[step]/+page.server.ts — dev',
+    'src/routes/(shop)/checkout/+page.svelte — dev',
+    'src/lib/{brand}/logo asset.svg — dev',
+    'tests/feature.test.mjs — suite',
+    '```',
+  ].join('\n');
+  assert.deepEqual(lint(t, spec({ touched })), []);
 });
 
 // -- (d) declared-tier coverage ----------------------------------------------
@@ -244,8 +284,47 @@ test('(g) a dev-owned test path must name a file, never a directory', (t) => {
     '```',
   ].join('\n');
   assert.deepEqual(lint(t, spec({ touched: fresh })), []);
-  const nameless = ['```touched-paths', 'tests/support/fixtures — dev', '```'].join('\n');
-  assert.match(lint(t, spec({ touched: nameless }))[0], /carries no file extension/);
+  // Nothing at the path yet is a file the story creates, whatever it is named.
+  // The worktree is the only thing here that knows a directory from a file.
+  const nameless = [
+    '```touched-paths',
+    'tests/support/fixtures — dev',
+    'tests/feature.test.mjs — suite',
+    '```',
+  ].join('\n');
+  assert.deepEqual(lint(t, spec({ touched: nameless })), []);
+});
+
+test('(g) a bracketed route file passes; the directory above it does not', (t) => {
+  const file = [
+    '```touched-paths',
+    'tests/routes/(shop)/[step]/page.test.mjs — dev',
+    'tests/feature.test.mjs — suite',
+    '```',
+  ].join('\n');
+  assert.deepEqual(lint(t, spec({ touched: file })), []);
+  // A bracketed file the story still has to write passes on its shape alone.
+  const fresh = [
+    '```touched-paths',
+    'tests/routes/(shop)/[slug]/page.test.mjs — dev',
+    'tests/feature.test.mjs — suite',
+    '```',
+  ].join('\n');
+  assert.deepEqual(lint(t, spec({ touched: fresh })), []);
+  // The rule still holds where it always held.
+  const cases = [
+    ['tests/routes/(shop)/[step] — dev', /it names a directory in the worktree/],
+    ['tests/routes/(shop)/[step]/ — dev', /it ends in a slash/],
+    ['tests/routes/(shop)/*/page.test.mjs — dev', /it is a glob/],
+    ['tests/routes/(shop)/?/page.test.mjs — dev', /it is a glob/],
+  ];
+  for (const [line, pattern] of cases) {
+    const defects = lint(t, spec({ touched: ['```touched-paths', line, '```'].join('\n') }));
+    assert.ok(
+      defects.some((d) => pattern.test(d)),
+      `${line}: ${defects.join(' | ')}`,
+    );
+  }
 });
 
 test('(g) a suite-owned directory entry is not the lint\'s business', (t) => {

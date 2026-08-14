@@ -74,6 +74,30 @@ test('a freeze exclusion narrows the rules to everything but that file', (t) => 
   ]);
 });
 
+test('a bracketed exclusion is narrowed by its path, not by what it would match', (t) => {
+  const root = tempDir('olympus-boundary-');
+  t.after(() => removeDir(root));
+  writeTree(root, {
+    'tests/plain.test.mjs': 'p\n',
+    'tests/routes/(shop)/[step]/page.test.mjs': 'a\n',
+    'tests/routes/(shop)/s/page.test.mjs': 'b\n',
+    'tests/routes/other/x.test.mjs': 'c\n',
+  });
+  const rules = testEditDenyRules(['tests'], {
+    except: ['tests/routes/(shop)/[step]/page.test.mjs'],
+    worktree: root,
+  });
+  const edits = rules.filter((r) => r.startsWith('Edit('));
+  // Only the exempt file leaves the boundary. Its sibling `s` — the directory
+  // a character-class reading of `[step]` would have covered — stays denied.
+  assert.deepEqual(edits, [
+    'Edit(tests/plain.test.mjs)',
+    'Edit(tests/routes/(shop)/s/**)',
+    'Edit(tests/routes/other/**)',
+  ]);
+  assert.ok(!rules.some((r) => r.includes('[step]')));
+});
+
 test('denyTools ride the claude argv as disallowed tools', () => {
   const def = seatDef('adversary');
   const { args } = claudeSeatCommand({

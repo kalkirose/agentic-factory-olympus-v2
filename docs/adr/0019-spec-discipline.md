@@ -42,6 +42,20 @@ structured field the freeze acts on.
   file, never a directory and never a glob;
   (h) no touched-paths entry and no test-mapping path matches a
   `forbiddenPatterns` shape.
+- **A touched-paths entry is a literal path; a config path entry is a glob.**
+  Inside the block, only `*` and `?` mark a pattern. Brackets, parentheses,
+  braces and spaces are characters the path carries, because they are
+  characters real directories carry — a framework whose routes are directories
+  named `[param]` and `(group)` writes them into every path a story touches.
+  Clean, for rule (c), is therefore: repo-relative, no leading `/`, no
+  backslash, no `.` or `..` segment, no trailing `/`. Rule (g) refuses an entry
+  that holds `*` or `?`, ends in `/`, or is a directory in the worktree; an
+  entry with nothing at it yet is a file the story will create. Every consumer
+  of an entry compares it to a path character for character: the capture's
+  declared set, the freeze's exclusions, the narrowed deny rules, and the
+  restore's exclude pathspecs, which carry `literal` magic so git does not
+  wildmatch them either. The tiers of `diffPolicy` and the `repo` path entries
+  are config, and they keep glob semantics untouched.
 - **The lint reads structured entries only.** Prose is never scanned. A rule
   that judged sentences would be a second spec gate, and judging the spec is
   the gate seat's work.
@@ -129,6 +143,33 @@ The adversary is the deliberate exception. Its restore covers the full set,
 including exclusions, because the adversary's job is to be wrong in a way the
 suite fails to catch — and a wrong implementation that quietly rewrites a
 shared test harness is exactly the tampering the restore exists to void.
+
+## Correction, 2026-08-14
+
+The first production run found two defects in the lint as it was first written.
+
+Rules (c) and (g) read `[` and `]` as glob syntax, and rule (c) also refused a
+space. Route directories are named with exactly those characters, so the lint
+called two real files patterns and refused them. The seat did what the lint
+asked: it deleted both from its touched-paths block and re-declared one of them
+as a named constant. A rule that makes a seat distort a sound spec is worse
+than no rule, so the marker set is now `*` and `?` alone, and every other
+character in an entry is a character of the path. Rule (g)'s file-extension
+heuristic went with it: it guessed from a name what only the worktree knows,
+and it refused extensionless files the story was about to create.
+
+The same confusion was audited across every consumer of an entry. Only one
+other place held it: the restore's exclude pathspecs were bare, and git
+wildmatches a bare pathspec, so an exclusion for a path holding `[` would spare
+every sibling the character class matched and the suite restore would silently
+stop covering them. They now carry `literal` magic.
+
+Rule (a) was decidable but not readable. It requires the section titles to be
+the card's criterion ids, and the failure text said so without saying what the
+ids were. A seat renumbered its sections positionally and failed all seven at
+once, with seven messages that each named one id it had not written. The
+message now carries the list the card actually holds, and the template line
+states that a title is the card's id copied verbatim, never renumbered.
 
 ## Fallback paths
 

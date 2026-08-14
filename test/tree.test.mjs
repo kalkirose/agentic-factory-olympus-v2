@@ -116,6 +116,31 @@ test('restorePaths leaves the freeze exclusions alone, and covers them without t
   assert.ok(!existsSync(join(repo, 'tests', 'support', 'fixtures.mjs')));
 });
 
+test('restorePaths holds a bracketed exclusion to the one file it names', async (t) => {
+  const root = tempDir();
+  const repo = initOriginRepo(join(root, 'repo'), {
+    'tests/routes/(shop)/[step]/page.test.mjs': 'base step\n',
+    'tests/routes/(shop)/s/page.test.mjs': 'base s\n',
+  });
+  t.after(() => removeDir(root));
+  const sha = await headSha(repo);
+  writeTree(repo, {
+    'tests/routes/(shop)/[step]/page.test.mjs': 'dev edit\n',
+    'tests/routes/(shop)/[step]/junk.mjs': 'junk\n',
+    'tests/routes/(shop)/s/page.test.mjs': 'tampered\n',
+  });
+  await restorePaths(repo, sha, ['tests'], {
+    except: ['tests/routes/(shop)/[step]/page.test.mjs'],
+  });
+  const { readFileSync } = await import('node:fs');
+  const content = (file) => readFileSync(join(repo, file), 'utf8').replace(/\r\n/g, '\n');
+  assert.equal(content('tests/routes/(shop)/[step]/page.test.mjs'), 'dev edit\n');
+  // A bare pathspec is wildmatched too, so `[step]` would have spared the `s`
+  // directory beside it and the suite restore would have stopped covering it.
+  assert.equal(content('tests/routes/(shop)/s/page.test.mjs'), 'base s\n');
+  assert.ok(!existsSync(join(repo, 'tests', 'routes', '(shop)', '[step]', 'junk.mjs')));
+});
+
 test('restorePaths takes glob entries: matching files revert, the rest stays', async (t) => {
   const repo = globRepoFixture(t);
   const sha = await headSha(repo);

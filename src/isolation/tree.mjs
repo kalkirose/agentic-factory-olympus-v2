@@ -59,12 +59,16 @@ export async function headSha(tree) {
  * pathspec. An entry with nothing at the sha is tolerated.
  *
  * `except` names files the restore leaves alone — the freeze's exclusions
- * (ADR-0019). They ride as `:(exclude)` pathspecs, so an exempt file keeps
- * both its edits and its existence: an untracked one survives the clean.
+ * (ADR-0019). They ride as `:(exclude,literal)` pathspecs, so an exempt file
+ * keeps both its edits and its existence: an untracked one survives the clean.
+ * The `literal` magic is what keeps the exclusion to the one file it names: a
+ * bare pathspec is also wildmatched, so an exclusion for a path holding `[`
+ * would spare every sibling the character class happens to match, and the
+ * suite restore would stop covering them.
  */
 export async function restorePaths(tree, sha, entries, { except = [] } = {}) {
   const exempt = new Set((except ?? []).map((file) => file.replaceAll('\\', '/')));
-  const excludes = [...exempt].map((file) => `:(exclude)${file}`);
+  const excludes = [...exempt].map((file) => `:(exclude,literal)${file}`);
   for (const entry of entries) {
     const pathspec = isGlobEntry(entry) ? `:(glob)${entry}` : entry;
     try {

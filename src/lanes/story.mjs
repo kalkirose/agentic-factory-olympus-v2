@@ -1249,7 +1249,7 @@ function templateLines() {
   return [
     'The spec has a fixed template. Write these parts, in this order, and nothing else:',
     '1. A header: the card key, the base sha, and the scope exclusions the card states.',
-    '2. One section per acceptance criterion on the card, in card order, each titled with the id of its criterion and holding, in this order:',
+    '2. One section per acceptance criterion on the card, in card order, each titled with that criterion\'s id as the card writes it — copied verbatim, never renumbered and never renamed — and holding, in this order:',
     '   - the intent of the criterion, three sentences at most;',
     '   - a line "Test mapping:" and under it one list item per asserted behavior, each opening with the repo-relative path of the test file that asserts it;',
     '   - a line "Named constants:" and under it one list item per constant, written "NAME = value". A constant is named in one place; every other mention refers to it.',
@@ -1257,7 +1257,7 @@ function templateLines() {
     '3. One fenced block, opened by ```touched-paths and closed by ```, naming every repo-relative path the work touches: one path per line, each followed by " — dev" or " — suite" for the seat that owns the file. Exactly one such block in the document, and every line names one file.',
     '4. An environment section naming only the environment variables the card names.',
     `The whole document runs to ${SPEC_LINE_CAP} lines at most.`,
-    'A criterion that carries no id of its own takes its position as its id: AC-1, AC-2, in card order.',
+    'Only a criterion whose card text opens with no id of its own takes its position as its id: AC-1, AC-2, in card order. A criterion that carries an id keeps it, whatever its position.',
     'The card defines WHAT ships. The spec adds only HOW, plus the test encoding. A requirement with no acceptance criterion behind it is a defect, and so is a section that answers no criterion.',
   ];
 }

@@ -14,6 +14,11 @@ import { underEntry } from '../config/project.mjs';
 // repo-relative path per line, each followed by the seat that owns the file.
 // The gate reads the path; the owner tag is the spec lint's and the freeze's
 // business, so the parse carries it rather than dropping it.
+//
+// A declared entry is a literal path, never a pattern. The tiers below are
+// project config and are matched as globs; an entry out of a spec is compared
+// to a changed file character for character, so a file inside a directory
+// named `[param]` or `(group)` answers its own entry and nothing else.
 const FENCE_OPEN = /^```touched-paths\s*$/;
 const FENCE_CLOSE = /^```/;
 const OWNER_SUFFIX = /^(.*?)\s+[—–-]\s+(.*)$/;
@@ -86,7 +91,8 @@ export function laneDiffPolicy(config, lane) {
  *
  * @param {string[]} changed repo-relative paths the capture holds
  * @param {object|null} tier the lane's policy tiers
- * @param {(path: string) => boolean} declares whether the run declared a path
+ * @param {(path: string) => boolean} declares whether the run declared a path;
+ *   the caller answers it by literal comparison against what the spec wrote
  * @returns {{path: string, rule: string, pattern: string}[]} one entry per
  *   violating path, in the order the paths arrived
  */

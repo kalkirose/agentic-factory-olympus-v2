@@ -141,6 +141,42 @@ test('the repair lane declares by verbatim ticket text', () => {
   );
 });
 
+test('a declared route path matches the changed file literally, tier globs still glob', () => {
+  const routes = `\`\`\`touched-paths
+apps/web/src/routes/(shop)/checkout/[step]/+page.server.ts — dev
+\`\`\`
+`;
+  const declaredHere = (path) => parseTouchedPaths(routes).includes(path);
+  const tier = { deniedPaths: ['**/*.snap'], declaredPaths: ['apps/web/src/routes/**'] };
+  assert.deepEqual(
+    diffPolicyViolations(
+      ['apps/web/src/routes/(shop)/checkout/[step]/+page.server.ts'],
+      tier,
+      declaredHere,
+    ),
+    [],
+  );
+  // The entry is a path, not a character class: a sibling the entry would
+  // match as a glob is still undeclared.
+  assert.deepEqual(
+    diffPolicyViolations(
+      ['apps/web/src/routes/(shop)/checkout/s/+page.server.ts'],
+      tier,
+      declaredHere,
+    ).map((v) => v.rule),
+    ['undeclared'],
+  );
+  // The config tier keeps its glob reading over the same bracketed path.
+  assert.deepEqual(
+    diffPolicyViolations(
+      ['apps/web/src/routes/(shop)/checkout/[step]/page.snap'],
+      tier,
+      declaredHere,
+    ).map((v) => [v.rule, v.pattern]),
+    [['denied', '**/*.snap']],
+  );
+});
+
 test('forbiddenPatterns blocks a path shape always, declared or not', () => {
   const v = diffPolicyViolations(
     ['apps/web/tests/shot-win32.png', 'apps/web/.env.local', 'packages/contracts/.env'],

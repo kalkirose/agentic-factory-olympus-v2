@@ -33,6 +33,16 @@ export const TOUCHED_OWNERS = ['dev', 'suite'];
 const TOUCHED_PATHS_SECTION = 'touched-paths';
 const ENVIRONMENT_SECTION = 'environment';
 
+/**
+ * The only two characters that make a touched-paths entry a pattern instead of
+ * a path. Everything else a path may hold is a character of that path:
+ * brackets, parentheses, braces and spaces all appear in real directory names,
+ * and a framework whose routes are directories named `[param]` or `(group)`
+ * puts them in the paths a story touches. Config path entries are globs and
+ * keep their glob syntax (`isGlobEntry`); a spec entry is a literal.
+ */
+const GLOB_MARKERS = /[*?]/;
+
 const HEADING = /^#{1,6}\s+(.*\S)\s*$/;
 const ENVIRONMENT_HEADING = /^environment\b/i;
 const TOUCHED_FENCE = /^```touched-paths\b/;
@@ -241,12 +251,16 @@ function criterionDefects(card, sections) {
   const ids = criteria.map((c) => c.id);
   const known = new Set(ids);
   const found = sections.map((s) => s.id);
+  // A section title is the card's id, and a seat that renumbers positionally
+  // fails every criterion at once. So the message that names a wrong title
+  // names the right ones: the list is the card's own data, read at runtime.
+  const expectedList = `expected sections, in card order: ${ids.join(', ')}`;
   for (const id of ids) {
     const n = found.filter((f) => f === id).length;
     if (n === 0) {
       defects.push(
         `the spec has no section for acceptance criterion ${id}; the template takes one ` +
-          'section per card criterion, titled with its id.',
+          `section per card criterion, titled with its id — ${expectedList}.`,
       );
     } else if (n > 1) {
       defects.push(`the spec has ${n} sections titled ${id}; the template takes exactly one.`);
@@ -256,7 +270,7 @@ function criterionDefects(card, sections) {
     if (!known.has(id)) {
       defects.push(
         `section ${id} answers no acceptance criterion on the card; the card defines what ` +
-          'ships, so a requirement with no criterion behind it is a defect.',
+          `ships, so a requirement with no criterion behind it is a defect — ${expectedList}.`,
       );
     }
   }
@@ -310,23 +324,26 @@ function blockDefects({ entries, blocks, unterminated }) {
 function pathDefect(raw) {
   if (/^([A-Za-z]:)?[\\/]/.test(raw)) return 'is not relative to the repository root.';
   if (raw.includes('\\')) return 'carries a backslash; paths are written with forward slashes.';
-  if (raw.split('/').includes('..')) return 'walks out of the repository with "..".';
+  const segments = raw.split('/');
+  if (segments.includes('..')) return 'walks out of the repository with "..".';
+  if (segments.includes('.')) {
+    return 'carries a "." segment; a path entry is written from the repository root.';
+  }
   if (raw.endsWith('/')) return 'ends in a slash; a path entry names a file.';
-  if (/\s/.test(raw)) return 'carries whitespace.';
-  if (/[*?[\]]/.test(raw)) return 'is a glob; a path entry names one file.';
+  if (GLOB_MARKERS.test(raw)) return 'is a glob; a path entry names one file.';
   return null;
 }
 
 // -- rule (g) ----------------------------------------------------------------
 
 function notOneFile(entry, worktree) {
-  if (/[*?[\]]/.test(entry.raw)) return 'it is a glob';
+  if (GLOB_MARKERS.test(entry.raw)) return 'it is a glob';
   if (entry.raw.endsWith('/')) return 'it ends in a slash';
   const full = join(worktree, entry.path);
   if (existsSync(full) && statSync(full).isDirectory()) return 'it names a directory in the worktree';
-  if (!existsSync(full) && !entry.path.split('/').pop().includes('.')) {
-    return 'it names no file that exists and carries no file extension';
-  }
+  // An entry with nothing at it yet is a file the story will create. Judging
+  // that by the file name would read a naming convention, and the worktree is
+  // the only thing here that knows a directory from a file.
   return null;
 }
 
