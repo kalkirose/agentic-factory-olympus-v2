@@ -38,6 +38,7 @@ import { readInheritance } from './resume.mjs';
 import {
   ACTOR,
   loadProjectConfig,
+  readConstitution,
   runEnv,
   runEvents,
   answeredPark,
@@ -466,6 +467,7 @@ async function specBirth(ctx) {
     schema: SPEC_BIRTH_SCHEMA,
     cwd: base.worktree,
     env: base.env,
+    constitution: base.constitution,
   });
   if (!result.ok) return seatFail(ctx, 'spec-birth', result);
   if (result.report.outcome === 'grounding-conflict') {
@@ -617,6 +619,7 @@ async function gateRound(ctx, base, { round, sections }) {
     schema: SPEC_GATE_SCHEMA,
     cwd: base.worktree,
     env: base.env,
+    constitution: base.constitution,
   });
   if (!result.ok) return { directive: seatFail(ctx, 'spec-gate', result) };
   const conflict = result.report.intentConflict;
@@ -653,6 +656,7 @@ async function amendSpec(ctx, base, brief) {
     schema: SPEC_AMEND_SCHEMA,
     cwd: base.worktree,
     env: base.env,
+    constitution: base.constitution,
   });
 }
 
@@ -694,6 +698,7 @@ async function suiteSeatWithChecks(ctx, base, { schema, buildRole, checks }) {
       schema,
       cwd: base.worktree,
       env: base.env,
+      constitution: base.constitution,
     });
     if (!result.ok) return { fail: seatFail(ctx, 'suite', result) };
     const defects = await checks(result.report);
@@ -1305,6 +1310,7 @@ async function laneBase(ctx) {
     // Derived from the ledger like every other position in this lane, so a
     // restart mid-suite re-reads the same notes instead of losing them.
     gateNotes: gateNotes(runEvents(ctx)),
+    constitution: readConstitution(worktree, config),
     testPaths: config.repo.testPaths,
     suiteArgv: config.commands[story.suiteCommand],
     env: runEnv(ctx, config),

@@ -137,7 +137,7 @@ function seatFixture(seats) {
   return { commandFor, calls };
 }
 
-function storyFixture(t, { seats, card = DEFAULT_CARD, config, composeRunner }) {
+function storyFixture(t, { seats, card = DEFAULT_CARD, config, composeRunner, files = {} }) {
   const root = tempDir();
   // `config` may be a function of the fixture root, for absolute probe paths.
   const overrides = typeof config === 'function' ? config(root) : (config ?? {});
@@ -156,6 +156,7 @@ function storyFixture(t, { seats, card = DEFAULT_CARD, config, composeRunner }) 
     }),
     'stories/alpha.md': card,
     'src/base.mjs': 'export const base = 1;\n',
+    ...files,
   });
   const paths = scaffoldHome(join(root, 'home'));
   writeFileSync(
@@ -277,7 +278,8 @@ test('a fixture story reaches a valid freeze record with kills and dispositions'
       };
     },
   };
-  const fx = storyFixture(t, { seats });
+  const policy = '# Constitution\n\nA deliverable exists only where the card names it.\n';
+  const fx = storyFixture(t, { seats, files: { '.olympus/constitution.md': policy } });
   const runId = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
@@ -321,6 +323,20 @@ test('a fixture story reaches a valid freeze record with kills and dispositions'
   const adversaryCalls = fx.calls.filter((c) => c.seat === 'adversary');
   assert.equal(adversaryCalls.length, 3);
   assert.ok(adversaryCalls.every((c) => c.denyTools.includes('Edit(tests/**)')));
+  // The constitution reached the pre-freeze seats; the spec gate judges, so
+  // it also carries the authority order. The adversary carries neither: its
+  // brief is to write a wrong implementation on purpose.
+  const line = 'A deliverable exists only where the card names it.';
+  for (const seat of ['spec-birth', 'spec-gate', 'suite']) {
+    assert.ok(
+      fx.calls.filter((c) => c.seat === seat).every((c) => c.prompt.includes(line)),
+      seat,
+    );
+  }
+  assert.match(fx.calls.find((c) => c.seat === 'spec-gate').prompt, /Authority order, highest first/);
+  assert.ok(!fx.calls.find((c) => c.seat === 'spec-birth').prompt.includes('Authority order'));
+  assert.ok(adversaryCalls.every((c) => !c.prompt.includes(line)));
+  assert.ok(adversaryCalls.every((c) => !c.prompt.includes('constitution')));
 });
 
 test('open decisions park readiness; the spec gate caps at two rounds', async (t) => {

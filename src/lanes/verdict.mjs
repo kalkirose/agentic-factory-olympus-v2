@@ -43,6 +43,7 @@ import { SUITE_SCHEMA, SPEC_AMEND_SCHEMA } from './story.mjs';
 import {
   ACTOR,
   loadProjectConfig,
+  readConstitution,
   runEnv,
   runEvents,
   answeredPark,
@@ -351,6 +352,7 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen }) {
     schema: TRIAGE_SCHEMA,
     cwd: base.worktree,
     env: base.env,
+    constitution: base.constitution,
     buildRole: (brief) => triageRole(base, reds, priorOpen, brief),
     checks: (r) => triageChecks(r, { redLayers, priorOpen }),
   });
@@ -684,6 +686,7 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
       schema: SPEC_AMEND_SCHEMA,
       cwd: base.worktree,
       env: base.env,
+      constitution: base.constitution,
     });
     if (!amend.ok) return { fail: seatFail(ctx, 'spec-birth', amend) };
   }
@@ -693,6 +696,7 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
     schema: SUITE_SCHEMA,
     cwd: base.worktree,
     env: base.env,
+    constitution: base.constitution,
     buildRole: (brief) => refreezeRole(base, findings, record, brief),
     checks: async (r) => {
       const defects = [];
@@ -808,6 +812,7 @@ async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
     schema: DEV_SCHEMA,
     cwd: base.worktree,
     env: base.env,
+    constitution: base.constitution,
     ...(mode === 'story' && { denyTools: testEditDenyRules(base.testPaths) }),
     buildRole,
     checks: () => captureDefects(ctx, base, mode, { seat }),
@@ -841,7 +846,10 @@ function resolveGateIntegrity(ctx, openIds) {
  * seats too — a judge that cannot deliver a usable verdict is not the run
  * failing, so the human buys the retry or abandons the run.
  */
-async function seatWithChecks(ctx, { seat, label, schema, cwd, env, denyTools, buildRole, checks }) {
+async function seatWithChecks(
+  ctx,
+  { seat, label, schema, cwd, env, constitution, denyTools, buildRole, checks },
+) {
   const limit = attemptLimit(runEvents(ctx), seat);
   let brief = limit === 1 ? failureBrief(runEvents(ctx), seat) : null;
   for (let attempt = 1; ; attempt++) {
@@ -854,6 +862,7 @@ async function seatWithChecks(ctx, { seat, label, schema, cwd, env, denyTools, b
       schema,
       cwd,
       env,
+      constitution,
       ...(denyTools && { denyTools }),
     });
     if (!result.ok) return { fail: seatFail(ctx, seat, result) };
@@ -869,12 +878,27 @@ async function seatWithChecks(ctx, { seat, label, schema, cwd, env, denyTools, b
 
 // -- role blocks -------------------------------------------------------------
 
+/**
+ * The Tier-1 gate commands, as facts. A dev seat used to be told to run "the
+ * gate commands from the project config" without being told what they are,
+ * and the fix seat was told nothing at all. Both seats are judged by these
+ * commands, so both are given them. The list is a tool the seat may reach
+ * for, not an instruction to double-check its work: this module's header
+ * bans verification scaffolding, and that ban settles the wording.
+ */
+function gateCommandLines(base) {
+  return [
+    'The Tier-1 gate commands this work is judged by:',
+    ...base.layers.map((l) => `- ${l.name}: ${(base.commands[l.command] ?? []).join(' ')}`),
+  ];
+}
+
 function devRole(base, brief = null) {
   return [
     `Implement the story spec at: ${base.specRef}`,
     'The frozen acceptance suite defines done. Do not edit or delete test files.',
     `Test paths (read-only): ${base.testPaths.join(', ')}`,
-    'Run the Tier-1 gate commands from the project config to check your work.',
+    ...gateCommandLines(base),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
   ].join('\n');
@@ -885,6 +909,7 @@ function fixRole(base, brief = null) {
     `Fix the defect described by the intake ticket at: ${base.specRef}`,
     'The ticket is the spec. Stay inside its scope.',
     'Add a regression test when the defect class demands one.',
+    ...gateCommandLines(base),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
   ].join('\n');
@@ -1004,6 +1029,7 @@ async function verdictBase(ctx, mode) {
       specRef: join(ctx.paths.runs, ctx.runId, 'spec.md'),
       suiteSha: currentSuiteSha(events),
       resetSha: freeze.sha,
+      constitution: readConstitution(worktree, config),
     };
   }
   // The intake ticket is the spec. A repo-relative path names a committed
@@ -1036,6 +1062,7 @@ async function verdictBase(ctx, mode) {
     specRef: ticketPath,
     suiteSha: null,
     resetSha: ctx.payload.baseSha,
+    constitution: readConstitution(worktree, config),
   };
 }
 

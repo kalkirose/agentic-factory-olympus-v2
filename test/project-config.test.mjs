@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  DEFAULT_CONSTITUTION_PATH,
   validateProjectConfig,
   withProjectDefaults,
   parseProjectConfig,
@@ -103,6 +104,26 @@ test('defaults fill every missing section', () => {
   assert.deepEqual(filled.lanes, {});
   assert.equal(filled.stack, null);
   assert.deepEqual(filled.tripwires, []);
+  assert.equal(filled.constitutionPath, DEFAULT_CONSTITUTION_PATH);
+});
+
+test('constitutionPath defaults, and an absolute path is refused', () => {
+  assert.deepEqual(validateProjectConfig({ ...valid(), constitutionPath: 'docs/policy.md' }), []);
+  assert.deepEqual(errorPaths({ ...valid(), constitutionPath: '/etc/policy.md' }), [
+    'constitutionPath',
+  ]);
+  assert.deepEqual(errorPaths({ ...valid(), constitutionPath: 'C:\\policy.md' }), [
+    'constitutionPath',
+  ]);
+  assert.deepEqual(errorPaths({ ...valid(), constitutionPath: '' }), ['constitutionPath']);
+  assert.deepEqual(errorPaths({ ...valid(), constitutionPath: 7 }), ['constitutionPath']);
+  const config = parseProjectConfig(JSON.stringify({ version: 1 }), 'fixture');
+  assert.equal(config.constitutionPath, DEFAULT_CONSTITUTION_PATH);
+  const named = parseProjectConfig(
+    JSON.stringify({ version: 1, constitutionPath: 'docs/policy.md' }),
+    'fixture',
+  );
+  assert.equal(named.constitutionPath, 'docs/policy.md');
 });
 
 test('parseProjectConfig names every validation error', () => {

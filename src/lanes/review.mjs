@@ -112,6 +112,7 @@ export async function furyRound(ctx, base, { cycle, diffText, diffFiles }) {
         roleBlock: furyRole(seat, base, diffText),
         cwd: base.worktree,
         env: base.env,
+        constitution: base.constitution,
       }),
     ),
   );
@@ -137,6 +138,7 @@ export async function generalistReview(ctx, base, { cycle, diffText, priorConfir
     roleBlock: generalistRole(base, diffText),
     cwd: base.worktree,
     env: base.env,
+    constitution: base.constitution,
   });
   if (outcome.fail) return { fail: outcome.fail };
   const collected = outcome.report.findings.map((f) => ({ ...f, source: 'generalist-review' }));
@@ -245,7 +247,7 @@ function stampReviewFinding(ctx, cycle, finding, { advisory }) {
  * `fresh` opts out of the shortcut for a retry the human bought — that report
  * is the one the coverage check refused, so replaying it buys nothing.
  */
-async function reviewSeat(ctx, { seat, label, schema, roleBlock, cwd, env, fresh = false }) {
+async function reviewSeat(ctx, { seat, label, schema, roleBlock, cwd, env, constitution, fresh = false }) {
   const reportPath = runReportPath(ctx.paths, ctx.runId, label);
   const events = runEvents(ctx);
   const prior = fresh
@@ -255,7 +257,7 @@ async function reviewSeat(ctx, { seat, label, schema, roleBlock, cwd, env, fresh
     const report = readJson(reportPath);
     if (report) return { report };
   }
-  const result = await ctx.runSeat({ seat, roleBlock, reportPath, schema, cwd, env });
+  const result = await ctx.runSeat({ seat, roleBlock, reportPath, schema, cwd, env, constitution });
   if (!result.ok) return { fail: seatFail(ctx, seat, result) };
   return { report: result.report };
 }
@@ -277,6 +279,7 @@ async function verifierSeat(ctx, base, { cycle, items }) {
       roleBlock: verifierRole(base, items, brief),
       cwd: base.worktree,
       env: base.env,
+      constitution: base.constitution,
       fresh: limit === 1,
     });
     if (outcome.fail) return outcome;

@@ -4,6 +4,12 @@
 // per-seat role block — judgment criteria plus dispatch context, supplied by
 // the lane. No verification scaffolding, no forced progress summaries, no
 // reasoning-echo asks enter here or in any role block.
+//
+// A third block sits between them when the project ships a constitution: the
+// policy text as its own delimited block, plus the authority order for the
+// seats that judge. The seat sets below are closed like the seat map. A
+// project with no constitution file gets no third block, and its prompts are
+// byte for byte what they were.
 
 // A seat is a headless session: it ends when the model stops, and the machine
 // kills every child command the seat left behind. A seat that starts a long
@@ -19,10 +25,81 @@ export const ONE_TURN_RULE = [
 ].join('\n');
 
 /**
- * @param {{seat: string, def: {web: boolean, explore: number},
- *   reportPath: string, schema: object, roleBlock: string}} opts
+ * The seats that receive the project constitution. The adversary is out by
+ * design: it writes deliberately wrong implementations on purpose, and policy
+ * text only dilutes that brief. The card sweep is out because it edits intent
+ * cards rather than the tree. The eval seat is instance-scoped and holds no
+ * worktree to read a constitution from.
  */
-export function assembleSeatPrompt({ seat, def, reportPath, schema, roleBlock }) {
+export const CONSTITUTION_SEATS = new Set([
+  'spec-birth',
+  'spec-gate',
+  'suite',
+  'dev',
+  'repair-dev',
+  'verdict-triage',
+  'fury-spec',
+  'fury-code-shape',
+  'fury-operational',
+  'fury-security',
+  'fury-interface',
+  'fury-verifier',
+  'generalist-review',
+]);
+
+/**
+ * The judging seats. Each one weighs the tree against a document, so each one
+ * needs to know which document wins when two of them disagree.
+ */
+export const AUTHORITY_SEATS = new Set([
+  'spec-gate',
+  'fury-spec',
+  'fury-code-shape',
+  'fury-operational',
+  'fury-security',
+  'fury-interface',
+  'fury-verifier',
+  'generalist-review',
+  'verdict-triage',
+]);
+
+const CONSTITUTION_HEAD =
+  'Project constitution — the standing policy of this repository, and an input to this seat. It starts at the opening marker and ends at the closing marker.';
+const CONSTITUTION_OPEN = '--- constitution ---';
+const CONSTITUTION_CLOSE = '--- end constitution ---';
+
+/** The authority order, fixed text, judging seats only. */
+export const AUTHORITY_ORDER = [
+  "Authority order, highest first: the constitution above, then the intent card, then this run's spec.",
+  'A spec clause that contradicts a higher authority has no force. Do not enforce such a clause against the tree.',
+  'The clause itself is a blocking finding against the spec.',
+].join('\n');
+
+/** What the order means for a seat that confirms or refutes findings. */
+export const VERIFIER_AUTHORITY = [
+  'Confirm a finding only when the spec clause behind it is legitimate under this order.',
+  'Refute a finding that enforces an illegitimate clause, and give that as the reason.',
+].join('\n');
+
+/**
+ * The policy block, or null when the project ships no constitution and when
+ * the seat takes none. Empty policy text counts as no constitution.
+ */
+function constitutionBlock(seat, constitution) {
+  if (typeof constitution !== 'string' || constitution.trim().length === 0) return null;
+  if (!CONSTITUTION_SEATS.has(seat)) return null;
+  const lines = [CONSTITUTION_HEAD, CONSTITUTION_OPEN, constitution.trim(), CONSTITUTION_CLOSE];
+  if (AUTHORITY_SEATS.has(seat)) lines.push(AUTHORITY_ORDER);
+  if (seat === 'fury-verifier') lines.push(VERIFIER_AUTHORITY);
+  return lines.join('\n');
+}
+
+/**
+ * @param {{seat: string, def: {web: boolean, explore: number},
+ *   reportPath: string, schema: object, roleBlock: string,
+ *   constitution?: string|null}} opts
+ */
+export function assembleSeatPrompt({ seat, def, reportPath, schema, roleBlock, constitution = null }) {
   if (typeof roleBlock !== 'string' || roleBlock.length === 0) {
     throw new Error('a seat prompt requires a role block');
   }
@@ -46,7 +123,8 @@ export function assembleSeatPrompt({ seat, def, reportPath, schema, roleBlock })
     JSON.stringify(schema, null, 2),
     'The written report is your completion signal. Keep every free-text field extremely concise.',
   ].join('\n');
-  return `${core}\n\n${roleBlock}`;
+  const policy = constitutionBlock(seat, constitution);
+  return policy ? `${core}\n\n${policy}\n\n${roleBlock}` : `${core}\n\n${roleBlock}`;
 }
 
 /**

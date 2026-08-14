@@ -28,6 +28,7 @@ const ACTOR = 'daemon';
  * Runs one seat session end to end.
  * @param {import('../telemetry/stores.mjs').TelemetryStore} store
  * @param {{seat: string, roleBlock: string, reportPath: string, schema: object,
+ *   constitution?: string|null,
  *   substitute?: {model: string, reason: string},
  *   semaphores?: import('./semaphore.mjs').ModelSemaphores,
  *   cwd?: string, env?: object, costCeiling?: number,
@@ -45,6 +46,7 @@ export async function runSeat(store, opts) {
     roleBlock,
     reportPath,
     schema,
+    constitution,
     substitute,
     semaphores,
     cwd,
@@ -80,7 +82,7 @@ export async function runSeat(store, opts) {
   mkdirSync(dirname(reportPath), { recursive: true });
   let release = semaphores ? await semaphores.acquire(model, { store, seat }) : () => {};
   try {
-    let prompt = assembleSeatPrompt({ seat, def, reportPath, schema, roleBlock });
+    let prompt = assembleSeatPrompt({ seat, def, reportPath, schema, roleBlock, constitution });
     let resume;
     let degraded = false;
     // One dispatch: build the argv for the model in force and supervise the

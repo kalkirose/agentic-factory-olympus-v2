@@ -3,10 +3,14 @@
 // the small directive constructors. Every lane re-derives its position from
 // the run ledger and the git state — nothing here holds cross-stage memory.
 import { readFileSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
 import { runLedgerPath } from '../daemon/home.mjs';
-import { parseProjectConfig, underEntry } from '../config/project.mjs';
+import {
+  DEFAULT_CONSTITUTION_PATH,
+  parseProjectConfig,
+  underEntry,
+} from '../config/project.mjs';
 import { cloneDir } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 import { stackEnv } from '../isolation/stacks.mjs';
@@ -18,6 +22,23 @@ export async function loadProjectConfig(ctx) {
   const clone = cloneDir(ctx.paths, ctx.project);
   const text = await git(['cat-file', '-p', ctx.payload.configBlob], { cwd: clone });
   return parseProjectConfig(text, `${ctx.project}#${ctx.payload.configBlob}`);
+}
+
+/**
+ * The project constitution: standing policy the project versions in its own
+ * repository, ranked above the intent card and above the run's spec. It is
+ * read from the run's worktree, so a run judges against the policy that
+ * shipped with the tree it holds. An absent, unreadable, or empty file
+ * returns null, and every seat prompt stays what it was.
+ */
+export function readConstitution(worktree, config) {
+  const path = join(worktree, config.constitutionPath ?? DEFAULT_CONSTITUTION_PATH);
+  try {
+    const text = readFileSync(path, 'utf8');
+    return text.trim().length > 0 ? text : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

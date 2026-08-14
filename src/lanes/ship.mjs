@@ -44,6 +44,7 @@ import {
 import {
   ACTOR,
   loadProjectConfig,
+  readConstitution,
   runEnv,
   runEvents,
   answeredPark,
@@ -491,6 +492,7 @@ async function mergeRound(ctx, base, { fromSha, mainSha, conflicts }) {
       schema: DEV_SCHEMA,
       cwd: base.worktree,
       env: base.env,
+      constitution: base.constitution,
       ...(base.storyLane && { denyTools: testEditDenyRules(base.testPaths) }),
     });
     if (!result.ok) cause = 'dev seat failed';
@@ -506,6 +508,7 @@ async function mergeRound(ctx, base, { fromSha, mainSha, conflicts }) {
       schema: SUITE_SCHEMA,
       cwd: base.worktree,
       env: base.env,
+      constitution: base.constitution,
     });
     if (!result.ok) cause = 'suite seat failed';
   }
@@ -625,6 +628,12 @@ function freshBase(base, resetSha) {
     testPaths: base.testPaths,
     specRef: base.specRef,
     env: base.env,
+    // The dev seat's brief names the Tier-1 gate commands and carries the
+    // constitution, so the narrowed base holds both facts the verdict base
+    // holds. A merge-born pass gets the same brief as any other pass.
+    layers: base.config.gates.tier1,
+    commands: base.config.commands,
+    constitution: base.constitution,
     resetSha,
   };
 }
@@ -1038,6 +1047,7 @@ async function shipBase(ctx, forgeFor) {
     defaultBranch: ctx.payload.defaultBranch ?? 'main',
     testPaths: config.repo.testPaths ?? [],
     env: runEnv(ctx, config),
+    constitution: readConstitution(worktree, config),
     cardPath,
     storyKey,
     cardTitle,

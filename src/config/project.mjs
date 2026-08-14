@@ -9,6 +9,7 @@ import { RUN_EVENTS, INSTANCE_EVENTS, ESCAPES_EVENTS } from '../ledger/registry.
 const KNOWN_EVENTS = new Set([...RUN_EVENTS, ...INSTANCE_EVENTS, ...ESCAPES_EVENTS]);
 
 export const DEFAULT_PROJECT_CONFIG_PATH = '.olympus/project.json';
+export const DEFAULT_CONSTITUTION_PATH = '.olympus/constitution.md';
 
 export function defaultProjectConfig() {
   return {
@@ -34,6 +35,9 @@ export function defaultProjectConfig() {
     // lane name → the diff-policy tiers the candidate capture enforces;
     // an absent lane leaves that lane's capture unpoliced
     diffPolicy: {},
+    // the standing policy file, relative to the repo root; an absent file
+    // leaves every seat prompt exactly as it was
+    constitutionPath: DEFAULT_CONSTITUTION_PATH,
   };
 }
 
@@ -59,6 +63,7 @@ export function validateProjectConfig(config) {
   validateGraph(config.graph, err);
   validateTripwires(config.tripwires, err);
   validateDiffPolicy(config.diffPolicy, err);
+  validateConstitutionPath(config.constitutionPath, err);
   if (isPlainObject(config.lanes) && isPlainObject(config.lanes.story)) {
     if (!Array.isArray(config.repo?.testPaths) || config.repo.testPaths.length === 0) {
       err('repo.testPaths', 'the story lane requires at least one test path');
@@ -326,6 +331,18 @@ function validateDiffPolicy(policy, err) {
         err(at(`forbiddenPatterns[${i}]`), `must be a valid regular expression: ${cause.message}`);
       }
     });
+  }
+}
+
+// The constitution's location. The file is read from the run's worktree, so
+// the path is repo-relative like every other path entry here; an absolute
+// path would reach outside the tree the run was given.
+function validateConstitutionPath(path, err) {
+  if (path === undefined) return;
+  if (typeof path !== 'string' || path.length === 0) {
+    err('constitutionPath', 'must be a non-empty string');
+  } else if (/^([a-zA-Z]:)?[\\/]/.test(path)) {
+    err('constitutionPath', 'must be a path relative to the repo root');
   }
 }
 

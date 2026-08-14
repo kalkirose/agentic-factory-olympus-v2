@@ -357,6 +357,50 @@ test('a clean implementation ships green in one cycle; advisory findings never b
   // The dev seat carried the test-edit deny rules.
   const dev = fx.calls.find((c) => c.seat === 'dev');
   assert.ok(dev.denyTools.includes('Edit(tests/**)'));
+  // The Tier-1 gates reach the dev seat as commands, not as a self-check.
+  assert.ok(dev.prompt.includes('- unit: node --test tests/*.test.mjs'));
+  assert.ok(dev.prompt.includes('- lint: node -e process.exit(0)'));
+  assert.ok(!dev.prompt.includes('gate commands from the project config'));
+  // No constitution file in this project: no policy block anywhere.
+  for (const call of fx.calls) assert.ok(!call.prompt.includes('constitution'), call.seat);
+});
+
+test('the constitution reaches the working seats, and the judges get the authority order', async (t) => {
+  const policy = '# Constitution\n\nAbsence of a file is never evidence of a missing deliverable.\n';
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    ...furyClean(),
+    'fury-spec': () => ({
+      report: {
+        findings: [
+          { lens: 'spec', severity: 'HIGH', finding: 'missing platform file', evidence: 'src/feature.mjs:1' },
+        ],
+        summary: 'one',
+      },
+    }),
+    'fury-verifier': verifierSeat(() => ({ verdict: 'refuted' })),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    originFiles: { '.olympus/constitution.md': policy },
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const line = 'Absence of a file is never evidence of a missing deliverable.';
+  const promptOf = (seat) => fx.calls.find((c) => c.seat === seat).prompt;
+  // The working seat takes the policy without the authority order.
+  assert.ok(promptOf('dev').includes(line));
+  assert.ok(!promptOf('dev').includes('Authority order'));
+  // Every judging seat takes both.
+  for (const seat of ['fury-spec', 'fury-security', 'fury-verifier']) {
+    assert.ok(promptOf(seat).includes(line), seat);
+    assert.match(promptOf(seat), /Authority order, highest first: the constitution above/);
+    assert.match(promptOf(seat), /blocking finding against the spec/);
+  }
+  // Only the verifier is told what the order means for confirming a finding.
+  assert.match(promptOf('fury-verifier'), /Refute a finding that enforces an illegitimate clause/);
+  assert.ok(!/Refute a finding/.test(promptOf('fury-spec')));
 });
 
 test('a code defect routes triage → repair round → generalist re-verdict', async (t) => {
@@ -936,6 +980,8 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
   assert.ok(dev.prompt.includes('intake ticket'));
   assert.ok(dev.prompt.includes(join(worktree, 'tickets/t1.md')));
   assert.ok(dev.prompt.includes('regression test'));
+  // The fix seat is judged by the same gates, so it is given them too.
+  assert.ok(dev.prompt.includes('- unit: node --test tests/*.test.mjs'));
   assert.equal(dev.denyTools, undefined);
   // Generalist review replaces the Fury fan-out; the LOW stays advisory.
   assert.ok(!fx.calls.some((c) => c.seat.startsWith('fury-')));

@@ -111,6 +111,11 @@ Two levels; the ownership test decides placement.
   verification scaffolding, no forced progress summaries, no reasoning-echo
   asks. Subagents banned; exception: dev seats may spawn read-only Explore
   subagents, cap 2.
+- **Constitution.** A project may version a policy file in its own repository
+  (`constitutionPath`, default `.olympus/constitution.md`). Its text rides as
+  a third block between the core and the role block, for a closed set of
+  seats; the judging seats also carry the authority order — constitution over
+  intent card over the run's spec (ADR-0018). No file, no third block.
 - **One turn, one session.** Every command runs synchronously inside the
   seat's turn. No background work, no armed watcher, no wait on an outside
   event: the session ends when the seat stops and the machine kills the rest.
