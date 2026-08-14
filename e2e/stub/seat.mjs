@@ -86,6 +86,9 @@ function behaviour(name) {
   if (name === 'card-sweep') {
     return { report: { updatedCards: [], invalidated: [], summary: 'every card still stands' } };
   }
+  if (name === 'reconcile-judge') {
+    return { report: { owed: false, records: [], reason: 'no decision-record tree in this fixture' } };
+  }
   throw new Error(`no fixture behaviour for the ${name} seat`);
 }
 

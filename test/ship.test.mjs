@@ -12,6 +12,7 @@ import {
   scaffoldHome,
   archivedRunLedgerPath,
   repairTicketPath,
+  reconcileTicketPath,
   runLedgerPath,
 } from '../src/daemon/home.mjs';
 import { postFreeze, repairLane } from '../src/lanes/verdict.mjs';
@@ -22,6 +23,7 @@ import { readEvents } from '../src/ledger/ledger.mjs';
 import { openEscapesStore } from '../src/telemetry/stores.mjs';
 import { recordEscape, ticketEscape, readEscapeSet } from '../src/telemetry/escapes.mjs';
 import { owedRepairs } from '../src/frontier/repairs.mjs';
+import { owedReconciliations, reconciliationLaunch } from '../src/frontier/reconciliations.mjs';
 import { tempDir, removeDir, waitFor, gitSync, initOriginRepo, commitTree, projectConfigJson } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -272,6 +274,9 @@ const BASE_SEATS = {
     files: { 'stories/alpha.md': DEFAULT_CARD + '\n<!-- swept -->\n' },
     report: { updatedCards: ['stories/alpha.md'], invalidated: [], summary: 'swept' },
   }),
+  'reconcile-judge': () => ({
+    report: { owed: false, records: [], reason: 'no decision-record tree' },
+  }),
 };
 
 function shipFixture(t, { seats = {}, pollMs = 30, forgeOpts = {}, enqueue = false, slotCap = 2 } = {}) {
@@ -430,6 +435,75 @@ test('a fixture PR ships green hands-off with full stamps', async (t) => {
   assert.equal(sweep.pushed, true);
   assert.match(gitSync(['show', 'main:stories/alpha.md'], fx.origin), /<!-- swept -->/);
   assert.ok(!events.some((e) => e.event === 'red-merge-breach'));
+});
+
+test('an owed judgment writes the reconciliation ticket the sweep derives from', async (t) => {
+  const fx = shipFixture(t, {
+    seats: {
+      'reconcile-judge': () => ({
+        report: {
+          owed: true,
+          records: ['docs/adr/0001-doubling.md'],
+          reason: 'the diff implements the doubling decision',
+        },
+      }),
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const judged = events.find((e) => e.event === 'reconciliation-judged');
+  assert.equal(judged.ok, true);
+  assert.equal(judged.owed, true);
+  assert.deepEqual(judged.records, ['docs/adr/0001-doubling.md']);
+  assert.equal(judged.ticket, reconcileTicketPath(fx.paths, runId));
+  // Ticket before stamp: a stamped judgment always has a ticket to launch from.
+  const ticket = readFileSync(judged.ticket, 'utf8');
+  assert.match(ticket, /docs\/adr\/0001-doubling\.md/);
+  assert.match(ticket, /never\s+absorbed silently/);
+  // The frontier derives the owed reconciliation and its launch payload.
+  const owed = owedReconciliations(fx.paths, 'proj');
+  assert.equal(owed.length, 1);
+  assert.equal(owed[0].runId, runId);
+  assert.deepEqual(reconciliationLaunch(owed[0]), {
+    project: 'proj',
+    lane: 'repair',
+    ticket: judged.ticket,
+    reconcilesRunId: runId,
+  });
+});
+
+test('a not-owed judgment stamps its reason and derives nothing', async (t) => {
+  const fx = shipFixture(t);
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const judged = events.find((e) => e.event === 'reconciliation-judged');
+  assert.equal(judged.ok, true);
+  assert.equal(judged.owed, false);
+  assert.equal(judged.reason, 'no decision-record tree');
+  assert.ok(!existsSync(reconcileTicketPath(fx.paths, runId)));
+  assert.deepEqual(owedReconciliations(fx.paths, 'proj'), []);
+});
+
+test('a failed judgment is a recorded miss; the story ships regardless', async (t) => {
+  const fx = shipFixture(t, { seats: { 'reconcile-judge': () => ({ exitCode: 3 }) } });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const judged = events.find((e) => e.event === 'reconciliation-judged');
+  assert.equal(judged.ok, false);
+  assert.equal(judged.cause, 'seat-failure');
+  assert.ok(!existsSync(reconcileTicketPath(fx.paths, runId)));
+  assert.deepEqual(owedReconciliations(fx.paths, 'proj'), []);
 });
 
 test('one failed-jobs re-run turns the check green: a ci-flake, never a finding', async (t) => {

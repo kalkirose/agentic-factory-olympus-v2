@@ -74,6 +74,11 @@ export const RUN_EVENTS = new Set([
   'merge-commit-check',
   'red-merge-breach',
   'card-sweep',
+  // The close-out judgment on decision-record reconciliation: owed or not,
+  // with the records named and the ticket written when owed (ADR-0026). A
+  // failed judgment stamps ok:false — an unjudged ship is visible, never a
+  // silent skip.
+  'reconciliation-judged',
   // escalation
   'park',
   'answer',

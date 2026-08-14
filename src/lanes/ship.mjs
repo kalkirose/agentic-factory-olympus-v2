@@ -14,7 +14,7 @@
 // state, and the forge, so a daemon restart resumes mid-ship without memory.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
-import { repairTicketPath, runReportPath } from '../daemon/home.mjs';
+import { repairTicketPath, reconcileTicketPath, runReportPath } from '../daemon/home.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
 import { openEscapesStore } from '../telemetry/stores.mjs';
 import { recordEscape, ticketEscape, fixEscape, readEscapeSet } from '../telemetry/escapes.mjs';
@@ -666,6 +666,9 @@ function closeOutHandler({ forgeFor, pollMs, enqueueRepair }) {
     if (base.storyLane && !runEvents(ctx).some((e) => e.event === 'card-sweep')) {
       await cardSweep(ctx, base, merged);
     }
+    if (base.storyLane && !runEvents(ctx).some((e) => e.event === 'reconciliation-judged')) {
+      await reconcileJudge(ctx, base, merged);
+    }
     if (Number.isInteger(ctx.payload.escapeSeq)) fixEscapeBack(ctx, merged);
     return { close: { state: 'shipped', pr: merged.pr, mergeSha: merged.mergeSha } };
   };
@@ -1023,6 +1026,127 @@ async function sweepChecks(base, cardDir, report) {
     }
   }
   return defects;
+}
+
+// -- the reconciliation judgment (ADR-0026) ----------------------------------
+
+const RECONCILE_JUDGE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    owed: { type: 'boolean' },
+    records: { type: 'array', items: { type: 'string' } },
+    reason: { type: 'string' },
+  },
+  required: ['owed', 'records', 'reason'],
+};
+
+/**
+ * A fresh-context seat judges whether the shipped diff implements or
+ * contradicts any decision record. Owed writes the reconciliation ticket
+ * first, then stamps — a stamped judgment always has a ticket to launch
+ * from. The sweep derives the owed set from the stamp and launches the
+ * reconciliation as a repair-lane run; the rewrite never rides the run
+ * that shipped the diff. Either verdict stamps with the reason, and a
+ * failed judgment stamps ok:false: an unjudged ship is a recorded miss,
+ * never a silent skip. The story shipped either way — nothing here blocks
+ * the close.
+ */
+async function reconcileJudge(ctx, base, merged) {
+  try {
+    await fetchClone(cloneDir(ctx.paths, ctx.project));
+    await resetHard(base.worktree, merged.mergeSha);
+  } catch (error) {
+    ctx.store.append('reconciliation-judged', {
+      actor: ACTOR,
+      ok: false,
+      cause: `worktree: ${error.message}`,
+    });
+    return;
+  }
+  const result = await ctx.runSeat({
+    seat: 'reconcile-judge',
+    roleBlock: judgeRole(base, merged),
+    reportPath: runReportPath(ctx.paths, ctx.runId, 'reconcile-judge'),
+    schema: RECONCILE_JUDGE_SCHEMA,
+    cwd: base.worktree,
+    env: base.env,
+  });
+  if (!result.ok) {
+    ctx.store.append('reconciliation-judged', { actor: ACTOR, ok: false, cause: 'seat-failure' });
+    return;
+  }
+  const { owed, records, reason } = result.report;
+  if (!owed) {
+    ctx.store.append('reconciliation-judged', { actor: ACTOR, ok: true, owed: false, reason });
+    return;
+  }
+  const ticket = reconcileTicketPath(ctx.paths, ctx.runId);
+  writeFileSync(ticket, reconcileTicket({ ctx, base, merged, records, reason }));
+  ctx.store.append('reconciliation-judged', {
+    actor: ACTOR,
+    ok: true,
+    owed: true,
+    records,
+    reason,
+    ticket,
+    gist: gist(`reconciliation owed: ${records.join(', ')}`),
+  });
+}
+
+function judgeRole(base, merged) {
+  return [
+    'Judge whether this shipped diff implements or contradicts any decision',
+    'record (ADR). You judge only; change nothing.',
+    `The shipped diff is the merge commit ${merged.mergeSha} on ${base.defaultBranch}`,
+    `(PR #${merged.pr}). Read it with: git show ${merged.mergeSha}`,
+    'Locate the decision-record tree (commonly docs/adr/). No such tree means',
+    'owed=false with that as the reason.',
+    'owed=true when the diff implements a recorded decision, contradicts one,',
+    'or deviates from one — implementation counts even when the diff never',
+    'touches the record files themselves. List every affected record path in',
+    'records, and state the reason in one or two sentences.',
+  ].join('\n');
+}
+
+/**
+ * The reconciliation ticket. The reconciliation run reads it from a fresh
+ * worktree of the default branch and can see nothing else — so the ticket
+ * carries the shipped diff's identity, the judged records, and the rewrite
+ * rules the record tree binds its editors to.
+ */
+function reconcileTicket({ ctx, base, merged, records, reason }) {
+  return [
+    `# Reconciliation ticket: run ${ctx.runId}`,
+    '',
+    `The ship of ${base.storyKey ?? ctx.runId} (PR #${merged.pr}, merge`,
+    `commit ${merged.mergeSha}) implicates the decision records below. This`,
+    'ticket is the spec of the reconciliation run: rewrite the records so they',
+    'stand as fact against the repository as shipped.',
+    '',
+    '## Records to reconcile',
+    '',
+    ...records.map((r) => `- ${r}`),
+    '',
+    `Judged reason: ${reason}`,
+    '',
+    '## The shipped diff',
+    '',
+    `- merge commit: ${merged.mergeSha} (read it with git show)`,
+    `- merged PR: #${merged.pr}`,
+    `- the run that shipped it: ${ctx.runId}`,
+    '',
+    '## Rules',
+    '',
+    '- Rewrite the implemented parts of each record as standalone',
+    '  present-tense fact. Keep the rationale and the fallback paths.',
+    '- Parts the diff did not implement stay as explicit open sections.',
+    '- A divergence between the shipped diff and a recorded decision is never',
+    '  absorbed silently: name it in the record and in your report, verbatim.',
+    '- Edit only the decision-record tree. No source, test, or config change',
+    '  rides this run.',
+    '',
+  ].join('\n');
 }
 
 // -- escape fix-back (repair lane) -------------------------------------------

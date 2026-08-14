@@ -263,7 +263,13 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   daemon home and is owed a repair-lane run. The breaching run enqueues; the
   frontier sweep launches, because that run still holds its own slot.
 - Close-out: watch merge-commit checks to terminal states, run the card
-  sweep, close the run ledger.
+  sweep, run the reconciliation judgment, close the run ledger.
+- **Reconciliation judgment** (ADR-0026): a fresh-context seat judges
+  whether the shipped diff implements or contradicts any decision record.
+  Owed writes a reconciliation ticket and stamps `reconciliation-judged`;
+  not-owed and seat-failure stamp too — an unjudged ship is a recorded
+  miss, never a silent skip. The rewrite runs later as its own repair-lane
+  run, never inside the run that shipped the diff.
 
 ## Parallelism and isolation
 
@@ -324,6 +330,11 @@ Owed breach repairs take their slots first: a sweep launches the ticketed
 escapes that have no repair run before it looks at the story frontier
 (ADR-0024). A pause is never bypassed — a paused project with owed repairs
 goes loud instead, and the stamp resolves when the repairs launch.
+
+Owed decision-record reconciliations launch second, after repairs and
+before stories (ADR-0026): shipped runs judged owed at close-out, minus
+those a reconciliation run's launch stamp already names — derived from the
+run ledgers at every sweep, stored nowhere, restart-idempotent.
 
 ## Tripwires
 

@@ -84,6 +84,17 @@ export function repairTicketPath(paths, escapeSeq) {
   return join(paths.tickets, `escape-${escapeSeq}.md`);
 }
 
+/**
+ * The path of one shipped run's reconciliation ticket. The shipping run's id
+ * names it: the close-out judgment writes it once, and the sweep that later
+ * launches the reconciliation derives nothing it does not read from that
+ * run's ledger.
+ * @param {ReturnType<typeof homePaths>} paths
+ */
+export function reconcileTicketPath(paths, runId) {
+  return join(paths.tickets, `reconcile-${runId}.md`);
+}
+
 /** @param {ReturnType<typeof homePaths>} paths */
 export function runLedgerPath(paths, runId) {
   return join(paths.runs, runId, 'ledger.jsonl');

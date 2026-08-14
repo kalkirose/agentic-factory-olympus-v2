@@ -4,9 +4,11 @@
 // config change, and console commands; never on a timer. Sweeps serialize
 // per project through a promise chain, so two triggers never race a launch.
 //
-// A sweep has two passes: owed breach repairs first, then the story
-// frontier. Repairs come first because they are defects on code that already
-// shipped, and both passes spend the same slots.
+// A sweep has three passes: owed breach repairs, then owed decision-record
+// reconciliations, then the story frontier. Repairs come first because they
+// are defects on code that already shipped; reconciliations outrank new
+// stories because record hygiene on shipped work is owed before more work
+// ships on top of it. All three passes spend the same slots.
 //
 // Arming is a per-project state machine: disarmed at birth, toggled by the
 // `arm` and `pause` commands, every transition stamped `arming-changed`,
@@ -22,6 +24,7 @@ import { openCardParks } from '../telemetry/queue.mjs';
 import { readGraphSource } from './source.mjs';
 import { computeFrontier } from './graph.mjs';
 import { owedRepairs, repairLaunch } from './repairs.mjs';
+import { owedReconciliations, reconciliationLaunch } from './reconciliations.mjs';
 
 const ACTOR = 'daemon';
 const GIST_MAX = 120;
@@ -107,6 +110,12 @@ export class FrontierLauncher {
       this.clearStarvation(project);
       return;
     }
+    if ((await this.reconciliationPass(project)) > 0) {
+      // Same stand-down as the repair pass: an owed reconciliation waits on
+      // a slot, so the story frontier does not take it first.
+      this.clearStarvation(project);
+      return;
+    }
     let source;
     try {
       source = await d.isolation.withClone(project, () =>
@@ -175,6 +184,38 @@ export class FrontierLauncher {
       }
     }
     this.clearOwedRepairs(project);
+    return waiting;
+  }
+
+  /**
+   * The reconciliation pass: the owed decision-record reconciliations of one
+   * project, oldest ship first, while slots allow. Returns how many still
+   * wait on a slot — the story pass stands down for those. Nothing is
+   * retried here: an owed reconciliation the sweep could not launch stays
+   * derived and the next sweep launches it, which is also how a daemon that
+   * restarted between the judgment and the launch catches up. A paused
+   * project launches nothing and nothing goes loud: the owed set persists in
+   * the run ledgers, and the record tree's own hygiene gate bounds the gap.
+   */
+  async reconciliationPass(project) {
+    const d = this.daemon;
+    if (!d.engine.lanes.has('repair') || !this.isArmed(project)) return 0;
+    const owed = owedReconciliations(d.paths, project);
+    let waiting = 0;
+    for (let i = 0; i < owed.length; i++) {
+      if (!d.running || !this.isArmed(project)) break;
+      if (!d.engine.hasFreeSlot(project)) {
+        waiting = owed.length - i;
+        break;
+      }
+      try {
+        await d.launchRun(reconciliationLaunch(owed[i]));
+      } catch {
+        // One failed launch ends the pass; the reconciliation stays owed and
+        // the next trigger retries it. The story frontier keeps moving.
+        break;
+      }
+    }
     return waiting;
   }
 

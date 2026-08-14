@@ -49,6 +49,9 @@ export const SEATS = Object.freeze({
   'generalist-review': seat(),
   // ship
   'card-sweep': seat(),
+  // close-out: judges whether the shipped diff implements or contradicts any
+  // decision record; read-only, reports only (ADR-0026)
+  'reconcile-judge': seat(),
   // instance-scoped
   eval: seat({ model: CERTIFICATION_MODEL, instanceScoped: true }),
 });

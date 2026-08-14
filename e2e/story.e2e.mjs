@@ -158,6 +158,7 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
     'merged',
     'merge-commit-check',
     'card-sweep',
+    'reconciliation-judged',
     'run-closed',
   ]);
 
@@ -278,6 +279,7 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
     'repair-dev',
     'generalist-review',
     'card-sweep',
+    'reconcile-judge',
     'fury-spec',
     'fury-code-shape',
     'fury-operational',
