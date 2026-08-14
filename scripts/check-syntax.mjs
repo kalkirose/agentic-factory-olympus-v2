@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-const ROOTS = ['bin', 'src', 'scripts', 'test'];
+const ROOTS = ['bin', 'src', 'scripts', 'test', 'e2e'];
 
 function* walk(dir) {
   let entries;

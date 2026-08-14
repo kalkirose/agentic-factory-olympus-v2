@@ -353,3 +353,20 @@ daemon home, GET-only, path-guarded. The page fetches state on load, polls
 every 60 s (display cadence only), and has a manual refresh. Content: status
 chips, loud strip, run cards with stage pipeline, escalations, build health,
 run-time statistics, ledger tail. Dark command-center look.
+
+## Proof
+
+Two tiers, two CI jobs, both on every push.
+
+`npm test` is the unit and integration suite under `test/`: every part against
+the graph its fixture builds, with scripted children in place of seats and
+substituted runners in place of compose and the forge.
+
+`npm run test:e2e` is the binary proof under `e2e/`: `bin/olympusd.mjs`
+started as a child process and driven by `bin/olympusctl.mjs` through a whole
+story run and a whole repair run against a throwaway git project. Real control
+files, real ledgers, real worktrees, real gate commands; the seat CLI and the
+forge CLI are stubs behind their instance-config seams, and nothing else is
+substituted. What it does not reach — docker stacks, a live forge, model
+seats, the Windows process branches, the red routes — is named in ADR-0025
+with where each is proven instead.

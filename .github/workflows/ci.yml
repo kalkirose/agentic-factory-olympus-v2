@@ -15,3 +15,16 @@ jobs:
           node-version: 22
       - run: npm run check
       - run: npm test
+
+  e2e:
+    # The assembled binaries against a fixture project: two full runs, real
+    # git, real gate commands, stubs for the seat CLI and the forge CLI only
+    # (ADR-0025).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm run test:e2e
