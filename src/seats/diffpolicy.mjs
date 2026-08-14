@@ -130,16 +130,36 @@ export function violationLine(v) {
   return `${v.path}: the diff policy admits this path only when the spec declares it (declaredPaths: ${v.pattern}), and the spec does not. Restore it to its committed state.`;
 }
 
-/** The corrective-brief line for one path the capture took back. */
+/**
+ * The line that states one take-back, wherever a take-back is stated: the
+ * capture record, a later seat's brief, the corrective brief of a capture that
+ * a violation blocked anyway.
+ *
+ * It is not a defect line. A take-back names a path the lane froze, and no
+ * seat under that freeze can make the write legal by trying again. The line
+ * therefore says three things and asks for nothing: the path is frozen, the
+ * write is reverted and ships from no implementation seat, and the route for
+ * a change the surface genuinely needs runs through the verdict.
+ */
 export function dropLine(path) {
-  return `${path}: the capture took this change back and it did not reach the commit. Whatever it was meant to fix is still unfixed.`;
+  return (
+    `${path}: this path is frozen for this lane. The capture reverted the write, ` +
+    'and it ships from no implementation seat. If this surface must change, the ' +
+    'verdict routes that change through a re-freeze; do not write the file again.'
+  );
 }
+
+/** The record's one-sentence statement of what a take-back is. */
+export const DROP_NOTE =
+  'Frozen paths reverted at capture. The commit holds the allowed set; a change ' +
+  'a frozen surface needs reaches it through the verdict re-freeze route, never ' +
+  'through an implementation seat.';
 
 /** A one-line gist for the ledger stream index. */
 export function captureGist({ violations, dropped }) {
   const parts = [];
   if (violations.length > 0) parts.push(`${violations.length} path(s) the diff policy blocks`);
-  if (dropped.length > 0) parts.push(`${dropped.length} path(s) the capture took back`);
+  if (dropped.length > 0) parts.push(`${dropped.length} frozen path(s) the capture reverted`);
   const named = [...violations.map((v) => v.path), ...dropped].slice(0, 3).join(', ');
   return `${parts.join(' and ')}: ${named}`;
 }

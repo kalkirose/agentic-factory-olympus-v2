@@ -30,6 +30,7 @@ import {
 } from '../isolation/tree.mjs';
 import { testEditDenyRules } from '../seats/boundary.mjs';
 import {
+  DROP_NOTE,
   captureGist,
   diffPolicyViolations,
   dropLine,
@@ -155,7 +156,7 @@ function implementationHandler(mode) {
     const baseSha = await headSha(base.worktree);
     // The capture gate holds the structural test-edit guarantee: the frozen
     // suite is restored from its sha before the tree is committed or judged.
-    const { fail } = await devSeatWithCapture(ctx, base, mode, {
+    const { fail, dropped } = await devSeatWithCapture(ctx, base, mode, {
       seat: 'dev',
       buildRole: (brief) => (mode === 'story' ? devRole(base, brief) : fixRole(base, brief)),
       suiteSha: base.suiteSha,
@@ -168,6 +169,10 @@ function implementationHandler(mode) {
       phase: 'initial',
       baseSha,
       sha,
+      // What the capture took back rides the commit record: this commit is
+      // not the tree the seat left, and every later reader must know that
+      // from the record rather than from a re-discovered red (ADR-0017).
+      ...(dropped.length > 0 && { dropped }),
     });
     return { next: 'verdict' };
   };
@@ -211,6 +216,9 @@ async function runCycle(ctx, base, mode, { cycle }) {
   const suiteSha = mode === 'story' ? currentSuiteSha(startEvents) : null;
   const pass = currentPass(startEvents);
   const impl = lastImplementation(startEvents);
+  // What the capture took back before this tree was committed. Every seat this
+  // cycle briefs is reading a tree the take-back already changed.
+  const dropped = impl?.dropped ?? [];
   if (mode === 'story') {
     await restorePaths(base.worktree, suiteSha, base.testPaths, { except: base.frozenExclusions });
   }
@@ -243,7 +251,7 @@ async function runCycle(ctx, base, mode, { cycle }) {
   // green spectrum resolve mechanically: their evidence is gone.
   let triageOpen = [];
   if (reds.length > 0) {
-    const triaged = await triageStep(ctx, base, { cycle, reds, priorOpen: triagePrior });
+    const triaged = await triageStep(ctx, base, { cycle, reds, priorOpen: triagePrior, dropped });
     if (triaged.fail) return { directive: triaged.fail };
     triageOpen = triaged.open;
   }
@@ -289,7 +297,7 @@ async function runCycle(ctx, base, mode, { cycle }) {
     spectrum = confirmed;
     reds = persistentReds(confirmed.results);
     if (reds.length > 0) {
-      const triaged = await triageStep(ctx, base, { cycle, reds, priorOpen: triagePrior });
+      const triaged = await triageStep(ctx, base, { cycle, reds, priorOpen: triagePrior, dropped });
       if (triaged.fail) return { directive: triaged.fail };
       open = [...triaged.open, ...reviewOpen];
     }
@@ -310,6 +318,9 @@ async function runCycle(ctx, base, mode, { cycle }) {
     ...(suiteSha && { suiteSha }),
     sweep: plan.sweep,
     ...(confirmation && { confirmation: true }),
+    // The capture took these paths back before this tree was committed, so a
+    // red on the surface they cover is explained, not mysterious.
+    ...(dropped.length > 0 && { dropped }),
     spectrum: spectrum.results.map(({ output, ...r }) => r),
     flakes: runEvents(ctx)
       .filter((e) => e.event === 'flake' && e.cycle === cycle)
@@ -331,6 +342,7 @@ async function runCycle(ctx, base, mode, { cycle }) {
     ...(suiteSha && { suiteSha }),
     sweep: plan.sweep,
     ...(confirmation && { confirmation: true }),
+    ...(dropped.length > 0 && { dropped }),
     verdict,
     open: openIds,
     record: recordPath,
@@ -356,7 +368,7 @@ function gateCommandError(ctx, error) {
  * The shared four-class triage over persistent reds. The ship step calls it
  * with CI checks as the red layers (`ci:<check>`); the routes stay the same.
  */
-export async function triageStep(ctx, base, { cycle, reds, priorOpen }) {
+export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = [] }) {
   const events = runEvents(ctx);
   const stamped = events.filter(
     (e) => e.event === 'finding' && e.cycle === cycle && e.source === 'triage',
@@ -383,7 +395,7 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen }) {
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
-    buildRole: (brief) => triageRole(base, reds, priorOpen, brief),
+    buildRole: (brief) => triageRole(base, reds, priorOpen, brief, dropped),
     checks: (r) => triageChecks(r, { redLayers, priorOpen }),
   });
   if (fail) return { fail };
@@ -685,7 +697,7 @@ export async function freshPass(ctx, base, mode, { newPass, trigger, open, last 
 async function runDevSeat(ctx, base, mode, { seat, buildRole, pass = null, phase = null }) {
   const events = runEvents(ctx);
   const baseSha = await headSha(base.worktree);
-  const { fail } = await devSeatWithCapture(ctx, base, mode, {
+  const { fail, dropped } = await devSeatWithCapture(ctx, base, mode, {
     seat,
     buildRole,
     suiteSha: mode === 'story' ? currentSuiteSha(events) : null,
@@ -698,6 +710,7 @@ async function runDevSeat(ctx, base, mode, { seat, buildRole, pass = null, phase
     phase: phase ?? 'repair',
     baseSha,
     sha,
+    ...(dropped.length > 0 && { dropped }),
   });
   return { sha };
 }
@@ -764,23 +777,32 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
 
 /**
  * The gate between what a dev seat left in the tree and the implementation
- * commit. Two things can stand in the way, and both are defects the seat
- * answers in one corrective invocation:
+ * commit. Two things can stand in the way, and they are not the same thing.
  *
- * - a change the lane's diff policy refuses (ADR-0017);
- * - a change the capture takes back. The structural suite restore is the only
- *   one today: a story-lane seat that reached a test path past its tool deny
- *   gets that write reverted. The revert stays unconditional — the frozen
- *   suite is the thing being judged against — but it is no longer silent. A
- *   seat that believes a fix landed, and a verdict that re-finds the same
- *   red, cost a run far more than a park does.
+ * - A **violation** is a change the lane's diff policy refuses (ADR-0017):
+ *   a denied path, an undeclared declarable path, a forbidden path shape. It
+ *   is a work-product defect the seat answers in one corrective invocation,
+ *   and the capture stops until it does.
+ * - A **take-back** is a write to a path the lane froze — today, a story-lane
+ *   seat that reached a test path past its tool deny. The revert stays
+ *   unconditional, because the frozen suite is the thing being judged
+ *   against, and it stays recorded. It is not a defect: no seat under that
+ *   freeze can make the write legal by trying again, so a corrective
+ *   invocation buys the run nothing and the park that follows it costs the
+ *   run everything. The capture keeps the allowed set and proceeds; the
+ *   verdict owns the frozen surface through its re-freeze route.
+ *
+ * A capture that holds both blocks. The violation decides that, and the
+ * corrective brief still states the take-back, because the seat is about to
+ * re-read a tree that no longer holds its write.
  *
  * The restore runs before the record, so the tree is correct whether or not
- * the capture proceeds.
+ * the capture proceeds. `capture.dropped` carries the take-back out to the
+ * commit record; the ledger record is the loud copy.
  *
  * @returns {Promise<string[]>} defect lines; empty means the capture proceeds
  */
-async function captureDefects(ctx, base, mode, { seat }) {
+async function captureDefects(ctx, base, mode, { seat, capture }) {
   const changed = await changedFiles(base.worktree);
   // An exclusion is the seat's own file: the restore leaves it alone, so the
   // capture keeps it and the diff policy judges it like any other change.
@@ -794,6 +816,10 @@ async function captureDefects(ctx, base, mode, { seat }) {
       except: exempt,
     });
   }
+  // Across the attempts of one seat pass, not just the last one: a write the
+  // first capture took back is gone from the commit the corrective attempt
+  // produces, and the commit record has to say so.
+  for (const path of dropped) if (!capture.dropped.includes(path)) capture.dropped.push(path);
   const tier = laneDiffPolicy(base.config, mode);
   const kept = changed.filter((f) => !dropped.includes(f));
   const violations = diffPolicyViolations(kept, tier, declaresPath(base, mode, tier));
@@ -804,8 +830,10 @@ async function captureDefects(ctx, base, mode, { seat }) {
     lane: mode,
     violations,
     dropped,
+    ...(dropped.length > 0 && { note: DROP_NOTE, droppedLines: dropped.map(dropLine) }),
     gist: gist(captureGist({ violations, dropped })),
   });
+  if (violations.length === 0) return [];
   return [...violations.map(violationLine), ...dropped.map(dropLine)];
 }
 
@@ -828,7 +856,13 @@ function declaresPath(base, mode, tier) {
   return (path) => declared.has(path);
 }
 
-/** Pairs a `resolved` append to every capture record a later capture cleared. */
+/**
+ * Pairs a `resolved` append to every capture record a later capture cleared.
+ *
+ * Only a record that blocked can be cleared this way. A take-back-only record
+ * blocked nothing, so no later capture answers it: it stays open, and the run
+ * pairs its resolution at close, the way a budget breach does (ADR-0021).
+ */
 function resolveCaptureRecords(ctx) {
   const events = runEvents(ctx);
   const resolved = new Set(
@@ -836,16 +870,21 @@ function resolveCaptureRecords(ctx) {
   );
   for (const e of events) {
     if (e.event !== 'diff-policy-violation' || resolved.has(e.seq)) continue;
+    if ((e.violations ?? []).length === 0) continue;
     ctx.store.resolve({ actor: ACTOR, resolves: e.seq });
   }
 }
 
 /**
  * One dev-seat invocation and its capture gate, through the lane's corrective
- * machinery: a refused capture buys one corrective invocation carrying the
- * exact paths, then the `seat-failure` park.
+ * machinery: a capture a violation refused buys one corrective invocation
+ * carrying the exact paths, then the `seat-failure` park. A capture that only
+ * took frozen writes back proceeds, and reports what it took.
+ *
+ * @returns {Promise<{report?: object, fail?: object, dropped: string[]}>}
  */
 async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
+  const capture = { dropped: [] };
   const outcome = await seatWithChecks(ctx, {
     seat,
     label: null,
@@ -860,10 +899,10 @@ async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
       }),
     }),
     buildRole,
-    checks: () => captureDefects(ctx, base, mode, { seat }),
+    checks: () => captureDefects(ctx, base, mode, { seat, capture }),
   });
   if (!outcome.fail) resolveCaptureRecords(ctx);
-  return outcome;
+  return { ...outcome, dropped: capture.dropped };
 }
 
 // -- gate integrity ----------------------------------------------------------
@@ -931,12 +970,24 @@ function repairRole(base, open, record, brief = null) {
     ...open.map((f) => `- ${findingLine(f)}`),
     'Tier-1 verdict:',
     ...(record?.spectrum ?? []).map((r) => `- ${r.layer}: ${r.status}${layerNote(r)}`),
+    ...takenBackLines(record?.dropped),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
   ].join('\n');
 }
 
-function triageRole(base, reds, priorOpen, brief) {
+/**
+ * What the capture took back, stated to a seat that is about to read a tree
+ * the take-back already changed. The seat that wrote the file is gone; this
+ * seat must not repeat the write, and the lines say why and where the route
+ * is instead.
+ */
+function takenBackLines(dropped) {
+  if (!dropped?.length) return [];
+  return ['Taken back at capture:', ...dropped.map((p) => `- ${dropLine(p)}`)];
+}
+
+function triageRole(base, reds, priorOpen, brief, dropped = []) {
   const lines = [
     'Classify the persistent red Tier-1 layers below into findings. Cluster reds that share one root cause into one finding.',
     'Class each finding — code-defect | suite-defect | env | harness — and cite evidence for every class.',
@@ -948,6 +999,7 @@ function triageRole(base, reds, priorOpen, brief) {
     lines.push('Prior open findings — list the ids that persist in "persisting"; report only new findings in "findings":');
     for (const f of priorOpen) lines.push(`- [${f.id}] ${findingLine(f)}`);
   }
+  lines.push(...takenBackLines(dropped));
   lines.push('Persistent reds:');
   for (const r of reds) {
     lines.push(`- layer ${r.layer}:`, r.output ?? '(no output)');

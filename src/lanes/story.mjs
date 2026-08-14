@@ -1276,6 +1276,7 @@ function templateLines() {
     '   - a line "Named constants:" and under it one list item per constant, written "NAME = value". A constant is named in one place; every other mention refers to it.',
     '   - a line "Supersedes:" and under it one list item per frozen test this criterion contradicts, written "<path> — keep|supersede — <the clause that replaces it>". Write "- None" when it contradicts none.',
     '3. One fenced block, opened by ```touched-paths and closed by ```, naming every repo-relative path the work touches: one path per line, each followed by " — dev" or " — suite" for the seat that owns the file. Exactly one such block in the document, and every line names one file.',
+    '   A story that changes a rendered surface re-renders that surface\'s existing visual baseline files, so name each of those files in the block as a dev-owned entry and they join the freeze exclusions. A baseline the block does not name is frozen: the capture reverts the write, and the change costs a verdict round-trip to reach the suite.',
     '4. An environment section naming only the environment variables the card names.',
     `The whole document runs to ${SPEC_LINE_CAP} lines at most.`,
     'Only a criterion whose card text opens with no id of its own takes its position as its id: AC-1, AC-2, in card order. A criterion that carries an id keeps it, whatever its position.',

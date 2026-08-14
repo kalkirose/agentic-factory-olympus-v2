@@ -58,9 +58,11 @@ export const RUN_EVENTS = new Set([
   // informational, because a threshold never parks, blocks, or closes
   // anything (ADR-0021). The run pairs its own `resolved` at close.
   'budget-breach',
-  // A candidate capture the diff policy refused, or one that took a change
-  // back. Loud, because both mean the tree the run judges is not the tree the
-  // seat believed it left behind (ADR-0017).
+  // A candidate capture the diff policy refused, or one that took a frozen
+  // write back. Loud, because both mean the tree the run judges is not the
+  // tree the seat believed it left behind (ADR-0017). A refusal resolves when
+  // a later capture clears it; a take-back blocked nothing, so the run pairs
+  // its resolution at close.
   'diff-policy-violation',
   // ship
   'pr-opened',
@@ -142,6 +144,13 @@ export const LOUD_EVENTS = new Set([
   'repairs-owed',
   'budget-breach',
 ]);
+
+// Loud run items the run pairs its own `resolved` to when it closes. They ask
+// the owner for no decision — the run they reported on is over — so leaving
+// them open would build the owner an alert strip of finished runs (ADR-0021).
+// Anything a later step can genuinely clear resolves at that step instead, and
+// reaches close already paired.
+export const CLOSE_RESOLVED_EVENTS = new Set(['budget-breach', 'diff-policy-violation']);
 
 export function streamOf(event) {
   if (QUEUED_EVENTS.has(event)) return 'queued';

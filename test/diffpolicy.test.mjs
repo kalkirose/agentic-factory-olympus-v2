@@ -3,14 +3,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  DROP_NOTE,
   captureGist,
   diffPolicyViolations,
+  dropLine,
   laneDiffPolicy,
   parseTouchedPaths,
   violationLine,
 } from '../src/seats/diffpolicy.mjs';
 import { validateProjectConfig, withProjectDefaults } from '../src/config/project.mjs';
-import { LOUD_EVENTS, RUN_EVENTS } from '../src/ledger/registry.mjs';
+import { CLOSE_RESOLVED_EVENTS, LOUD_EVENTS, RUN_EVENTS } from '../src/ledger/registry.mjs';
 import { RESOLVABLE_EVENTS } from '../src/telemetry/stores.mjs';
 import { deriveRunState } from '../src/engine/replay.mjs';
 
@@ -210,8 +212,25 @@ test('the gist names the count and the first paths', () => {
     violations: [{ path: '.npmrc' }, { path: 'scripts/a.mjs' }],
     dropped: ['tests/a.test.mjs'],
   });
-  assert.match(gist, /2 path\(s\) the diff policy blocks and 1 path\(s\) the capture took back/);
+  assert.match(
+    gist,
+    /2 path\(s\) the diff policy blocks and 1 frozen path\(s\) the capture reverted/,
+  );
   assert.match(gist, /\.npmrc, scripts\/a\.mjs, tests\/a\.test\.mjs/);
+});
+
+test('the take-back line states the freeze, the revert, and the re-freeze route', () => {
+  const line = dropLine('tests/visual/checkout.png');
+  assert.match(line, /^tests\/visual\/checkout\.png: this path is frozen for this lane\./);
+  assert.match(line, /The capture reverted the write, and it ships from no implementation seat\./);
+  assert.match(line, /the verdict routes that change through a re-freeze/);
+  assert.match(line, /do not write the file again\./);
+  // The old wording told the seat its work was still owed, which is the one
+  // thing a frozen path never asks of the seat that wrote it.
+  assert.doesNotMatch(line, /unfixed/);
+  assert.doesNotMatch(line, /meant to fix/);
+  assert.match(DROP_NOTE, /never\s+through an implementation seat/);
+  assert.doesNotMatch(DROP_NOTE, /unfixed/);
 });
 
 // -- the project-config block ------------------------------------------------
@@ -268,6 +287,15 @@ test('the capture record is a known run event, loud, and resolvable', () => {
   assert.ok(RESOLVABLE_EVENTS.has('diff-policy-violation'));
 });
 
+test('the capture record pairs its resolution at close, like a budget breach', () => {
+  assert.ok(CLOSE_RESOLVED_EVENTS.has('diff-policy-violation'));
+  assert.ok(CLOSE_RESOLVED_EVENTS.has('budget-breach'));
+  // Only loud items a run can close on its own. A liveness violation is not
+  // one: it says the run stopped being a run.
+  for (const event of CLOSE_RESOLVED_EVENTS) assert.ok(RESOLVABLE_EVENTS.has(event));
+  assert.ok(!CLOSE_RESOLVED_EVENTS.has('liveness-violation'));
+});
+
 test('replay ignores the capture record: a blocked capture is not a run violation', () => {
   const events = [
     { seq: 1, event: 'run-launched', project: 'p', lane: 'story', worktree: '/w' },
@@ -281,4 +309,21 @@ test('replay ignores the capture record: a blocked capture is not a run violatio
   // An unresolved liveness violation still reads as one; the two never mix.
   const live = deriveRunState([...events, { seq: 4, event: 'liveness-violation' }]);
   assert.equal(live.violated, true);
+});
+
+test('replay of a take-back that shipped resumes past the commit it rode', () => {
+  // The take-back does not stop the capture, so the commit stamp follows it in
+  // the same stage. Replay reads the stage from the stamps, and the take-back
+  // record carries no state of its own to reconstruct.
+  const events = [
+    { seq: 1, event: 'run-launched', project: 'p', lane: 'story', worktree: '/w' },
+    { seq: 2, event: 'stage-entered', stage: 'implementation' },
+    { seq: 3, event: 'diff-policy-violation', seat: 'dev', violations: [], dropped: ['tests/a.mjs'] },
+    { seq: 4, event: 'implementation-committed', pass: 1, phase: 'initial', dropped: ['tests/a.mjs'] },
+    { seq: 5, event: 'stage-entered', stage: 'verdict' },
+  ];
+  const state = deriveRunState(events);
+  assert.equal(state.violated, false);
+  assert.equal(state.stage, 'verdict');
+  assert.equal(state.closed, null);
 });

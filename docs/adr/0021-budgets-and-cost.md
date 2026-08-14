@@ -76,6 +76,11 @@ paired resolution, so the run appends it at close: the alert did its work
 while the run was live, and a strip of alerts about finished runs would train
 the owner to ignore the strip.
 
+That close is now a shared route rather than a budget special case. The
+capture take-back (ADR-0017) reports the same way — loud while the run is
+live, answerable by nobody, over when the run is over — so both events sit in
+one registry set the close reads.
+
 ## Why a memo now, and what it supersedes
 
 ADR-0005 decided that a degrade does not remember the rejection window, on the

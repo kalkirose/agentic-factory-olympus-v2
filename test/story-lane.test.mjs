@@ -391,6 +391,14 @@ test('a fixture story reaches a valid freeze record with kills and dispositions'
   assert.ok(!fx.calls.find((c) => c.seat === 'spec-birth').prompt.includes('Authority order'));
   assert.ok(adversaryCalls.every((c) => !c.prompt.includes(line)));
   assert.ok(adversaryCalls.every((c) => !c.prompt.includes('constitution')));
+  // The touched-paths template names the one entry class a spec author reads
+  // past: the visual baselines a rendered surface re-renders. Undeclared, they
+  // are frozen, and the story pays a verdict round-trip to change them.
+  const birthPrompt = fx.calls.find((c) => c.seat === 'spec-birth').prompt;
+  assert.match(birthPrompt, /re-renders that surface's existing visual baseline files/);
+  assert.match(birthPrompt, /name each of those files in the block as a dev-owned entry/);
+  assert.match(birthPrompt, /A baseline the block does not name is frozen/);
+  assert.match(birthPrompt, /costs a verdict round-trip/);
 });
 
 test('open decisions park readiness; the spec gate caps at two rounds', async (t) => {

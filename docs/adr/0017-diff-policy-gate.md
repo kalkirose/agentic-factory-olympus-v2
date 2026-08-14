@@ -137,3 +137,83 @@ If the drop record proves noisy on the repair lane, where the seat may write
 tests by design, the record narrows to lanes that run a structural restore.
 Trigger: drop records with no corresponding defect in any run. Reversal cost:
 low, one condition at the record site.
+
+## Correction (2026-08-14): a take-back is not a defect
+
+The decision above treats a violation and a take-back as one thing: two
+conditions, both work-product defects, both answered through the corrective
+invocation and the `seat-failure` park behind it. That is wrong for the
+take-back, and it parks runs that should never have stopped.
+
+A violation is a defect. The seat wrote a path its mandate does not cover, and
+the corrective invocation asks it to do something it can do: put the file back
+and ship the rest. A take-back is a different kind of fact. The path is frozen
+for the lane, the write is gone, and no seat under that freeze can make the
+same write legal by trying again. Sending it back with a defect list gives it
+one legal move it will not find and one illegal move it already made.
+
+Both halves of that failure ran in one live story run, twice, identically.
+
+A dev seat re-rendered a UI surface and updated the visual baseline file that
+surface is compared against. The baseline sits under a frozen test path and
+the spec had not declared it, so the capture reverted the write and refused
+the commit. The corrective brief told the seat that whatever the change was
+meant to fix "is still unfixed". The seat re-ran its own checks, saw the
+visual layer red without the file, wrote the file again, and was taken back
+again. Second refusal, `seat-failure` park, run stopped. A later repair-dev
+seat, fresh context, reached the identical position from the identical brief
+and stopped the run a second time. Two parks, two seats, one file, zero
+information the seats could have acted on: the brief named the offending path
+and never named the route.
+
+The same run then proved the route it never named. On a later cycle the
+visual layer went red, the verdict triaged it as a suite defect, the spec
+amendment ran, the suite seat re-committed the surface's baseline, and the
+re-freeze landed. No human touched it. The harness already owns undeclared
+changes to frozen surfaces; the seat-side loop was buying nothing and
+spending everything.
+
+So the semantics split:
+
+- **Violations keep the whole gate.** A denied path, an undeclared declarable
+  path, a forbidden path shape: capture blocked, one corrective invocation
+  carrying the exact paths, then the `seat-failure` park. Unchanged.
+- **Take-backs stop blocking.** The revert stays unconditional, the loud
+  record stays, and the capture proceeds to commit the allowed set. No
+  corrective invocation, no park. A capture holding both blocks — the
+  violation decides, and the brief states the take-back as a fact rather than
+  as a defect.
+- **The take-back reaches downstream on the record.** The capture record
+  carries the dropped paths and the wording; the implementation commit record
+  carries the dropped paths of its own pass, including a take-back from an
+  attempt a violation later blocked; the verdict record carries what the tree
+  it judges lost. Triage and repair briefs state it. The failure this ADR was
+  written to prevent — a stage reasoning from a tree nobody described — is
+  prevented by the record, and it never needed the park.
+- **The wording carries the route.** Every statement of a take-back says the
+  path is frozen for this lane, that the write was reverted and ships from no
+  implementation seat, and that a change the surface genuinely needs is routed
+  by the verdict through a re-freeze. The old sentence asserted the opposite:
+  that something was still owed from the seat.
+- **The loud item pairs at close.** A take-back record blocks nothing, so no
+  later capture clears it. The run pairs its own `resolved` when it closes,
+  the way a budget breach does (ADR-0021). A record that carried a violation
+  still resolves at the capture that cleared it.
+
+The spec template gained the matching line, because the cheapest place to
+settle a baseline is before any seat runs: a story that changes a rendered
+surface enumerates that surface's existing visual baseline files as dev-owned
+touched-paths entries, and they join the freeze exclusions. An undeclared
+baseline is not a disaster after this correction — it costs the run one
+verdict round-trip instead of a park — but it is still a round-trip nobody
+needed to buy.
+
+### Fallback path
+
+If take-backs turn out to hide real losses — a seat's genuine work vanishing
+into a frozen path with nothing downstream reacting — the capture stops at a
+`stage-blocked` park that names the paths and asks the owner whether to route
+them through a re-freeze, instead of returning the seat a defect list it
+cannot answer. Trigger: a run that ships with a take-back whose surface a
+later run has to fix. Reversal cost: low; the record and its wording already
+exist, and the park replaces one early return in the capture.

@@ -11,7 +11,12 @@
 import { readdirSync } from 'node:fs';
 import { readEvents } from '../ledger/ledger.mjs';
 import { runCost } from '../ledger/cost.mjs';
-import { PARK_TYPES, CLOSE_STATES, SEAT_TERMINAL_EVENTS } from '../ledger/registry.mjs';
+import {
+  PARK_TYPES,
+  CLOSE_STATES,
+  CLOSE_RESOLVED_EVENTS,
+  SEAT_TERMINAL_EVENTS,
+} from '../ledger/registry.mjs';
 import { runLedgerPath } from '../daemon/home.mjs';
 import { openRunStore, archiveRun } from '../telemetry/stores.mjs';
 import { deriveRunState } from './replay.mjs';
@@ -263,15 +268,16 @@ export class RunEngine {
   }
 
   /**
-   * Pairs the resolution a loud stamp owes. A budget breach asks for no
-   * decision — the run it reported on is over — so the run closes it rather
-   * than leaving the owner an alert strip of runs that already ended.
+   * Pairs the resolution a loud stamp owes. A budget breach and a capture
+   * take-back both ask for no decision — the run they reported on is over —
+   * so the run closes them rather than leaving the owner an alert strip of
+   * runs that already ended.
    */
-  resolveBudgetBreach(run, state) {
+  resolveLoudAtClose(run, state) {
     const events = readEvents(runLedgerPath(this.paths, run.runId));
     const resolved = new Set(events.filter((e) => e.event === 'resolved').map((e) => e.resolves));
     for (const e of events) {
-      if (e.event === 'budget-breach' && !resolved.has(e.seq)) {
+      if (CLOSE_RESOLVED_EVENTS.has(e.event) && !resolved.has(e.seq)) {
         run.store.resolve({ actor: ACTOR, resolves: e.seq, note: `run closed ${state}` });
       }
     }
@@ -374,7 +380,7 @@ export class RunEngine {
 
   closeRun(run, state, { actor = ACTOR, ...extra } = {}) {
     run.closed = true;
-    this.resolveBudgetBreach(run, state);
+    this.resolveLoudAtClose(run, state);
     run.store.append('run-closed', { actor, state, ...extra });
     run.store.close();
     this.runs.delete(run.runId);

@@ -1350,9 +1350,10 @@ test('a forbidden path shape blocks even when the spec declares it', async (t) =
   );
 });
 
-test('a change the capture takes back is stamped and named, with no policy declared', async (t) => {
-  // No diffPolicy block at all: the drop record is not a policy tier, it is
-  // the capture refusing to discard a seat's work in silence.
+test('a take-back is stamped and the capture commits the allowed set anyway', async (t) => {
+  // No diffPolicy block at all: the take-back record is not a policy tier, it
+  // is the capture refusing to discard a seat's work in silence. The seat is
+  // invoked once — a frozen path is not a defect it can answer.
   const seats = {
     dev: ({ label }) =>
       label === 'dev-1'
@@ -1360,7 +1361,7 @@ test('a change the capture takes back is stamped and named, with no policy decla
             files: { 'src/feature.mjs': GOOD_FEATURE, 'tests/feature.test.mjs': WRONG_TEST },
             report: { summary: 'implemented, and I relaxed the test' },
           }
-        : { report: { summary: 'implemented; the test stands' } },
+        : { report: { summary: 'a second invocation the take-back must not buy' } },
     ...furyClean(),
   };
   const fx = verdictFixture(t, { seats });
@@ -1370,10 +1371,14 @@ test('a change the capture takes back is stamped and named, with no policy decla
   const stamp = events.find((e) => e.event === 'diff-policy-violation');
   assert.deepEqual(stamp.dropped, ['tests/feature.test.mjs']);
   assert.deepEqual(stamp.violations, []);
-  assert.match(
-    fx.calls.find((c) => c.label === 'dev-2').prompt,
-    /tests\/feature\.test\.mjs: the capture took this change back/,
-  );
+  assert.match(stamp.gist, /1 frozen path\(s\) the capture reverted/);
+  // No corrective invocation, no park, and the allowed half of the tree is
+  // committed: the run walks straight into the verdict.
+  assert.equal(fx.calls.filter((c) => c.seat === 'dev').length, 1);
+  assert.ok(!events.some((e) => e.event === 'seat-failure'));
+  assert.ok(!events.some((e) => e.event === 'park'));
+  const commit = events.find((e) => e.event === 'implementation-committed');
+  assert.deepEqual(commit.dropped, ['tests/feature.test.mjs']);
   // The frozen suite is what was judged. The seat's relaxed test expects
   // f(2) === 5 against a feature that doubles, so a candidate carrying it
   // would have gone red on the unit layer instead of shipping in one cycle.
@@ -1382,6 +1387,95 @@ test('a change the capture takes back is stamped and named, with no policy decla
     renders.map((e) => [e.cycle, e.verdict]),
     [[1, 'green']],
   );
+  assert.deepEqual(renders[0].dropped, ['tests/feature.test.mjs']);
+  assert.deepEqual(readRecord(fx.paths, runId, 1).dropped, ['tests/feature.test.mjs']);
+  // Loud until the run ends, then paired — the same close the budget threshold
+  // takes, because neither asks the owner for a decision.
+  const resolution = events.find((e) => e.event === 'resolved' && e.resolves === stamp.seq);
+  assert.equal(resolution.resolvedEvent, 'diff-policy-violation');
+  assert.ok(events.indexOf(resolution) > events.findIndex((e) => e.event === 'verdict-rendered'));
+  assert.equal(loudFor(fx.paths, runId, 'diff-policy-violation').length, 0);
+});
+
+test('the take-back message names the freeze and the re-freeze route, never a fix', async (t) => {
+  // The wording is the fix. A seat told its write "is still unfixed" writes it
+  // again, is taken back again, and parks the run; a seat told the path is
+  // frozen and that the verdict owns the route does neither.
+  const seats = {
+    dev: ({ label }) =>
+      label === 'dev-1'
+        ? {
+            files: {
+              'src/feature.mjs': BAD_FEATURE,
+              'tests/feature.test.mjs': WRONG_TEST,
+            },
+            report: { summary: 'implemented, and I relaxed the test' },
+          }
+        : { files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'repaired' } },
+    'verdict-triage': triageSeat(() => ({ class: 'code-defect' })),
+    'repair-dev': () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'repaired' } }),
+    'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, { seats });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const stamp = events.find((e) => e.event === 'diff-policy-violation');
+  const line = stamp.droppedLines[0];
+  assert.match(line, /^tests\/feature\.test\.mjs: this path is frozen for this lane\./);
+  assert.match(line, /The capture reverted the write, and it ships from no implementation seat\./);
+  assert.match(line, /the verdict routes that change through a re-freeze; do not write the file again\./);
+  assert.doesNotMatch(line, /unfixed/);
+  assert.match(stamp.note, /reaches it through the verdict re-freeze route, never through an implementation seat/);
+  // Every later seat briefed on this tree is told the same thing.
+  const triage = fx.calls.find((c) => c.seat === 'verdict-triage');
+  assert.match(triage.prompt, /Taken back at capture:/);
+  assert.match(triage.prompt, /this path is frozen for this lane/);
+  const repair = fx.calls.find((c) => c.seat === 'repair-dev');
+  assert.match(repair.prompt, /Taken back at capture:/);
+  assert.match(repair.prompt, /do not write the file again/);
+});
+
+test('a violation alongside a take-back still blocks, and the brief carries both', async (t) => {
+  // The violation decides. The take-back rides the same brief as a statement,
+  // because the corrective seat is about to re-read a tree without its write.
+  const seats = {
+    dev: ({ label }) =>
+      label === 'dev-1'
+        ? {
+            files: {
+              'src/feature.mjs': GOOD_FEATURE,
+              '.npmrc': 'link-workspace-packages=true\n',
+              'tests/feature.test.mjs': WRONG_TEST,
+            },
+            report: { summary: 'implemented' },
+          }
+        : { removes: ['.npmrc'], report: { summary: 'implemented without the topology change' } },
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, { seats, diffPolicy: POLICY });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const stamp = events.find((e) => e.event === 'diff-policy-violation');
+  assert.deepEqual(stamp.violations.map((v) => v.path), ['.npmrc']);
+  assert.deepEqual(stamp.dropped, ['tests/feature.test.mjs']);
+  const corrective = fx.calls.find((c) => c.label === 'dev-2');
+  assert.ok(corrective, 'the violation bought a corrective invocation');
+  assert.match(corrective.prompt, /\.npmrc: the diff policy denies this path to this lane/);
+  assert.match(corrective.prompt, /tests\/feature\.test\.mjs: this path is frozen for this lane/);
+  // The take-back happened in this pass, so the commit that pass produced
+  // carries it even though the corrective capture took nothing back.
+  const commit = events.find((e) => e.event === 'implementation-committed');
+  assert.deepEqual(commit.dropped, ['tests/feature.test.mjs']);
+  // The record that blocked is cleared by the capture that cleared it, not at
+  // close: it asked for a correction and got one.
+  assert.equal(events.filter((e) => e.event === 'diff-policy-violation').length, 1);
+  assert.ok(
+    events.some((e) => e.event === 'resolved' && e.resolves === stamp.seq && !e.note),
+  );
+  assert.equal(loudFor(fx.paths, runId, 'diff-policy-violation').length, 0);
 });
 
 test('a freeze exclusion is the dev seat\'s file: no deny rule, no restore, no drop', async (t) => {
