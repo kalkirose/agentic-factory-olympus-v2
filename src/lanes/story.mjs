@@ -36,7 +36,7 @@ import { laneDiffPolicy } from '../seats/diffpolicy.mjs';
 import { parseIntentCard } from './card.mjs';
 import { runCommand } from './exec.mjs';
 import { readInheritance } from './resume.mjs';
-import { SPEC_LINE_CAP, frozenExclusions, lintSpec } from './speclint.mjs';
+import { SPEC_LINE_CAP, amendedSections, frozenExclusions, lintSpec } from './speclint.mjs';
 import {
   ACTOR,
   loadProjectConfig,
@@ -107,6 +107,9 @@ export const SPEC_AMEND_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
+    // The amendment's own account of its scope, for the run record. The gate
+    // scopes its re-check on the diff of the two spec versions instead, so a
+    // declaration that understates the edit cannot narrow a re-check.
     amendedSections: { type: 'array', items: { type: 'string' } },
     summary: { type: 'string' },
   },
@@ -541,11 +544,17 @@ function gateNotes(events) {
   return notes;
 }
 
-/** Extra rounds the owner bought, one per exhaustion park answered "round". */
+// The two parks that hand the gate back to the owner. They differ in what
+// stopped the gate, never in what the owner can do about it: both offer the
+// same two options, and a `round` answered at either one buys exactly one
+// amendment plus one re-check.
+const GATE_PARKS = new Set(['spec-gate-exhausted', 'spec-gate-stalled']);
+
+/** Extra rounds the owner bought, one per gate park answered "round". */
 function grantedRounds(events) {
   let granted = 0;
   for (const e of events) {
-    if (e.event !== 'park' || e.type !== 'spec-gate-exhausted') continue;
+    if (e.event !== 'park' || !GATE_PARKS.has(e.type)) continue;
     const answer = events.find((a) => a.event === 'answer' && a.parkSeq === e.seq);
     if (answer?.option === 'round') granted++;
   }
@@ -553,18 +562,42 @@ function grantedRounds(events) {
 }
 
 /**
- * The exhaustion park raised after a given round, with its answer. Keyed on
- * the round rather than on the type alone: a bought round is spent, so the
- * next cap must ask again instead of reading the answer that bought it.
+ * The gate park of a type raised after a given round, with its answer. Keyed
+ * on the round rather than on the type alone: a bought round is spent, so the
+ * next park must ask again instead of reading the answer that bought it.
  */
-function exhaustionPark(events, afterSeq) {
+function gatePark(events, type, afterSeq) {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
-    if (e.event !== 'park' || e.type !== 'spec-gate-exhausted' || e.seq <= afterSeq) continue;
+    if (e.event !== 'park' || e.type !== type || e.seq <= afterSeq) continue;
     const answer = events.slice(i + 1).find((a) => a.event === 'answer' && a.parkSeq === e.seq);
     return { park: e, answer: answer ?? null };
   }
   return null;
+}
+
+/**
+ * The spec as a counted round judged it. Every round writes one before it
+ * spawns its seat, so the next round derives its own scope from two documents
+ * instead of trusting the amendment's account of what it changed. The copies
+ * live beside the spec in the run directory and archive with the run.
+ */
+function roundSpecPath(ctx, round) {
+  return join(ctx.paths.runs, ctx.runId, `spec-round-${round}.md`);
+}
+
+/** The findings the last counted round reported, verbatim, notes included. */
+function priorRoundFindings(events) {
+  const rounds = events.filter((e) => e.event === 'spec-gate-round');
+  const last = rounds[rounds.length - 1];
+  if (!last) return [];
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.event === 'seat-report' && e.seat === 'spec-gate' && e.seq < last.seq) {
+      return readJson(e.path)?.findings ?? [];
+    }
+  }
+  return [];
 }
 
 async function specGate(ctx) {
@@ -591,15 +624,41 @@ async function specGate(ctx) {
     }
     if (last?.verdict === 'pass') return { next: 'suite' };
     if (rounds.length === 0) {
-      const r = await gateRound(ctx, base, { round: 1, sections: null });
+      const r = await gateRound(ctx, base, { round: 1 });
       if (r.directive) return r.directive;
       continue;
+    }
+    // Convergence. Every counted round past the first must strictly shrink the
+    // blocking set, exactly as a repair round must. A round that does not is
+    // the gate oscillating — each amendment rewrites spec text, and the next
+    // full re-check reads the new text as new surface — so the run hands the
+    // decision over at once and leaves the rest of the cap unspent.
+    const previous = rounds[rounds.length - 2];
+    if (previous && last.findings >= previous.findings) {
+      const asked = gatePark(events, 'spec-gate-stalled', last.seq);
+      if (!asked) {
+        return parkDirective('spec-gate-stalled', {
+          question:
+            `The spec gate is not converging. Round ${last.round} ended with ` +
+            `${last.findings} blocking findings against ${previous.findings} in round ` +
+            `${previous.round}, so the open set did not shrink; notes: ${last.notes ?? 0}. ` +
+            'Notes do not hold the spec; they travel to the suite seat as proof obligations. ' +
+            'The gate stops here rather than spend a counted round on a document ' +
+            `that is not getting closer. The spec stands at ${base.specPath}. ` +
+            'Answer "round" for one more amendment and re-check, or "abandon" to close the run.',
+          options: ['round', 'abandon'],
+          refs: [base.cardPath],
+        });
+      }
+      if (asked.answer?.option !== 'round') {
+        return { close: { state: 'failed', reason: 'spec-gate-stalled' } };
+      }
     }
     // The cap is where the human enters, not where the spec dies. An
     // exhausted gate holds a spec that is a known list of findings away from
     // done, so the owner buys another round or abandons it deliberately.
     if (rounds.length >= SPEC_GATE_ROUNDS + grantedRounds(events)) {
-      const asked = exhaustionPark(events, last.seq);
+      const asked = gatePark(events, 'spec-gate-exhausted', last.seq);
       if (!asked) {
         return parkDirective('spec-gate-exhausted', {
           // Two counts, never one total: only the blocking count holds the
@@ -621,25 +680,34 @@ async function specGate(ctx) {
     }
     // A counted round with findings open: the birth seat amends, then the
     // gate re-checks the amended sections only.
-    const amendReport = seatReportAfter(events, 'spec-birth', last.seq);
-    if (!amendReport) {
+    if (!seatReportAfter(events, 'spec-birth', last.seq)) {
       const report = readJson(lastSeatReportEvent(events, 'spec-gate').path);
       const amend = await amendSpec(ctx, base, findingsBrief(blockingFindings(report?.findings)));
       if (amend.fail) return amend.fail;
       continue;
     }
-    const sections = readJson(amendReport.path)?.amendedSections ?? [];
-    const r = await gateRound(ctx, base, { round: rounds.length + 1, sections });
+    const r = await gateRound(ctx, base, { round: rounds.length + 1 });
     if (r.directive) return r.directive;
   }
 }
 
-async function gateRound(ctx, base, { round, sections }) {
+async function gateRound(ctx, base, { round }) {
   const events = runEvents(ctx);
   const n = invocationCount(events, 'spec-gate') + 1;
+  // The re-check's two additions: the parts the amendment moved, computed
+  // from the spec the previous round judged, and that round's findings. A
+  // first round, and any round whose predecessor left no copy, reviews whole.
+  const prior = round > 1 ? roundSpecPath(ctx, round - 1) : null;
+  const scope =
+    prior && existsSync(prior)
+      ? amendedSections(readFileSync(prior, 'utf8'), readFileSync(base.specPath, 'utf8'), {
+          card: base.card,
+        })
+      : null;
+  copyFileSync(base.specPath, roundSpecPath(ctx, round));
   const result = await ctx.runSeat({
     seat: 'spec-gate',
-    roleBlock: gateRole(base, sections),
+    roleBlock: gateRole(base, { scope, priorFindings: priorRoundFindings(events) }),
     reportPath: runReportPath(ctx.paths, ctx.runId, `spec-gate-${n}`),
     schema: SPEC_GATE_SCHEMA,
     cwd: base.worktree,
@@ -1224,8 +1292,8 @@ function findingsBrief(findings) {
   ].join('\n');
 }
 
-function gateRole(base, sections) {
-  return [
+function gateRole(base, { scope, priorFindings }) {
+  const lines = [
     'Fresh-context review of a born story spec.',
     `The spec: ${base.specPath}`,
     `The intent card: ${base.cardPath} (in your working directory).`,
@@ -1243,10 +1311,32 @@ function gateRole(base, sections) {
     'Never use "note" to pass a finding you cannot defend as suite-provable. When you are unsure which one a finding is, class it "blocking". An omitted severity counts as blocking.',
     'Report "intentConflict" on every pass: {"conflict": false, "detail": ""} when the spec and the card agree.',
     'Set "conflict": true only when the spec and the card\'s intent disagree, and put the disagreement in "detail"; do not list it as a finding. A true value stops the run and waits for a human, so a note, an observation, or the word "none" belongs in the summary instead.',
-    sections && sections.length > 0
-      ? `Re-check only these amended sections: ${sections.join('; ')}`
-      : 'Review the whole spec.',
-  ].join('\n');
+  ];
+  if (!scope) {
+    lines.push('Review the whole spec.');
+    return lines.join('\n');
+  }
+  // The re-check rule. A full re-review of an amended document finds new
+  // surface every round, because the amendment wrote new text, so the open set
+  // never shrinks and the gate never converges. The scope is what the machine
+  // saw move; everything else was read once already and passed.
+  lines.push(
+    'This is a re-check, not a fresh review. The spec was amended to close the findings of the previous round.',
+    scope.length > 0
+      ? `Sections amended since the previous round: ${scope.join('; ')}`
+      : 'Sections amended since the previous round: none.',
+    'Re-check every amended section in full, exactly as you would on a first pass.',
+    'For every finding of the previous round, say whether it is closed or still open. A finding that is still open keeps the severity it carried.',
+    'A new defect in a section that was NOT amended is reported with severity "note", never "blocking". That text was reviewed and passed a round ago, and a gate that re-opens settled text spends the run on a document instead of shipping it.',
+    'One exception, blocking wherever you find it, amended or not: a clause that contradicts a higher authority — the constitution, then the intent card. Name the document it contradicts in the evidence.',
+    priorFindings.length > 0
+      ? 'The findings of the previous round, verbatim:'
+      : 'The previous round reported no finding.',
+    ...priorFindings.map(
+      (f) => `- [${f.section}] (${f.severity ?? 'blocking'}) ${f.finding} (evidence: ${f.evidence})`,
+    ),
+  );
+  return lines.join('\n');
 }
 
 /** The two facts that bound any test plan: what runs the suite, and where a

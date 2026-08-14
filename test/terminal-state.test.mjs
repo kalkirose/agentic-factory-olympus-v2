@@ -45,6 +45,7 @@ const CLOSE_SET = new Set([
   'shipped', // the ship step's close-out
   'failed:<answer>', // the abandon route (lanes/shared.mjs)
   'failed:spec-gate-exhausted', // park spec-gate-exhausted, answered "abandon"
+  'failed:spec-gate-stalled', // park spec-gate-stalled, answered "abandon"
   'failed:second-zero-kill', // park second-zero-kill, answered "fail"
   'failed:unkilled-gap-survivor', // park unkilled-gap-survivor, answered "fail"
   'failed:second-stall', // park second-stall, answered "fail"
@@ -481,6 +482,63 @@ test('a spec-lint park replays across a restart, and one retry buys one invocati
   fx.answer(runId, { option: 'abandon' });
   const closed = (await waitClosed(fx.paths, runId)).find((e) => e.event === 'run-closed');
   assert.equal(closed.seat, 'suite');
+});
+
+test('the convergence park replays across a restart, and one answer buys one round', async (t) => {
+  let amendments = 0;
+  const fx = fixture(t, {
+    seats: {
+      'spec-birth': ({ prompt }) =>
+        prompt.includes('Amend the born spec')
+          ? {
+              files: {
+                [specPathFrom(prompt)]: FIXTURE_SPEC.replace(
+                  'The suite asserts it on one number.',
+                  `The suite asserts it on one number. Amendment ${++amendments}.`,
+                ),
+              },
+              report: { amendedSections: ['AC-1'], summary: 'amended' },
+            }
+          : {
+              files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
+              report: { outcome: 'spec-born', summary: 'born' },
+            },
+      // Two blocking findings every round: the open set never shrinks.
+      'spec-gate': () => ({
+        report: {
+          findings: [
+            { section: 'AC-1', finding: 'ungrounded claim', evidence: 'src/base.mjs' },
+            { section: 'AC-1', finding: 'unassertable clause', evidence: 'src/base.mjs' },
+          ],
+          summary: 'two blocking',
+        },
+      }),
+    },
+  });
+  const { runId } = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'spec-gate-stalled');
+  assert.deepEqual(park.options, ['round', 'abandon']);
+  const gateCalls = () => fx.calls.filter((c) => c.seat === 'spec-gate');
+  assert.equal(gateCalls().length, 2);
+  // The gate's position is the ledger and the run's files, so a restart over a
+  // parked run re-enters nothing and re-checks nothing.
+  const before = readEvents(runLedgerPath(fx.paths, runId));
+  await fx.restart();
+  assert.deepEqual(
+    readEvents(runLedgerPath(fx.paths, runId)).map((e) => e.event),
+    before.map((e) => e.event),
+  );
+  // One answer buys one amendment plus one re-check; the round it buys stalls
+  // again, and the park asks once more instead of reading the spent answer.
+  fx.answer(runId, { option: 'round' });
+  const second = await waitParked(fx.paths, runId, 'spec-gate-stalled', 2);
+  assert.ok(second.question.includes('2 blocking findings against 2 in round 2'));
+  assert.equal(gateCalls().length, 3);
+  fx.answer(runId, { option: 'abandon' });
+  const closed = (await waitClosed(fx.paths, runId)).find((e) => e.event === 'run-closed');
+  assert.equal(closed.state, 'failed');
+  assert.equal(closed.reason, 'spec-gate-stalled');
+  assert.equal(gateCalls().length, 3); // the abandon spends nothing
 });
 
 test('a park replays across a daemon restart and the answer still closes the run', async (t) => {

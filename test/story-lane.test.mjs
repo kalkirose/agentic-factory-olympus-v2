@@ -77,6 +77,58 @@ function specPathFrom(prompt) {
   return /absolute path: (.+)$/m.exec(prompt)[1].trim();
 }
 
+/** The fixture spec with its AC-1 section rewritten — one amendment's work. */
+function amendedSpec(n) {
+  return FIXTURE_SPEC.replace(
+    'The suite asserts it on one number.',
+    `The suite asserts it on one number. Amendment ${n} grounds it in src/base.mjs.`,
+  );
+}
+
+/**
+ * A spec-birth behavior that writes the spec at birth and rewrites the AC-1
+ * section on every amendment, so the gate's computed scope is never empty.
+ */
+function amendingBirth() {
+  let amendments = 0;
+  return ({ prompt }) =>
+    prompt.includes('Amend the born spec')
+      ? {
+          files: { [specPathFrom(prompt)]: amendedSpec(++amendments) },
+          report: { amendedSections: ['AC-1'], summary: 'amended' },
+        }
+      : {
+          files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
+          report: { outcome: 'spec-born', summary: 'born' },
+        };
+}
+
+/** A gate behavior that reports a blocking count per round, plus one note. */
+function gateFindings(counts) {
+  return ({ label }) => {
+    const round = Number(/-(\d+)$/.exec(label)[1]);
+    const blocking = counts[round - 1] ?? 0;
+    return {
+      report: {
+        findings: [
+          ...Array.from({ length: blocking }, (_, i) => ({
+            section: 'AC-1',
+            finding: `ungrounded claim ${i + 1}`,
+            evidence: 'src/base.mjs',
+          })),
+          {
+            section: 'AC-1',
+            finding: 'two helpers, not three',
+            evidence: 'src/base.mjs',
+            severity: 'note',
+          },
+        ],
+        summary: `${blocking} blocking`,
+      },
+    };
+  };
+}
+
 function fixtureParse(line) {
   if (!line.trim()) return null;
   try {
@@ -351,24 +403,8 @@ title: Alpha
 
 - Pick the rounding mode
 ${FIXTURE_ACCEPTANCE}`;
-  const seats = {
-    'spec-birth': ({ prompt }) =>
-      prompt.includes('Amend the born spec')
-        ? { report: { amendedSections: ['Goal'], summary: 'amended' } }
-        : {
-            files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
-            report: { outcome: 'spec-born', summary: 'born' },
-          },
-    'spec-gate': () => ({
-      report: {
-        findings: [
-          { section: 'Goal', finding: 'ungrounded claim', evidence: 'src/base.mjs' },
-          { section: 'Scope', finding: 'two helpers, not three', evidence: 'src/base.mjs', severity: 'note' },
-        ],
-        summary: 'defects',
-      },
-    }),
-  };
+  // The blocking set shrinks 2 → 1, so the gate converges and spends its cap.
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([2, 1]) };
   const fx = storyFixture(t, { seats, card });
   const runId = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'open-decisions');
@@ -404,26 +440,34 @@ ${FIXTURE_ACCEPTANCE}`;
   );
   const amend = fx.calls.find((c) => c.label === 'spec-birth-2');
   assert.ok(amend.prompt.includes('ungrounded claim'));
+  // The re-check is scoped by the diff of the two spec versions, not by the
+  // amendment's own account of it, and it carries the previous round's
+  // findings verbatim so each one is answered closed or still open.
   const recheck = fx.calls.find((c) => c.label === 'spec-gate-2');
-  assert.ok(recheck.prompt.includes('Re-check only these amended sections: Goal'));
+  assert.ok(recheck.prompt.includes('Sections amended since the previous round: AC-1'));
+  assert.ok(recheck.prompt.includes('This is a re-check, not a fresh review'));
+  assert.ok(recheck.prompt.includes('closed or still open'));
+  assert.ok(recheck.prompt.includes('The findings of the previous round, verbatim:'));
+  assert.ok(recheck.prompt.includes('- [AC-1] (blocking) ungrounded claim 1'));
+  assert.ok(recheck.prompt.includes('- [AC-1] (note) two helpers, not three'));
+  // A new defect outside the amended sections is a note; an authority
+  // contradiction blocks wherever it is found.
+  assert.ok(
+    recheck.prompt.includes(
+      'A new defect in a section that was NOT amended is reported with severity "note", never "blocking"',
+    ),
+  );
+  assert.ok(recheck.prompt.includes('blocking wherever you find it, amended or not'));
+  assert.ok(!recheck.prompt.includes('Review the whole spec'));
+  // The spec each round judged is kept beside the run's spec, so the scope is
+  // recomputed after a restart rather than remembered.
+  assert.ok(existsSync(join(fx.paths.archivedRuns, runId, 'spec-round-1.md')));
+  assert.ok(existsSync(join(fx.paths.archivedRuns, runId, 'spec-round-2.md')));
 });
 
 test('the owner buys one more spec-gate round, and the next cap parks again', async (t) => {
-  const seats = {
-    'spec-birth': ({ prompt }) =>
-      prompt.includes('Amend the born spec')
-        ? { report: { amendedSections: ['Goal'], summary: 'amended' } }
-        : {
-            files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
-            report: { outcome: 'spec-born', summary: 'born' },
-          },
-    'spec-gate': () => ({
-      report: {
-        findings: [{ section: 'Goal', finding: 'still ungrounded', evidence: 'src/base.mjs' }],
-        summary: 'defects',
-      },
-    }),
-  };
+  // 3 → 2 → 1: every round shrinks, so only the cap ever parks the run.
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 2, 1]) };
   const fx = storyFixture(t, { seats });
   const runId = await fx.launch();
   const first = await waitParked(fx.paths, runId, 'spec-gate-exhausted');
@@ -447,6 +491,94 @@ test('the owner buys one more spec-gate round, and the next cap parks again', as
   // The bought round is an amendment plus a re-check, like any other round.
   assert.ok(fx.calls.some((c) => c.label === 'spec-birth-3'));
   assert.ok(fx.calls.some((c) => c.label === 'spec-gate-3'));
+  // A shrinking gate never meets the convergence park.
+  assert.ok(!events.some((e) => e.event === 'park' && e.type === 'spec-gate-stalled'));
+});
+
+test('a shrinking blocking set runs to zero and passes the gate', async (t) => {
+  // 3 → 1 → 0. The cap parks between rounds 2 and 3, the owner buys the round,
+  // and the round it buys passes. Nothing stalls on the way.
+  const seats = {
+    'spec-birth': amendingBirth(),
+    'spec-gate': gateFindings([3, 1, 0]),
+    suite: () => ({
+      files: { 'tests/feature.test.mjs': STRONG_TEST },
+      report: {
+        suiteFiles: ['tests/feature.test.mjs'],
+        reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        summary: 'authored',
+      },
+    }),
+    adversary: () => ({
+      files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
+      report: { approach: 'stub', wrongness: 'f returns 0' },
+    }),
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const capped = await waitParked(fx.paths, runId, 'spec-gate-exhausted');
+  assert.ok(capped.question.includes('blocking findings: 1'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'round' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const rounds = events.filter((e) => e.event === 'spec-gate-round');
+  assert.deepEqual(
+    rounds.map((e) => [e.round, e.verdict, e.findings]),
+    [
+      [1, 'findings', 3],
+      [2, 'findings', 1],
+      [3, 'pass', 0],
+    ],
+  );
+  assert.ok(!events.some((e) => e.event === 'park' && e.type === 'spec-gate-stalled'));
+});
+
+test('a blocking set that does not shrink parks at once, cap unspent', async (t) => {
+  // 3 → 3. The cap allows two counted rounds and both ran, but the park that
+  // stops the gate is the convergence one: the set never shrank.
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const stalled = await waitParked(fx.paths, runId, 'spec-gate-stalled');
+  assert.ok(stalled.question.includes('not converging'));
+  assert.ok(stalled.question.includes('3 blocking findings against 3 in round 1'));
+  assert.deepEqual(stalled.options, ['round', 'abandon']);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const events = await waitClosed(fx.paths, runId);
+  const closed = events.find((e) => e.event === 'run-closed');
+  assert.equal(closed.state, 'failed');
+  assert.equal(closed.reason, 'spec-gate-stalled');
+  // The convergence park is the only one raised: the cap was never reached.
+  assert.deepEqual(
+    events.filter((e) => e.event === 'park').map((e) => e.type),
+    ['spec-gate-stalled'],
+  );
+  assert.equal(events.filter((e) => e.event === 'spec-gate-round').length, 2);
+});
+
+test('a growing blocking set parks before the cap, and one bought round runs', async (t) => {
+  // 2 → 4 → 4: growth parks, the bought round runs, and the round it buys
+  // grows again, so the gate parks a second time on the same condition.
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([2, 4, 4]) };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const first = await waitParked(fx.paths, runId, 'spec-gate-stalled');
+  assert.ok(first.question.includes('4 blocking findings against 2 in round 1'));
+  assert.ok(first.question.includes('rather than spend a counted round'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'round' });
+  const second = await waitParked(fx.paths, runId, 'spec-gate-stalled', 2);
+  assert.ok(second.question.includes('4 blocking findings against 4 in round 2'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').reason, 'spec-gate-stalled');
+  // One answer bought exactly one amendment and one re-check.
+  const rounds = events.filter((e) => e.event === 'spec-gate-round');
+  assert.deepEqual(
+    rounds.map((e) => e.round),
+    [1, 2, 3],
+  );
+  assert.ok(fx.calls.some((c) => c.label === 'spec-gate-3'));
+  assert.ok(!fx.calls.some((c) => c.label === 'spec-gate-4'));
 });
 
 test('blocking findings hold the spec; notes pass it and reach the suite seat', async (t) => {

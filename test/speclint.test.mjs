@@ -6,7 +6,12 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseIntentCard } from '../src/lanes/card.mjs';
-import { lintSpec, frozenExclusions, SPEC_LINE_CAP } from '../src/lanes/speclint.mjs';
+import {
+  amendedSections,
+  lintSpec,
+  frozenExclusions,
+  SPEC_LINE_CAP,
+} from '../src/lanes/speclint.mjs';
 import { parseTouchedBlock, parseTouchedPaths } from '../src/seats/diffpolicy.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
@@ -297,6 +302,66 @@ test('the touched-paths parse carries the owner and still answers the gate', () 
       ['tests/feature.test.mjs', 'suite'],
     ],
   );
+});
+
+// -- the amended set ---------------------------------------------------------
+
+const AMEND_BASE = spec();
+
+test('the amended set names the criterion section whose text moved', () => {
+  const moved = AMEND_BASE.replace(
+    'The behavior the criterion names.\n\nTest mapping:\n- tests/feature.test.mjs — f(2) is 4',
+    'The behavior the criterion names, grounded in src/feature.mjs.\n\nTest mapping:\n- tests/feature.test.mjs — f(2) is 4',
+  );
+  assert.notEqual(moved, AMEND_BASE);
+  assert.deepEqual(amendedSections(AMEND_BASE, moved, { card }), ['AC-1']);
+});
+
+test('the amended set names the touched-paths block and the environment section', () => {
+  const touched = AMEND_BASE.replace('src/feature.mjs — dev', 'src/doubler.mjs — dev');
+  assert.deepEqual(amendedSections(AMEND_BASE, touched, { card }), ['touched-paths']);
+  const environment = AMEND_BASE.replace(
+    '## Environment\n\nNone.',
+    '## Environment\n\nFACTOR_MODE, which the card names.',
+  );
+  assert.deepEqual(amendedSections(AMEND_BASE, environment, { card }), ['environment']);
+});
+
+test('an untouched part is absent from the amended set', () => {
+  assert.deepEqual(amendedSections(AMEND_BASE, AMEND_BASE, { card }), []);
+  // Blank lines and trailing whitespace are not an amendment.
+  const reflowed = AMEND_BASE.replaceAll('\n\n', '\n\n\n').replaceAll(
+    'Named constants:',
+    'Named constants:   ',
+  );
+  assert.deepEqual(amendedSections(AMEND_BASE, reflowed, { card }), []);
+});
+
+test('the amended set runs in card order, then touched paths, then environment', () => {
+  const moved = spec({
+    sections: [
+      section('AC-1', ['tests/feature.test.mjs — f(2) is 4.0']),
+      section('AC-2', ['tests/feature.test.mjs — f("x") raises']),
+    ].join('\n'),
+    touched: ['```touched-paths', 'src/doubler.mjs — dev', '```'].join('\n'),
+    environment: '## Environment\n\nFACTOR_MODE.',
+  });
+  assert.deepEqual(amendedSections(AMEND_BASE, moved, { card }), [
+    'AC-1',
+    'AC-2',
+    'touched-paths',
+    'environment',
+  ]);
+});
+
+test('a part only one version carries counts as moved', () => {
+  const dropped = spec({ sections: section('AC-1', ['tests/feature.test.mjs — f(2) is 4']) });
+  assert.deepEqual(amendedSections(AMEND_BASE, dropped, { card }), ['AC-2']);
+  const blockless = AMEND_BASE.replace(
+    ['```touched-paths', 'src/feature.mjs — dev', 'tests/feature.test.mjs — suite', '```'].join('\n'),
+    '',
+  );
+  assert.deepEqual(amendedSections(AMEND_BASE, blockless, { card }), ['touched-paths']);
 });
 
 // -- card criteria -----------------------------------------------------------

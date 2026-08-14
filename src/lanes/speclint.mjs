@@ -24,7 +24,19 @@ export const SPEC_LINE_CAP = 400;
 /** The seats a touched-paths entry may name as the owner of a file. */
 export const TOUCHED_OWNERS = ['dev', 'suite'];
 
+/**
+ * The two template parts that carry no criterion id. They are compared like
+ * sections because a re-check that skipped them would skip the two blocks a
+ * later stage acts on: the paths the capture judges, and the variables the
+ * stack must hold.
+ */
+const TOUCHED_PATHS_SECTION = 'touched-paths';
+const ENVIRONMENT_SECTION = 'environment';
+
 const HEADING = /^#{1,6}\s+(.*\S)\s*$/;
+const ENVIRONMENT_HEADING = /^environment\b/i;
+const TOUCHED_FENCE = /^```touched-paths\b/;
+const FENCE = /^```/;
 const LIST_ITEM = /^\s*[-*]\s+(.*\S)\s*$/;
 const TEST_MAPPING_LABEL = /^\**\s*test mapping\b/i;
 const SUPERSEDES_LABEL = /^\**\s*supersedes\b/i;
@@ -140,6 +152,85 @@ export function frozenExclusions(specText, testPaths = []) {
       )
       .map((entry) => entry.path),
   );
+}
+
+// -- the amended set ---------------------------------------------------------
+
+/**
+ * The template parts whose text moved between two versions of one spec. The
+ * spec gate scopes every re-check with it, so the scope is derived from the
+ * two documents rather than declared by the seat that edited one of them.
+ *
+ * A part is a criterion section, the touched-paths block, or the environment
+ * section. A part that only one version carries counts as moved. Comparison
+ * ignores blank lines and end-of-line whitespace: an amendment that reflows a
+ * paragraph changed the section, one that re-indents it did not.
+ *
+ * @param {string} priorText the spec as the previous round judged it
+ * @param {string} currentText the spec as it stands
+ * @param {{card: object}} ctx
+ * @returns {string[]} part names, in card order, then touched-paths, then
+ *   environment
+ */
+export function amendedSections(priorText, currentText, { card }) {
+  const ids = (card?.acceptance ?? []).map((c) => c.id);
+  const known = new Set(ids);
+  const before = specParts(priorText, known);
+  const after = specParts(currentText, known);
+  const order = [...ids, TOUCHED_PATHS_SECTION, ENVIRONMENT_SECTION];
+  const rank = (name) => {
+    const at = order.indexOf(name);
+    return at === -1 ? order.length : at;
+  };
+  return unique([...before.keys(), ...after.keys()])
+    .filter((name) => before.get(name) !== after.get(name))
+    .sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
+ * One spec as a map of part name to normalized text. The criterion-section
+ * rule is the lint's own (see `specSections`); the touched-paths block is read
+ * from its fence wherever it sits, so a block nested under a criterion heading
+ * still compares as itself.
+ */
+function specParts(specText, known) {
+  const lines = String(specText ?? '').split(/\r?\n/);
+  const parts = new Map();
+  const push = (name, line) => {
+    const text = line.trim();
+    if (text.length === 0) return;
+    if (!parts.has(name)) parts.set(name, []);
+    parts.get(name).push(text);
+  };
+  let current = null;
+  let headings = 0;
+  let fenced = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (fenced) {
+      if (FENCE.test(trimmed)) fenced = false;
+      else push(TOUCHED_PATHS_SECTION, line);
+      continue;
+    }
+    if (TOUCHED_FENCE.test(trimmed)) {
+      // An empty block is a part that exists; a missing block is not.
+      if (!parts.has(TOUCHED_PATHS_SECTION)) parts.set(TOUCHED_PATHS_SECTION, []);
+      fenced = true;
+      continue;
+    }
+    const heading = HEADING.exec(line);
+    if (heading) {
+      const title = heading[1];
+      const id = title.split(/\s+/)[0].replace(/^[`*]+/, '').replace(/[`*:.]+$/, '');
+      headings++;
+      if (isCriterionId(id) && (headings > 1 || known.has(id))) current = id;
+      else if (ENVIRONMENT_HEADING.test(title)) current = ENVIRONMENT_SECTION;
+      else current = null;
+      continue;
+    }
+    if (current) push(current, line);
+  }
+  return new Map([...parts].map(([name, body]) => [name, body.join('\n')]));
 }
 
 // -- rule (a) ----------------------------------------------------------------

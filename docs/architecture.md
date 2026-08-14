@@ -161,6 +161,13 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   severity: blocking findings hold the spec; notes do not, and travel to the
   suite seat as obligations to prove against running code. An omitted
   severity is blocking.
+- **Gate convergence** (ADR-0020): every round past the first is a re-check.
+  Its scope is computed, not declared — the round's spec copy diffed against
+  the spec as it stands, part by part — and it carries the previous round's
+  findings verbatim. A new defect in an unamended section is a note, except
+  an authority contradiction, which blocks anywhere. A round that does not
+  strictly shrink the blocking count parks the run at once
+  (`spec-gate-stalled`, same options as the cap park, remaining cap unspent).
 - **Adversary**: fixed 3 waves of throwaway wrong implementations, all
   evaluated to verdict, in disposable worktrees. A survivor is a demonstrated
   suite gap: one targeted amendment round (a killing test per survivor), then
@@ -253,10 +260,11 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 
 ## Escalations and the human
 
-- **Touchpoint catalog** (closed, nine park events): open decisions at build
+- **Touchpoint catalog** (closed, ten park events): open decisions at build
   start; grounding conflict at spec birth; intent conflict at spec gate;
-  spec-gate exhaustion; unkilled-gap survivor; second 0/3 adversary round;
-  second stall; card invalidated at ship-time sweep; provisioning gate.
+  spec-gate exhaustion; spec-gate non-convergence; unkilled-gap survivor;
+  second 0/3 adversary round; second stall; card invalidated at ship-time
+  sweep; provisioning gate.
 - Park = stamped escalation record (question, context refs, options) + a
   queued-stream event. The answer is a state change from any console session;
   the daemon validates, stamps who and when, resumes at the parked state.
