@@ -13,6 +13,9 @@
 // repair rounds (progress-gated, cap 3), suite-defect re-freeze, env/harness
 // operational fixes, one fresh pass per run, and the second-stall escalation.
 // Re-freeze steps and operational fixes never consume implementation budget.
+// An operational fix on a CI verdict whose open findings are all env-class
+// takes no cycle at all: it hands the run back to ship, where the CI re-run
+// is the test, and stamps the skip on the ledger.
 //
 // Every handler re-derives its position from the run ledger and the git
 // state, so a daemon restart resumes mid-verdict without memory.
@@ -67,6 +70,13 @@ import {
 
 const REPAIR_CAP = 3;
 const TRIAGE_CLASSES = ['code-defect', 'suite-defect', 'env', 'harness'];
+
+// Why an env-only CI verdict goes back to ship without a local cycle. The
+// stamp carries it, because a skipped sweep must read as a decision and not
+// as a step the run forgot.
+const SWEEP_SKIP_NOTE =
+  'every open finding is env-class on a CI verdict: no Tier-1 layer of this ' +
+  'tree exercises them, so the CI re-run is the test';
 
 /**
  * The story-lane continuation after the freeze. `afterVerdict` supplies the
@@ -203,7 +213,7 @@ function verdictHandler(mode, nextStage) {
         continue;
       }
       if (last.verdict === 'green') return { next: nextStage };
-      const directive = await ladder(ctx, base, mode, { events, renders, last });
+      const directive = await ladder(ctx, base, mode, { events, renders, last, nextStage });
       if (directive) return directive;
     }
   };
@@ -468,7 +478,7 @@ function triageChecks(report, { redLayers, priorOpen }) {
 
 // -- the response ladder -----------------------------------------------------
 
-async function ladder(ctx, base, mode, { events, renders, last }) {
+async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
   const index = findingIndex(events);
   const open = last.open.map((id) => index.get(id)).filter(Boolean);
   const suiteDefects = mode === 'story' ? open.filter((f) => f.class === 'suite-defect') : [];
@@ -501,6 +511,11 @@ async function ladder(ctx, base, mode, { events, renders, last }) {
   // waits on the human (the substrate needs provisioning the daemon must
   // never self-clear).
   if (ops.length > 0) {
+    // A fix the local spectrum cannot test hands the run straight back to
+    // ship, where the CI re-run tests it (ADR-0022). The stamp names the
+    // findings and the reason, so the missing cycle reads as a decision.
+    const skip = skipsSweep(last, open);
+    const skipStamp = skip ? { sweep: 'skipped', note: SWEEP_SKIP_NOTE } : {};
     const fixedIds = new Set(
       events.filter((e) => e.event === 'operational-fix').flatMap((e) => e.findings ?? []),
     );
@@ -510,7 +525,9 @@ async function ladder(ctx, base, mode, { events, renders, last }) {
         actor: ACTOR,
         findings: unfixed.map((f) => f.id),
         layers: [...new Set(unfixed.flatMap((f) => f.layers ?? []))],
+        ...skipStamp,
       });
+      if (skip) return { next: nextStage };
       acted = true;
     } else {
       const park = answeredPark(events, 'provisioning-gate');
@@ -526,7 +543,9 @@ async function ladder(ctx, base, mode, { events, renders, last }) {
         actor: park.answer.actor,
         findings: ops.map((f) => f.id),
         source: 'answer',
+        ...skipStamp,
       });
+      if (skip) return { next: nextStage };
       acted = true;
     }
   }
@@ -632,6 +651,28 @@ async function ladder(ctx, base, mode, { events, renders, last }) {
 
   if (!acted) throw new Error('verdict ladder found no route for the open findings');
   return null;
+}
+
+/**
+ * Whether the operational fix this verdict earns needs a local cycle behind
+ * it. It does not when every open finding is env-class on a verdict the CI
+ * checks rendered: the layers of this tree were green at this sha, the red
+ * ones are CI checks the spectrum does not hold, and no local layer can
+ * exercise the substrate the findings name. Any other open finding — a
+ * harness defect, a code defect, a suite defect — is something the local
+ * layers do judge, so the cycle runs (ADR-0022).
+ */
+function skipsSweep(last, open) {
+  return last.source === 'ci' && open.length > 0 && open.every((f) => f.class === 'env');
+}
+
+/**
+ * Whether the verdict stage handed a red render back to ship without a local
+ * cycle. The render stays red until the CI re-run answers it, so the ship
+ * stage reads this before it bounces a red verdict back.
+ */
+export function sweepSkippedAfter(events, seq) {
+  return events.some((e) => e.event === 'operational-fix' && e.sweep === 'skipped' && e.seq > seq);
 }
 
 /** The progress rule: a repair round must strictly shrink the open set. */

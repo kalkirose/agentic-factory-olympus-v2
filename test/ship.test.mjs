@@ -590,6 +590,82 @@ test('persistent CI reds enter the shared triage and the repair route', async (t
   assert.ok(!events.some((e) => e.event === 'ci-flake'));
 });
 
+/** A triage behavior that classes the red CI layers into the given classes. */
+function ciTriageSeat(classes) {
+  return ({ prompt }) => {
+    const layers = [...prompt.matchAll(/^- layer (\S+):$/gm)].map((m) => m[1]);
+    return {
+      report: {
+        findings: layers.flatMap((layer) =>
+          classes.map((cls) => ({
+            class: cls,
+            layers: [layer],
+            summary: `${cls} on ${layer}`,
+            evidence: `red output of ${layer}`,
+          })),
+        ),
+        persisting: [],
+        summary: 'triaged',
+      },
+    };
+  };
+}
+
+test('env-only CI findings skip the local sweep: the fix goes back for the re-run', async (t) => {
+  const fx = shipFixture(t, { seats: { 'verdict-triage': ciTriageSeat(['env']) } });
+  fx.forge.state.autoChecks = () => [red()];
+  let reruns = 0;
+  // The first re-run leaves the check red — the credential is still stale, so
+  // the red is persistent and triage classes it. The operational fix earns
+  // the second re-run, which is green.
+  fx.forge.state.onRerun = (sha) => fx.forge.setChecks(sha, [++reruns === 1 ? red() : green()]);
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const finding = events.find((e) => e.event === 'finding');
+  assert.equal(finding.class, 'env');
+  // the skip, stamped: which findings, and why no cycle ran
+  const fix = events.find((e) => e.event === 'operational-fix');
+  assert.equal(fix.sweep, 'skipped');
+  assert.deepEqual(fix.findings, [finding.id]);
+  assert.match(fix.note, /env-class/);
+  // no local cycle behind the fix: the spectrum ran once, for the candidate
+  assert.deepEqual(
+    [...new Set(events.filter((e) => e.event === 'layer-result').map((e) => e.cycle))],
+    [1],
+  );
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 2);
+  assert.equal(fx.forge.state.reruns.length, 2);
+});
+
+test('a mixed CI verdict keeps the local sweep: the repair round is judged', async (t) => {
+  const fx = shipFixture(t, {
+    seats: {
+      'verdict-triage': ciTriageSeat(['env', 'code-defect']),
+      'repair-dev': () => ({
+        files: { 'src/fix-note.mjs': 'export const note = 1;\n' },
+        report: { summary: 'repaired' },
+      }),
+      'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+    },
+  });
+  let shas = 0;
+  fx.forge.state.autoChecks = () => (++shas === 1 ? [red()] : [green()]);
+  fx.forge.state.onRerun = (sha) => fx.forge.setChecks(sha, [red()]);
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const classes = events.filter((e) => e.event === 'finding').map((e) => e.class);
+  assert.deepEqual(classes.sort(), ['code-defect', 'env']);
+  // the env finding still takes its operational fix, and the sweep stands
+  const fix = events.find((e) => e.event === 'operational-fix');
+  assert.equal(fix.sweep, undefined);
+  assert.ok(events.some((e) => e.event === 'repair-round'));
+  const cycles = new Set(events.filter((e) => e.event === 'layer-result').map((e) => e.cycle));
+  assert.ok(cycles.has(3), `the repair round was judged: cycles ${[...cycles]}`);
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').at(-1).verdict, 'green');
+});
+
 test('a competing merge updates the branch: merge main in, re-run, auto-merge fires', async (t) => {
   const fx = shipFixture(t);
   fx.forge.state.autoChecks = () => [running()];

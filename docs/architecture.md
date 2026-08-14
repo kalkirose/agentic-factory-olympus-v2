@@ -222,7 +222,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   and carries the remaining greens forward, marked `carried` in the record so
   no result reads as a fresh proof. A clean targeted cycle runs every layer it
   has not yet run, at that sha, before the verdict turns green; a red that
-  confirmation sweep turns up enters triage like any other (ADR-0022).
+  confirmation sweep turns up enters triage like any other. A CI verdict whose
+  open findings are all env-class runs no cycle at all: the operational fix
+  stamps `sweep: 'skipped'` with the findings and the reason, the run goes back
+  to ship, and the CI re-run is the test (ADR-0022).
 - **Flake filter.** Each red layer re-runs once, red-only, by process policy.
   A green re-run writes a flake event, never a finding. Survivors are
   persistent reds; only these enter triage.
@@ -235,8 +238,9 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   3). Stall or a verified approach-level finding → one fresh pass per run,
   briefed by born spec + frozen suite + stall brief, never the prior tree; a
   second stall escalates. Suite-defect → re-freeze step by the suite seat at
-  a new SHA. Env/harness → operational fix by an orchestrator job. Re-freeze
-  and operational fixes cost no implementation budget.
+  a new SHA. Env/harness → operational fix by an orchestrator job; an env-only
+  CI verdict takes no cycle behind its fix. Re-freeze and operational fixes
+  cost no implementation budget.
 - **Fury round.** Six lenses on five seats (architecture + minimality merge
   into one code-shape seat with per-lens reporting; interface fires only on
   UI diffs). One round per pass, on the candidate tree, before the verdict

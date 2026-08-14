@@ -10,8 +10,10 @@
 // wall-clock timeout detects anything. Persistent CI reds render a red
 // verdict (`source: 'ci'`) and re-enter the verdict stage — the same
 // four-class triage, the same routes, the same shared budgets as in-run
-// reds. Every handler re-derives its position from the run ledger, the git
-// state, and the forge, so a daemon restart resumes mid-ship without memory.
+// reds. An env-only verdict comes back here for the re-run without a local
+// cycle; every other route judges the tree again first. Every handler
+// re-derives its position from the run ledger, the git state, and the forge,
+// so a daemon restart resumes mid-ship without memory.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { repairTicketPath, reconcileTicketPath, runReportPath } from '../daemon/home.mjs';
@@ -41,6 +43,7 @@ import {
   currentPass,
   freshPass,
   answerCount,
+  sweepSkippedAfter,
 } from './verdict.mjs';
 import {
   ACTOR,
@@ -124,9 +127,18 @@ function shipHandler({ forgeFor, pollMs }) {
       if (ctx.stopped()) return null;
       const events = runEvents(ctx);
       // A crash between a rendered red verdict and the stage transition
-      // resumes here; red verdicts belong to the verdict stage.
+      // resumes here; red verdicts belong to the verdict stage. The one red
+      // render that stays here is the env-only CI verdict the ladder handed
+      // back with its sweep skipped: the re-run this stage asks for is the
+      // test of the fix, and bouncing it would be the loop (ADR-0022).
       const lastRender = findLast(events, 'verdict-rendered');
-      if (lastRender && lastRender.verdict === 'red') return { next: 'verdict' };
+      if (
+        lastRender &&
+        lastRender.verdict === 'red' &&
+        !sweepSkippedAfter(events, lastRender.seq)
+      ) {
+        return { next: 'verdict' };
+      }
       if (findLast(events, 'merged')) return { next: 'close-out' };
       // A fresh pass interrupted between its stamp and its dev seat resumes
       // here too; finish it before touching the forge.

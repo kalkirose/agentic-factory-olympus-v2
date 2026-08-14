@@ -1,6 +1,6 @@
 # ADR-0022: Targeted verdict re-runs, carried greens, and the confirmation sweep
 
-Status: accepted (2026-08-14)
+Status: accepted (2026-08-15)
 
 ## Decision
 
@@ -27,6 +27,14 @@ Tier-1 spectrum, and no green verdict rests on a result the cycle did not earn.
   layer this cycle has not yet run, at this sha. A red it turns up enters
   triage exactly like a first-cycle red. The record and the `verdict-rendered`
   stamp carry `sweep` and, where it fired, `confirmation`.
+- **An env-only CI verdict runs no cycle at all.** When a verdict the CI
+  checks rendered holds open findings and every one of them is env-class, the
+  operational fix hands the run straight back to the ship stage, and the CI
+  re-run the fix earns is the test. The `operational-fix` stamp carries
+  `sweep: 'skipped'`, the findings it covers, and the reason, so the missing
+  cycle reads as a decision. One open finding of any other class — harness,
+  code-defect, suite-defect — puts the cycle back, because those are defects
+  the local layers judge.
 - **Nothing else moves.** The flake filter stays one red-only re-run inside a
   cycle. Green stays zero reds and zero open findings. Triage, the response
   ladder, the repair budget, and the park machinery read the same record they
@@ -36,7 +44,8 @@ Tier-1 spectrum, and no green verdict rests on a result the cycle did not earn.
 is superseded here.**
 
 The plan lives in `cyclePlan()` in `src/lanes/spectrum.mjs`, beside the graph
-walk it shares.
+walk it shares. The env-only route lives in the response ladder in
+`src/lanes/verdict.mjs`, beside the operational fix it stamps.
 
 ## What this is for
 
@@ -100,6 +109,36 @@ not know. The sweep runs before green, so the worst case is a red found one
 cycle later than a full sweep would have found it. A false green is not
 reachable.
 
+## Why an env-only CI verdict is worth no local layers
+
+An env finding on a CI verdict names substrate this tree does not hold: a
+stale credential, a registry that refused, a runner the project does not own.
+Two facts about that verdict decide the route. Every Tier-1 layer was green at
+this sha, because a green verdict is what sent the run to ship. The red layers
+are CI checks, and the local spectrum does not hold them. A cycle behind the
+fix would therefore re-prove 28 layers that are proven already and reach
+nothing the finding names. On the reference project that is ten minutes per
+fix, and one run can be granted the fix more than once.
+
+The cost is the smaller half. A green spectrum resolves the findings the last
+verdict left open, on the rule that their evidence is gone. For an env finding
+a CI red raised, the evidence is not gone: the spectrum that just ran never
+went near it, so a cycle here would close the finding on a proof it never
+earned. The skip leaves the finding open, hands the run back to ship, and lets
+the CI re-run answer it — green, and the PR merges; red again, and the same
+triage renders the finding again and the second one parks the provisioning
+gate for the human.
+
+The red render stands while the run is back in the ship stage, and that is the
+honest state: nothing has proven the substrate yet. The ship stage would
+ordinarily bounce a red render back to the verdict, so it reads the skip stamp
+and stays. That stamp is the only thing between the two stages, which is why
+it names the findings and the reason rather than a bare flag.
+
+A harness finding takes the cycle. It is a gate-integrity defect in the
+machinery this tree runs, so the local layers are exactly what judges its fix.
+This is the one route where the ladder's env and harness classes part company.
+
 ## Replay
 
 The plan reads the ledger and nothing else: the last `verdict-rendered` for
@@ -109,6 +148,12 @@ so a daemon that dies mid-cycle derives the same set when it comes back, and
 the layers already stamped are skipped as they always were. A restart after
 the confirmation sweep sees every layer stamped, re-derives the same clean
 result, and writes the same record.
+
+The env-only route replays the same way. Its inputs are the last render's
+source, the classes of the findings that render left open, and the
+`operational-fix` stamp that follows it. A daemon that dies between the stamp
+and the stage transition finds the stamp when it comes back, and the ship
+stage takes the run from there.
 
 ## Fallback paths
 
@@ -122,3 +167,9 @@ If some projects want targeting and others do not, the same return reads a
 `gates.targetedReruns` flag from project config, defaulting to on. Trigger: a
 project whose layers share state the `needs` graph does not declare. Reversal
 cost: low, one config field and one condition.
+
+If a project's Tier-1 layers do reach the substrate an env finding names — a
+smoke layer that calls the same external service the CI check calls — the
+env-only skip drops and every operational fix takes its cycle again. Trigger:
+one env finding a local layer could have proven or disproven. Reversal cost:
+none, one condition in the ladder.
