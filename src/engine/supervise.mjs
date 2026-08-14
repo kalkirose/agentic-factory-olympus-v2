@@ -19,6 +19,7 @@
 import { spawn } from 'node:child_process';
 import { resolveArgv } from './executable.mjs';
 import { seatSpawnOptions, terminateTree } from './processes.mjs';
+import { seatExecutesSuite } from '../seats/seatmap.mjs';
 
 // Bounds for the failure evidence. A ledger records what a reader needs to
 // name the cause, not the transcript: the last stderr and the tail of stdout,
@@ -36,26 +37,41 @@ const STDOUT_LINE_CHARS = 200;
  * `{cost?, note?, meta?}` or null. Only `cost` and `note` stamp the ledger;
  * `meta` fields accumulate into the resolved result for the caller (actual
  * model, session id). `spawnFields` adds caller fields (model, effort,
- * attempt) to the seat-spawned stamp.
+ * attempt) to the seat-spawned stamp. `secretEnv` is the instance config's
+ * secret name patterns, stripped from every seat that does not execute the
+ * suite.
  * @param {import('../telemetry/stores.mjs').TelemetryStore} store
  * @param {{seat: string, cmd: string, args?: string[], cwd?: string,
- *   env?: object, costCeiling?: number, parseLine?: (line: string) => object|null,
- *   spawnFields?: object}} opts
+ *   env?: object, secretEnv?: string[], costCeiling?: number,
+ *   parseLine?: (line: string) => object|null, spawnFields?: object}} opts
  * @returns {{done: Promise<object>, terminate: (reason: string) => void}}
  */
 export function superviseSeat(
   store,
-  { seat, cmd, args = [], cwd, env, costCeiling, parseLine = parseProgress, spawnFields = {} },
+  {
+    seat,
+    cmd,
+    args = [],
+    cwd,
+    env,
+    secretEnv,
+    costCeiling,
+    parseLine = parseProgress,
+    spawnFields = {},
+  },
 ) {
   if (typeof seat !== 'string' || seat.length === 0) throw new Error('supervise requires a seat id');
   if (typeof cmd !== 'string' || cmd.length === 0) throw new Error('supervise requires a cmd');
+  const { env: childEnv, stripped } = seatEnv(seat, env, secretEnv);
   store.append('seat-spawned', {
     ...spawnFields,
     actor: 'daemon',
     seat,
     ...(costCeiling != null && { costCeiling }),
+    // The count, never the names: a ledger a reader outside this machine may
+    // hold says how much was withheld, not what the machine holds.
+    ...(stripped > 0 && { envStripped: stripped }),
   });
-  const childEnv = env ? { ...process.env, ...env } : process.env;
   // The seat command (`claudeCommand`) names a tool; the host decides which
   // file that is. A resolution refusal is a spawn failure like any other.
   let spec;
@@ -195,6 +211,45 @@ export function superviseSeat(
       void terminateTree(child);
     },
   };
+}
+
+/**
+ * The seat's environment, and how many variables the strip removed.
+ *
+ * The machine's secrets follow the ability to execute the project's suite and
+ * nothing else. A seat that never runs a gate command has no use for a payment
+ * or auth credential, and a throwaway adversary tree or a read-only review seat
+ * is the last place one should be readable. So every variable whose name
+ * matches a configured `secretEnv` pattern is removed before the spawn, for
+ * every seat the seat map does not mark `executesSuite`. Only those names go:
+ * the CLI still needs its own auth and system environment to run at all, so
+ * this is a strip, never an allowlist. Without patterns the environment is
+ * exactly what it was before the feature existed, for every seat.
+ */
+function seatEnv(seat, env, patterns) {
+  const base = env ? { ...process.env, ...env } : process.env;
+  if (!Array.isArray(patterns) || patterns.length === 0) return { env: base, stripped: 0 };
+  if (seatExecutesSuite(seat)) return { env: base, stripped: 0 };
+  const kept = {};
+  let stripped = 0;
+  for (const [name, value] of Object.entries(base)) {
+    if (matchesSecret(name, patterns)) stripped++;
+    else kept[name] = value;
+  }
+  return { env: kept, stripped };
+}
+
+// A pattern is an environment-variable name: exact (`DATABASE_URL`), or one
+// `*` at an end (`STRIPE_*`, `*_TOKEN`), or `*` alone for every name.
+// Case-sensitive, because the names are. The instance config refuses any other
+// shape, so nothing here can silently match nothing.
+function matchesSecret(name, patterns) {
+  return patterns.some((pattern) => {
+    if (pattern === '*') return true;
+    if (pattern.endsWith('*')) return name.startsWith(pattern.slice(0, -1));
+    if (pattern.startsWith('*')) return name.endsWith(pattern.slice(1));
+    return name === pattern;
+  });
 }
 
 // The failure evidence, omitted whole when the child emitted nothing.

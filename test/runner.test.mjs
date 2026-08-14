@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { runSeat, unavailableMemo } from '../src/seats/runner.mjs';
 import { parseClaudeLine } from '../src/seats/claude.mjs';
 import { ModelSemaphores } from '../src/seats/semaphore.mjs';
@@ -46,6 +46,17 @@ function fixtureCommand({ report, reportPath, lines = [], exitCode = 0 }) {
     `process.exit(${exitCode});`,
   ].join('\n');
   return { cmd: process.execPath, args: ['-e', script], parseLine: fixtureParse };
+}
+
+// A fixture seat that also writes the environment it inherited, which is the
+// only way to read what a spawned process was actually given.
+function envDumpCommand({ report, reportPath, dump }) {
+  const script = [
+    `const fs = require('fs');`,
+    `fs.writeFileSync(${JSON.stringify(dump)}, JSON.stringify(process.env));`,
+    `fs.writeFileSync(${JSON.stringify(reportPath)}, ${JSON.stringify(JSON.stringify(report))});`,
+  ].join('\n');
+  return { cmd: process.execPath, args: ['-e', script] };
 }
 
 function fixtureParse(line) {
@@ -490,6 +501,29 @@ test('a fixture seat completes the contract loop end to end', async (t) => {
   assert.equal(report.model, DEFAULT_MODEL);
   assert.equal(report.cost, 2);
   assert.ok(!events.some((e) => e.event === 'seat-failure'));
+});
+
+// The machine names its secrets in instance config; the runner is what carries
+// them to the spawn, so the child of a session is where the strip is proven.
+test('a seat session spawns a child without the secrets the seat may not hold', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'spec-gate');
+  const dump = runReportPath(paths, 'r1', 'env-dump');
+  const result = await runSeat(store, {
+    seat: 'spec-gate',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    env: { PAY_SECRET_KEY: 'sk-test-1', RUN_ID: 'r1' },
+    secretEnv: ['PAY_SECRET_*'],
+    commandFor: () => envDumpCommand({ report: { verdict: 'pass' }, reportPath, dump }),
+  });
+  assert.equal(result.ok, true);
+  const seen = JSON.parse(readFileSync(dump, 'utf8'));
+  assert.equal(seen.PAY_SECRET_KEY, undefined);
+  assert.equal(seen.RUN_ID, 'r1');
+  const spawned = readEvents(runLedgerPath(paths, 'r1')).find((e) => e.event === 'seat-spawned');
+  assert.equal(spawned.envStripped, 1);
 });
 
 test('a broken report triggers exactly one corrective re-prompt, then success', async (t) => {

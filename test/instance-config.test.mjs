@@ -75,6 +75,29 @@ test('worktreeRoot is optional, absolute, and passes through untouched', () => {
   }
 });
 
+test('secretEnv is optional and holds name patterns the matcher can honor', () => {
+  // Absent by default: no configuration means no stripping anywhere.
+  assert.equal(defaultInstanceConfig().secretEnv, undefined);
+  assert.equal(withDefaults({ version: 1 }).secretEnv, undefined);
+  const patterns = ['PAY_SECRET_*', '*_TOKEN', 'ADMIN_PASSWORD', '*'];
+  assert.deepEqual(validateInstanceConfig({ version: 1, secretEnv: patterns }), []);
+  assert.deepEqual(withDefaults({ version: 1, secretEnv: patterns }).secretEnv, patterns);
+  assert.deepEqual(validateInstanceConfig({ version: 1, secretEnv: [] }), []);
+  for (const bad of ['PAY_*', ['PAY_*', ''], [7], { PAY: true }]) {
+    assert.deepEqual(
+      validateInstanceConfig({ version: 1, secretEnv: bad }).map((e) => e.path),
+      ['secretEnv'],
+      `expected ${JSON.stringify(bad)} to be rejected`,
+    );
+  }
+  // A star the matcher cannot honor is refused at load, not matched against
+  // nothing: a rejected edit is loud, a silent non-match leaks.
+  assert.deepEqual(
+    validateInstanceConfig({ version: 1, secretEnv: ['PAY_*_KEY', '*PAY*'] }).map((e) => e.path),
+    ['secretEnv.PAY_*_KEY', 'secretEnv.*PAY*'],
+  );
+});
+
 test('an invalid file throws with detail', (t) => {
   const home = tempDir();
   t.after(() => removeDir(home));

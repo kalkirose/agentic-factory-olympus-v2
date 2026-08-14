@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   SEATS,
   seatDef,
+  seatExecutesSuite,
   DEFAULT_MODEL,
   CERTIFICATION_MODEL,
   DEFAULT_EFFORT,
@@ -40,6 +41,18 @@ test('web tools and Explore subagents go to the named seats only', () => {
 
 test('an unknown seat is an error, never a default', () => {
   assert.throws(() => seatDef('minos'), /unknown seat/);
+});
+
+// The machine's secrets follow this flag and nothing else, so the seats that
+// carry it are a policy statement, not an implementation detail.
+test('only the seats that run the project suite are marked as executing it', () => {
+  for (const [name, def] of Object.entries(SEATS)) {
+    const expected = ['dev', 'repair-dev', 'suite'].includes(name);
+    assert.equal(def.executesSuite, expected, name);
+    assert.equal(seatExecutesSuite(name), expected, name);
+  }
+  // Fail closed: a name the map does not hold gets no credentials.
+  assert.equal(seatExecutesSuite('minos'), false);
 });
 
 test('the prompt carries both blocks, the report path, and the policy lines', () => {

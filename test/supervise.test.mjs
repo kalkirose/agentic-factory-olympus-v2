@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { superviseSeat } from '../src/engine/supervise.mjs';
 import { openRunStore } from '../src/telemetry/stores.mjs';
@@ -165,6 +165,77 @@ test('a spawn error stamps seat-failure on the spawn route', async (t) => {
   assert.equal(result.reason, 'spawn');
   const failure = readEvents(runLedgerPath(paths, 'r1')).find((e) => e.event === 'seat-failure');
   assert.equal(failure.reason, 'spawn');
+});
+
+// -- secret environment -------------------------------------------------------
+
+// The machine's credentials, as a host that runs a payment provider's test
+// mode holds them, plus the near misses that must survive every pattern.
+const SECRET_PATTERNS = ['PAY_SECRET_*', '*_TOKEN', 'ADMIN_PASSWORD'];
+const MACHINE_ENV = {
+  PAY_SECRET_KEY: 'sk-test-1',
+  PAY_SECRET_WEBHOOK: 'whsec-1',
+  SESSION_TOKEN: 'tok-1',
+  ADMIN_PASSWORD: 'pw-1',
+  PAY_PUBLIC_KEY: 'pk-test-1',
+  TOKEN_STORE: 'store-1',
+  ADMIN_PASSWORD_HINT: 'the usual one',
+  RUN_ID: 'r1',
+};
+const SECRET_NAMES = ['PAY_SECRET_KEY', 'PAY_SECRET_WEBHOOK', 'SESSION_TOKEN', 'ADMIN_PASSWORD'];
+const KEPT_NAMES = ['PAY_PUBLIC_KEY', 'TOKEN_STORE', 'ADMIN_PASSWORD_HINT', 'RUN_ID'];
+
+// The environment a seat child actually inherited: the child writes it to a
+// file, because nothing outside the process can read what it was given.
+async function spawnedEnv(t, store, { seat, env, secretEnv }) {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const file = join(dir, 'env.json');
+  const dump = `require('fs').writeFileSync(${JSON.stringify(file)}, JSON.stringify(process.env));`;
+  const result = await superviseSeat(store, { seat, ...nodeSeat(dump), env, secretEnv }).done;
+  assert.equal(result.failed, false);
+  return JSON.parse(readFileSync(file, 'utf8'));
+}
+
+test('a seat that never runs the suite is spawned without the machine secrets', async (t) => {
+  const { paths, store } = setup(t);
+  const seen = await spawnedEnv(t, store, {
+    seat: 'spec-gate',
+    env: MACHINE_ENV,
+    secretEnv: SECRET_PATTERNS,
+  });
+  for (const name of SECRET_NAMES) assert.equal(seen[name], undefined, name);
+  // Everything else is untouched, including the names a pattern nearly caught.
+  for (const name of KEPT_NAMES) assert.equal(seen[name], MACHINE_ENV[name], name);
+  // A strip, never an allowlist: the CLI keeps the host environment it needs
+  // to run at all.
+  assert.ok(Object.keys(seen).some((name) => name.toLowerCase() === 'path'));
+  const spawned = readEvents(runLedgerPath(paths, 'r1')).find((e) => e.event === 'seat-spawned');
+  // The count, and never the names.
+  assert.equal(spawned.envStripped, SECRET_NAMES.length);
+  assert.ok(!SECRET_NAMES.some((name) => JSON.stringify(spawned).includes(name)));
+});
+
+test('a seat that executes the suite keeps the environment whole', async (t) => {
+  const { paths, store } = setup(t);
+  const seen = await spawnedEnv(t, store, {
+    seat: 'dev',
+    env: MACHINE_ENV,
+    secretEnv: SECRET_PATTERNS,
+  });
+  for (const [name, value] of Object.entries(MACHINE_ENV)) assert.equal(seen[name], value, name);
+  const spawned = readEvents(runLedgerPath(paths, 'r1')).find((e) => e.event === 'seat-spawned');
+  assert.equal(spawned.envStripped, undefined);
+});
+
+test('without patterns every seat inherits the same environment', async (t) => {
+  const { paths, store } = setup(t);
+  const gate = await spawnedEnv(t, store, { seat: 'spec-gate', env: MACHINE_ENV });
+  const dev = await spawnedEnv(t, store, { seat: 'dev', env: MACHINE_ENV });
+  assert.deepEqual(gate, dev);
+  // Identical because nothing was removed, not because both were emptied.
+  for (const name of SECRET_NAMES) assert.equal(gate[name], MACHINE_ENV[name], name);
+  assert.ok(!readEvents(runLedgerPath(paths, 'r1')).some((e) => e.envStripped !== undefined));
 });
 
 // The seat command comes from config the same way a gate command does, so a

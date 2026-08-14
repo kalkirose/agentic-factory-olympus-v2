@@ -89,8 +89,9 @@ resolution.
 Two levels; the ownership test decides placement.
 
 - **Instance config** — daemon home, machine-scoped: model semaphores, paths,
-  ledger home, notification-stream wiring, slot caps keyed by project. The
-  console edits it live; no PR.
+  ledger home, notification-stream wiring, slot caps keyed by project, and the
+  name patterns this host holds credentials in (`secretEnv`). The console edits
+  it live; no PR.
 - **Project config** — one JSON versioned in the project repo: repo facts,
   commands, gates, conventions, lane specifics, per-lane budget thresholds,
   and the tripwire registry.
@@ -135,6 +136,12 @@ Two levels; the ownership test decides placement.
   across all runs. A seat waits on the semaphore; it never fails on it.
 - **Web tools.** Web search on spec-birth and dev seats only. Judgment seats
   get none.
+- **Secrets.** The machine's credentials follow suite execution. A seat marked
+  `executesSuite` in the seat map (dev, repair-dev, suite) inherits the host
+  environment whole; every other seat is spawned with each variable matching an
+  instance-config `secretEnv` pattern removed, and `seat-spawned` carries how
+  many went (never which). Project-config commands always run with the full
+  environment (ADR-0023).
 
 ## Pre-freeze chain (story lane)
 

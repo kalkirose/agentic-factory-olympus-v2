@@ -173,7 +173,7 @@ export class Daemon {
         paths: this.paths,
         ledger: this.ledger,
         semaphores: this.semaphores,
-        seatDefaults: this.evalSeatDefaults ?? (() => ({ claudeCommand: this.config.claudeCommand })),
+        seatDefaults: this.evalSeatDefaults ?? (() => this.seatDefaults()),
       });
       this.engine = new RunEngine(this.paths, {
         instanceStore: this.ledger,
@@ -185,7 +185,7 @@ export class Daemon {
         },
         onParked: (info) => this.frontier.queueSweep(info.project),
         semaphores: this.semaphores,
-        seatDefaults: () => ({ claudeCommand: this.config.claudeCommand }),
+        seatDefaults: () => this.seatDefaults(),
         onEvent: (project, line) => this.tripwires?.notify(project, line),
       });
       for (const [name, lane] of Object.entries(this.lanes)) {
@@ -511,6 +511,18 @@ export class Daemon {
   }
 
   // -- instance config ------------------------------------------------------
+
+  /**
+   * The machine-scoped seat options, read fresh per dispatch so a live config
+   * edit reaches the next seat: which tool the seat runs as, and which
+   * environment names hold this host's credentials.
+   */
+  seatDefaults() {
+    return {
+      claudeCommand: this.config.claudeCommand,
+      ...(this.config.secretEnv !== undefined && { secretEnv: this.config.secretEnv }),
+    };
+  }
 
   watchConfig() {
     const watcher = watch(this.paths.home, (kind, filename) => {

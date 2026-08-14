@@ -254,3 +254,16 @@ test(
     }
   },
 );
+
+// Project-config commands are the verdict's own instrument: the Tier-1
+// spectrum, the suite, the lint gate. A payment test that cannot read the
+// machine's test-mode credentials is a red the tree did not earn, so nothing
+// on this path narrows the environment.
+test('runCommand hands the machine environment to a command whole', async () => {
+  const result = await runCommand(
+    [process.execPath, '-e', 'console.log(process.env.PAY_SECRET_KEY ?? "absent")'],
+    { env: { PAY_SECRET_KEY: 'sk-test-1' } },
+  );
+  assert.equal(result.code, 0);
+  assert.match(result.output, /sk-test-1/);
+});

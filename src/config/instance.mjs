@@ -27,6 +27,11 @@ export function defaultInstanceConfig() {
     // `<home>/worktrees`. A machine whose path ceiling a run's deepest test
     // artifact would cross sets a short root and every run path shortens with
     // it.
+    //
+    // Absent by default too: `secretEnv`, the env-var name patterns this host
+    // holds credentials in. Named, they are stripped from every seat that does
+    // not execute the project's suite (ADR-0023). Absent, no seat's
+    // environment differs from the daemon's own.
   };
 }
 
@@ -76,6 +81,24 @@ export function validateInstanceConfig(config) {
       err('worktreeRoot', 'must be a non-empty string');
     } else if (!isAbsolute(config.worktreeRoot)) {
       err('worktreeRoot', 'must be an absolute path');
+    }
+  }
+  // Which names hold credentials is machine knowledge, like the argv keys: the
+  // same project runs on a host that has them and a host that does not.
+  if (config.secretEnv !== undefined) {
+    const patterns = config.secretEnv;
+    const ok =
+      Array.isArray(patterns) && patterns.every((p) => typeof p === 'string' && p.length > 0);
+    if (!ok) err('secretEnv', 'must be an array of non-empty name patterns');
+    else {
+      // A pattern the matcher cannot honor is refused here rather than matched
+      // against nothing: a rejected edit is loud, a silent non-match leaks.
+      for (const pattern of patterns) {
+        const stars = pattern.split('*').length - 1;
+        if (stars > 1 || (stars === 1 && !pattern.startsWith('*') && !pattern.endsWith('*'))) {
+          err(`secretEnv.${pattern}`, 'may hold one `*`, at the start or the end');
+        }
+      }
     }
   }
   for (const key of ['composeCommand', 'claudeCommand', 'ghCommand']) {

@@ -14,6 +14,9 @@ export const DEFAULT_EFFORT = 'xhigh';
 // explore: max read-only Explore subagents; 0 = all subagents banned.
 // instanceScoped: runs without a worktree or a stack, stamps to the
 // instance ledger.
+// executesSuite: the seat runs the project's gate and suite commands to check
+// its own work, so it needs whatever credentials those commands need. It is
+// the one policy the machine's secrets follow (ADR-0023).
 function seat(overrides = {}) {
   return Object.freeze({
     model: DEFAULT_MODEL,
@@ -21,6 +24,7 @@ function seat(overrides = {}) {
     web: false,
     explore: 0,
     instanceScoped: false,
+    executesSuite: false,
     ...overrides,
   });
 }
@@ -29,11 +33,11 @@ export const SEATS = Object.freeze({
   // story lane, pre-freeze
   'spec-birth': seat({ web: true }),
   'spec-gate': seat(),
-  suite: seat(),
+  suite: seat({ executesSuite: true }),
   adversary: seat(),
   // implementation
-  dev: seat({ web: true, explore: 2 }),
-  'repair-dev': seat({ web: true, explore: 2 }),
+  dev: seat({ web: true, explore: 2, executesSuite: true }),
+  'repair-dev': seat({ web: true, explore: 2, executesSuite: true }),
   // verdict
   'verdict-triage': seat({ model: CERTIFICATION_MODEL }),
   'fury-spec': seat(),
@@ -54,4 +58,14 @@ export function seatDef(name) {
   const def = SEATS[name];
   if (!def) throw new Error(`unknown seat: ${name}`);
   return def;
+}
+
+/**
+ * Whether a seat executes the project's suite. The one reader is the secret
+ * strip at the spawn site, and it answers false for a name the map does not
+ * hold: a seat nobody declared gets no credentials, which is the safe way to
+ * be wrong about a security policy.
+ */
+export function seatExecutesSuite(name) {
+  return SEATS[name]?.executesSuite === true;
 }

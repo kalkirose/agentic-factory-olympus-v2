@@ -37,7 +37,7 @@ const ACTOR = 'daemon';
  *   constitution?: string|null,
  *   substitute?: {model: string, reason: string},
  *   semaphores?: import('./semaphore.mjs').ModelSemaphores,
- *   cwd?: string, env?: object, costCeiling?: number,
+ *   cwd?: string, env?: object, secretEnv?: string[], costCeiling?: number,
  *   claudeCommand?: string[], denyTools?: string[],
  *   commandFor?: (opts: object) => {cmd: string, args: string[], parseLine?: Function},
  *   supervise?: (opts: object) => Promise<object>}} opts
@@ -57,6 +57,7 @@ export async function runSeat(store, opts) {
     semaphores,
     cwd,
     env,
+    secretEnv,
     costCeiling,
     claudeCommand,
     denyTools,
@@ -128,6 +129,7 @@ export async function runSeat(store, opts) {
         args: spec.args,
         cwd,
         env,
+        secretEnv,
         costCeiling,
         ...(spec.parseLine && { parseLine: spec.parseLine }),
         spawnFields: {
