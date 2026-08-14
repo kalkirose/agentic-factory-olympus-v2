@@ -14,6 +14,12 @@
 // only ever moves a seat from the certification model to the default model,
 // which raises capability, so no floor is at risk. The default model refusing
 // too is a loud failure, not a second retry.
+//
+// Quota memo: a run that already watched the vendor refuse a model, and holds
+// the reset instant the vendor declared, degrades at the spawn instead of
+// buying the same rejection again (ADR-0021). The stamp is the same
+// `model-degraded`, marked `memo` — no degrade is ever silent, and the
+// evidence it stood on is named.
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { superviseSeat } from '../engine/supervise.mjs';
@@ -80,11 +86,28 @@ export async function runSeat(store, opts) {
     });
   }
   mkdirSync(dirname(reportPath), { recursive: true });
+  let degraded = false;
+  // The memo is read before the semaphore: a seat that will run on the default
+  // model must hold the default model's slot, not the refused model's.
+  const memo = model === DEFAULT_MODEL ? null : unavailableMemo(store.events(), model);
+  if (memo !== null) {
+    store.append('model-degraded', {
+      actor: ACTOR,
+      seat,
+      requested: model,
+      used: DEFAULT_MODEL,
+      ...(memo.reason && { reason: memo.reason }),
+      attempt: 1,
+      resetsAt: memo.resetsAt,
+      memo: true,
+    });
+    model = DEFAULT_MODEL;
+    degraded = true;
+  }
   let release = semaphores ? await semaphores.acquire(model, { store, seat }) : () => {};
   try {
     let prompt = assembleSeatPrompt({ seat, def, reportPath, schema, roleBlock, constitution });
     let resume;
-    let degraded = false;
     // One dispatch: build the argv for the model in force and supervise the
     // child. `seat-spawned` carries the model actually spawned, so a degraded
     // retry reads as its own spawn on the model that judged the work.
@@ -196,4 +219,31 @@ export async function runSeat(store, opts) {
   } finally {
     release();
   }
+}
+
+/**
+ * The ledger's standing record of a model the vendor refused: the latest
+ * rejection this ledger holds for that model, when the reset instant it came
+ * with has not yet arrived. Both stamps that record a rejection are read — a
+ * `model-degraded` names the refusing model in `requested`, a `seat-failure`
+ * on reason `model-unavailable` names it in `model` — so the memo works
+ * whether the first seat degraded or failed.
+ *
+ * `resetsAt` is the vendor's own declaration, in Unix seconds. Comparing it
+ * to now reads a fact the vendor stated; no elapsed time is measured, and
+ * nothing here expires on a clock of the harness's own.
+ * @returns {{resetsAt: number, reason: string|undefined}|null}
+ */
+export function unavailableMemo(events, model) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (typeof e.resetsAt !== 'number') continue;
+    let reason;
+    if (e.event === 'model-degraded' && e.requested === model) reason = e.reason;
+    else if (e.event === 'seat-failure' && e.reason === 'model-unavailable' && e.model === model) {
+      reason = e.cause;
+    } else continue;
+    return e.resetsAt * 1000 > Date.now() ? { resetsAt: e.resetsAt, reason } : null;
+  }
+  return null;
 }

@@ -15,6 +15,14 @@ const SEAT_EVENTS = [
   'semaphore-granted',
 ];
 
+// The events that end a seat invocation. Everything a seat spent before one
+// of these is a snapshot; the terminal stamp is the invocation's final word.
+export const SEAT_TERMINAL_EVENTS = new Set([
+  'seat-report',
+  'seat-failure',
+  'seat-terminated',
+]);
+
 export const RUN_EVENTS = new Set([
   // run lifecycle
   'run-launched',
@@ -45,6 +53,11 @@ export const RUN_EVENTS = new Set([
   'operational-fix',
   // gate integrity (loud)
   'gate-integrity',
+  // The run passed the budget its lane was given. Loud, because the owner is
+  // watching money leave and nothing else in the run will say so — and
+  // informational, because a threshold never parks, blocks, or closes
+  // anything (ADR-0021). The run pairs its own `resolved` at close.
+  'budget-breach',
   // A candidate capture the diff policy refused, or one that took a change
   // back. Loud, because both mean the tree the run judges is not the tree the
   // seat believed it left behind (ADR-0017).
@@ -114,6 +127,7 @@ export const LOUD_EVENTS = new Set([
   'diff-policy-violation',
   'red-merge-breach',
   'factory-starvation',
+  'budget-breach',
 ]);
 
 export function streamOf(event) {

@@ -6,7 +6,8 @@
 // clone without a fetch and degrade to null when no clone exists yet.
 import { existsSync } from 'node:fs';
 import { readEvents } from '../ledger/ledger.mjs';
-import { LOUD_EVENTS } from '../ledger/registry.mjs';
+import { LOUD_EVENTS, SEAT_TERMINAL_EVENTS } from '../ledger/registry.mjs';
+import { runCost } from '../ledger/cost.mjs';
 import { deriveRunState } from '../engine/replay.mjs';
 import { readLock, pidAlive } from '../daemon/lock.mjs';
 import { openLoud, listRunEvents, storyRunsByKey } from '../telemetry/readers.mjs';
@@ -33,7 +34,6 @@ export const LANE_STAGES = {
 };
 
 const ENVELOPE_KEYS = new Set(['seq', 'ts', 'event', 'actor', 'stream', 'refs']);
-const SEAT_TERMINALS = new Set(['seat-report', 'seat-failure', 'seat-terminated']);
 const DETAIL_MAX = 140;
 const TAIL_LINES = 40;
 const SHIPS_WINDOW = 10;
@@ -105,7 +105,7 @@ function openRunView({ runId, project, lane, events }, now) {
   for (const e of events) {
     if (e.event === 'seat-spawned') {
       inFlight.set(e.seat, { seat: e.seat, model: e.model, effort: e.effort });
-    } else if (SEAT_TERMINALS.has(e.event)) {
+    } else if (SEAT_TERMINAL_EVENTS.has(e.event)) {
       inFlight.delete(e.seat);
     }
   }
@@ -126,6 +126,8 @@ function openRunView({ runId, project, lane, events }, now) {
     ...(park && { parkType: park.type, parkedMinutes: minutesBetween(park.ts, now) }),
     violated: state.violated,
     elapsedMinutes: minutesBetween(launch.ts, now),
+    cost: runCost(events),
+    ...(typeof state.payload.budget === 'number' && { budget: state.payload.budget }),
     seats,
     ...(repair && { repair: { pass: repair.pass, round: repair.round } }),
     lastEvent: { seq: last.seq, ts: last.ts, event: last.event, detail: detailOf(last) },
@@ -165,7 +167,7 @@ function semaphoreView(config, open, instanceEvents) {
   const held = new Map();
   for (const e of instanceEvents) {
     if (e.event === 'seat-spawned') held.set(e.seat, e.model);
-    else if (SEAT_TERMINALS.has(e.event)) held.delete(e.seat);
+    else if (SEAT_TERMINAL_EVENTS.has(e.event)) held.delete(e.seat);
   }
   for (const model of held.values()) {
     inFlight.set(model, (inFlight.get(model) ?? 0) + 1);
@@ -337,6 +339,7 @@ function shipList(allRuns) {
       storyKey: launch.storyKey ?? null,
       ts: merged.ts,
       hours: round((Date.parse(merged.ts) - Date.parse(launch.ts)) / 3_600_000),
+      cost: runCost(events),
       ...(prOpened && {
         shipMinutes: round((Date.parse(merged.ts) - Date.parse(prOpened.ts)) / 60_000),
       }),
@@ -353,6 +356,7 @@ function statsView(allRuns, ships) {
     targetHours: TARGET_HOURS,
     ships: last,
     medianHours: last.length > 0 ? round(median(last.map((s) => s.hours))) : null,
+    medianCost: last.length > 0 ? round(median(last.map((s) => s.cost))) : null,
     priorMedianHours: prior.length > 0 ? round(median(prior.map((s) => s.hours))) : null,
     greenShipP50Minutes: shipMinutes.length > 0 ? round(median(shipMinutes)) : null,
     ciCriticalPathP50Minutes: ciCriticalPath(allRuns),

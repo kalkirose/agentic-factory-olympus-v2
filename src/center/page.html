@@ -311,6 +311,11 @@ function fmtMinutes(m) {
   return Math.floor(m / 60) + " h " + String(Math.round(m % 60)).padStart(2, "0") + " min";
 }
 
+function fmtCost(usd) {
+  if (usd === null || usd === undefined) return "—";
+  return "$" + usd.toFixed(2);
+}
+
 function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
 function empty(node, text) { node.appendChild(el("div", "empty", text)); }
@@ -408,6 +413,7 @@ function renderRuns(s) {
         : "none in flight");
       fact("elapsed", fmtMinutes(run.elapsedMinutes));
     }
+    fact("cost", fmtCost(run.cost) + (typeof run.budget === "number" ? " of " + fmtCost(run.budget) : ""));
     card.appendChild(facts);
 
     const last = el("div", "last");
@@ -570,7 +576,8 @@ function renderStats(s) {
       (diff <= 0 ? "▼ " : "▲ ") + Math.abs(diff).toFixed(1) + " h vs prior 10"));
   }
   box.appendChild(hero);
-  box.appendChild(el("div", "hero-sub", "Median story wall-clock · target ≤ " + st.targetHours + " h"));
+  box.appendChild(el("div", "hero-sub",
+    "Median story wall-clock · target ≤ " + st.targetHours + " h · median cost " + fmtCost(st.medianCost)));
 
   if (st.ships.length > 0) {
     const wrap = el("div", "colwrap");

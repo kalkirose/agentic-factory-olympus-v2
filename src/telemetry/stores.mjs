@@ -70,6 +70,11 @@ export class TelemetryStore {
     return line;
   }
 
+  /** Every event in this ledger, in order. A reader; never store state. */
+  events() {
+    return readEvents(this.ledger.path);
+  }
+
   /**
    * Appends the paired `resolved` event for a loud item or a breach in this
    * ledger. Refuses an unknown target, a non-resolvable event, and a double

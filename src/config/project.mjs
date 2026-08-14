@@ -35,6 +35,9 @@ export function defaultProjectConfig() {
     // lane name → the diff-policy tiers the candidate capture enforces;
     // an absent lane leaves that lane's capture unpoliced
     diffPolicy: {},
+    // lane name → the run cost, in US dollars, past which the run says so
+    // once and keeps going; an absent lane sets no threshold
+    budgets: {},
     // the standing policy file, relative to the repo root; an absent file
     // leaves every seat prompt exactly as it was
     constitutionPath: DEFAULT_CONSTITUTION_PATH,
@@ -63,6 +66,7 @@ export function validateProjectConfig(config) {
   validateGraph(config.graph, err);
   validateTripwires(config.tripwires, err);
   validateDiffPolicy(config.diffPolicy, err);
+  validateBudgets(config.budgets, err);
   validateConstitutionPath(config.constitutionPath, err);
   if (isPlainObject(config.lanes) && isPlainObject(config.lanes.story)) {
     if (!Array.isArray(config.repo?.testPaths) || config.repo.testPaths.length === 0) {
@@ -295,7 +299,8 @@ function validateTripwires(tripwires, err) {
 // The diff policy the candidate capture enforces, per lane. Only the lanes
 // that run a dev seat take one; a name outside that set is a typo the launch
 // must not swallow, because a policy nobody reads protects nothing.
-const POLICED_LANES = new Set(['story', 'repair']);
+const LANES = ['story', 'repair'];
+const POLICED_LANES = new Set(LANES);
 const TIER_KEYS = ['deniedPaths', 'declaredPaths', 'forbiddenPatterns'];
 
 function validateDiffPolicy(policy, err) {
@@ -307,7 +312,7 @@ function validateDiffPolicy(policy, err) {
   for (const [lane, tiers] of Object.entries(policy)) {
     const at = (key) => `diffPolicy.${lane}.${key}`;
     if (!POLICED_LANES.has(lane)) {
-      err(`diffPolicy.${lane}`, `must name a lane with a dev seat: ${[...POLICED_LANES].join(' | ')}`);
+      err(`diffPolicy.${lane}`, `must name a lane with a dev seat: ${LANES.join(' | ')}`);
       continue;
     }
     if (!isPlainObject(tiers)) {
@@ -331,6 +336,27 @@ function validateDiffPolicy(policy, err) {
         err(at(`forbiddenPatterns[${i}]`), `must be a valid regular expression: ${cause.message}`);
       }
     });
+  }
+}
+
+// Per-lane budget thresholds, in US dollars. A threshold informs and never
+// gates (ADR-0021), so the only thing validation protects is the reading: a
+// lane name outside the closed set, or a figure that is not a positive amount
+// of money, is a typo that would leave the owner believing a budget was set.
+function validateBudgets(budgets, err) {
+  if (budgets === undefined) return;
+  if (!isPlainObject(budgets)) {
+    err('budgets', 'must be an object keyed by lane name');
+    return;
+  }
+  for (const [lane, value] of Object.entries(budgets)) {
+    if (!POLICED_LANES.has(lane)) {
+      err(`budgets.${lane}`, `must name a lane: ${LANES.join(' | ')}`);
+      continue;
+    }
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+      err(`budgets.${lane}`, 'must be a positive number of US dollars');
+    }
   }
 }
 

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { runSeat } from '../src/seats/runner.mjs';
+import { runSeat, unavailableMemo } from '../src/seats/runner.mjs';
 import { parseClaudeLine } from '../src/seats/claude.mjs';
 import { ModelSemaphores } from '../src/seats/semaphore.mjs';
 import { DEFAULT_MODEL, CERTIFICATION_MODEL } from '../src/seats/seatmap.mjs';
@@ -287,6 +287,135 @@ test('a rejection on the default model degrades nothing and fails once', async (
   const failure = events.find((e) => e.event === 'seat-failure');
   assert.equal(failure.model, DEFAULT_MODEL);
   assert.equal(failure.degraded, undefined);
+});
+
+// -- the per-run quota memo --------------------------------------------------
+
+const FUTURE_RESET = Math.floor(Date.now() / 1000) + 3600;
+const PAST_RESET = Math.floor(Date.now() / 1000) - 3600;
+
+const rejectionResetting = (resetsAt) =>
+  rejectionLines.map((line) =>
+    line.type === 'rate_limit_event'
+      ? { ...line, rate_limit_info: { ...line.rate_limit_info, resetsAt } }
+      : line,
+  );
+
+test('a run degrades the second seat on its memo, without re-buying the rejection', async (t) => {
+  const { paths, store } = setup(t);
+  const calls = [];
+  const commandFor = (reportPath) => (opts) => {
+    calls.push(opts.model);
+    return opts.model === CERTIFICATION_MODEL
+      ? claudeFixtureCommand({ reportPath, lines: rejectionResetting(FUTURE_RESET), exitCode: 1 })
+      : claudeFixtureCommand({
+          report: { verdict: 'pass' },
+          reportPath,
+          lines: healthyLines(DEFAULT_MODEL),
+        });
+  };
+  const first = runReportPath(paths, 'r1', 'verdict-triage');
+  const one = await runSeat(store, {
+    seat: 'verdict-triage',
+    roleBlock: 'ROLE',
+    reportPath: first,
+    schema: SCHEMA,
+    commandFor: commandFor(first),
+  });
+  assert.equal(one.ok, true);
+  const second = runReportPath(paths, 'r1', 'fury-verifier');
+  const two = await runSeat(store, {
+    seat: 'fury-verifier',
+    roleBlock: 'ROLE',
+    reportPath: second,
+    schema: SCHEMA,
+    commandFor: commandFor(second),
+  });
+  assert.equal(two.ok, true);
+  assert.equal(two.model, DEFAULT_MODEL);
+  // The refused model is spawned once in the whole run, not once per seat.
+  assert.deepEqual(calls, [CERTIFICATION_MODEL, DEFAULT_MODEL, DEFAULT_MODEL]);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  const degrades = events.filter((e) => e.event === 'model-degraded');
+  assert.equal(degrades.length, 2);
+  // The first degrade stood on its own rejection; the second on the memo, and
+  // says so. Neither is silent.
+  assert.equal(degrades[0].memo, undefined);
+  assert.equal(degrades[1].memo, true);
+  assert.equal(degrades[1].seat, 'fury-verifier');
+  assert.equal(degrades[1].requested, CERTIFICATION_MODEL);
+  assert.equal(degrades[1].used, DEFAULT_MODEL);
+  assert.equal(degrades[1].reason, 'rate-limit');
+  assert.equal(degrades[1].resetsAt, FUTURE_RESET);
+  assert.equal(degrades[1].attempt, 1);
+  // The memo degrade rides its own spawn stamp, on the model that did the work.
+  const spawned = events.filter((e) => e.event === 'seat-spawned' && e.seat === 'fury-verifier');
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].model, DEFAULT_MODEL);
+  assert.equal(spawned[0].degraded, true);
+  assert.ok(degrades[1].seq < spawned[0].seq);
+});
+
+test('a memo whose reset instant has passed sends the seat at its own model', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'verdict-triage');
+  store.append('model-degraded', {
+    actor: 'daemon',
+    seat: 'eval',
+    requested: CERTIFICATION_MODEL,
+    used: DEFAULT_MODEL,
+    reason: 'rate-limit',
+    attempt: 1,
+    resetsAt: PAST_RESET,
+  });
+  const calls = [];
+  const result = await runSeat(store, {
+    seat: 'verdict-triage',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: (opts) => {
+      calls.push(opts.model);
+      return claudeFixtureCommand({
+        report: { verdict: 'pass' },
+        reportPath,
+        lines: healthyLines(CERTIFICATION_MODEL),
+      });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.model, CERTIFICATION_MODEL);
+  assert.deepEqual(calls, [CERTIFICATION_MODEL]);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  assert.equal(events.filter((e) => e.event === 'model-degraded' && e.memo).length, 0);
+});
+
+test('a rejection recorded with no reset instant leaves the memo empty', () => {
+  assert.equal(
+    unavailableMemo(
+      [{ event: 'model-degraded', requested: CERTIFICATION_MODEL, reason: 'rate-limit' }],
+      CERTIFICATION_MODEL,
+    ),
+    null,
+  );
+});
+
+test('the memo reads a seat-failure record as readily as a degrade', () => {
+  const memo = unavailableMemo(
+    [
+      {
+        event: 'seat-failure',
+        reason: 'model-unavailable',
+        model: CERTIFICATION_MODEL,
+        cause: 'rate-limit',
+        resetsAt: FUTURE_RESET,
+      },
+    ],
+    CERTIFICATION_MODEL,
+  );
+  assert.deepEqual(memo, { resetsAt: FUTURE_RESET, reason: 'rate-limit' });
+  // Another model's rejection is not this model's memo.
+  assert.equal(unavailableMemo([{ event: 'model-degraded', requested: 'other', resetsAt: FUTURE_RESET }], CERTIFICATION_MODEL), null);
 });
 
 test('a degrade moves the seat onto the default model semaphore', async (t) => {

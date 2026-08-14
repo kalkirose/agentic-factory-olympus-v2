@@ -275,6 +275,11 @@ export class Daemon {
           baseSha: ws.baseSha,
           defaultBranch: entry.defaultBranch,
           configBlob: ws.configBlob,
+          // The lane's budget rides the launch stamp, so the run carries the
+          // threshold it was launched under through every resume.
+          ...(typeof ws.projectConfig.budgets?.[lane] === 'number' && {
+            budget: ws.projectConfig.budgets[lane],
+          }),
           ...(ws.stack && { stack: ws.stack.name }),
           ...payload,
         });

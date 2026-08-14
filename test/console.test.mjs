@@ -51,7 +51,7 @@ test('status renders chips, loud before queue, runs, and arming', (t) => {
   assert.ok(status.indexOf('QUEUE') < status.indexOf('RUNS'));
   assert.match(status, /factory-starvation: alpha/);
   assert.match(status, /open-decisions: s1/);
-  assert.match(status, /r1 story @ work \[parked:open-decisions\]/);
+  assert.match(status, /r1 story @ work · \$0\.00 \[parked:open-decisions\]/);
   assert.match(status, /alpha: armed, slot cap 3/);
 });
 

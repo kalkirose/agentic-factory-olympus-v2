@@ -10,7 +10,8 @@
 // the run open — alert, never auto-kill. The console resolves or kills it.
 import { readdirSync } from 'node:fs';
 import { readEvents } from '../ledger/ledger.mjs';
-import { PARK_TYPES, CLOSE_STATES } from '../ledger/registry.mjs';
+import { runCost } from '../ledger/cost.mjs';
+import { PARK_TYPES, CLOSE_STATES, SEAT_TERMINAL_EVENTS } from '../ledger/registry.mjs';
 import { runLedgerPath } from '../daemon/home.mjs';
 import { openRunStore, archiveRun } from '../telemetry/stores.mjs';
 import { deriveRunState } from './replay.mjs';
@@ -111,9 +112,7 @@ export class RunEngine {
       lane,
       payload,
       stage: null,
-      store: openRunStore(this.paths, runId, {
-        onAppend: (line) => this.onEvent?.(project, line),
-      }),
+      store: null,
       parked: false,
       parkSeq: 0,
       parkRecord: null,
@@ -123,6 +122,14 @@ export class RunEngine {
       seats: new Set(),
       lastAnswer: null,
     };
+    run.store = openRunStore(this.paths, runId, {
+      onAppend: (line) => {
+        // The watcher's event key first, so it reads the seat's own stamp
+        // before it reads anything the budget check appends behind it.
+        this.onEvent?.(project, line);
+        this.checkBudget(run, line);
+      },
+    });
     this.runs.set(runId, run);
     return run;
   }
@@ -229,6 +236,47 @@ export class RunEngine {
     this.stampViolation(run, `stage ${run.stage} returned an invalid directive`);
   }
 
+  // -- budget ---------------------------------------------------------------
+
+  /**
+   * The lane's budget, evaluated after every seat terminal stamp. The first
+   * crossing stamps `budget-breach` once and the run carries on: a threshold
+   * informs, and never parks, blocks, or closes anything (ADR-0021). The
+   * ledger is the only memory, so a resumed run neither re-stamps nor forgets.
+   */
+  checkBudget(run, line) {
+    const threshold = run.payload?.budget;
+    if (typeof threshold !== 'number' || !SEAT_TERMINAL_EVENTS.has(line.event)) return;
+    const events = readEvents(runLedgerPath(this.paths, run.runId));
+    if (events.some((e) => e.event === 'budget-breach')) return;
+    const cost = runCost(events);
+    if (cost < threshold) return;
+    run.store.append('budget-breach', {
+      actor: ACTOR,
+      threshold,
+      cost,
+      stage: run.stage,
+      gist:
+        `${run.runId} is at $${cost.toFixed(2)} of its $${threshold.toFixed(2)} ` +
+        `${run.lane} budget (${run.stage})`,
+    });
+  }
+
+  /**
+   * Pairs the resolution a loud stamp owes. A budget breach asks for no
+   * decision — the run it reported on is over — so the run closes it rather
+   * than leaving the owner an alert strip of runs that already ended.
+   */
+  resolveBudgetBreach(run, state) {
+    const events = readEvents(runLedgerPath(this.paths, run.runId));
+    const resolved = new Set(events.filter((e) => e.event === 'resolved').map((e) => e.resolves));
+    for (const e of events) {
+      if (e.event === 'budget-breach' && !resolved.has(e.seq)) {
+        run.store.resolve({ actor: ACTOR, resolves: e.seq, note: `run closed ${state}` });
+      }
+    }
+  }
+
   // -- park / answer / resume -----------------------------------------------
 
   // `reason` and `detail` belong to a recoverable failure: they carry the
@@ -326,6 +374,7 @@ export class RunEngine {
 
   closeRun(run, state, { actor = ACTOR, ...extra } = {}) {
     run.closed = true;
+    this.resolveBudgetBreach(run, state);
     run.store.append('run-closed', { actor, state, ...extra });
     run.store.close();
     this.runs.delete(run.runId);

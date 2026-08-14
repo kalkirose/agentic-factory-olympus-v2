@@ -141,6 +141,9 @@ seats whose judgment the run's certification rests on.
 
 ## Why a degrade does not remember the rejection window
 
+Superseded by ADR-0021: a run now degrades on its own recorded rejection while
+the vendor's `resetsAt` is still ahead.
+
 A rejected request costs nothing and returns in about two seconds, so every
 later seat on the refused model re-pays two seconds and no money. Remembering
 the window until `resetsAt` would buy that back, and would cost more than it

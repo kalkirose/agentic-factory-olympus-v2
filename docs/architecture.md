@@ -92,7 +92,8 @@ Two levels; the ownership test decides placement.
   ledger home, notification-stream wiring, slot caps keyed by project. The
   console edits it live; no PR.
 - **Project config** — one JSON versioned in the project repo: repo facts,
-  commands, gates, conventions, lane specifics, and the tripwire registry.
+  commands, gates, conventions, lane specifics, per-lane budget thresholds,
+  and the tripwire registry.
   The daemon reads it from `main` in its bare clone at each run launch, so
   config changes ship through the same PR path as the code they describe.
 
@@ -125,8 +126,11 @@ Two levels; the ownership test decides placement.
   orchestrator re-dispatch on the default model, recorded with the substitute
   named. A model that refuses the work (read from the seat's own stream, not
   from an exit code) degrades to the default model at the same effort, stamped
-  `model-degraded`; the default model refusing too is a loud failure. The
-  ledger records the actual model from the transcript.
+  `model-degraded`; the default model refusing too is a loud failure. A run
+  that already holds a rejection for a model, with the vendor's reset instant
+  still ahead, degrades the next seat at the spawn — the same stamp, marked as
+  standing on the run's own record (ADR-0021). The ledger records the actual
+  model from the transcript.
 - **Semaphores.** The daemon holds a global concurrency semaphore per model
   across all runs. A seat waits on the semaphore; it never fails on it.
 - **Web tools.** Web search on spec-birth and dev seats only. Judgment seats
@@ -309,6 +313,17 @@ Standing quality bar (written by the runs themselves, never mined from
 outside): escaped defects per story (ceiling 0.5, rolling 10 ships),
 gate-integrity defects (zero-tolerance incidents), adversary kill rate at
 freeze (0/N blocks), per-lens review yield (zero-yield lane = cut candidate).
+
+## Cost and budgets
+
+One derivation answers what a run spent: per seat invocation, the terminal
+stamp supersedes its progress snapshots, and an invocation that ended without
+one contributes its last snapshot. Every display and every threshold reads it.
+
+Project config may give a lane a budget in US dollars. The first seat terminal
+stamp that puts the run at or past it stamps `budget-breach` once, loud, and
+the run carries on: a threshold informs, and never parks, blocks, or closes
+anything. The run pairs the resolution at close (ADR-0021).
 
 ## Command center
 

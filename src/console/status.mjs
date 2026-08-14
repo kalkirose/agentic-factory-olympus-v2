@@ -3,6 +3,7 @@
 // Every render answers from the files alone; olympusctl prints these.
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { readEvents, tailEvents } from '../ledger/ledger.mjs';
+import { runCost } from '../ledger/cost.mjs';
 import { deriveRunState } from '../engine/replay.mjs';
 import { runLedgerPath } from '../daemon/home.mjs';
 import { readLock, pidAlive } from '../daemon/lock.mjs';
@@ -47,7 +48,7 @@ export function openRuns(paths) {
     if (events.length === 0) continue;
     const state = deriveRunState(events);
     if (state.closed) continue;
-    runs.push({ runId: entry.name, ...state });
+    runs.push({ runId: entry.name, ...state, cost: runCost(events) });
   }
   return runs;
 }
@@ -86,8 +87,11 @@ export function renderStatus(paths) {
       ...(run.parked ? [`parked:${run.parkRecord?.type}`] : []),
       ...(run.violated ? ['violated'] : []),
     ];
+    const budget = run.payload?.budget;
+    const spend = `$${run.cost.toFixed(2)}${typeof budget === 'number' ? ` of $${budget.toFixed(2)}` : ''}`;
     lines.push(
-      `  ${run.runId} ${run.lane} @ ${run.stage}${flags.length > 0 ? ` [${flags.join(', ')}]` : ''}`,
+      `  ${run.runId} ${run.lane} @ ${run.stage} · ${spend}` +
+        `${flags.length > 0 ? ` [${flags.join(', ')}]` : ''}`,
     );
   }
   if (runs.length === 0) lines.push('  none');
