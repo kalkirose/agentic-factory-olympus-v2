@@ -107,8 +107,9 @@ Two levels; the ownership test decides placement.
 - **File contracts.** No structured-output tool anywhere. The seat writes its
   JSON report to the named ledger path; a deterministic process validates it
   (flat, draft-07-safe schemas). One corrective re-prompt, then seat-failure.
-  A child that dies on a nonzero exit buys up to 3 fresh dispatches per seat
-  session before that failure stands (ADR-0005); nothing else is retried.
+  A child that dies on a nonzero exit buys up to 3 re-dispatches per seat
+  session before that failure stands, resuming the session it named as it
+  died (ADR-0005); nothing else is retried.
 - **Prompts.** Two blocks: a shared core (role line, ledger discipline, file
   contract, scope discipline, narration cadence, one-turn execution, concise
   reports) plus a per-seat role block with judgment criteria only. No

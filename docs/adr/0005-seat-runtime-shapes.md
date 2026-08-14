@@ -20,15 +20,19 @@ assembly, and the headless runner — gets these concrete shapes:
   the transcript named a session id — then a `seat-failure` event with
   reason `report-invalid`. A missing file and bad JSON take the same route.
 - **Crash retries.** A child that dies on a nonzero exit is re-dispatched in
-  place — same prompt, fresh child — up to 3 times per seat session, one
-  budget shared across the contract attempts and a degrade re-dispatch. Each
-  crashed dispatch stamps its own `seat-failure` (reason `exit`) with the
-  evidence before the next spawn, and every retry spawn carries `retry` with
-  its ordinal, so the ledger holds the full history. The allowance covers
-  reason `exit` only: a deliberate termination, a cost-ceiling breach, and a
-  spawn refusal are never retried, and an unavailable model keeps its own
-  degrade route. A session that spends the budget returns the failure and the
-  lane parks it.
+  place, on the prompt in force, up to 3 times per seat session — one budget
+  shared across the contract attempts and a degrade re-dispatch. The
+  re-dispatch resumes the session the dying child named in its transcript, so
+  the work that session already bought is still there; a child that died
+  before it named a session is re-dispatched fresh. Each crashed dispatch
+  stamps its own `seat-failure` (reason `exit`) with the evidence before the
+  next spawn, and every retry spawn carries `retry` with its ordinal,
+  `resumed` with the shape it took, and `session` with the id when it resumed
+  — the ledger holds the full history, and no reader has to infer the shape
+  from an absent field. The allowance covers reason `exit` only: a deliberate
+  termination, a cost-ceiling breach, and a spawn refusal are never retried,
+  and an unavailable model keeps its own degrade route. A session that spends
+  the budget returns the failure and the lane parks it.
 - **Schema subset.** Report schemas are a flat draft-07-safe subset: a
   top-level object of primitive fields, arrays of primitives, arrays of
   flat objects, or one level of flat object; `enum` on primitives; every
@@ -103,29 +107,45 @@ assembly, and the headless runner — gets these concrete shapes:
   handler transition. `claudeCommand` (argv) is instance config, like
   `composeCommand` — it describes the machine.
 
-## Why the corrective re-prompt resumes the session
+## Why every re-dispatch resumes the session, when one exists
 
-A fresh context would re-read the whole task to fix a format defect; the
-session that wrote the report already holds the content. Resume is cheaper
-and keeps effort constant inside the seat session. When no session id was
-captured, the corrective prompt stands alone — it carries the errors, the
-path, and the schema.
+A seat session is an asset the run has already paid for: the task it read,
+the files it opened, the findings it reached. A fresh child holds none of
+that and buys all of it again, at the same effort, for the same money. So
+both re-dispatch routes resume where the transcript named a session id.
+
+The corrective re-prompt resumes because the defect it answers is format,
+not knowledge — the session that wrote the report already holds the content,
+and only the shape has to change.
+
+The crash retry resumes because the loss it answers is the whole session.
+Measured on a live run: a verifier had verified every finding it was given
+and spent $1.73 when the API connection dropped as it wrote its report. A
+fresh child re-buys that entire session to recover one file write; a resume
+loses the dropped turn and nothing else. The gap grows with the seat — the
+longest, most expensive seats are exactly the ones most exposed to a
+connection that lasts long enough to drop.
+
+Where no session id was captured, the re-dispatch stands alone: a corrective
+prompt carries the errors, the path, and the schema, and a crash retry
+carries the prompt in force. A rejected model wrote no transcript at all, so
+the degrade re-dispatch never carries a resume.
 
 ## Why a nonzero exit buys retries and the other failures do not
 
 A nonzero exit is the one failure class whose cause is usually outside the
 seat: a dropped API connection, a killed stream. The work product is absent,
-not defective, and a fresh child on the same prompt answers it. The first
-live cutover run proved the shape twice — a verifier that had finished every
-check died writing its report, and the only route was a human park answer
-that bought exactly the dispatch a machine could have bought. Three retries
-bound the spend to a known worst case; the bound is a constant, not config,
-because no project has a reason to want a different one.
+not defective, and another child on the same prompt answers it. A live run
+proved the shape twice in one story, and each time the only route was a
+human park answer that bought exactly the dispatch a machine could have
+bought. Three retries bound the spend to a known worst case; the bound is a
+constant, not config, because no project has a reason to want a different
+one.
 
 The other classes carry their own answer already. A termination is the
 orchestrator's own decision. A cost-ceiling breach re-run would spend the
 same money again. A spawn refusal is a host defect no respawn changes. An
-unavailable model has the degrade route, which remembers the vendor's reset
+unavailable model has the degrade route, which reads the vendor's reset
 window instead of re-buying the rejection.
 
 ## Why the one-turn rule sits in the core block
@@ -222,10 +242,12 @@ and keep the `rate_limit_event` alone, which no healthy stream carries at
 status `rejected`. Trigger: a `model-degraded` stamp whose seat had a working
 model. Reversal cost: none — delete one condition.
 
-If session resume proves unreliable for the corrective re-prompt, send the
-corrective prompt as a fresh invocation with the report errors inline (the
-code path already handles a missing session id). Trigger: resumed sessions
-fail or drift in the shakedown. Reversal cost: none — drop the resume arg.
+If session resume proves unreliable, dispatch both re-dispatch routes fresh:
+the corrective prompt carries the report errors inline, the crash retry
+carries the prompt in force. Both paths already handle a missing session id,
+so nothing new has to be written. Trigger: a resumed session fails, or
+answers something other than the work it was resumed into. Reversal cost:
+none — drop the resume argument.
 
 If the flat schema subset cannot express a lane's report, widen the subset
 one construct at a time by ADR, keeping the explicit-additionalProperties

@@ -662,6 +662,18 @@ test('a substitute dispatch stamps model-substituted with the substitute named',
   assert.ok(events.indexOf(substituted) < events.findIndex((e) => e.event === 'seat-spawned'));
 });
 
+// A seat child that dies on a nonzero exit, having named its session first.
+// The transcript line is written with a synchronous write, so it reaches the
+// supervisor ahead of the exit on every platform.
+function crashCommand({ sessionId } = {}) {
+  const line = JSON.stringify(JSON.stringify({ meta: { sessionId } }) + '\n');
+  const script = [
+    ...(sessionId ? [`require('fs').writeSync(1, ${line});`] : []),
+    'process.exit(3);',
+  ].join('\n');
+  return { cmd: process.execPath, args: ['-e', script], parseLine: fixtureParse };
+}
+
 test('a child crash buys a fresh dispatch, and the report lands on the retry', async (t) => {
   const { paths, store } = setup(t);
   const reportPath = runReportPath(paths, 'r1', 'dev');
@@ -688,12 +700,77 @@ test('a child crash buys a fresh dispatch, and the report lands on the retry', a
     spawned.map((e) => e.retry),
     [undefined, 1, 2],
   );
-  // A crash retry is a fresh dispatch, never a corrective re-prompt.
+  // A crash retry re-runs the prompt in force; it is never a corrective
+  // re-prompt. These children named no session, so every retry is fresh.
   assert.ok(!spawned.some((e) => e.corrective));
+  assert.deepEqual(
+    spawned.slice(1).map((e) => e.resumed),
+    [false, false],
+  );
   const failures = events.filter((e) => e.event === 'seat-failure');
   assert.equal(failures.length, 2);
   assert.ok(failures.every((e) => e.reason === 'exit'));
   assert.equal(events.find((e) => e.event === 'seat-report').attempt, 1);
+});
+
+test('a crash retry resumes the session the dying child named', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev');
+  const calls = [];
+  const result = await runSeat(store, {
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: (opts) => {
+      calls.push(opts);
+      return calls.length === 1
+        ? crashCommand({ sessionId: 's1' })
+        : fixtureCommand({ report: { verdict: 'pass' }, reportPath });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 2);
+  // The first dispatch is fresh; the retry re-enters the crashed session and
+  // carries the same prompt, so the work already bought is not bought again.
+  assert.equal(calls[0].resume, undefined);
+  assert.equal(calls[1].resume, 's1');
+  assert.equal(calls[1].prompt, calls[0].prompt);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  const spawned = events.filter((e) => e.event === 'seat-spawned');
+  assert.equal(spawned.length, 2);
+  // The spawn stamp says which shape the retry took, and names the session.
+  assert.equal(spawned[1].retry, 1);
+  assert.equal(spawned[1].resumed, true);
+  assert.equal(spawned[1].session, 's1');
+  assert.ok(!spawned.some((e) => e.corrective));
+});
+
+test('a crash before the child named a session retries fresh', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev');
+  const calls = [];
+  const result = await runSeat(store, {
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: (opts) => {
+      calls.push(opts);
+      return calls.length === 1
+        ? crashCommand()
+        : fixtureCommand({ report: { verdict: 'pass' }, reportPath });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].resume, undefined);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  const spawned = events.filter((e) => e.event === 'seat-spawned');
+  assert.equal(spawned[1].retry, 1);
+  assert.equal(spawned[1].resumed, false);
+  // Nothing to resume into, so the stamp names no session at all.
+  assert.ok(!('session' in spawned[1]));
 });
 
 test('a fourth crash ends the session with the retry budget spent', async (t) => {

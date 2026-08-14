@@ -6,10 +6,13 @@
 //
 // Crash retries: a child that dies without a verdict — a nonzero exit, which
 // is the transient class (an API drop, a killed connection) — is re-dispatched
-// in place on the prompt in force, up to CRASH_RETRIES fresh children per seat
-// session. Every crashed dispatch stamps its own seat-failure with the
-// evidence before the next spawn, and the retry spawn carries `retry`, so the
-// ledger reads spawn → failure → spawn with nothing silent. Deliberate
+// in place on the prompt in force, up to CRASH_RETRIES children per seat
+// session. A crashed child that named a session id is resumed into that
+// session, so the work it did before the drop is not re-bought; without one
+// there is nothing to resume into and the retry is a fresh dispatch. Every
+// crashed dispatch stamps its own seat-failure with the evidence before the
+// next spawn, and the retry spawn carries `retry` with the shape it took, so
+// the ledger reads spawn → failure → spawn with nothing silent. Deliberate
 // termination, a cost-ceiling breach, and a spawn refusal are never retried:
 // those causes do not change on a second try.
 //
@@ -39,8 +42,8 @@ import { claudeSeatCommand } from './claude.mjs';
 
 const ACTOR = 'daemon';
 
-// Fresh children a seat session may buy back after nonzero exits, shared
-// across the whole session (both contract attempts and a degrade re-dispatch).
+// Children a seat session may buy back after nonzero exits, shared across the
+// whole session (both contract attempts and a degrade re-dispatch).
 const CRASH_RETRIES = 3;
 
 /**
@@ -149,7 +152,14 @@ export async function runSeat(store, opts) {
           model,
           effort: def.effort,
           attempt,
-          ...(retry > 0 && { retry }),
+          // A retry names the shape it took: resumed into the session the
+          // crashed child was writing, or dispatched fresh. `resumed` is
+          // stamped either way, so a reader never has to read absence.
+          ...(retry > 0 && {
+            retry,
+            resumed: resume !== undefined,
+            ...(resume !== undefined && { session: resume }),
+          }),
           ...(attempt === 2 && { corrective: true }),
           ...(degraded && { degraded: true }),
         },
@@ -165,6 +175,13 @@ export async function runSeat(store, opts) {
       let result = await dispatch(attempt);
       while (result.failed === true && result.reason === 'exit' && crashRetries < CRASH_RETRIES) {
         crashRetries++;
+        // A session id the dying child named is the work it had already
+        // bought: every finding it reached, every file it read. Resuming
+        // costs the drop; a fresh child costs the whole session again. A
+        // crash before the transcript named a session leaves nothing to
+        // resume into, and the retry keeps whatever resume was in force.
+        const sessionId = result.meta?.sessionId;
+        if (typeof sessionId === 'string' && sessionId.length > 0) resume = sessionId;
         result = await dispatch(attempt, crashRetries);
       }
       return result;
