@@ -94,7 +94,7 @@ src/feature.mjs and its test only.
 
 ## Acceptance criteria
 
-- AC-1: f(x) returns 2*x for every number x.
+**AC-1** f(x) returns 2*x for every number x.
 `;
 
 const TICKET = `# Repair ticket: greet returns the wrong text

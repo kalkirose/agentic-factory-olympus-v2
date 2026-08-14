@@ -33,7 +33,7 @@ import {
 } from '../isolation/tree.mjs';
 import { testEditDenyRules } from '../seats/boundary.mjs';
 import { laneDiffPolicy } from '../seats/diffpolicy.mjs';
-import { parseIntentCard } from './card.mjs';
+import { noCriteriaMessage, parseIntentCard } from './card.mjs';
 import { runCommand } from './exec.mjs';
 import { readInheritance } from './resume.mjs';
 import { SPEC_LINE_CAP, amendedSections, frozenExclusions, lintSpec } from './speclint.mjs';
@@ -268,6 +268,8 @@ function readinessHandler(postFreezeStage) {
         { errors },
       );
     }
+    const noCriteria = criteriaBlock(ctx, card, cardPath);
+    if (noCriteria) return noCriteria;
     if (story.lintCommand) {
       const lint = await runCommand(config.commands[story.lintCommand], {
         cwd: worktree,
@@ -300,6 +302,20 @@ function readinessHandler(postFreezeStage) {
     }
     return { next: 'spec-birth' };
   };
+}
+
+/**
+ * The criterion-set guard, or null when the card names criteria. The card is
+ * the only source of the set the spec mirrors, so a card that yields none
+ * leaves every later stage judging a spec against nothing. That is a defect of
+ * the card or of the parser, and a seat can fix neither, so the run parks
+ * stage-blocked (ADR-0015) instead of spending a corrective invocation on it.
+ * Readiness asks first; the two stages that lint a spec ask again, because the
+ * card sits in a worktree that a seat can write to.
+ */
+function criteriaBlock(ctx, card, cardPath) {
+  if ((card?.acceptance ?? []).length > 0) return null;
+  return blocked(ctx, 'card-no-criteria', noCriteriaMessage(cardPath), { card: cardPath });
 }
 
 // -- the resume route --------------------------------------------------------
@@ -461,6 +477,8 @@ async function advanceBase(ctx, { worktree, config, story, prior, base, from }) 
 
 async function specBirth(ctx) {
   const base = await laneBase(ctx);
+  const noCriteria = criteriaBlock(ctx, base.card, base.cardPath);
+  if (noCriteria) return noCriteria;
   const events = runEvents(ctx);
   if (events.some((e) => e.event === 'spec-born')) return { next: 'spec-gate' };
   const { report, fail } = await seatWithChecks(ctx, {
@@ -515,6 +533,7 @@ export function specLintDefects(base) {
   }
   return lintSpec(text, {
     card: base.card,
+    cardPath: base.cardPath,
     worktree: base.worktree,
     testPaths: base.testPaths,
     tier: base.tier,
@@ -745,6 +764,8 @@ async function gateRound(ctx, base, { round }) {
  * that never held it, and it takes the same corrective route.
  */
 async function amendSpec(ctx, base, brief) {
+  const noCriteria = criteriaBlock(ctx, base.card, base.cardPath);
+  if (noCriteria) return { fail: noCriteria };
   return seatWithChecks(ctx, {
     seat: 'spec-birth',
     schema: SPEC_AMEND_SCHEMA,

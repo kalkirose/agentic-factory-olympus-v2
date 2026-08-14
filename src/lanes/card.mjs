@@ -3,6 +3,17 @@
 // harness reads only what readiness, the frontier and the spec lint need —
 // the key, the edges, the phase, the open decisions, and the acceptance
 // criteria. Everything else is seat-facing prose.
+//
+// This is the harness's only card parser: readiness, the daemon's card sweep,
+// the frontier's graph source and the spec lint all read a card through
+// `parseIntentCard`, so a card reads the same everywhere it is read.
+
+/** The acceptance section's heading: any level, matched without case. */
+const ACCEPTANCE_HEADING = /acceptance/i;
+
+const HEADING = /^(#{1,6})\s+(.*\S)\s*$/;
+const LIST_ITEM = /^\s*[-*+]\s+(.*)$/;
+const NONE = /^none\.?$/i;
 
 /**
  * An acceptance-criterion id: an identifier that carries a digit. The digit is
@@ -12,6 +23,23 @@
  */
 export function isCriterionId(token) {
   return /^[A-Za-z][A-Za-z0-9._-]*$/.test(token) && /\d/.test(token);
+}
+
+/**
+ * The one message a card that yields no criterion raises. It names the card
+ * and the heading the parse read, because the two candidates are a card that
+ * labels nothing and a parser that cannot read the labels it carries — and
+ * neither is a defect of the spec.
+ * @param {string|null} cardPath
+ */
+export function noCriteriaMessage(cardPath) {
+  return (
+    `the intent card at ${cardPath ?? '(no path recorded)'} yields no acceptance criterion: ` +
+    `no line under its acceptance heading (any level, matched without case against ` +
+    `/${ACCEPTANCE_HEADING.source}/) opens with a criterion id. A criterion line is written ` +
+    '"**AC-1** text", "AC-1 text", "AC-1: text", "- AC-1 text", or "### AC-1". A spec cannot ' +
+    'answer an empty set, so this is a defect of the card or of the parser, never of the spec.'
+  );
 }
 
 /**
@@ -38,21 +66,74 @@ export function parseIntentCard(text) {
 }
 
 /**
- * The card's acceptance criteria, in card order. A criterion may carry its own
- * id — the first token of the item, when that token has the shape of one — and
- * takes its position as its id when it does not. Every card therefore names an
- * ordered id set, which is the set the spec must mirror section for section.
+ * The card's acceptance criteria, in card order. A criterion carries its own
+ * id when the line it opens starts with one, and takes its position as its id
+ * when the card labels nothing. Every card therefore names an ordered id set,
+ * which is the set the spec must mirror section for section.
  * @returns {{id: string, text: string}[]}
  */
 function acceptanceCriteria(body) {
-  return sectionItems(body, /acceptance/i).map((item, i) => {
-    const [first, ...rest] = item.split(/\s+/);
-    const token = first.replace(/^[`*]+/, '').replace(/[`*:.]+$/, '');
-    if (rest.length > 0 && isCriterionId(token)) {
-      return { id: token, text: rest.join(' ').replace(/^[—–-]\s*/, '') };
-    }
-    return { id: `AC-${i + 1}`, text: item };
+  const criteria = [];
+  for (const line of acceptanceLines(body)) {
+    const criterion = criterionOf(line, criteria.length);
+    if (criterion) criteria.push(criterion);
+  }
+  return criteria;
+}
+
+/**
+ * The lines under the acceptance heading. Cards write their criteria as
+ * sub-headings as readily as they write them as plain lines, so a deeper
+ * heading that opens with a criterion id stays inside the section; every other
+ * heading closes it.
+ */
+function acceptanceLines(body) {
+  const lines = body.split(/\r?\n/);
+  const start = lines.findIndex((line) => {
+    const heading = HEADING.exec(line);
+    return heading && ACCEPTANCE_HEADING.test(heading[2]);
   });
+  if (start === -1) return [];
+  const level = HEADING.exec(lines[start])[1].length;
+  const section = [];
+  for (const line of lines.slice(start + 1)) {
+    const heading = HEADING.exec(line);
+    if (heading && !(heading[1].length > level && criterionId(firstToken(heading[2])))) break;
+    section.push(line);
+  }
+  return section;
+}
+
+/**
+ * One line of the acceptance section as a criterion, or null. A criterion is a
+ * line that opens with its id, in any of the forms a card writes it in: bold
+ * (`**AC-3.6.1** the text`), bare (`AC-12 the text`, `AC-12: the text`), a
+ * list item of either (`- AC-1: the text`), or a sub-heading (`### AC-1`). A
+ * list item that opens with no id takes its position, which is how a card that
+ * labels nothing still names an ordered set. Everything else under the heading
+ * is prose: an indented line belongs to the item above it, and a paragraph
+ * that opens with an ordinary word states no criterion.
+ */
+function criterionOf(line, position) {
+  const heading = HEADING.exec(line);
+  const item = heading ? null : LIST_ITEM.exec(line);
+  const text = (heading ? heading[2] : (item ? item[1] : line)).trim();
+  if (text.length === 0 || NONE.test(text)) return null;
+  if (!heading && !item && /^\s/.test(line)) return null;
+  const [first, ...rest] = text.split(/\s+/);
+  const id = criterionId(first);
+  if (id) return { id, text: rest.join(' ').replace(/^[—–-]\s*/, '') };
+  return item ? { id: `AC-${position + 1}`, text } : null;
+}
+
+/** The criterion id a token carries, stripped of its markdown, or null. */
+function criterionId(token) {
+  const stripped = token.replace(/^[`*_(\[]+/, '').replace(/[`*_:.,;)\]]+$/, '');
+  return isCriterionId(stripped) ? stripped : null;
+}
+
+function firstToken(text) {
+  return text.split(/\s+/)[0];
 }
 
 function splitFrontmatter(text) {
@@ -89,17 +170,17 @@ function parseList(value) {
 function sectionItems(body, pattern) {
   const lines = body.split(/\r?\n/);
   const start = lines.findIndex((line) => {
-    const match = /^#{1,6}\s+(.*)$/.exec(line);
-    return match && pattern.test(match[1]);
+    const heading = HEADING.exec(line);
+    return heading && pattern.test(heading[2]);
   });
   if (start === -1) return [];
   const items = [];
   for (const line of lines.slice(start + 1)) {
-    if (/^#{1,6}\s/.test(line)) break;
-    const item = /^\s*[-*]\s+(.*)$/.exec(line);
+    if (HEADING.test(line)) break;
+    const item = LIST_ITEM.exec(line);
     if (!item) continue;
     const value = item[1].trim();
-    if (value.length > 0 && !/^none\.?$/i.test(value)) items.push(value);
+    if (value.length > 0 && !NONE.test(value)) items.push(value);
   }
   return items;
 }

@@ -26,11 +26,15 @@ Provide f(x) that doubles x.
 
 ## Acceptance criteria
 
-- AC-1: f(x) returns 2*x for every number x.
-- AC-2: f throws on a value that is not a number.
+**AC-1** f(x) returns 2*x for every number x.
+
+AC-2: f throws on a value that is not a number.
 `;
 
+// Both legal line shapes in one card: the bold id real cards write, and the
+// bare id. Rule (a) is exercised against the set they parse to.
 const { card } = parseIntentCard(CARD);
+const CARD_PATH = '.olympus/cards/alpha-1.md';
 
 const TIER = {
   declaredPaths: ['**/package.json'],
@@ -82,8 +86,8 @@ function fixtureTree(t) {
   return dir;
 }
 
-function lint(t, text, { tier = null, testPaths = ['tests'], worktree = fixtureTree(t) } = {}) {
-  return lintSpec(text, { card, worktree, testPaths, tier });
+function lint(t, text, { tier = null, testPaths = ['tests'], worktree = fixtureTree(t), on = card } = {}) {
+  return lintSpec(text, { card: on, cardPath: CARD_PATH, worktree, testPaths, tier });
 }
 
 // -- the clean spec ----------------------------------------------------------
@@ -147,6 +151,21 @@ test('(a) a renumbered section title is answered with the ids the card carries',
   }
   assert.ok(defects.some((d) => /no section for acceptance criterion AC-1/.test(d)));
   assert.ok(defects.some((d) => /section AC-3 answers no acceptance criterion/.test(d)));
+});
+
+test('(a) a card that yields no criterion is one message, never one per section', (t) => {
+  const { card: empty } = parseIntentCard(
+    '---\nkey: alpha-1\n---\n\n## Acceptance criteria\n\nThe goal above states them.\n',
+  );
+  // Nothing to compare against: every section would answer no criterion and
+  // the expected-id list would render empty. One message says what happened,
+  // names the card, and names the heading the parse read.
+  const defects = lint(t, spec(), { on: empty });
+  assert.equal(defects.length, 1);
+  assert.ok(defects[0].includes('yields no acceptance criterion'), defects[0]);
+  assert.ok(defects[0].includes(CARD_PATH), defects[0]);
+  assert.ok(defects[0].includes('acceptance heading'), defects[0]);
+  assert.ok(!defects[0].includes('answers no acceptance criterion'), defects[0]);
 });
 
 // -- (b) the hard cap --------------------------------------------------------

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseIntentCard } from '../src/lanes/card.mjs';
+import { noCriteriaMessage, parseIntentCard } from '../src/lanes/card.mjs';
 
 const CARD = `---
 key: alpha-1
@@ -52,4 +52,76 @@ test('missing frontmatter and missing key are errors', () => {
 test('blocked-by accepts a bare comma list', () => {
   const { card } = parseIntentCard('---\nkey: a-1\nblocked-by: a-0, b-1\n---\n');
   assert.deepEqual(card.blockedBy, ['a-0', 'b-1']);
+});
+
+// -- acceptance criteria -----------------------------------------------------
+
+function criteria(section) {
+  return parseIntentCard(`---\nkey: a-1\n---\n\n${section}`).card.acceptance;
+}
+
+test('every line shape a card writes a criterion in parses, in card order', () => {
+  const parsed = criteria(
+    [
+      '## Acceptance Criteria',
+      '',
+      '**AC-3.6.1** The bold form real cards write.',
+      '',
+      'AC-3.6.2 The bare form.',
+      '',
+      'AC-12: The bare form with a colon.',
+      '',
+      '- AC-0.1.4: The list form.',
+      '',
+      '### AC-7',
+      '',
+      'The heading form states its text below the heading.',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    parsed.map((c) => c.id),
+    ['AC-3.6.1', 'AC-3.6.2', 'AC-12', 'AC-0.1.4', 'AC-7'],
+  );
+  assert.equal(parsed[0].text, 'The bold form real cards write.');
+  assert.equal(parsed[3].text, 'The list form.');
+});
+
+test('prose under the heading is prose, and ids outside the section are ignored', () => {
+  const parsed = criteria(
+    [
+      '## Acceptance criteria',
+      '',
+      'Each criterion below is assertable by one test.',
+      '',
+      '**AC-1** The widget renders.',
+      '  AC-2 is named in the sentence above, indented under it.',
+      '',
+      '## Sources',
+      '',
+      '**AC-9** A criterion of the story this one supersedes.',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    parsed.map((c) => c.id),
+    ['AC-1'],
+  );
+});
+
+test('a card that labels nothing still names an ordered set', () => {
+  assert.deepEqual(
+    criteria('## Acceptance criteria\n\n- The widget renders.\n- The widget closes.\n').map(
+      (c) => c.id,
+    ),
+    ['AC-1', 'AC-2'],
+  );
+});
+
+test('a card with no criterion line yields none, and the message names it', () => {
+  assert.deepEqual(criteria('## Acceptance criteria\n\nThe goal above states it.\n'), []);
+  assert.deepEqual(criteria('## Goal\n\nDo the thing.\n'), []);
+  const message = noCriteriaMessage('.olympus/cards/a-1.md');
+  assert.match(message, /\.olympus\/cards\/a-1\.md/);
+  assert.match(message, /acceptance/);
 });

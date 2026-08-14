@@ -16,7 +16,7 @@ import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { underEntry } from '../config/project.mjs';
 import { parseTouchedBlock } from '../seats/diffpolicy.mjs';
-import { isCriterionId } from './card.mjs';
+import { isCriterionId, noCriteriaMessage } from './card.mjs';
 
 /** The template's hard cap. A spec past it is a document nobody reads whole. */
 export const SPEC_LINE_CAP = 400;
@@ -56,11 +56,12 @@ const NONE = /^none\.?$/i;
  * Lints a born or amended story spec against the template.
  *
  * @param {string} specText
- * @param {{card: object, worktree: string, testPaths: string[], tier: object|null}} ctx
- *   `tier` is the lane's diff policy, or null when the project declares none.
+ * @param {{card: object, cardPath: string|null, worktree: string, testPaths: string[],
+ *   tier: object|null}} ctx `tier` is the lane's diff policy, or null when the
+ *   project declares none; `cardPath` names the card in rule (a)'s messages.
  * @returns {string[]} one message per defect, in rule order; empty means clean
  */
-export function lintSpec(specText, { card, worktree, testPaths = [], tier = null }) {
+export function lintSpec(specText, { card, cardPath = null, worktree, testPaths = [], tier = null }) {
   const text = typeof specText === 'string' ? specText : '';
   const lines = text.split(/\r?\n/);
   const criteria = card?.acceptance ?? [];
@@ -69,7 +70,7 @@ export function lintSpec(specText, { card, worktree, testPaths = [], tier = null
   const defects = [];
 
   // (a) one section per card criterion, in card order, none missing, none extra.
-  defects.push(...criterionDefects(card, sections));
+  defects.push(...criterionDefects(card, sections, cardPath));
 
   // (b) the hard cap.
   const count = lines.length > 0 && lines[lines.length - 1] === '' ? lines.length - 1 : lines.length;
@@ -245,9 +246,14 @@ function specParts(specText, known) {
 
 // -- rule (a) ----------------------------------------------------------------
 
-function criterionDefects(card, sections) {
+function criterionDefects(card, sections, cardPath = null) {
   const defects = [];
   const criteria = card?.acceptance ?? [];
+  // An empty criterion set is nothing to compare a spec against. Every section
+  // would answer no criterion and the expected-id list would render empty, so
+  // the rule says the one true thing instead: the card yielded no criterion.
+  // The lane parks that state stage-blocked, because no seat can fix a parse.
+  if (criteria.length === 0) return [noCriteriaMessage(cardPath)];
   const ids = criteria.map((c) => c.id);
   const known = new Set(ids);
   const found = sections.map((s) => s.id);

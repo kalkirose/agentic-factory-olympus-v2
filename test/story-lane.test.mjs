@@ -1045,6 +1045,37 @@ test('a spec that breaks the template takes one corrective round, then parks', a
   assert.equal(closed.seat, 'spec-birth');
 });
 
+test('a card that yields no criterion parks stage-blocked, before any seat', async (t) => {
+  const card = `---
+key: alpha-1
+title: Alpha
+---
+
+## Acceptance criteria
+
+The goal above states them.
+`;
+  const seats = { 'spec-birth': amendingBirth() };
+  const fx = storyFixture(t, { seats, card });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'stage-blocked');
+  assert.equal(park.reason, 'card-no-criteria');
+  assert.deepEqual(park.options, ['retry', 'abandon']);
+  // The message names the card and the heading the parse read.
+  assert.ok(park.question.includes('stories/alpha.md'), park.question);
+  assert.ok(park.question.includes('acceptance heading'), park.question);
+  // A seat cannot fix a parse, so no seat was ever asked to: the birth seat is
+  // never invoked, and no spec-defect failure was recorded against it.
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  assert.deepEqual(fx.calls, []);
+  assert.ok(!live.some((e) => e.event === 'seat-spawned'));
+  assert.ok(!live.some((e) => e.event === 'seat-failure'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const closed = (await waitClosed(fx.paths, runId)).find((e) => e.event === 'run-closed');
+  assert.equal(closed.state, 'failed');
+  assert.equal(closed.reason, 'card-no-criteria');
+});
+
 test('the freeze records the test-path files the spec gave the dev pass', async (t) => {
   const spec = FIXTURE_SPEC.replace(
     'tests/feature.test.mjs — suite',

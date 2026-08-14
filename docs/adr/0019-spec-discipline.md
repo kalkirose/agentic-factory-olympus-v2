@@ -171,6 +171,24 @@ once, with seven messages that each named one id it had not written. The
 message now carries the list the card actually holds, and the template line
 states that a title is the card's id copied verbatim, never renumbered.
 
+The runs after it found two more, both on the path from the card to rule (a).
+
+The card parse read list items alone, so a card that writes its criteria as
+bold ids at the start of a line — `**AC-3.6.1** the text`, which is how real
+cards write them — yielded an empty id set, and every spec section answered no
+criterion whatever its title. A criterion id now counts wherever it opens a
+line under the acceptance heading: bold, bare, bare with a colon, a list item
+of any of those, or a deeper sub-heading. `parseIntentCard` stays the one card
+parser, so readiness, the card sweep, the frontier and the lint read a card the
+same way.
+
+An empty criterion set is a machinery or card defect, never a spec defect, so
+it no longer routes as one. Rule (a) answers it with a single message that
+names the card and the heading it read, and the lane parks it `stage-blocked`
+(ADR-0015) at readiness and at the two stages that lint a spec. No seat is
+asked to correct it: a seat cannot fix a parse, and the corrective invocation
+it would spend is spent on a document that was never the problem.
+
 ## Fallback paths
 
 If the template proves too rigid for a class of story — one where the natural

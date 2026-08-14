@@ -55,11 +55,15 @@ export function initOriginRepo(dir, files) {
 
 // -- story fixtures ----------------------------------------------------------
 
-/** The acceptance-criteria section the fixture intent cards carry. */
+/**
+ * The acceptance-criteria section the fixture intent cards carry. The
+ * criterion is written the way real cards write one — a bold id at the start
+ * of the line — so a parser that reads list items alone fails the lane suite.
+ */
 export const FIXTURE_ACCEPTANCE = `
 ## Acceptance criteria
 
-- AC-1: f(x) returns 2*x for every number x.
+**AC-1** f(x) returns 2*x for every number x.
 `;
 
 /**
