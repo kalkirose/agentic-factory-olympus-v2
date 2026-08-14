@@ -4,11 +4,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DROP_NOTE,
+  RECAPTURE_NOTE,
   captureGist,
+  classifyTakeBacks,
   diffPolicyViolations,
   dropLine,
   laneDiffPolicy,
   parseTouchedPaths,
+  recaptureGist,
+  recaptureLine,
   violationLine,
 } from '../src/seats/diffpolicy.mjs';
 import { validateProjectConfig, withProjectDefaults } from '../src/config/project.mjs';
@@ -233,6 +237,65 @@ test('the take-back line states the freeze, the revert, and the re-freeze route'
   assert.doesNotMatch(DROP_NOTE, /unfixed/);
 });
 
+// -- the re-capturable class -------------------------------------------------
+
+const SHOT = 'apps/web/tests/visual/__screenshots__/checkout.png';
+const RECAP = { recapturablePaths: ['**/__screenshots__/**', 'tests/fixtures/recorded'] };
+
+test('a declared re-capturable take-back is the quiet class, everything else is held', () => {
+  const split = classifyTakeBacks([SHOT, 'tests/fixtures/recorded/cart.json', 'tests/cart.test.mjs'], RECAP);
+  assert.deepEqual(split.recaptured, [
+    { path: SHOT, pattern: '**/__screenshots__/**' },
+    { path: 'tests/fixtures/recorded/cart.json', pattern: 'tests/fixtures/recorded' },
+  ]);
+  assert.deepEqual(split.held, ['tests/cart.test.mjs']);
+});
+
+test('an undeclared class quiets nothing: no entries, no tier at all', () => {
+  const dropped = [SHOT, 'tests/cart.test.mjs'];
+  for (const tier of [null, undefined, {}, { deniedPaths: ['scripts/**'] }]) {
+    const split = classifyTakeBacks(dropped, tier);
+    assert.deepEqual(split.recaptured, []);
+    assert.deepEqual(split.held, dropped);
+  }
+});
+
+test('the hard tiers outrank the class: a denied or forbidden take-back stays loud', () => {
+  // Tamper protection is the reason the gate exists. A project that widens its
+  // re-capturable glob over a path it also denies quiets nothing.
+  const tier = {
+    deniedPaths: ['**/vitest*.config.*'],
+    forbiddenPatterns: ['-win32\\.'],
+    recapturablePaths: ['**/__screenshots__/**', 'tests/**'],
+  };
+  const split = classifyTakeBacks(
+    ['tests/vitest.config.ts', 'apps/web/tests/visual/__screenshots__/shot-win32.png', SHOT],
+    tier,
+  );
+  assert.deepEqual(split.recaptured.map((r) => r.path), [SHOT]);
+  assert.deepEqual(split.held, [
+    'tests/vitest.config.ts',
+    'apps/web/tests/visual/__screenshots__/shot-win32.png',
+  ]);
+});
+
+test('a backslash take-back is classed as its slash form', () => {
+  const split = classifyTakeBacks([SHOT.replaceAll('/', '\\')], RECAP);
+  assert.deepEqual(split.recaptured.map((r) => r.path), [SHOT]);
+});
+
+test('the re-capturable line names the class, the revert, and the re-freeze', () => {
+  const line = recaptureLine({ path: SHOT, pattern: '**/__screenshots__/**' });
+  assert.match(line, /^apps\/web\/tests\/visual\/__screenshots__\/checkout\.png: a re-capturable frozen path/);
+  assert.match(line, /recapturablePaths: \*\*\/__screenshots__\/\*\*/);
+  assert.match(line, /the verdict's re-freeze re-takes this artifact/);
+  // It asks the seat for nothing, exactly like the loud take-back line.
+  assert.doesNotMatch(line, /unfixed/);
+  assert.doesNotMatch(line, /Restore it/);
+  assert.match(RECAPTURE_NOTE, /a record and not an open item/);
+  assert.match(recaptureGist([{ path: SHOT }]), /1 re-capturable frozen path\(s\) the capture reverted/);
+});
+
 // -- the project-config block ------------------------------------------------
 
 test('laneDiffPolicy reads the lane, and an absent block reads null', () => {
@@ -270,6 +333,20 @@ test('diffPolicy rejects an unknown lane, an unknown tier, and a bad shape', () 
   ]);
 });
 
+test('a lane declares the re-capturable class in the same block, and alone', () => {
+  const config = baseConfig({ diffPolicy: { story: { recapturablePaths: ['**/__screenshots__/**'] } } });
+  assert.deepEqual(validateProjectConfig(config), []);
+  assert.deepEqual(withProjectDefaults(config).diffPolicy.story, {
+    recapturablePaths: ['**/__screenshots__/**'],
+  });
+  assert.deepEqual(errorPaths(baseConfig({ diffPolicy: { story: { recapturablePaths: 'x' } } })), [
+    'diffPolicy.story.recapturablePaths',
+  ]);
+  assert.deepEqual(errorPaths(baseConfig({ diffPolicy: { story: { recapturablePath: ['a'] } } })), [
+    'diffPolicy.story.recapturablePath',
+  ]);
+});
+
 test('diffPolicy rejects a forbiddenPatterns entry that is not a regular expression', () => {
   assert.deepEqual(errorPaths(baseConfig({ diffPolicy: { story: { forbiddenPatterns: ['(['] } } })), [
     'diffPolicy.story.forbiddenPatterns[0]',
@@ -285,6 +362,15 @@ test('the capture record is a known run event, loud, and resolvable', () => {
   assert.ok(RUN_EVENTS.has('diff-policy-violation'));
   assert.ok(LOUD_EVENTS.has('diff-policy-violation'));
   assert.ok(RESOLVABLE_EVENTS.has('diff-policy-violation'));
+});
+
+test('the re-capturable record is a known run event, and it is quiet', () => {
+  assert.ok(RUN_EVENTS.has('diff-policy-recapture'));
+  // Quiet is the whole point: no loud stream, so nothing to resolve and
+  // nothing for the run to pair at close.
+  assert.ok(!LOUD_EVENTS.has('diff-policy-recapture'));
+  assert.ok(!RESOLVABLE_EVENTS.has('diff-policy-recapture'));
+  assert.ok(!CLOSE_RESOLVED_EVENTS.has('diff-policy-recapture'));
 });
 
 test('the capture record pairs its resolution at close, like a budget breach', () => {

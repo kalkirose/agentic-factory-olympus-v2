@@ -69,6 +69,11 @@ export const RUN_EVENTS = new Set([
   // a later capture clears it; a take-back blocked nothing, so the run pairs
   // its resolution at close.
   'diff-policy-violation',
+  // A capture that took a write back from a path the lane declared
+  // re-capturable. Quiet: the revert, the record and the downstream statement
+  // are the same as any take-back, but the verdict's re-freeze already owns
+  // the artifact, so an alert would report a handled case (ADR-0017).
+  'diff-policy-recapture',
   // ship
   'pr-opened',
   'check-transition',

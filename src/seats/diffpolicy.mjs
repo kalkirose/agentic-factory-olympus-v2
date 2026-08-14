@@ -8,6 +8,10 @@
 // names violates it whatever the change inside that file says — the point is
 // that the seat under judgment cannot quietly move the ground it is judged
 // on, and content review cannot settle that.
+//
+// The same block carries one class that blocks nothing: `recapturablePaths`
+// names the frozen artifacts a re-freeze re-takes, and a write the capture
+// takes back from one of them is recorded quietly instead of loudly.
 import { underEntry } from '../config/project.mjs';
 
 // The declaration contract: a fenced block the spec author writes, one
@@ -147,6 +151,70 @@ export function dropLine(path) {
     'and it ships from no implementation seat. If this surface must change, the ' +
     'verdict routes that change through a re-freeze; do not write the file again.'
   );
+}
+
+/**
+ * Splits the paths one capture took back into the two classes the record
+ * treats differently.
+ *
+ * A take-back is a write to a path the lane froze, and the revert is the same
+ * for every one of them. What differs is who the record is for. A frozen test
+ * is authored work, and a write to it is worth the owner's attention. A frozen
+ * artifact a machine re-takes — a visual baseline, a recorded fixture — is not:
+ * the verdict's re-freeze route already re-takes it, so an alert on every
+ * take-back reports a handled case as an open item.
+ *
+ * `recapturablePaths` names that second class, per lane, in project config. A
+ * path in it is still reverted, still recorded, and still stated to every
+ * later seat; only the loudness changes.
+ *
+ * The class never reaches a path the hard tiers hold. A take-back that the
+ * lane's `deniedPaths` or `forbiddenPatterns` also match stays in the loud
+ * class whatever `recapturablePaths` says, so no project quiets its own
+ * tamper protection by widening a glob.
+ *
+ * @param {string[]} dropped repo-relative paths the capture reverted
+ * @param {object|null} tier the lane's policy tiers
+ * @returns {{recaptured: {path: string, pattern: string}[], held: string[]}}
+ *   `recaptured` is the quiet class with the entry that classed each path;
+ *   `held` is everything else, in the order the paths arrived
+ */
+export function classifyTakeBacks(dropped, tier) {
+  const recaptured = [];
+  const held = [];
+  for (const raw of dropped) {
+    const path = raw.replaceAll('\\', '/');
+    const guarded =
+      (tier?.deniedPaths ?? []).some((entry) => underEntry(path, entry)) ||
+      (tier?.forbiddenPatterns ?? []).some((pattern) => compile(pattern).test(path));
+    const entry = guarded
+      ? undefined
+      : (tier?.recapturablePaths ?? []).find((e) => underEntry(path, e));
+    if (entry) recaptured.push({ path, pattern: entry });
+    else held.push(raw);
+  }
+  return { recaptured, held };
+}
+
+/** The record's line for one re-capturable take-back. */
+export function recaptureLine(r) {
+  return (
+    `${r.path}: a re-capturable frozen path (recapturablePaths: ${r.pattern}). The capture ` +
+    "reverted the write, and the verdict's re-freeze re-takes this artifact; it ships from " +
+    'no implementation seat.'
+  );
+}
+
+/** The record's one-sentence statement of what a re-capturable take-back is. */
+export const RECAPTURE_NOTE =
+  'Re-capturable frozen paths reverted at capture. The lane declares this class in project ' +
+  'config for artifacts a re-freeze re-takes, so the take-back is a record and not an open ' +
+  'item; the allowed set is committed either way.';
+
+/** A one-line gist for the ledger stream index. */
+export function recaptureGist(recaptured) {
+  const named = recaptured.map((r) => r.path).slice(0, 3).join(', ');
+  return `${recaptured.length} re-capturable frozen path(s) the capture reverted: ${named}`;
 }
 
 /** The record's one-sentence statement of what a take-back is. */

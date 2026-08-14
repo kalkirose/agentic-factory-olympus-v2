@@ -303,9 +303,13 @@ function validateTripwires(tripwires, err) {
 // The diff policy the candidate capture enforces, per lane. Only the lanes
 // that run a dev seat take one; a name outside that set is a typo the launch
 // must not swallow, because a policy nobody reads protects nothing.
+// `recapturablePaths` rides the same block and is not a tier: it blocks
+// nothing and admits nothing. It classes the writes the capture takes back
+// from frozen paths, so a take-back on an artifact a re-freeze re-takes is
+// recorded quietly rather than as an open loud item (ADR-0017).
 const LANES = ['story', 'repair'];
 const POLICED_LANES = new Set(LANES);
-const TIER_KEYS = ['deniedPaths', 'declaredPaths', 'forbiddenPatterns'];
+const TIER_KEYS = ['deniedPaths', 'declaredPaths', 'forbiddenPatterns', 'recapturablePaths'];
 
 function validateDiffPolicy(policy, err) {
   if (policy === undefined) return;
@@ -328,6 +332,7 @@ function validateDiffPolicy(policy, err) {
     }
     validateStringList(tiers.deniedPaths, at('deniedPaths'), err);
     validateStringList(tiers.declaredPaths, at('declaredPaths'), err);
+    validateStringList(tiers.recapturablePaths, at('recapturablePaths'), err);
     if (tiers.forbiddenPatterns === undefined) continue;
     if (!isStringList(tiers.forbiddenPatterns)) {
       err(at('forbiddenPatterns'), 'must be an array of non-empty strings');

@@ -34,11 +34,15 @@ import {
 import { testEditDenyRules } from '../seats/boundary.mjs';
 import {
   DROP_NOTE,
+  RECAPTURE_NOTE,
   captureGist,
+  classifyTakeBacks,
   diffPolicyViolations,
   dropLine,
   laneDiffPolicy,
   parseTouchedPaths,
+  recaptureGist,
+  recaptureLine,
   violationLine,
 } from '../seats/diffpolicy.mjs';
 import { runSpectrum, persistentReds, cyclePlan } from './spectrum.mjs';
@@ -837,6 +841,12 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
  * corrective brief still states the take-back, because the seat is about to
  * re-read a tree that no longer holds its write.
  *
+ * Take-backs come in two record classes, and nothing else about them differs.
+ * A path the lane declared `recapturablePaths` is an artifact a re-freeze
+ * re-takes, so it stamps the quiet `diff-policy-recapture`; every other frozen
+ * path stamps the loud record. The revert, `capture.dropped` and every
+ * downstream statement cover both classes.
+ *
  * The restore runs before the record, so the tree is correct whether or not
  * the capture proceeds. `capture.dropped` carries the take-back out to the
  * commit record; the ledger record is the loud copy.
@@ -864,16 +874,32 @@ async function captureDefects(ctx, base, mode, { seat, capture }) {
   const tier = laneDiffPolicy(base.config, mode);
   const kept = changed.filter((f) => !dropped.includes(f));
   const violations = diffPolicyViolations(kept, tier, declaresPath(base, mode, tier));
-  if (violations.length === 0 && dropped.length === 0) return [];
-  ctx.store.append('diff-policy-violation', {
-    actor: ACTOR,
-    seat,
-    lane: mode,
-    violations,
-    dropped,
-    ...(dropped.length > 0 && { note: DROP_NOTE, droppedLines: dropped.map(dropLine) }),
-    gist: gist(captureGist({ violations, dropped })),
-  });
+  // The two classes of take-back part here, and only in the record: the quiet
+  // class is reverted, committed around and stated downstream exactly like the
+  // loud one.
+  const { recaptured, held } = classifyTakeBacks(dropped, tier);
+  if (recaptured.length > 0) {
+    ctx.store.append('diff-policy-recapture', {
+      actor: ACTOR,
+      seat,
+      lane: mode,
+      recaptured,
+      note: RECAPTURE_NOTE,
+      recapturedLines: recaptured.map(recaptureLine),
+      gist: gist(recaptureGist(recaptured)),
+    });
+  }
+  if (violations.length > 0 || held.length > 0) {
+    ctx.store.append('diff-policy-violation', {
+      actor: ACTOR,
+      seat,
+      lane: mode,
+      violations,
+      dropped: held,
+      ...(held.length > 0 && { note: DROP_NOTE, droppedLines: held.map(dropLine) }),
+      gist: gist(captureGist({ violations, dropped: held })),
+    });
+  }
   if (violations.length === 0) return [];
   return [...violations.map(violationLine), ...dropped.map(dropLine)];
 }

@@ -210,7 +210,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   the lane froze — stamps the same record and blocks nothing: the capture
   commits the allowed set, the record and the commit both name the dropped
   paths, and every later brief states the freeze and the re-freeze route.
-  Nothing is ever discarded without a record (ADR-0017).
+  A take-back from a path the lane declared `recapturablePaths` — a baseline
+  or fixture a re-freeze re-takes — stamps the quiet `diff-policy-recapture`
+  instead, and the hard tiers outrank the class. Nothing is ever discarded
+  without a record (ADR-0017).
 - **Deterministic core.** Every Tier-1 check (per-layer suites, lint, types,
   build) runs as a process. Unlimited rounds; a rerun judges nothing.
 - **Spectrum verdict.** Every runnable Tier-1 layer the cycle runs runs to

@@ -1207,6 +1207,10 @@ const POLICY = {
   repair: { deniedPaths: ['.olympus/**'], forbiddenPatterns: ['-win32\\.'] },
 };
 
+// The class that quiets a take-back, declared per lane beside the tiers. The
+// tiers are absent here on purpose: quieting a take-back turns no policing on.
+const RECAPTURE_POLICY = { story: { recapturablePaths: ['**/__screenshots__/**'] } };
+
 const SPEC_WITH_BLOCK = [
   '# Spec',
   '',
@@ -1395,6 +1399,89 @@ test('a take-back is stamped and the capture commits the allowed set anyway', as
   assert.equal(resolution.resolvedEvent, 'diff-policy-violation');
   assert.ok(events.indexOf(resolution) > events.findIndex((e) => e.event === 'verdict-rendered'));
   assert.equal(loudFor(fx.paths, runId, 'diff-policy-violation').length, 0);
+});
+
+test('a re-capturable take-back stamps quiet, and stamps no loud record at all', async (t) => {
+  // The live shape this class exists for: a seat re-renders a surface, the
+  // visual baseline under it is re-taken, and the capture reverts the write.
+  // The verdict's re-freeze already owns that artifact, so the record is a
+  // record — not a loud item the owner has to read and dismiss.
+  const seats = {
+    dev: ({ label }) =>
+      label === 'dev-1'
+        ? {
+            files: {
+              'src/feature.mjs': GOOD_FEATURE,
+              'tests/visual/__screenshots__/checkout.png': 'baseline-bytes\n',
+            },
+            report: { summary: 'implemented, and the surface re-rendered' },
+          }
+        : { report: { summary: 'a second invocation the take-back must not buy' } },
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, { seats, diffPolicy: RECAPTURE_POLICY });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const quiet = events.find((e) => e.event === 'diff-policy-recapture');
+  assert.equal(quiet.seat, 'dev');
+  assert.equal(quiet.lane, 'story');
+  assert.deepEqual(quiet.recaptured, [
+    { path: 'tests/visual/__screenshots__/checkout.png', pattern: '**/__screenshots__/**' },
+  ]);
+  assert.match(quiet.recapturedLines[0], /a re-capturable frozen path/);
+  assert.match(quiet.note, /a record and not an open item/);
+  // Nothing loud was stamped, so there is nothing to resolve and nothing the
+  // loud strip ever carried.
+  assert.ok(!events.some((e) => e.event === 'diff-policy-violation'));
+  assert.ok(!events.some((e) => e.event === 'resolved'));
+  assert.equal(openLoud(fx.paths).filter((i) => i.ledger === `run:${runId}`).length, 0);
+  // Everything else about a take-back is unchanged: one seat invocation, no
+  // park, the allowed set committed, and the loss stated to every later stage.
+  assert.equal(fx.calls.filter((c) => c.seat === 'dev').length, 1);
+  assert.ok(!events.some((e) => e.event === 'park'));
+  const commit = events.find((e) => e.event === 'implementation-committed');
+  assert.deepEqual(commit.dropped, ['tests/visual/__screenshots__/checkout.png']);
+  assert.deepEqual(readRecord(fx.paths, runId, 1).dropped, [
+    'tests/visual/__screenshots__/checkout.png',
+  ]);
+});
+
+test('the class quiets only what it names: an undeclared frozen path stays loud', async (t) => {
+  const seats = {
+    dev: ({ label }) =>
+      label === 'dev-1'
+        ? {
+            files: {
+              'src/feature.mjs': GOOD_FEATURE,
+              'tests/visual/__screenshots__/checkout.png': 'baseline-bytes\n',
+              'tests/feature.test.mjs': WRONG_TEST,
+            },
+            report: { summary: 'implemented, and I relaxed the test' },
+          }
+        : { report: { summary: 'a second invocation the take-back must not buy' } },
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, { seats, diffPolicy: RECAPTURE_POLICY });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // One take-back per class, and the loud record carries only its own.
+  assert.deepEqual(
+    events.find((e) => e.event === 'diff-policy-recapture').recaptured.map((r) => r.path),
+    ['tests/visual/__screenshots__/checkout.png'],
+  );
+  const loud = events.find((e) => e.event === 'diff-policy-violation');
+  assert.deepEqual(loud.dropped, ['tests/feature.test.mjs']);
+  assert.deepEqual(loud.violations, []);
+  assert.match(loud.droppedLines[0], /this path is frozen for this lane/);
+  // The commit and the verdict record judge one tree, so they carry both.
+  const commit = events.find((e) => e.event === 'implementation-committed');
+  assert.deepEqual([...commit.dropped].sort(), [
+    'tests/feature.test.mjs',
+    'tests/visual/__screenshots__/checkout.png',
+  ]);
+  assert.deepEqual(readRecord(fx.paths, runId, 1).dropped, commit.dropped);
 });
 
 test('the take-back message names the freeze and the re-freeze route, never a fix', async (t) => {
