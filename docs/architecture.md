@@ -94,7 +94,8 @@ Two levels; the ownership test decides placement.
   it live; no PR.
 - **Project config** — one JSON versioned in the project repo: repo facts,
   commands, gates, conventions, lane specifics, per-lane budget thresholds,
-  and the tripwire registry.
+  the external credentials the work needs with the read-only probe that
+  proves each one, and the tripwire registry.
   The daemon reads it from `main` in its bare clone at each run launch, so
   config changes ship through the same PR path as the code they describe.
 
@@ -152,7 +153,8 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 (seat) → adversary → freeze (process).
 
 - **Readiness** is mechanical: card on the graph frontier, open decisions
-  empty, references lint-green, worktree provisioned.
+  empty, references lint-green, worktree provisioned, and every external
+  credential the project declares proven by its read-only probe (ADR-0027).
 - **Spec birth** authors the buildable spec from the intent card, grounded
   against the repo as it exists that day. AFK; escalates only on open
   decisions or a grounding conflict with the card's intent. The born spec is
@@ -248,6 +250,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 
 - The run ends at close-out, not at the green verdict. In-loop ship, no
   batching.
+- **Ship preflight.** Before the PR opens: every declared credential probes
+  again, because a key the launch proved can go stale inside a run and CI is
+  the most expensive way to learn it (ADR-0027); then branch protection and
+  the auto-merge capability. Anything missing parks a provisioning gate.
 - The harness arms auto-merge (squash) at PR open. Branch protection names
   the full required-check set; the flag fires only on full green. No human
   touch on the green path.

@@ -105,6 +105,39 @@ test('defaults fill every missing section', () => {
   assert.equal(filled.stack, null);
   assert.deepEqual(filled.tripwires, []);
   assert.equal(filled.constitutionPath, DEFAULT_CONSTITUTION_PATH);
+  assert.deepEqual(filled.credentials, []);
+});
+
+test('a credential names one variable and a probe command', () => {
+  const config = valid();
+  config.credentials = [{ name: 'payments', env: 'PAY_SECRET_KEY', probe: 'lint' }];
+  assert.deepEqual(validateProjectConfig(config), []);
+  assert.deepEqual(errorPaths({ ...valid(), credentials: {} }), ['credentials']);
+  assert.deepEqual(errorPaths({ ...valid(), credentials: ['payments'] }), ['credentials[0]']);
+  assert.deepEqual(
+    errorPaths({ ...valid(), credentials: [{ name: 'payments', env: 'PAY_SECRET_KEY' }] }),
+    ['credentials[0].probe'],
+  );
+  assert.deepEqual(
+    errorPaths({ ...valid(), credentials: [{ name: 'payments', env: 'PAY_SECRET_KEY', probe: 'absent' }] }),
+    ['credentials[0].probe'],
+  );
+  // One name, never a pattern, and never a value.
+  for (const env of ['PAY_SECRET_*', '2FA_TOKEN', 'PAY KEY', '', 7]) {
+    assert.deepEqual(errorPaths({ ...valid(), credentials: [{ name: 'payments', env, probe: 'lint' }] }), [
+      'credentials[0].env',
+    ]);
+  }
+  assert.deepEqual(
+    errorPaths({
+      ...valid(),
+      credentials: [
+        { name: 'payments', env: 'PAY_SECRET_KEY', probe: 'lint' },
+        { name: 'payments', env: 'PAY_OTHER_KEY', probe: 'lint' },
+      ],
+    }),
+    ['credentials[1].name'],
+  );
 });
 
 test('constitutionPath defaults, and an absolute path is refused', () => {

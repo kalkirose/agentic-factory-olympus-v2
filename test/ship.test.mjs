@@ -60,6 +60,15 @@ test('f doubles', async () => {
 
 // -- check-run shorthands ----------------------------------------------------
 
+// A credential probe the fixture controls through one variable. Its output
+// carries a value that must never be recorded, so the ledger and the park text
+// can be searched for it.
+const PROBE_VAR = 'OLYMPUS_FIXTURE_CREDENTIAL';
+const PROBE_LEAK = 'sk_fixture_never_record_me';
+const PROBE_SCRIPT =
+  `console.log('probe sent ${PROBE_LEAK}');` +
+  `process.exit(process.env.${PROBE_VAR} === 'live' ? 0 : 1);`;
+
 const green = (name = 'ci') => ({
   name,
   status: 'completed',
@@ -279,15 +288,19 @@ const BASE_SEATS = {
   }),
 };
 
-function shipFixture(t, { seats = {}, pollMs = 30, forgeOpts = {}, enqueue = false, slotCap = 2 } = {}) {
+function shipFixture(
+  t,
+  { seats = {}, pollMs = 30, forgeOpts = {}, enqueue = false, slotCap = 2, config = {} } = {},
+) {
   const root = tempDir();
   const origin = initOriginRepo(join(root, 'origin'), {
     [CONFIG_PATH]: projectConfigJson({
       repo: { testPaths: ['tests'] },
-      commands: { suite: ['node', '--test', 'tests/*.test.mjs'] },
       gates: { tier1: [{ name: 'unit', command: 'suite' }] },
       lanes: { story: { suiteCommand: 'suite' } },
       stack: null,
+      ...config,
+      commands: { suite: ['node', '--test', 'tests/*.test.mjs'], ...(config.commands ?? {}) },
     }),
     'stories/alpha.md': DEFAULT_CARD,
     'src/base.mjs': 'export const base = 1;\n',
@@ -814,6 +827,44 @@ test('the preflight parks a provisioning gate until the substrate is ready', asy
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   assert.ok(events.some((e) => e.event === 'pr-opened'));
+});
+
+test('a credential that went stale in the run parks the ship gate before the PR', async (t) => {
+  // The launch proved the key; it expired while the run built. The ship gate
+  // asks again, and the answer arrives before a CI round pays for it.
+  const previous = process.env[PROBE_VAR];
+  const set = (next) => {
+    if (next === undefined) delete process.env[PROBE_VAR];
+    else process.env[PROBE_VAR] = next;
+  };
+  set('stale');
+  t.after(() => set(previous));
+  const fx = shipFixture(t, {
+    config: {
+      commands: { probe: [process.execPath, '-e', PROBE_SCRIPT] },
+      credentials: [{ name: 'payments', env: PROBE_VAR, probe: 'probe' }],
+    },
+  });
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  assert.match(park.question, /payments credential probe answered no at the ship gate/);
+  assert.ok(!park.question.includes(PROBE_LEAK));
+  // No PR, so no CI round: the gate sits in front of the money.
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  assert.ok(!live.some((e) => e.event === 'pr-opened'));
+  assert.ok(!readFileSync(runLedgerPath(fx.paths, runId), 'utf8').includes(PROBE_LEAK));
+  set('live');
+  fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'key rotated' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.deepEqual(
+    events.filter((e) => e.event === 'credential-probe').map((e) => [e.phase, e.ok]),
+    [
+      ['ship', false],
+      ['ship', true],
+    ],
+  );
 });
 
 test('a failed merge round stalls into the fresh pass born on updated main', async (t) => {

@@ -41,6 +41,9 @@ export function defaultProjectConfig() {
     // the standing policy file, relative to the repo root; an absent file
     // leaves every seat prompt exactly as it was
     constitutionPath: DEFAULT_CONSTITUTION_PATH,
+    // external credentials the project's work needs, each with the read-only
+    // command that proves it; an empty list probes nothing
+    credentials: [],
   };
 }
 
@@ -68,6 +71,7 @@ export function validateProjectConfig(config) {
   validateDiffPolicy(config.diffPolicy, err);
   validateBudgets(config.budgets, err);
   validateConstitutionPath(config.constitutionPath, err);
+  validateCredentials(config.credentials, config.commands, err);
   if (isPlainObject(config.lanes) && isPlainObject(config.lanes.story)) {
     if (!Array.isArray(config.repo?.testPaths) || config.repo.testPaths.length === 0) {
       err('repo.testPaths', 'the story lane requires at least one test path');
@@ -370,6 +374,42 @@ function validateConstitutionPath(path, err) {
   } else if (/^([a-zA-Z]:)?[\\/]/.test(path)) {
     err('constitutionPath', 'must be a path relative to the repo root');
   }
+}
+
+// The external credentials the project's work needs, each named with the one
+// environment variable that carries it and the read-only command that proves
+// it works. The probe is required: a declared credential with nothing behind
+// it reads as covered and is not. The variable is one name, never a pattern —
+// the probe answers for exactly the value it was given.
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function validateCredentials(credentials, commands, err) {
+  if (credentials === undefined) return;
+  if (!Array.isArray(credentials)) {
+    err('credentials', 'must be an array');
+    return;
+  }
+  const seen = new Set();
+  credentials.forEach((entry, i) => {
+    const at = (key) => `credentials[${i}].${key}`;
+    if (!isPlainObject(entry)) {
+      err(`credentials[${i}]`, 'must be an object');
+      return;
+    }
+    if (typeof entry.name !== 'string' || entry.name.length === 0) {
+      err(at('name'), 'required string');
+    } else if (seen.has(entry.name)) {
+      err(at('name'), `duplicate credential name: ${entry.name}`);
+    } else {
+      seen.add(entry.name);
+    }
+    if (typeof entry.env !== 'string' || !ENV_NAME.test(entry.env)) {
+      err(at('env'), 'must name one environment variable');
+    }
+    if (typeof entry.probe !== 'string' || !isPlainObject(commands) || !commands[entry.probe]) {
+      err(at('probe'), 'must name a key in commands');
+    }
+  });
 }
 
 function validateStringList(value, path, err) {

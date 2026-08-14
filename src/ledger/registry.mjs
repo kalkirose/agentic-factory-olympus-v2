@@ -29,6 +29,11 @@ export const RUN_EVENTS = new Set([
   'stage-entered',
   'run-closed',
   ...SEAT_EVENTS,
+  // One read-only probe of one external credential, at the launch gate or at
+  // the ship gate: `ok` carries the answer, and both answers are stamped, so
+  // a run always says which credentials it proved and when. The probe's own
+  // output is never carried — it can hold the credential (ADR-0027).
+  'credential-probe',
   // spec + suite
   'spec-born',
   'spec-gate-round',

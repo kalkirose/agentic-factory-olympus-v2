@@ -35,6 +35,7 @@ import { testEditDenyRules } from '../seats/boundary.mjs';
 import { laneDiffPolicy } from '../seats/diffpolicy.mjs';
 import { noCriteriaMessage, parseIntentCard } from './card.mjs';
 import { runCommand } from './exec.mjs';
+import { probeCredentials } from './probes.mjs';
 import { readInheritance } from './resume.mjs';
 import { SPEC_LINE_CAP, amendedSections, frozenExclusions, lintSpec } from './speclint.mjs';
 import {
@@ -300,6 +301,14 @@ function readinessHandler(postFreezeStage) {
         });
       }
     }
+    // Last, so the credentials are proven as late as readiness can prove them
+    // and the first seat spawns behind a yes (ADR-0027).
+    const probed = await probeCredentials(ctx, config, {
+      phase: 'launch',
+      cwd: worktree,
+      env: runEnv(ctx, config),
+    });
+    if (probed) return probed;
     return { next: 'spec-birth' };
   };
 }
@@ -338,6 +347,15 @@ async function inheritFreeze(ctx, nextStage) {
   if (!story) {
     return blocked(ctx, 'story-lane-unconfigured', 'The project config names no story lane.');
   }
+  // An inherited freeze skips the card gates and hands the tree to a dev seat,
+  // so this route asks the credential question for itself, before the stamp
+  // that makes the inheritance permanent (ADR-0027).
+  const probed = await probeCredentials(ctx, config, {
+    phase: 'launch',
+    cwd: worktree,
+    env: runEnv(ctx, config),
+  });
+  if (probed) return probed;
   let prior;
   try {
     prior = readInheritance(ctx.paths, ctx.payload.resumeFrom);

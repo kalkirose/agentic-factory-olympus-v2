@@ -71,6 +71,27 @@ test('f doubles when present', async () => {
 });
 `;
 
+// A credential probe the fixture controls through one variable. It prints a
+// value that must never be recorded anywhere, so the ledger and the park text
+// can be searched for it.
+const PROBE_VAR = 'OLYMPUS_FIXTURE_CREDENTIAL';
+const PROBE_LEAK = 'sk_fixture_never_record_me';
+const PROBE_SCRIPT =
+  `console.log('probe sent ${PROBE_LEAK}');` +
+  `process.exit(process.env.${PROBE_VAR} === 'live' ? 0 : 1);`;
+
+/** Sets the fixture credential for one test and restores it afterwards. */
+function heldCredential(t, value) {
+  const previous = process.env[PROBE_VAR];
+  const set = (next) => {
+    if (next === undefined) delete process.env[PROBE_VAR];
+    else process.env[PROBE_VAR] = next;
+  };
+  set(value);
+  t.after(() => set(previous));
+  return set;
+}
+
 // -- fixture machinery -------------------------------------------------------
 
 function specPathFrom(prompt) {
@@ -471,6 +492,75 @@ ${FIXTURE_ACCEPTANCE}`;
   // recomputed after a restart rather than remembered.
   assert.ok(existsSync(join(fx.paths.archivedRuns, runId, 'spec-round-1.md')));
   assert.ok(existsSync(join(fx.paths.archivedRuns, runId, 'spec-round-2.md')));
+});
+
+test('a stale credential parks readiness before the first seat spawns', async (t) => {
+  const setCredential = heldCredential(t, 'stale');
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
+  const fx = storyFixture(t, {
+    seats,
+    config: {
+      commands: { probe: [process.execPath, '-e', PROBE_SCRIPT] },
+      credentials: [{ name: 'payments', env: PROBE_VAR, probe: 'probe' }],
+    },
+  });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  assert.match(park.question, /payments credential probe answered no at the launch gate/);
+  assert.ok(park.question.includes(PROBE_VAR));
+  // Nothing was spent past the gate.
+  assert.equal(fx.calls.length, 0);
+  const live = runLedgerPath(fx.paths, runId);
+  const failed = readEvents(live).find((e) => e.event === 'credential-probe');
+  assert.equal(failed.ok, false);
+  assert.equal(failed.reason, 'refused');
+  assert.equal(failed.phase, 'launch');
+  assert.equal(failed.credential, 'payments');
+  assert.equal(failed.variable, PROBE_VAR);
+  // The probe's own output reaches neither the ledger nor the human.
+  assert.ok(!readFileSync(live, 'utf8').includes(PROBE_LEAK));
+  assert.ok(!park.question.includes(PROBE_LEAK));
+
+  setCredential('live');
+  fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'key rotated' });
+  // The answer re-probes rather than trusting it: the pass is stamped too.
+  const stalled = await waitParked(fx.paths, runId, 'spec-gate-stalled');
+  assert.ok(stalled.question.includes('not converging'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.deepEqual(
+    events.filter((e) => e.event === 'credential-probe').map((e) => [e.phase, e.ok]),
+    [
+      ['launch', false],
+      ['launch', true],
+    ],
+  );
+  assert.ok(fx.calls.some((c) => c.seat === 'spec-birth'));
+});
+
+test('an absent credential variable parks without running the probe', async (t) => {
+  const setCredential = heldCredential(t, undefined);
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
+  const fx = storyFixture(t, {
+    seats,
+    config: {
+      commands: { probe: [process.execPath, '-e', PROBE_SCRIPT] },
+      credentials: [{ name: 'payments', env: PROBE_VAR, probe: 'probe' }],
+    },
+  });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  assert.match(park.question, /is not on this host/);
+  const stamped = readEvents(runLedgerPath(fx.paths, runId)).find(
+    (e) => e.event === 'credential-probe',
+  );
+  assert.equal(stamped.reason, 'absent');
+  assert.equal(fx.calls.length, 0);
+  setCredential('live');
+  fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'variable set' });
+  await waitParked(fx.paths, runId, 'spec-gate-stalled');
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
 });
 
 test('the owner buys one more spec-gate round, and the next cap parks again', async (t) => {

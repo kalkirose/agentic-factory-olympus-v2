@@ -32,6 +32,7 @@ import {
 } from '../isolation/tree.mjs';
 import { testEditDenyRules } from '../seats/boundary.mjs';
 import { parseIntentCard } from './card.mjs';
+import { probeCredentials } from './probes.mjs';
 import { SUITE_SCHEMA } from './story.mjs';
 import {
   DEV_SCHEMA,
@@ -179,6 +180,14 @@ function shipHandler({ forgeFor, pollMs }) {
 // -- PR open + preflight -----------------------------------------------------
 
 async function openPr(ctx, base) {
+  // The credential gate comes first: a CI round is the most expensive way to
+  // learn that a key went stale since the launch proved it (ADR-0027).
+  const probed = await probeCredentials(ctx, base.config, {
+    phase: 'ship',
+    cwd: base.worktree,
+    env: base.env,
+  });
+  if (probed) return probed;
   const pf = await base.forge.preflight(base.defaultBranch);
   if (!pf.autoMergeAllowed || pf.requiredChecks.length === 0) {
     // Hands-off ship needs branch protection naming the full required set
