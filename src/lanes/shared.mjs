@@ -225,8 +225,8 @@ export function commandError(ctx, reason, question, detail = {}) {
 }
 
 /**
- * A seat that could not deliver a usable work product past its corrective
- * invocation. The failure evidence stays in the ledger; a bought retry
+ * A seat that could not deliver a usable work product past its machine retry
+ * allowance. The failure evidence stays in the ledger; a bought retry
  * carries it into the next invocation's brief.
  */
 export function seatFail(ctx, seat, result) {
@@ -237,10 +237,10 @@ export function seatFail(ctx, seat, result) {
     seat,
     ...(cause && { cause }),
     question:
-      `The ${seat} seat failed after its corrective invocation` +
+      `The ${seat} seat failed` +
       (cause ? ` (${cause})` : '') +
-      `. Answer "retry" for one fresh ${seat} invocation carrying the failure ` +
-      'evidence, or "abandon" to close the run.',
+      ` and no machine retry remains. Answer "retry" for one fresh ${seat} ` +
+      'invocation carrying the failure evidence, or "abandon" to close the run.',
   });
 }
 

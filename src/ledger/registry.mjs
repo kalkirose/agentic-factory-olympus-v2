@@ -177,7 +177,7 @@ export const PARK_TYPES = new Set([
   'provisioning-gate',
   // Terminal-state discipline (ADR-0015): a recoverable failure parks with
   // `retry` / `abandon` instead of closing the run.
-  'seat-failure', // a seat work product past its corrective invocation
+  'seat-failure', // a seat work product past its machine retry allowance
   'stage-blocked', // a stage precondition the run cannot settle itself
   'command-error', // a configured command could not run at all
 ]);

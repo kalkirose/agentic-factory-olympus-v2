@@ -19,6 +19,16 @@ assembly, and the headless runner — gets these concrete shapes:
   file. One corrective re-prompt on failure — into the same session where
   the transcript named a session id — then a `seat-failure` event with
   reason `report-invalid`. A missing file and bad JSON take the same route.
+- **Crash retries.** A child that dies on a nonzero exit is re-dispatched in
+  place — same prompt, fresh child — up to 3 times per seat session, one
+  budget shared across the contract attempts and a degrade re-dispatch. Each
+  crashed dispatch stamps its own `seat-failure` (reason `exit`) with the
+  evidence before the next spawn, and every retry spawn carries `retry` with
+  its ordinal, so the ledger holds the full history. The allowance covers
+  reason `exit` only: a deliberate termination, a cost-ceiling breach, and a
+  spawn refusal are never retried, and an unavailable model keeps its own
+  degrade route. A session that spends the budget returns the failure and the
+  lane parks it.
 - **Schema subset.** Report schemas are a flat draft-07-safe subset: a
   top-level object of primitive fields, arrays of primitives, arrays of
   flat objects, or one level of flat object; `enum` on primitives; every
@@ -100,6 +110,23 @@ session that wrote the report already holds the content. Resume is cheaper
 and keeps effort constant inside the seat session. When no session id was
 captured, the corrective prompt stands alone — it carries the errors, the
 path, and the schema.
+
+## Why a nonzero exit buys retries and the other failures do not
+
+A nonzero exit is the one failure class whose cause is usually outside the
+seat: a dropped API connection, a killed stream. The work product is absent,
+not defective, and a fresh child on the same prompt answers it. The first
+live cutover run proved the shape twice — a verifier that had finished every
+check died writing its report, and the only route was a human park answer
+that bought exactly the dispatch a machine could have bought. Three retries
+bound the spend to a known worst case; the bound is a constant, not config,
+because no project has a reason to want a different one.
+
+The other classes carry their own answer already. A termination is the
+orchestrator's own decision. A cost-ceiling breach re-run would spend the
+same money again. A spawn refusal is a host defect no respawn changes. An
+unavailable model has the degrade route, which remembers the vendor's reset
+window instead of re-buying the rejection.
 
 ## Why the one-turn rule sits in the core block
 

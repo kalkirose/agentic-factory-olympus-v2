@@ -662,7 +662,41 @@ test('a substitute dispatch stamps model-substituted with the substitute named',
   assert.ok(events.indexOf(substituted) < events.findIndex((e) => e.event === 'seat-spawned'));
 });
 
-test('a child failure ends the session — no corrective re-prompt, no report', async (t) => {
+test('a child crash buys a fresh dispatch, and the report lands on the retry', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev');
+  let calls = 0;
+  const result = await runSeat(store, {
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: () => {
+      calls++;
+      return calls < 3
+        ? fixtureCommand({ reportPath, exitCode: 3 })
+        : fixtureCommand({ report: { verdict: 'pass' }, reportPath });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 3);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  const spawned = events.filter((e) => e.event === 'seat-spawned');
+  assert.equal(spawned.length, 3);
+  // The retry ordinal rides the spawn stamp; the first dispatch carries none.
+  assert.deepEqual(
+    spawned.map((e) => e.retry),
+    [undefined, 1, 2],
+  );
+  // A crash retry is a fresh dispatch, never a corrective re-prompt.
+  assert.ok(!spawned.some((e) => e.corrective));
+  const failures = events.filter((e) => e.event === 'seat-failure');
+  assert.equal(failures.length, 2);
+  assert.ok(failures.every((e) => e.reason === 'exit'));
+  assert.equal(events.find((e) => e.event === 'seat-report').attempt, 1);
+});
+
+test('a fourth crash ends the session with the retry budget spent', async (t) => {
   const { paths, store } = setup(t);
   const reportPath = runReportPath(paths, 'r1', 'dev');
   let calls = 0;
@@ -678,10 +712,41 @@ test('a child failure ends the session — no corrective re-prompt, no report', 
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'exit');
-  assert.equal(calls, 1);
+  // One dispatch and three retries, then the failure stands.
+  assert.equal(calls, 4);
   const events = readEvents(runLedgerPath(paths, 'r1'));
-  assert.equal(events.find((e) => e.event === 'seat-failure').reason, 'exit');
+  assert.equal(events.filter((e) => e.event === 'seat-failure').length, 4);
+  const spawned = events.filter((e) => e.event === 'seat-spawned');
+  assert.deepEqual(
+    spawned.map((e) => e.retry),
+    [undefined, 1, 2, 3],
+  );
   assert.ok(!events.some((e) => e.event === 'seat-report'));
+});
+
+test('a deliberate termination and a cost ceiling are never retried', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev');
+  for (const outcome of [
+    { terminated: true, reason: 'run-kill', cost: 0, meta: {} },
+    { failed: true, reason: 'cost-ceiling', cost: 9, meta: {} },
+  ]) {
+    let calls = 0;
+    const result = await runSeat(store, {
+      seat: 'dev',
+      roleBlock: 'ROLE',
+      reportPath,
+      schema: SCHEMA,
+      commandFor: () => ({ cmd: process.execPath, args: ['-e', ''] }),
+      supervise: async () => {
+        calls++;
+        return outcome;
+      },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, outcome.reason);
+    assert.equal(calls, 1);
+  }
 });
 
 test('a schema outside the flat subset refuses the dispatch', async (t) => {

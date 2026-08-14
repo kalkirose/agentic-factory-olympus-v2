@@ -4,6 +4,15 @@
 // then stamp seat-report or seat-failure. The runner never throws on a seat
 // outcome — the lane handler reads the result and decides the route.
 //
+// Crash retries: a child that dies without a verdict — a nonzero exit, which
+// is the transient class (an API drop, a killed connection) — is re-dispatched
+// in place on the prompt in force, up to CRASH_RETRIES fresh children per seat
+// session. Every crashed dispatch stamps its own seat-failure with the
+// evidence before the next spawn, and the retry spawn carries `retry`, so the
+// ledger reads spawn → failure → spawn with nothing silent. Deliberate
+// termination, a cost-ceiling breach, and a spawn refusal are never retried:
+// those causes do not change on a second try.
+//
 // Model integrity: a substitute dispatch stamps `model-substituted` before
 // the spawn; a transcript model that differs from the requested model is a
 // seat-failure on the harness route, never a silent downgrade.
@@ -29,6 +38,10 @@ import { assembleSeatPrompt, correctivePrompt } from './prompt.mjs';
 import { claudeSeatCommand } from './claude.mjs';
 
 const ACTOR = 'daemon';
+
+// Fresh children a seat session may buy back after nonzero exits, shared
+// across the whole session (both contract attempts and a degrade re-dispatch).
+const CRASH_RETRIES = 3;
 
 /**
  * Runs one seat session end to end.
@@ -112,7 +125,7 @@ export async function runSeat(store, opts) {
     // One dispatch: build the argv for the model in force and supervise the
     // child. `seat-spawned` carries the model actually spawned, so a degraded
     // retry reads as its own spawn on the model that judged the work.
-    const dispatch = (attempt) => {
+    const dispatch = (attempt, retry = 0) => {
       const spec = commandFor({
         claudeCommand,
         prompt,
@@ -136,13 +149,28 @@ export async function runSeat(store, opts) {
           model,
           effort: def.effort,
           attempt,
+          ...(retry > 0 && { retry }),
           ...(attempt === 2 && { corrective: true }),
           ...(degraded && { degraded: true }),
         },
       });
     };
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    // The crash-retry loop reads `model` and `prompt` from the enclosing
+    // scope, so a retry after a degrade or a corrective runs on whatever is
+    // now in force. Only reason `exit` qualifies: `terminated` is deliberate,
+    // `cost-ceiling` and `spawn` do not change on a second try, and an
+    // unavailable model has its own route below.
+    let crashRetries = 0;
+    const dispatchWithRetries = async (attempt) => {
       let result = await dispatch(attempt);
+      while (result.failed === true && result.reason === 'exit' && crashRetries < CRASH_RETRIES) {
+        crashRetries++;
+        result = await dispatch(attempt, crashRetries);
+      }
+      return result;
+    };
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      let result = await dispatchWithRetries(attempt);
       if (result.reason === 'model-unavailable') {
         if (!degraded && model !== DEFAULT_MODEL) {
           store.append('model-degraded', {
@@ -162,7 +190,7 @@ export async function runSeat(store, opts) {
           release = semaphores ? await semaphores.acquire(model, { store, seat }) : () => {};
           // A rejected model wrote no transcript to resume into.
           resume = undefined;
-          result = await dispatch(attempt);
+          result = await dispatchWithRetries(attempt);
         }
         if (result.reason === 'model-unavailable') {
           store.append('seat-failure', {
