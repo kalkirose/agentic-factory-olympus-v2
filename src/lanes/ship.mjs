@@ -16,9 +16,15 @@
 // so a daemon restart resumes mid-ship without memory.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
-import { repairTicketPath, reconcileTicketPath, runReportPath } from '../daemon/home.mjs';
+import {
+  repairTicketPath,
+  reconcileTicketPath,
+  runReportPath,
+  runLedgerPath,
+  archivedRunLedgerPath,
+} from '../daemon/home.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
-import { openEscapesStore } from '../telemetry/stores.mjs';
+import { openEscapesStore, resolveClosedRun } from '../telemetry/stores.mjs';
 import { recordEscape, ticketEscape, fixEscape, readEscapeSet } from '../telemetry/escapes.mjs';
 import { cloneDir, fetchClone, branchSha } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
@@ -449,14 +455,8 @@ async function stampMerged(ctx, base, opened, st) {
   const redChecks = runs
     .filter((r) => required.has(r.name) && RED.has(normalize(r)))
     .map((r) => r.name);
-  // The merge landed; any open green-but-no-merge alert is resolved.
-  const events = runEvents(ctx);
-  const resolved = new Set(events.filter((e) => e.event === 'resolved').map((e) => e.resolves));
-  for (const e of events) {
-    if (e.event === 'gate-integrity' && e.kind === 'auto-merge' && !resolved.has(e.seq)) {
-      ctx.store.resolve({ actor: ACTOR, resolves: e.seq });
-    }
-  }
+  // The merge is what a green-but-no-merge alert was waiting for, so the
+  // engine's owning-event sweep clears it behind this stamp (ADR-0015).
   ctx.store.append('merged', {
     actor: ACTOR,
     pr: opened.pr,
@@ -1173,22 +1173,68 @@ function reconcileTicket({ ctx, base, merged, records, reason }) {
 // -- escape fix-back (repair lane) -------------------------------------------
 
 function fixEscapeBack(ctx, merged) {
-  const store = openEscapesStore(ctx.paths, { onAppend: ctx.onAppend });
-  try {
-    const target = readEscapeSet(ctx.paths.escapesLedger).find(
-      (e) => e.seq === ctx.payload.escapeSeq,
-    );
-    if (!target || target.fixed) return;
-    fixEscape(store, {
-      actor: ACTOR,
-      fixes: ctx.payload.escapeSeq,
-      category: target.category,
-      attribution: String(ctx.payload.attribution ?? target.attribution),
-      refs: { runId: ctx.runId, pr: merged.pr, mergeSha: merged.mergeSha },
-    });
-  } finally {
-    store.close();
+  const target = readEscapeSet(ctx.paths.escapesLedger).find(
+    (e) => e.seq === ctx.payload.escapeSeq,
+  );
+  if (!target) return;
+  if (!target.fixed) {
+    const store = openEscapesStore(ctx.paths, { onAppend: ctx.onAppend });
+    try {
+      fixEscape(store, {
+        actor: ACTOR,
+        fixes: ctx.payload.escapeSeq,
+        category: target.category,
+        attribution: String(ctx.payload.attribution ?? target.attribution),
+        refs: { runId: ctx.runId, pr: merged.pr, mergeSha: merged.mergeSha },
+      });
+    } finally {
+      store.close();
+    }
   }
+  settleBreachOf(ctx, target);
+}
+
+/**
+ * The red-merge breach the fixed escape belonged to. Its owning event is the
+ * fix of every escape it ticketed, and that fix lands in a different ledger,
+ * on a different run, long after the breached run closed — so the sweep the
+ * engine runs over one run ledger cannot reach it and this does (ADR-0015).
+ *
+ * Best effort by design: the breach record is a fact either way, and a repair
+ * that shipped never fails on the bookkeeping of the run it repaired.
+ */
+function settleBreachOf(ctx, target) {
+  const originRunId = target.refs?.runId;
+  if (typeof originRunId !== 'string' || originRunId === ctx.runId) return;
+  try {
+    const set = readEscapeSet(ctx.paths.escapesLedger);
+    const fixed = new Set(set.filter((e) => e.fixed).map((e) => e.seq));
+    const events = originEvents(ctx.paths, originRunId);
+    // Only a run that is over: an open run belongs to the engine, and two
+    // writers on one live ledger would collide on seq.
+    if (!events.some((e) => e.event === 'run-closed')) return;
+    const resolved = new Set(events.filter((e) => e.event === 'resolved').map((e) => e.resolves));
+    for (const e of events) {
+      if (e.event !== 'red-merge-breach' || resolved.has(e.seq)) continue;
+      // A breach that ticketed nothing has no repair to wait for, and no fix
+      // can answer it. That one stays for the human.
+      const ticketed = e.ticketed ?? [];
+      if (ticketed.length === 0 || !ticketed.every((seq) => fixed.has(seq))) continue;
+      resolveClosedRun(ctx.paths, originRunId, {
+        actor: ACTOR,
+        resolves: e.seq,
+        owner: 'escape-fixed',
+      });
+    }
+  } catch {
+    // The console can still resolve the record by hand.
+  }
+}
+
+/** A closed run's events, live path first, then the archive. */
+function originEvents(paths, runId) {
+  const live = readEvents(runLedgerPath(paths, runId));
+  return live.length > 0 ? live : readEvents(archivedRunLedgerPath(paths, runId));
 }
 
 // -- role blocks -------------------------------------------------------------

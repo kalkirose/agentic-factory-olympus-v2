@@ -20,7 +20,9 @@ import { shipStep } from '../src/lanes/ship.mjs';
 import { gitHubForge, parseGitHubRepo } from '../src/ship/forge.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
-import { openEscapesStore } from '../src/telemetry/stores.mjs';
+import { openEscapesStore, TelemetryStore } from '../src/telemetry/stores.mjs';
+import { openLoud } from '../src/telemetry/readers.mjs';
+import { RUN_EVENTS } from '../src/ledger/registry.mjs';
 import { recordEscape, ticketEscape, readEscapeSet } from '../src/telemetry/escapes.mjs';
 import { owedRepairs } from '../src/frontier/repairs.mjs';
 import { owedReconciliations, reconciliationLaunch } from '../src/frontier/reconciliations.mjs';
@@ -842,6 +844,63 @@ test('a repair-lane ship stamps the escape fixed at close-out', async (t) => {
   assert.equal(escapes[0].fixRefs.pr, 7);
   // the loop closed: a fixed escape is owed to nobody
   assert.deepEqual(owedRepairs(fx.paths, 'proj'), []);
+});
+
+test('the escape fix clears the red-merge breach it was recorded for', async (t) => {
+  const fx = shipFixture(t);
+  const store = openEscapesStore(fx.paths);
+  const recorded = recordEscape(store, {
+    actor: 'daemon',
+    category: 'product-escape',
+    defectLine: 'f(3) returns 5 in production',
+    detectionSource: 'harness-self',
+    attribution: 'alpha-1',
+    refs: { project: 'proj', runId: 'seed' },
+  });
+  const ticket = repairTicketPath(fx.paths, recorded.seq);
+  writeFileSync(ticket, '# Fix f(3)\n');
+  ticketEscape(store, { actor: 'daemon', escape: recorded.seq, ticket });
+  store.close();
+  // The run that shipped the red merge, as its close-out left it: breached,
+  // loud, closed, archived.
+  const seed = new TelemetryStore(
+    fx.paths,
+    'run:seed',
+    archivedRunLedgerPath(fx.paths, 'seed'),
+    RUN_EVENTS,
+  );
+  seed.append('run-launched', { actor: 'daemon', project: 'proj', lane: 'story' });
+  const breach = seed.append('red-merge-breach', {
+    actor: 'daemon',
+    pr: 3,
+    escapes: [recorded.seq],
+    ticketed: [recorded.seq],
+    gist: 'red merge on PR #3',
+  });
+  seed.append('run-closed', { actor: 'daemon', state: 'shipped' });
+  seed.close();
+  assert.equal(openLoud(fx.paths).length, 1);
+  fx.forge.state.autoChecks = () => [green()];
+  await fx.daemon.start();
+  fx.daemon.engine.seatDefaults = () => ({ commandFor: seatFixture(BASE_SEATS).commandFor });
+  const { runId } = await fx.daemon.launchRun({
+    project: 'proj',
+    lane: 'repairship',
+    ticket,
+    escapeSeq: recorded.seq,
+  });
+  await waitClosed(fx.paths, runId);
+  // The defect is out of the product, so the breach is no longer an ask: the
+  // strip clears without anyone reading it.
+  const seeded = readEvents(archivedRunLedgerPath(fx.paths, 'seed'));
+  const resolution = seeded.find((e) => e.event === 'resolved');
+  assert.equal(resolution.resolves, breach.seq);
+  assert.equal(resolution.resolvedEvent, 'red-merge-breach');
+  assert.equal(resolution.owner, 'escape-fixed');
+  assert.deepEqual(
+    openLoud(fx.paths).filter((e) => e.event === 'red-merge-breach'),
+    [],
+  );
 });
 
 test('green but no merge: loud gate-integrity, one re-arm, resolution at merge', async (t) => {

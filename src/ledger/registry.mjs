@@ -65,9 +65,9 @@ export const RUN_EVENTS = new Set([
   'budget-breach',
   // A candidate capture the diff policy refused, or one that took a frozen
   // write back. Loud, because both mean the tree the run judges is not the
-  // tree the seat believed it left behind (ADR-0017). A refusal resolves when
-  // a later capture clears it; a take-back blocked nothing, so the run pairs
-  // its resolution at close.
+  // tree the seat believed it left behind (ADR-0017). A refusal is owned by
+  // the capture that got through; a take-back by the re-freeze that re-takes
+  // the frozen surface (ADR-0015).
   'diff-policy-violation',
   // A capture that took a write back from a path the lane declared
   // re-capturable. Quiet: the revert, the record and the downstream statement
@@ -160,11 +160,11 @@ export const LOUD_EVENTS = new Set([
   'budget-breach',
 ]);
 
-// Loud run items the run pairs its own `resolved` to when it closes. They ask
-// the owner for no decision — the run they reported on is over — so leaving
-// them open would build the owner an alert strip of finished runs (ADR-0021).
-// Anything a later step can genuinely clear resolves at that step instead, and
-// reaches close already paired.
+// The close-out backstop. A loud record resolves at the event that owns it
+// (`resolution.mjs`); these two are the classes a run may also close on its
+// own when no owner ever landed. They ask the owner for no decision — the run
+// they reported on is over — so leaving them open would build the owner an
+// alert strip of finished runs (ADR-0021).
 export const CLOSE_RESOLVED_EVENTS = new Set(['budget-breach', 'diff-policy-violation']);
 
 export function streamOf(event) {

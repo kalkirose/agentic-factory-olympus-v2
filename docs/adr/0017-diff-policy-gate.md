@@ -42,15 +42,14 @@ allowed set.
 - **The repair lane declares by its ticket.** That lane has no born spec, so
   its intake ticket answers: a path the ticket names verbatim is declared.
 - **Every violation is stamped loud.** `diff-policy-violation` carries every
-  violating path with the rule and pattern that caught it. A later capture
-  that clears the record pairs a `resolved` append, so a run that answered
-  itself leaves no open loud item.
+  violating path with the rule and pattern that caught it. The capture that
+  gets through owns the record and resolves it (ADR-0015), so a run that
+  answered itself leaves no open loud item.
 - **A take-back is stamped in one of two classes.** The loud
-  `diff-policy-violation` carries it by default, and the run pairs its own
-  `resolved` at close, because no later capture can clear a record that
-  blocked nothing. A path the lane declared `recapturablePaths` stamps the
-  quiet `diff-policy-recapture` instead: a run event, no loud stream, no
-  resolution owed.
+  `diff-policy-violation` carries it by default, and the re-freeze that
+  re-takes the frozen surface owns it. A path the lane declared
+  `recapturablePaths` stamps the quiet `diff-policy-recapture` instead: a run
+  event, no loud stream, no resolution owed.
 - **The hard tiers outrank the quiet class.** A take-back that `deniedPaths`
   or `forbiddenPatterns` also match stays loud whatever `recapturablePaths`
   says. Tamper protection sits on the code and config that decide whether a

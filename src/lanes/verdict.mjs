@@ -318,7 +318,6 @@ async function runCycle(ctx, base, mode, { cycle }) {
   }
 
   const openIds = open.map((f) => f.id);
-  resolveGateIntegrity(ctx, openIds);
   const resolvedNow = priorOpen.filter((f) => !openIds.includes(f.id));
   const verdict = reds.length === 0 && open.length === 0 ? 'green' : 'red';
   const confirmation = runEvents(ctx).some(
@@ -924,25 +923,6 @@ function declaresPath(base, mode, tier) {
 }
 
 /**
- * Pairs a `resolved` append to every capture record a later capture cleared.
- *
- * Only a record that blocked can be cleared this way. A take-back-only record
- * blocked nothing, so no later capture answers it: it stays open, and the run
- * pairs its resolution at close, the way a budget breach does (ADR-0021).
- */
-function resolveCaptureRecords(ctx) {
-  const events = runEvents(ctx);
-  const resolved = new Set(
-    events.filter((e) => e.event === 'resolved').map((e) => e.resolves),
-  );
-  for (const e of events) {
-    if (e.event !== 'diff-policy-violation' || resolved.has(e.seq)) continue;
-    if ((e.violations ?? []).length === 0) continue;
-    ctx.store.resolve({ actor: ACTOR, resolves: e.seq });
-  }
-}
-
-/**
  * One dev-seat invocation and its capture gate, through the lane's corrective
  * machinery: a capture a violation refused buys one corrective invocation
  * carrying the exact paths, then the `seat-failure` park. A capture that only
@@ -968,25 +948,7 @@ async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
     buildRole,
     checks: () => captureDefects(ctx, base, mode, { seat, capture }),
   });
-  if (!outcome.fail) resolveCaptureRecords(ctx);
   return { ...outcome, dropped: capture.dropped };
-}
-
-// -- gate integrity ----------------------------------------------------------
-
-/** Pairs a `resolved` append to every gate-integrity line whose harness
- * finding has left the open set. */
-function resolveGateIntegrity(ctx, openIds) {
-  const events = runEvents(ctx);
-  const resolved = new Set(
-    events.filter((e) => e.event === 'resolved').map((e) => e.resolves),
-  );
-  for (const e of events) {
-    if (e.event !== 'gate-integrity' || resolved.has(e.seq)) continue;
-    if (!openIds.includes(e.findingId)) {
-      ctx.store.resolve({ actor: ACTOR, resolves: e.seq, findingId: e.findingId });
-    }
-  }
 }
 
 // -- role blocks -------------------------------------------------------------

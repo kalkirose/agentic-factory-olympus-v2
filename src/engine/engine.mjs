@@ -17,6 +17,7 @@ import {
   CLOSE_RESOLVED_EVENTS,
   SEAT_TERMINAL_EVENTS,
 } from '../ledger/registry.mjs';
+import { OWNER_EVENTS, settleOwnedLoud } from '../ledger/resolution.mjs';
 import { runLedgerPath } from '../daemon/home.mjs';
 import { openRunStore, archiveRun } from '../telemetry/stores.mjs';
 import { deriveRunState } from './replay.mjs';
@@ -34,11 +35,11 @@ export class RunEngine {
    *   onParked?: (info: {runId: string, project: string, lane: string, type: string}) => void,
    *   semaphores?: import('../seats/semaphore.mjs').ModelSemaphores,
    *   seatDefaults?: () => object,
-   *   onEvent?: (project: string, line: object) => void}} opts
+   *   onEvent?: (project: string, line: object, ledger: string) => void}} opts
    *   seatDefaults supplies machine-scoped runSeat options (claudeCommand)
    *   read fresh per dispatch, so a live config edit applies. onEvent fires
-   *   on every run-store append, project-attributed — the tripwire watcher's
-   *   event key.
+   *   on every run-store append, project-attributed and carrying its source
+   *   ledger — the event key every in-daemon observer reads.
    */
   constructor(
     paths,
@@ -124,15 +125,17 @@ export class RunEngine {
       violated: false,
       closed: false,
       executing: false,
+      settling: false,
       seats: new Set(),
       lastAnswer: null,
     };
     run.store = openRunStore(this.paths, runId, {
-      onAppend: (line) => {
+      onAppend: (line, ledger) => {
         // The watcher's event key first, so it reads the seat's own stamp
         // before it reads anything the budget check appends behind it.
-        this.onEvent?.(project, line);
+        this.onEvent?.(project, line, ledger);
         this.checkBudget(run, line);
+        this.settleLoud(run, line);
       },
     });
     this.runs.set(runId, run);
@@ -172,7 +175,7 @@ export class RunEngine {
       paths: this.paths,
       // For stores a handler opens itself (the escapes ledger): the same
       // project-attributed event key the run store carries.
-      onAppend: (line) => this.onEvent?.(run.project, line),
+      onAppend: (line, ledger) => this.onEvent?.(run.project, line, ledger),
       // Long-poll handlers (the check watcher) exit their loop on this; the
       // engine ignores any directive returned after stop or close.
       stopped: () => this.stopped || run.closed,
@@ -267,11 +270,34 @@ export class RunEngine {
     });
   }
 
+  // -- loud lifecycle -------------------------------------------------------
+
   /**
-   * Pairs the resolution a loud stamp owes. A budget breach and a capture
-   * take-back both ask for no decision — the run they reported on is over —
-   * so the run closes them rather than leaving the owner an alert strip of
-   * runs that already ended.
+   * Pairs the resolution a loud record owes as soon as the event that owns it
+   * lands (ADR-0015). The key is the append itself, so no lane has to remember
+   * to clear the record it opened: a run ledger that holds an owning event
+   * holds the resolution behind it.
+   */
+  settleLoud(run, line) {
+    if (!OWNER_EVENTS.has(line.event) || run.settling) return;
+    // The sweep appends, and every append re-enters this hook. The flag keeps
+    // one sweep in flight; its own resolutions own nothing, so nothing is lost.
+    run.settling = true;
+    try {
+      settleOwnedLoud(run.store, { actor: ACTOR });
+    } catch {
+      // A resolution never fails the append it followed. The close-out sweep
+      // is the backstop for anything this pass could not pair.
+    } finally {
+      run.settling = false;
+    }
+  }
+
+  /**
+   * The backstop under the owning-event sweep: a loud record whose owner never
+   * landed, on a run that is now over. A budget breach and a capture take-back
+   * both ask for no decision, so the run closes them rather than leaving the
+   * owner an alert strip of runs that already ended.
    */
   resolveLoudAtClose(run, state) {
     const events = readEvents(runLedgerPath(this.paths, run.runId));

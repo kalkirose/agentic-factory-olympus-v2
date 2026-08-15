@@ -82,7 +82,9 @@ event registry is closed; a new type enters only by a design-level decision.
 
 Every loud event and every breach gets a paired `resolved` append in its
 source ledger. The open set is derivable: index entries without a linked
-resolution.
+resolution. Each loud class names the event that owns it in one table, and the
+engine pairs the resolution when that event lands; the run close is the
+backstop for the classes no event owns.
 
 ## Configuration
 
@@ -317,8 +319,9 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   presented FIFO with roadmap-order tiebreak, answered in any order.
 - **Streams.** Queued: park events + tripwire breaches. Loud: liveness
   violation, gate-integrity defect, diff-policy violation, red-merge breach,
-  factory starvation.
-  Consoles render loud first, then queue depth. Pull only.
+  factory starvation, owed repairs, budget breach. Consoles render loud first,
+  then queue depth, and a loud item leaves the strip as soon as the event that
+  owns it lands. Pull only.
 
 ## Liveness
 

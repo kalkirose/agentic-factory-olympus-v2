@@ -1,8 +1,13 @@
 # ADR-0015: Terminal-state discipline
 
-Status: accepted (2026-08-13)
+Status: accepted (2026-08-15)
 
-## Decision
+Two things in the harness reach a terminal state and stay there: a run, and a
+loud record. Both are governed here, because both go wrong the same way — a
+machine ends something on its own authority that the owner wanted to decide,
+or leaves something open that nothing will ever close.
+
+## Decision: how a run ends
 
 A run reaches `run-closed` through three routes only:
 
@@ -14,12 +19,12 @@ Every other condition that a lane meets on its own parks the run. A refusal
 that happens before provisioning throws at the console or at the daemon
 handler and opens no run at all, so it stamps nothing.
 
-- **Three recovery park types** join the closed catalog: `seat-failure` (a
+- **Three recovery park types** are in the closed catalog: `seat-failure` (a
   seat work product past its corrective invocation), `stage-blocked` (a stage
   precondition the run cannot settle itself), and `command-error` (a
   configured command that could not run). Each one offers the same two
-  options, `retry` and `abandon`. No new ledger event type: a recovery park
-  is the same `park` event under a new type.
+  options, `retry` and `abandon`. A recovery park is the same `park` event
+  under a new type; it is no new ledger event.
 - **The park carries the close it replaced.** The park event holds `reason`
   and `detail`, which are the close directive the condition would have taken.
   `abandon` closes on that record, so the run fails on the original reason
@@ -51,12 +56,48 @@ handler and opens no run at all, so it stamps nothing.
   `run-closed` is stamped in the engine alone, from the directive route and
   the kill. A new close route fails CI until it is added deliberately.
 
-Nothing else changes. The spec-gate exhaustion park keeps its own options
-(`round` and `abandon`). The four option parks that already close on a human
-answer keep their reasons (`spec-gate-exhausted`, `second-zero-kill`,
-`unkilled-gap-survivor`, `second-stall`). The model-unavailable degradation,
-the human kill path, the seat runner's single corrective re-prompt and the
-park catalog's answer plumbing are untouched.
+The spec-gate exhaustion park keeps its own options (`round` and `abandon`).
+The four option parks that close on a human answer keep their reasons
+(`spec-gate-exhausted`, `second-zero-kill`, `unkilled-gap-survivor`,
+`second-stall`).
+
+## Decision: how a loud record ends
+
+Every loud class names the event that owns it, in one table
+(`src/ledger/resolution.mjs`). An owned record resolves the moment its owning
+event lands.
+
+- **The table is complete and structurally held.** Every event in
+  `LOUD_EVENTS` has an entry, and every entry either names the ledger event
+  that owns it or states in prose who else settles it. A loud class that says
+  neither fails CI.
+- **The sweep is keyed on the append, not on the call site.** The engine
+  hooks every run-ledger append; an append of an owning event sweeps the
+  ledger and pairs every resolution its own events owe. No lane has to
+  remember to clear a record another lane opened, and a resolution never fails
+  the append it followed.
+- **The owner must land behind the record.** A candidate owner is an event of
+  the named type at a higher seq, judged by the rule's own predicate where
+  the class needs one. A record already carrying a `resolved` is skipped, so
+  the sweep is idempotent across a restart.
+- **The four owned pairings.** A capture refusal is owned by
+  `implementation-committed`, the capture that got through. A capture
+  take-back is owned by `re-freeze`, which re-takes the frozen surface the
+  write reached. A green-but-no-merge alert is owned by `merged`. A harness
+  finding is owned by the first `verdict-rendered` whose open set no longer
+  holds it.
+- **A red-merge breach is owned across ledgers**, by the fix of every escape
+  it ticketed. The repair run's close-out pairs it back onto the breached
+  run, live path first and then the archive, and only onto a run that already
+  closed. It is best effort: the breach record is a fact either way, and a
+  repair that shipped never fails on the bookkeeping of the run it repaired.
+- **Two classes have no ledger owner.** A budget breach asks nothing of
+  anyone, so its life ends when the run it reported on does. A liveness
+  violation says the run stopped being a run, so only the human clears it.
+- **The close-out sweep is the backstop.** At `run-closed` the run pairs a
+  `resolved` to every open record in `CLOSE_RESOLVED_EVENTS` — a budget breach
+  and a capture record — whose owner never landed. The note names the state
+  the run closed in.
 
 ## Why a recoverable failure is a decision, not a defect
 
@@ -108,6 +149,35 @@ the gate keys its park on the round. A recovery park needs no key: the failure
 itself proves that the last retry was spent, and an abandoned park closes the
 run at the next stage entry, so no stale answer can survive.
 
+## Why a loud record ends at its owner, not at the run
+
+The loud strip is the one surface the owner is shown before being asked to
+look for anything. Its value is entirely in what it does not hold. A strip
+that carries four items all day, three of them business the harness itself
+settled hours ago, is a strip the owner learns to scroll past — and the fourth
+item is the one that mattered.
+
+Resolving at run close was the wrong instinct dressed as caution. It is true
+that a finished run's alerts should not survive it. It does not follow that
+they should survive until then. A take-back is answered the moment the verdict
+re-freezes the surface the write reached: from that stamp on, the record
+describes a handled case, and every minute it stays open is a minute of the
+owner's attention spent on nothing.
+
+The general form is that each loud class already has an event that answers it.
+Two classes had that event wired at their own call site, one class had it
+wired for one of its two record shapes, and the rest waited for the close.
+Naming the owner per class in one table makes the question answerable rather
+than remembered: what does this record wait for, and did that happen? A class
+whose honest answer is "nothing in the ledger" says so, in the table, and
+takes the close backstop or the human.
+
+Keying the sweep on the append rather than on the call site follows the rule
+the stream indexes already hold to: a pairing that must be remembered by the
+site that opened the record is a pairing that goes missing the first time a
+new route opens one. The engine sees every append. It is where the guarantee
+can be structural instead of conventional.
+
 ## Fallback paths
 
 If a recovery type costs more human attention than it saves, that type
@@ -130,3 +200,15 @@ If the park detail on the ledger grows past a readable line, the close keeps
 the reason alone and the detail stays in the park record. Trigger: a park
 event that no console can render. Reversal cost: low. One spread disappears
 from the abandon route.
+
+If an owning-event pairing proves too eager — a record cleared while the
+condition it reported still holds — that class loses its owner and returns to
+the close backstop or the human. Trigger: one case where the owner had to
+re-open a record the sweep resolved. Reversal cost: low. One entry in the
+table drops its `owner` and gains a `by`.
+
+If the per-append sweep becomes a cost on long run ledgers, it moves to the
+handler-settle point, where the engine already re-reads the ledger for the
+liveness check. Trigger: measurable append latency attributable to the sweep.
+Reversal cost: low. The same function, called from one place instead of the
+store hook, at the price of resolutions landing a stage later.

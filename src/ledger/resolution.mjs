@@ -1,0 +1,122 @@
+// Loud-item lifecycle: which event owns each loud record.
+//
+// A loud record is a request for the owner's eyes. It stops being one at the
+// moment the event that answers it lands — the re-freeze that re-takes an
+// artifact a capture took back, the merge that fires after a gate said it did
+// not, the commit that clears a refusal. Waiting for the run to close instead
+// leaves the strip holding finished business all day (ADR-0015).
+//
+// The table below is the whole answer, one entry per loud class. Every loud
+// event in the registry has an entry, and an entry either names the ledger
+// event that owns the record or says in `by` who else settles it. A class with
+// an owner needs no call-site discipline: the engine sweeps the run ledger
+// whenever an owning event lands.
+import { LOUD_EVENTS } from './registry.mjs';
+
+/**
+ * @typedef {object} OwnershipRule
+ * @property {string} name the record class, for readers of this table
+ * @property {(item: object) => boolean} [match] which records of the event
+ *   type this rule covers; absent means all of them
+ * @property {string} [owner] the ledger event that answers the record
+ * @property {(item: object, owner: object) => boolean} [owns] whether a
+ *   candidate owner answers this record; absent means the first one does
+ * @property {(item: object) => object} [fields] payload the resolution carries
+ * @property {string} [by] who settles a class no ledger event owns
+ */
+
+/** @type {Record<string, OwnershipRule[]>} */
+export const LOUD_OWNERSHIP = {
+  // A refusal blocked a capture, so the capture that got through answers it.
+  // A take-back blocked nothing, and no later capture speaks to it: the frozen
+  // surface it wrote to is re-taken by the verdict's re-freeze, and that is
+  // the event that owns it (ADR-0017).
+  'diff-policy-violation': [
+    {
+      name: 'refusal',
+      match: (item) => (item.violations ?? []).length > 0,
+      owner: 'implementation-committed',
+    },
+    {
+      name: 'take-back',
+      match: (item) => (item.violations ?? []).length === 0,
+      owner: 're-freeze',
+    },
+  ],
+  // Two classes, two owners. A green-but-no-merge alert is answered by the
+  // merge landing. A harness finding is answered by the first verdict whose
+  // open set no longer holds it.
+  'gate-integrity': [
+    {
+      name: 'auto-merge',
+      match: (item) => item.kind === 'auto-merge',
+      owner: 'merged',
+    },
+    {
+      name: 'harness-finding',
+      match: (item) => typeof item.findingId === 'string',
+      owner: 'verdict-rendered',
+      owns: (item, render) => !(render.open ?? []).includes(item.findingId),
+      fields: (item) => ({ findingId: item.findingId }),
+    },
+  ],
+  // A red merge stays loud while the defect is still in the product. The
+  // repair run's close-out fixes the escapes it ticketed, and pairs the
+  // resolution back onto this record then — a cross-ledger owner, so the ship
+  // lane does it rather than the run-ledger sweep (ADR-0024).
+  'red-merge-breach': [{ name: 'breach', by: 'the escape fix of every escape it ticketed' }],
+  // A threshold informs and asks nothing, so the run it reported on closing is
+  // the whole of its life (ADR-0021).
+  'budget-breach': [{ name: 'threshold', by: 'the run close' }],
+  // The run stopped being a run. Nothing the run can stamp answers that.
+  'liveness-violation': [{ name: 'stall', by: 'the human, from a console' }],
+  // Instance-scoped, and both are conditions rather than records: the frontier
+  // re-evaluates them on every sweep and pairs the resolution when the
+  // condition lifts.
+  'factory-starvation': [{ name: 'starvation', by: 'the frontier sweep' }],
+  'repairs-owed': [{ name: 'owed', by: 'the frontier sweep' }],
+};
+
+/** The events that can answer a loud record. The engine's sweep key. */
+export const OWNER_EVENTS = new Set(
+  Object.values(LOUD_OWNERSHIP)
+    .flat()
+    .map((rule) => rule.owner)
+    .filter(Boolean),
+);
+
+/**
+ * The resolutions a ledger's own events already owe: every open loud record
+ * whose owning event has landed behind it, in ledger order.
+ * @param {object[]} events
+ * @returns {{resolves: number, owner: string}[]}
+ */
+export function ownedResolutions(events) {
+  const resolved = new Set(events.filter((e) => e.event === 'resolved').map((e) => e.resolves));
+  const owed = [];
+  for (const item of events) {
+    if (!LOUD_EVENTS.has(item.event) || resolved.has(item.seq)) continue;
+    for (const rule of LOUD_OWNERSHIP[item.event] ?? []) {
+      if (!rule.owner) continue;
+      if (rule.match && !rule.match(item)) continue;
+      const owner = events.find(
+        (e) => e.seq > item.seq && e.event === rule.owner && (rule.owns?.(item, e) ?? true),
+      );
+      if (!owner) continue;
+      owed.push({ resolves: item.seq, owner: rule.owner, ...(rule.fields?.(item) ?? {}) });
+      break;
+    }
+  }
+  return owed;
+}
+
+/**
+ * Pairs every resolution a store's own events owe. Idempotent: a record the
+ * ledger already resolved is skipped, so a replay after a restart settles the
+ * same set once.
+ * @param {import('../telemetry/stores.mjs').TelemetryStore} store
+ * @param {{actor: string}} opts
+ */
+export function settleOwnedLoud(store, { actor }) {
+  for (const owed of ownedResolutions(store.events())) store.resolve({ actor, ...owed });
+}

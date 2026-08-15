@@ -22,7 +22,9 @@ that stops a run paying twice for the same refusal.
   stamps `budget-breach` once, carrying the threshold, the cost at crossing,
   and the stage. The run then continues exactly as it would have. A threshold
   never parks, blocks, or closes anything (owner decision, 2026-08-13).
-- **`budget-breach` is loud, and the run pairs its own resolution at close.**
+- **`budget-breach` is loud, and no event in the ledger owns it.** Nothing the
+  run can stamp answers a figure, so the run pairs the resolution when it
+  closes (ADR-0015).
 - **A run remembers a refused model for as long as the vendor said it would.**
   When the run's ledger already holds a rejection for the model a seat is
   configured to run on, and the `resetsAt` that came with it has not arrived,
@@ -76,10 +78,10 @@ paired resolution, so the run appends it at close: the alert did its work
 while the run was live, and a strip of alerts about finished runs would train
 the owner to ignore the strip.
 
-That close is now a shared route rather than a budget special case. The
-capture take-back (ADR-0017) reports the same way — loud while the run is
-live, answerable by nobody, over when the run is over — so both events sit in
-one registry set the close reads.
+Every other loud class resolves earlier, at the event that answers it
+(ADR-0015). A figure has no such event: no later stamp makes a run cost less
+than it cost. That is what puts the breach in the close-out set rather than in
+the owned set, and it is the whole of the difference.
 
 ## Why a memo now, and what it supersedes
 
