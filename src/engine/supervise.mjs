@@ -86,11 +86,10 @@ export function superviseSeat(
     cwd,
     env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
-    // A seat runs in its own process group wherever it can, so nothing aimed
-    // at a seat can reach the daemon through it. `windowsVerbatimArguments` is
-    // set by the resolver for exactly the commands that run under `cmd.exe`,
-    // which are the ones that cannot take it.
-    ...seatSpawnOptions({ viaShim: spec.windowsVerbatimArguments === true }),
+    // A seat runs on a console of its own that has no window, so nothing it
+    // starts can put one on the operator's screen and nothing aimed at a seat
+    // reaches the daemon through it (ADR-0016).
+    ...seatSpawnOptions(),
     ...(spec.windowsVerbatimArguments && { windowsVerbatimArguments: true }),
   });
   let cost = 0;

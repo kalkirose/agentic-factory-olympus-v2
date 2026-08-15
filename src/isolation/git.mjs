@@ -46,8 +46,10 @@ function run(argv, args, { cwd, env }) {
   return new Promise((resolve, reject) => {
     // The failure names the command the caller asked for, not the invocation
     // this module built around it.
-    const options = { cwd, windowsHide: true, ...(env !== undefined && { env }) };
-    execFile('git', argv, options, (error, stdout, stderr) => {
+    const options = { cwd, ...(env !== undefined && { env }) };
+    // `windowsHide` stands at the call, where the process starts and where a
+    // reader looks for it, and after the caller's options so none can drop it.
+    execFile('git', argv, { ...options, windowsHide: true }, (error, stdout, stderr) => {
       if (error) {
         reject(new Error(`git ${args.join(' ')} failed: ${String(stderr).trim() || error.message}`));
       } else {

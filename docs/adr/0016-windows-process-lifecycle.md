@@ -5,16 +5,24 @@ Status: accepted (2026-08-14)
 ## Decision
 
 Windows has no process groups a signal can address and no kill that reaches a
-descendant. Four corrections follow, and the platform branch for all of them
-lives in one module (`src/engine/processes.mjs`), the way `resolveArgv` owns
-the executable branch (ADR-0013). Off Windows every path below is byte for byte
-what shipped before.
+descendant. The corrections below follow from that, and the platform branch for
+all of them lives in one module (`src/engine/processes.mjs`), the way
+`resolveArgv` owns the executable branch (ADR-0013). Off Windows every path
+below is byte for byte what shipped before.
 
-- **A seat spawns into its own process group where it can.** On Windows
-  `detached` is `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`, and the group is
-  what a console control event addresses. A seat that spawns directly takes it.
-  A seat that has to run under `cmd.exe` does not, for the reason below. The
-  child is not unref'd, so the daemon still waits on it exactly as before.
+- **A seat spawns onto a console that has no window.** Every seat takes
+  `windowsHide`, which on Windows is `CREATE_NO_WINDOW`: the seat is handed a
+  console of its own with no window on it, and its whole descendant tree
+  inherits that console instead of opening one. One shape covers both seats,
+  the tool that spawns directly and the shim that runs under `cmd.exe`.
+  `detached` is not taken: there it is `DETACHED_PROCESS`, which leaves the seat
+  with no console at all, and a console program that has none opens a visible
+  one. The child is not unref'd, so the daemon still waits on it as before.
+- **Nothing the harness starts shows a window.** The seat spawn, the
+  project-config command runner, git, compose and the notifier command each
+  carry `windowsHide` at the call itself, after the caller's own options so
+  that none of them can drop it. `test/processes.test.mjs` reads every
+  child-process call site under `src/` and fails on one that does not.
 - **The daemon does not die on a console break.** `SIGBREAK` is listened for
   and dropped. It is the signal a group-addressed console event delivers, it
   carries no indication of which member it was meant for, and the daemon has a
@@ -51,9 +59,10 @@ the operator has to clear.
 Measured on the host, not inferred. A parent spawned a child the way
 `superviseSeat` did, and a console control event was addressed to the **child's**
 pid. The parent received it: with a listener attached it reported `SIGBREAK`,
-and with no listener — the daemon's own shape — it died with exit code
+and with no listener, the daemon's own shape, it died with exit code
 `0xC000013A`, `STATUS_CONTROL_C_EXIT`, having written nothing. Repeating the
-measurement with `detached` set, the parent received nothing at all.
+measurement with the child on a console of its own, the event ended the child
+and the process that raised it, and the parent lived.
 
 That is the whole mechanism. A child spawned without `detached` shares its
 parent's console and its parent's console process group, and a console control
@@ -74,21 +83,53 @@ handle names is the interpreter and everything of interest is a generation
 below it. Measured on the same host: after `child.kill()`, the direct child was
 gone and the tool it started was still running.
 
-## Why the isolation is two measures and not one
+## Why the console is the boundary and not the process group
 
-`detached` alone would have been the whole answer, and it is not available to
-every seat. Measured, on the same shim shape the resolver produces: a batch
-file spawned with `DETACHED_PROCESS` runs and its own `echo` reaches the pipe,
-but the tool it launches writes nothing anywhere. The interpreter has no
-console to pass on, and its child ends up with no usable standard output. A
-seat's stdout is where its cost, its session id and its refusal to do the work
-arrive, so losing it would trade a visible failure for a silent one.
+A seat's descendants are console programs in their own right: git, `cmd.exe`, a
+build tool, a shell. The harness does not spawn any of them, so none of them
+takes an option from it. What each one gets is settled one generation up,
+because a child inherits its parent's console. The seat's console is the only
+place the question can be answered at all.
 
-So the seats that can be isolated are, and the daemon stops dying for the ones
-that cannot. Dropping `SIGBREAK` is the same guarantee reached from the other
-end: the event still arrives, and it no longer means anything. The cost is that
-Ctrl+Break at the daemon's own console no longer stops it. `olympusd stop` and
-Ctrl+C both do, and neither was ever the accident.
+Three shapes were measured on the host, each with a seat that ran a console
+program of its own and reported the console it was handed.
+
+- A plain spawn. The descendant inherits the daemon's console, and a console
+  control event addressed to the seat reaches the daemon. That is the failure
+  above.
+- `DETACHED_PROCESS`. The seat has no console, so the descendant opened one:
+  `GetConsoleWindow` returned a handle and `IsWindowVisible` returned true. A
+  window on the operator's screen, one for every console program a seat runs.
+  `CREATE_NO_WINDOW` was set on that same spawn and changed nothing, because
+  Windows ignores it next to `DETACHED_PROCESS`.
+- `CREATE_NO_WINDOW` alone. The seat is handed a console of its own that has no
+  window, and the descendant reported that same console and no window.
+  `GetConsoleProcessList` showed the seat and its descendant on one console and
+  the parent on another.
+
+The third answers both questions at once. Nothing appears on the operator's
+screen, and a console control event raised on a seat's console cannot reach the
+daemon, because delivery goes only to the processes attached to the console the
+sender is attached to. Measured: a break addressed to such a seat ended the seat
+and the process that raised it, and the parent lived.
+
+It also keeps the seat's stdout, which `DETACHED_PROCESS` does not. Measured on
+the shim shape the resolver produces: under `DETACHED_PROCESS` the batch file
+runs and its own `echo` reaches the pipe, and the tool it starts writes nowhere;
+under `CREATE_NO_WINDOW` both arrive. A console with no window is still a
+console, so the interpreter has one to pass on and its child has usable standard
+handles. A seat's stdout is where its cost, its session id and its refusal to do
+the work arrive, so nothing that costs it is taken.
+
+Termination is untouched by any of this. A deliberate end is
+`taskkill /PID <pid> /T /F`, which walks the parent-child tree the kernel
+records; it never read a process group, so a seat that is not detached is ended
+exactly as before, descendants included.
+
+Dropping `SIGBREAK` stays. It is the same guarantee reached from the other end,
+it costs nothing, and it covers whatever reaches the daemon's own console. The
+price is that Ctrl+Break at that console no longer stops the daemon.
+`olympusd stop` and Ctrl+C both do, and neither was ever the accident.
 
 ## Why a natural exit needs a sweep and a kill does not
 
@@ -150,12 +191,12 @@ The `EBUSY` failures are explained, and are fixed by the sweep.
 
 ## Fallback paths
 
-If the seats that run under `cmd.exe` need real isolation rather than the
-daemon's refusal to die, the spawn moves to a job object, which separates the
-kill boundary from the console boundary entirely. Trigger: a console event that
-reaches the daemon through a path `SIGBREAK` does not cover. Reversal cost:
-moderate, a native binding or a launcher process is required either way, which
-is why it is not the first answer.
+If a console event reaches the daemon through a path that neither the seat's own
+console nor the `SIGBREAK` drop covers, the spawn moves to a job object, which
+separates the kill boundary from the console boundary entirely. Trigger: a
+daemon exit with no `daemon-stopped` and a seat kill in front of it. Reversal
+cost: moderate, a native binding or a launcher process is required either way,
+which is why it is not the first answer.
 
 If the PowerShell enumeration proves too slow at release time, the sweep moves
 to a native handle query. Trigger: a release whose sweep dominates its

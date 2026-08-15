@@ -7,16 +7,14 @@
 //
 // 1. A spawned child joins its parent's console and its parent's console
 //    process group. A console control event addressed to the child is
-//    delivered to the whole group — the daemon included — and a daemon with no
+//    delivered to the whole group, the daemon included, and a daemon with no
 //    handler for it dies on the spot (measured: exit 0xC000013A,
-//    STATUS_CONTROL_C_EXIT). `detached` puts the seat in a group of its own and
-//    closes that path, but only where it can be afforded: it is
-//    DETACHED_PROCESS as well, and a seat that runs through `cmd.exe` loses the
-//    pipes when its own child inherits them from a console-less interpreter
-//    (measured: the batch runs, the tool it starts writes nowhere). A seat's
-//    stdout carries its cost, its session and its refusal to work, so it is
-//    never traded away. The daemon's refusal to die on SIGBREAK covers the
-//    seats this cannot (ADR-0016).
+//    STATUS_CONTROL_C_EXIT). So a seat is given a console of its own that has
+//    no window. `windowsHide` is CREATE_NO_WINDOW, the seat's whole descendant
+//    tree inherits that console, and neither a window nor a console event can
+//    leave it. `detached` is not taken: it is DETACHED_PROCESS, which leaves
+//    the seat with no console at all, and every console descendant of a
+//    console-less process opens a visible one of its own (ADR-0016).
 // 2. `child.kill()` is TerminateProcess on the one process the handle names.
 //    A seat is usually `cmd.exe` running a shim (ADR-0013), so the tool itself
 //    is a grandchild and survives the kill along with everything it spawned.
@@ -37,19 +35,18 @@ import { resolveArgv } from './executable.mjs';
 const MIN_ROOT_LENGTH = 4;
 
 /**
- * Spawn options for a seat child, on top of what the caller sets.
- * @param {{platform?: string, viaShim?: boolean}} [opts] `viaShim` marks a
- *   command that runs under `cmd.exe` rather than spawning directly.
+ * Spawn options for a seat child, on top of what the caller sets. One shape for
+ * every seat: a shim under `cmd.exe` and a directly spawned tool take the same.
+ * @param {{platform?: string}} [opts]
  * @returns {object} empty off Windows
  */
-export function seatSpawnOptions({ platform = process.platform, viaShim = false } = {}) {
+export function seatSpawnOptions({ platform = process.platform } = {}) {
   if (platform !== 'win32') return {};
-  // `detached` on Windows is DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP. The
-  // group is what a console control event addresses, so a seat that takes it
-  // cannot carry one back to the daemon. The child is not unref'd — the daemon
-  // still waits on it exactly as before.
-  if (viaShim) return { windowsHide: true };
-  return { detached: true, windowsHide: true };
+  // CREATE_NO_WINDOW. The seat gets a console of its own with no window on it,
+  // the descendants inherit that console instead of opening a visible one, and
+  // a console control event stays inside it. The child is not detached and not
+  // unref'd: the daemon still waits on it exactly as before.
+  return { windowsHide: true };
 }
 
 /**
@@ -147,7 +144,8 @@ function spawnSpec([command, ...args]) {
 // an answer ("no such pid"), not a fault.
 function execAsync(file, args, opts = {}) {
   return new Promise((resolve, reject) => {
-    execFile(file, args, { windowsHide: true, ...opts }, (error, stdout, stderr) => {
+    // `windowsHide` is last: no caller can drop it and put a window on screen.
+    execFile(file, args, { ...opts, windowsHide: true }, (error, stdout, stderr) => {
       if (error && typeof error.code !== 'number') reject(error);
       else resolve({ code: error ? error.code : 0, stdout, stderr });
     });
