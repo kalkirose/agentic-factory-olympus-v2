@@ -2,7 +2,8 @@
 // `shipStep({forgeFor})` supplies the two stages after the verdict — `ship`
 // (PR open with auto-merge armed, the check watcher, the CI red route, the
 // competing-merge update, the merge round) and `close-out` (red-merge breach
-// conversion, merge-commit checks to terminal, the card sweep, the escape
+// conversion, merge-commit checks to terminal, the card sweep, the
+// reconciliation judgment, the configured learning artifact, the escape
 // fix-back, ledger close).
 //
 // The check watcher is a ledger-stamping process: every observed state
@@ -14,7 +15,7 @@
 // cycle; every other route judges the tree again first. Every handler
 // re-derives its position from the run ledger, the git state, and the forge,
 // so a daemon restart resumes mid-ship without memory.
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
   repairTicketPath,
@@ -693,6 +694,9 @@ function closeOutHandler({ forgeFor, pollMs, enqueueRepair }) {
     if (base.storyLane && !runEvents(ctx).some((e) => e.event === 'reconciliation-judged')) {
       await reconcileJudge(ctx, base, merged);
     }
+    if (base.storyLane && !runEvents(ctx).some((e) => e.event === 'learning-lesson')) {
+      await learningLesson(ctx, base, merged);
+    }
     if (Number.isInteger(ctx.payload.escapeSeq)) fixEscapeBack(ctx, merged);
     return { close: { state: 'shipped', pr: merged.pr, mergeSha: merged.mergeSha } };
   };
@@ -1175,6 +1179,97 @@ function reconcileTicket({ ctx, base, merged, records, reason }) {
     '- Edit only the decision-record tree. No source, test, or config change',
     '  rides this run.',
     '',
+  ].join('\n');
+}
+
+// -- the learning artifact (ADR-0031) ----------------------------------------
+
+const LEARNING_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    artifacts: { type: 'array', items: { type: 'string' } },
+    summary: { type: 'string' },
+  },
+  required: ['artifacts', 'summary'],
+};
+
+/**
+ * The close-out seat that writes a human-readable learning artifact about the
+ * story that just shipped. The project asks for it in its config; a project
+ * that does not stamps nothing and runs exactly as it did before. The seat's
+ * conduct is the owner's instructions file, read here and carried in the role
+ * block — the harness supplies the shipped story's identity and the workspace
+ * and holds no opinion about what a lesson is.
+ *
+ * Every failure is quiet and the close proceeds: one attempt, no retry, no
+ * park, no loud item, and no path from here to a failed close. Both outcomes
+ * stamp `learning-lesson`, so a feature that stopped working says so.
+ */
+async function learningLesson(ctx, base, merged) {
+  const learning = base.config.closeout?.learning;
+  if (!learning) return;
+  const fail = (reason) => ctx.store.append('learning-lesson', { actor: ACTOR, ok: false, reason });
+  let instructions;
+  let step = 'instructions';
+  try {
+    instructions = readFileSync(learning.instructions, 'utf8');
+    step = 'workspace';
+    mkdirSync(learning.workspace, { recursive: true });
+    step = 'worktree';
+    await fetchClone(cloneDir(ctx.paths, ctx.project));
+    await resetHard(base.worktree, merged.mergeSha);
+  } catch (error) {
+    fail(`${step}: ${error.message}`);
+    return;
+  }
+  let result;
+  try {
+    result = await ctx.runSeat({
+      seat: 'learning',
+      roleBlock: learningRole({ ctx, base, merged, instructions, workspace: learning.workspace }),
+      reportPath: runReportPath(ctx.paths, ctx.runId, 'learning'),
+      schema: LEARNING_SCHEMA,
+      cwd: base.worktree,
+      env: base.env,
+    });
+  } catch (error) {
+    fail(`seat: ${error.message}`);
+    return;
+  }
+  if (!result.ok) {
+    fail('seat-failure');
+    return;
+  }
+  ctx.store.append('learning-lesson', {
+    actor: ACTOR,
+    ok: true,
+    artifacts: result.report.artifacts,
+    summary: result.report.summary,
+  });
+}
+
+function learningRole({ ctx, base, merged, instructions, workspace }) {
+  return [
+    'A story shipped. Write the learning artifact for it, and nothing else.',
+    'The instructions below are your conduct: they are the authority on what',
+    'the artifact is, where it belongs, and how it reads. Follow them.',
+    `Your workspace is the directory ${workspace}. It is stateful — read what`,
+    'stands there before you add to it, and keep it as the instructions say.',
+    'Write inside that directory and nowhere else: no file outside it, no',
+    'change to this repository, and no push.',
+    'You judge nothing about the code and decide nothing about the project.',
+    'The story that shipped:',
+    `- story: ${base.storyKey ?? ctx.runId}`,
+    `- its spec: ${base.specRef}`,
+    `- merge commit ${merged.mergeSha} on ${base.defaultBranch}; read the`,
+    `  shipped diff with: git show ${merged.mergeSha}`,
+    `- merged PR: #${merged.pr}`,
+    'Report every file you wrote or changed under artifacts, by absolute',
+    'path, and say in one or two sentences what the lesson was.',
+    '',
+    '--- the instructions ---',
+    instructions.trim(),
   ].join('\n');
 }
 

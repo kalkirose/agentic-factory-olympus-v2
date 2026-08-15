@@ -89,6 +89,12 @@ export const RUN_EVENTS = new Set([
   // failed judgment stamps ok:false — an unjudged ship is visible, never a
   // silent skip.
   'reconciliation-judged',
+  // The close-out learning artifact a project asks for in its config: `ok`
+  // with the artifact paths the seat reported, or ok:false with the reason
+  // (ADR-0031). Quiet either way — the story shipped, and nothing here can
+  // stop or slow the close — but never silent, because a feature that fails
+  // without a record is a feature nobody can tell is broken.
+  'learning-lesson',
   // escalation
   'park',
   'answer',

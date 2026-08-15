@@ -100,7 +100,8 @@ Two levels; the ownership test decides placement.
 - **Project config** — one JSON versioned in the project repo: repo facts,
   commands, gates, conventions, lane specifics, per-lane budget thresholds,
   the external credentials the work needs with the read-only probe that
-  proves each one, and the tripwire registry.
+  proves each one, the tripwire registry, and the optional close-out extras
+  (`closeout`).
   The daemon reads it from `main` in its bare clone at each run launch, so
   config changes ship through the same PR path as the code they describe.
 
@@ -289,13 +290,21 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   daemon home and is owed a repair-lane run. The breaching run enqueues; the
   frontier sweep launches, because that run still holds its own slot.
 - Close-out: watch merge-commit checks to terminal states, run the card
-  sweep, run the reconciliation judgment, close the run ledger.
+  sweep, run the reconciliation judgment, run the learning artifact if the
+  project configured one, close the run ledger.
 - **Reconciliation judgment** (ADR-0026): a fresh-context seat judges
   whether the shipped diff implements or contradicts any decision record.
   Owed writes a reconciliation ticket and stamps `reconciliation-judged`;
   not-owed and seat-failure stamp too — an unjudged ship is a recorded
   miss, never a silent skip. The rewrite runs later as its own repair-lane
   run, never inside the run that shipped the diff.
+- **Learning artifact** (ADR-0031): optional, by project config
+  (`closeout.learning`: an instructions file and a workspace directory, both
+  absolute). A fresh-context seat writes a human-readable lesson about the
+  shipped story under the owner's instructions, inside the workspace and
+  nowhere else. Every failure stamps `learning-lesson` with `ok: false` and
+  the reason and the close proceeds: one attempt, no park, no loud item, no
+  failed close. An unconfigured project runs the close-out it always ran.
 
 ## Parallelism and isolation
 

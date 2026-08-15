@@ -106,6 +106,45 @@ test('defaults fill every missing section', () => {
   assert.deepEqual(filled.tripwires, []);
   assert.equal(filled.constitutionPath, DEFAULT_CONSTITUTION_PATH);
   assert.deepEqual(filled.credentials, []);
+  assert.equal(filled.closeout, null);
+});
+
+test('the close-out learning block takes two absolute paths, or is absent', () => {
+  const learning = { instructions: '/skills/teach.md', workspace: '/home/learning' };
+  assert.deepEqual(validateProjectConfig({ ...valid(), closeout: { learning } }), []);
+  assert.deepEqual(
+    validateProjectConfig({
+      ...valid(),
+      closeout: { learning: { instructions: 'C:\\skills\\teach.md', workspace: 'D:/learning' } },
+    }),
+    [],
+  );
+  // Absent is the off switch and validates clean; an empty section is inert.
+  assert.deepEqual(validateProjectConfig({ ...valid(), closeout: {} }), []);
+  assert.deepEqual(errorPaths({ ...valid(), closeout: [] }), ['closeout']);
+  assert.deepEqual(errorPaths({ ...valid(), closeout: { lessons: learning } }), ['closeout.lessons']);
+  assert.deepEqual(errorPaths({ ...valid(), closeout: { learning: 'on' } }), ['closeout.learning']);
+  assert.deepEqual(errorPaths({ ...valid(), closeout: { learning: { ...learning, mood: 'x' } } }), [
+    'closeout.learning.mood',
+  ]);
+  // Both paths are required, and a repo-relative one would reach a tree that
+  // is removed at close.
+  assert.deepEqual(errorPaths({ ...valid(), closeout: { learning: {} } }), [
+    'closeout.learning.instructions',
+    'closeout.learning.workspace',
+  ]);
+  for (const bad of ['docs/teach.md', '', 7]) {
+    assert.deepEqual(
+      errorPaths({ ...valid(), closeout: { learning: { ...learning, instructions: bad } } }),
+      ['closeout.learning.instructions'],
+    );
+  }
+  assert.deepEqual(
+    errorPaths({ ...valid(), closeout: { learning: { ...learning, workspace: 'var/learning' } } }),
+    ['closeout.learning.workspace'],
+  );
+  const parsed = parseProjectConfig(JSON.stringify({ version: 1, closeout: { learning } }), 'fixture');
+  assert.deepEqual(parsed.closeout.learning, learning);
 });
 
 test('a credential names one variable and a probe command', () => {

@@ -288,6 +288,7 @@ const BASE_SEATS = {
   'reconcile-judge': () => ({
     report: { owed: false, records: [], reason: 'no decision-record tree' },
   }),
+  learning: () => ({ report: { artifacts: ['/w/lessons/alpha-1.md'], summary: 'a lesson' } }),
 };
 
 function shipFixture(
@@ -519,6 +520,112 @@ test('a failed judgment is a recorded miss; the story ships regardless', async (
   assert.equal(judged.cause, 'seat-failure');
   assert.ok(!existsSync(reconcileTicketPath(fx.paths, runId)));
   assert.deepEqual(owedReconciliations(fx.paths, 'proj'), []);
+});
+
+// -- the close-out learning artifact (ADR-0031) ------------------------------
+
+const INSTRUCTIONS = 'Keep one lesson file per story. Write for a human.\n';
+
+/**
+ * An instructions file and a workspace directory for the learning close-out.
+ * `write: false` leaves the instructions file absent — the unreadable case.
+ */
+function learningSetup(t, { write = true } = {}) {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const instructions = join(dir, 'teach.md');
+  if (write) writeFileSync(instructions, INSTRUCTIONS);
+  const workspace = join(dir, 'workspace');
+  return {
+    instructions,
+    workspace,
+    config: { closeout: { learning: { instructions, workspace } } },
+  };
+}
+
+async function shipGreen(fx) {
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await fx.launch();
+  return { runId, events: await waitClosed(fx.paths, runId) };
+}
+
+test('the configured close-out seat carries the instructions and the workspace', async (t) => {
+  const learning = learningSetup(t);
+  const fx = shipFixture(t, { config: learning.config });
+  const { runId, events } = await shipGreen(fx);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const lesson = events.find((e) => e.event === 'learning-lesson');
+  assert.equal(lesson.ok, true);
+  assert.deepEqual(lesson.artifacts, ['/w/lessons/alpha-1.md']);
+  // The workspace is the seat's, and the harness creates it when it is absent.
+  assert.ok(existsSync(learning.workspace));
+  // The seat runs last, on the shipped facts: the instructions are its
+  // conduct, and the merge commit, the PR and the card key are its inputs.
+  const judged = events.find((e) => e.event === 'reconciliation-judged');
+  assert.ok(judged.seq < lesson.seq);
+  const call = fx.calls.find((c) => c.seat === 'learning');
+  assert.ok(call.prompt.includes(INSTRUCTIONS.trim()));
+  assert.ok(call.prompt.includes(learning.workspace));
+  assert.ok(call.prompt.includes(events.find((e) => e.event === 'merged').mergeSha));
+  assert.ok(call.prompt.includes('#7'));
+  assert.ok(call.prompt.includes('alpha-1'));
+  assert.ok(call.prompt.includes(join(fx.paths.runs, runId, 'spec.md')));
+});
+
+test('an unconfigured project runs the close-out it always ran', async (t) => {
+  const fx = shipFixture(t);
+  const { events } = await shipGreen(fx);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!events.some((e) => e.event === 'learning-lesson'));
+  assert.ok(!fx.calls.some((c) => c.seat === 'learning'));
+});
+
+test('unreadable instructions stamp the miss; the close proceeds untouched', async (t) => {
+  const learning = learningSetup(t, { write: false });
+  const fx = shipFixture(t, { config: learning.config });
+  const { events } = await shipGreen(fx);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const lesson = events.find((e) => e.event === 'learning-lesson');
+  assert.equal(lesson.ok, false);
+  assert.match(lesson.reason, /^instructions: /);
+  assert.ok(!fx.calls.some((c) => c.seat === 'learning'));
+  assert.ok(!events.some((e) => e.event === 'park'));
+  assert.deepEqual(openLoud(fx.paths), []);
+});
+
+test('a failed learning seat is a quiet miss; the story ships regardless', async (t) => {
+  const learning = learningSetup(t);
+  const fx = shipFixture(t, {
+    config: learning.config,
+    seats: { learning: () => ({ exitCode: 3 }) },
+  });
+  const { events } = await shipGreen(fx);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const lesson = events.find((e) => e.event === 'learning-lesson');
+  assert.equal(lesson.ok, false);
+  assert.equal(lesson.reason, 'seat-failure');
+  // One attempt: the seat's own crash allowance is all it gets, and no park,
+  // no loud item and no retry of the lesson itself follows.
+  assert.equal(events.filter((e) => e.event === 'learning-lesson').length, 1);
+  assert.ok(!events.some((e) => e.event === 'park'));
+  assert.deepEqual(openLoud(fx.paths), []);
+});
+
+test('a repair-lane ship writes no lesson', async (t) => {
+  const learning = learningSetup(t);
+  const fx = shipFixture(t, { config: learning.config });
+  fx.forge.state.autoChecks = () => [green()];
+  await fx.daemon.start();
+  fx.daemon.engine.seatDefaults = () => ({ commandFor: seatFixture(BASE_SEATS).commandFor });
+  const { runId } = await fx.daemon.launchRun({
+    project: 'proj',
+    lane: 'repairship',
+    ticket: 'docs/fix.md',
+  });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!events.some((e) => e.event === 'learning-lesson'));
+  assert.ok(!existsSync(learning.workspace));
 });
 
 test('one failed-jobs re-run turns the check green: a ci-flake, never a finding', async (t) => {

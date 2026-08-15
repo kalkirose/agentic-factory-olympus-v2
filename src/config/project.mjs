@@ -11,6 +11,11 @@ const KNOWN_EVENTS = new Set([...RUN_EVENTS, ...INSTANCE_EVENTS, ...ESCAPES_EVEN
 export const DEFAULT_PROJECT_CONFIG_PATH = '.olympus/project.json';
 export const DEFAULT_CONSTITUTION_PATH = '.olympus/constitution.md';
 
+// A path that starts at a root, POSIX or Windows. Most path entries here are
+// repo-relative and this rejects them; the close-out block is the exception
+// and this is what it requires.
+const ABSOLUTE_PATH = /^([a-zA-Z]:)?[\\/]/;
+
 export function defaultProjectConfig() {
   return {
     version: 1,
@@ -44,6 +49,9 @@ export function defaultProjectConfig() {
     // external credentials the project's work needs, each with the read-only
     // command that proves it; an empty list probes nothing
     credentials: [],
+    // optional close-out extras the project asks for after a shipped story;
+    // null = the close-out is exactly what it always was
+    closeout: null,
   };
 }
 
@@ -72,6 +80,7 @@ export function validateProjectConfig(config) {
   validateBudgets(config.budgets, err);
   validateConstitutionPath(config.constitutionPath, err);
   validateCredentials(config.credentials, config.commands, err);
+  validateCloseout(config.closeout, err);
   if (isPlainObject(config.lanes) && isPlainObject(config.lanes.story)) {
     if (!Array.isArray(config.repo?.testPaths) || config.repo.testPaths.length === 0) {
       err('repo.testPaths', 'the story lane requires at least one test path');
@@ -179,7 +188,7 @@ function validateStack(stack, err) {
   }
   if (typeof stack.composeFile !== 'string' || stack.composeFile.length === 0) {
     err('stack.composeFile', 'required string');
-  } else if (/^([a-zA-Z]:)?[\\/]/.test(stack.composeFile)) {
+  } else if (ABSOLUTE_PATH.test(stack.composeFile)) {
     err('stack.composeFile', 'must be a path relative to the repo root');
   }
   if (stack.env !== undefined) {
@@ -204,7 +213,7 @@ function validateGraph(graph, err) {
   }
   if (typeof graph.cardsDir !== 'string' || graph.cardsDir.length === 0) {
     err('graph.cardsDir', 'required string');
-  } else if (/^([a-zA-Z]:)?[\\/]/.test(graph.cardsDir)) {
+  } else if (ABSOLUTE_PATH.test(graph.cardsDir)) {
     err('graph.cardsDir', 'must be a path relative to the repo root');
   }
   if (graph.phases === undefined) return;
@@ -376,8 +385,47 @@ function validateConstitutionPath(path, err) {
   if (path === undefined) return;
   if (typeof path !== 'string' || path.length === 0) {
     err('constitutionPath', 'must be a non-empty string');
-  } else if (/^([a-zA-Z]:)?[\\/]/.test(path)) {
+  } else if (ABSOLUTE_PATH.test(path)) {
     err('constitutionPath', 'must be a path relative to the repo root');
+  }
+}
+
+// The optional close-out extras, one section today: `learning`, the artifact
+// a shipped story leaves behind for a human reader. Both of its entries are
+// absolute host paths on purpose — the instructions file is the owner's, and
+// the workspace outlives every run, while the run's worktree is created at
+// launch and removed at close. The section is validated like any other,
+// because the feature itself fails quietly by design: a block the owner
+// believes is configured and is not would otherwise never say so.
+const LEARNING_KEYS = ['instructions', 'workspace'];
+
+function validateCloseout(closeout, err) {
+  if (closeout === undefined || closeout === null) return;
+  if (!isPlainObject(closeout)) {
+    err('closeout', 'must be an object');
+    return;
+  }
+  for (const key of Object.keys(closeout)) {
+    if (key !== 'learning') err(`closeout.${key}`, 'unknown section: learning');
+  }
+  const learning = closeout.learning;
+  if (learning === undefined) return;
+  if (!isPlainObject(learning)) {
+    err('closeout.learning', 'must be an object');
+    return;
+  }
+  for (const key of Object.keys(learning)) {
+    if (!LEARNING_KEYS.includes(key)) {
+      err(`closeout.learning.${key}`, `unknown key: ${LEARNING_KEYS.join(' | ')}`);
+    }
+  }
+  for (const key of LEARNING_KEYS) {
+    const value = learning[key];
+    if (typeof value !== 'string' || value.length === 0) {
+      err(`closeout.learning.${key}`, 'required string');
+    } else if (!ABSOLUTE_PATH.test(value)) {
+      err(`closeout.learning.${key}`, 'must be an absolute path');
+    }
   }
 }
 
@@ -432,6 +480,7 @@ export function withProjectDefaults(config) {
     gates: { ...base.gates, ...config.gates },
     stack: config.stack ?? null,
     graph: config.graph ? { phases: [{ name: 'launch' }], ...config.graph } : null,
+    closeout: config.closeout ?? null,
   };
 }
 

@@ -52,6 +52,10 @@ export const SEATS = Object.freeze({
   // close-out: judges whether the shipped diff implements or contradicts any
   // decision record; read-only, reports only (ADR-0026)
   'reconcile-judge': seat(),
+  // close-out: writes the learning artifact for a shipped story, under the
+  // instructions the project configured; optional, judges nothing, and writes
+  // only inside the workspace it is given (ADR-0031)
+  learning: seat(),
   // instance-scoped
   eval: seat({ model: CERTIFICATION_MODEL, instanceScoped: true }),
 });
