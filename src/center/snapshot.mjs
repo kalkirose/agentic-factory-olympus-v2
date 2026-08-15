@@ -16,6 +16,7 @@ import { readEscapeSet, escapesWindow } from '../telemetry/escapes.mjs';
 import { furyYieldBaseline, BASELINE_WINDOW } from '../tripwires/metrics.mjs';
 import { withTripwireDefaults } from '../tripwires/registry.mjs';
 import { readInstanceConfig, armingState } from '../console/status.mjs';
+import { CRASH_RETRIES } from '../seats/runner.mjs';
 import { computeFrontier, roadmapPositions } from '../frontier/graph.mjs';
 import { readGraphSource } from '../frontier/source.mjs';
 import { cloneDir, readBlobFromBranch } from '../isolation/clones.mjs';
@@ -104,7 +105,20 @@ function openRunView({ runId, project, lane, events }, now) {
   const inFlight = new Map();
   for (const e of events) {
     if (e.event === 'seat-spawned') {
-      inFlight.set(e.seat, { seat: e.seat, model: e.model, effort: e.effort });
+      inFlight.set(e.seat, {
+        seat: e.seat,
+        model: e.model,
+        effort: e.effort,
+        // A crash retry re-spawns the same seat, so the chip would otherwise
+        // show a seat that vanished and came back with nothing said. The
+        // ordinal names how much of the machine allowance is spent, and the
+        // shape says whether the retry resumed the dropped session.
+        ...(typeof e.retry === 'number' && {
+          retry: e.retry,
+          retryMax: CRASH_RETRIES,
+          resumed: e.resumed === true,
+        }),
+      });
     } else if (SEAT_TERMINAL_EVENTS.has(e.event)) {
       inFlight.delete(e.seat);
     }

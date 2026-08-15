@@ -409,7 +409,7 @@ function renderRuns(s) {
       fact("resumes", "on console answer");
     } else {
       fact("seats", run.seats.length > 0
-        ? run.seats.map((seat) => seat.seat + " " + shortModel(seat.model) + "·" + seat.effort).join(" + ")
+        ? run.seats.map(seatChip).join(" + ")
         : "none in flight");
       fact("elapsed", fmtMinutes(run.elapsedMinutes));
     }
@@ -423,6 +423,14 @@ function renderRuns(s) {
     card.appendChild(last);
     box.appendChild(card);
   }
+}
+
+/* A seat in flight. A retry spawn says its ordinal and its shape, so a seat
+   that dropped and came back does not read as a first dispatch. */
+function seatChip(seat) {
+  const chip = seat.seat + " " + shortModel(seat.model) + "·" + seat.effort;
+  if (typeof seat.retry !== "number") return chip;
+  return chip + " · retry " + seat.retry + "/" + seat.retryMax + (seat.resumed ? " resumed" : " fresh");
 }
 
 const STAGE_LABELS = { "readiness": "ready", "spec-birth": "birth", "spec-gate": "gate", "adversary": "advers", "implementation": "dev", "close-out": "close" };

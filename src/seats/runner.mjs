@@ -43,8 +43,10 @@ import { claudeSeatCommand } from './claude.mjs';
 const ACTOR = 'daemon';
 
 // Children a seat session may buy back after nonzero exits, shared across the
-// whole session (both contract attempts and a degrade re-dispatch).
-const CRASH_RETRIES = 3;
+// whole session (both contract attempts and a degrade re-dispatch). The
+// command center reads it too, to say how much of the allowance a retrying
+// seat has spent.
+export const CRASH_RETRIES = 3;
 
 /**
  * Runs one seat session end to end.

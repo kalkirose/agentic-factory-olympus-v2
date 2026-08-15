@@ -15,6 +15,7 @@ import {
 import { recordEscape, fixEscape } from '../src/telemetry/escapes.mjs';
 import { ensureBareClone } from '../src/isolation/clones.mjs';
 import { buildSnapshot, LANE_STAGES } from '../src/center/snapshot.mjs';
+import { CRASH_RETRIES } from '../src/seats/runner.mjs';
 import { createCenterServer } from '../src/center/server.mjs';
 import { tempDir, removeDir, initOriginRepo, projectConfigJson } from './helpers.mjs';
 
@@ -247,6 +248,49 @@ test('snapshot reads registry and frontier from the clone, no fetch', async (t) 
   assert.deepEqual(health.frontier, { width: 2, unfinished: 3, launchable: 0 });
 });
 
+test('a seat chip carries the retry ordinal, a first spawn carries none', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const paths = scaffoldHome(join(root, 'home'));
+  const store = openRunStore(paths, 'r-retry');
+  const spawn = (seat, fields = {}) =>
+    store.append('seat-spawned', {
+      actor: 'daemon',
+      seat,
+      model: 'model-a',
+      effort: 'xhigh',
+      attempt: 1,
+      ...fields,
+    });
+  store.append('run-launched', { actor: ACTOR, project: 'alpha', lane: 'story', storyKey: 's-9' });
+  store.append('stage-entered', { actor: ACTOR, stage: 'implementation' });
+  spawn('dev-1');
+  spawn('fury-1');
+  // The crash-retry cycle: the dying child stamps its evidence, then the
+  // retry spawns into the session it named.
+  store.append('seat-failure', { actor: 'daemon', seat: 'dev-1', reason: 'exit', code: 1 });
+  spawn('dev-1', { retry: 2, resumed: true, session: 'sess-1' });
+  store.close();
+
+  const s = await buildSnapshot(paths, { now: NOW });
+  const { seats } = s.runs.find((r) => r.runId === 'r-retry');
+  assert.deepEqual(seats.find((x) => x.seat === 'dev-1'), {
+    seat: 'dev-1',
+    model: 'model-a',
+    effort: 'xhigh',
+    retry: 2,
+    retryMax: CRASH_RETRIES,
+    resumed: true,
+  });
+  assert.deepEqual(seats.find((x) => x.seat === 'fury-1'), {
+    seat: 'fury-1',
+    model: 'model-a',
+    effort: 'xhigh',
+  });
+  // Both seats hold a slot on the model: the retry replaced the drop.
+  assert.deepEqual(s.semaphores, [{ model: 'model-a', max: null, inFlight: 2 }]);
+});
+
 // -- server -------------------------------------------------------------------
 
 async function startServer(t, home) {
@@ -266,6 +310,8 @@ test('server serves the page, the snapshot, and raw state files', async (t) => {
   const html = await page.text();
   assert.match(html, /Command Center/);
   assert.match(html, /snapshot\.json/);
+  // The seat chip renders the retry ordinal the snapshot carries.
+  assert.match(html, /" · retry " \+ seat\.retry \+ "\/" \+ seat\.retryMax/);
 
   const snapshot = await (await fetch(`${base}/snapshot.json`)).json();
   assert.equal(snapshot.home, paths.home);
