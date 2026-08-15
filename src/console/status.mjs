@@ -33,6 +33,22 @@ export function armingState(paths) {
   return armed;
 }
 
+/**
+ * What the running instance's start-time check found in the seat environment.
+ * Only this instance's findings: a defect the operator fixed is gone from the
+ * next start's, and the ones behind an older start describe a host that no
+ * longer runs the seats (ADR-0030).
+ */
+export function seatEnvironment(paths) {
+  const events = readEvents(paths.instanceLedger);
+  let start = -1;
+  events.forEach((e, i) => {
+    if (e.event === 'daemon-started') start = i;
+  });
+  if (start === -1) return [];
+  return events.slice(start).filter((e) => e.event === 'seat-environment');
+}
+
 /** Open runs with their replayed state, from the run ledgers alone. */
 export function openRuns(paths) {
   const runs = [];
@@ -104,6 +120,14 @@ export function renderStatus(paths) {
       lines.push(
         `  ${name}: ${armed.get(name) === true ? 'armed' : 'paused'}, slot cap ${project.slotCap}`,
       );
+    }
+  }
+  const environment = seatEnvironment(paths);
+  if (environment.length > 0) {
+    lines.push('');
+    lines.push(`SEAT ENVIRONMENT (${environment.length} at this start)`);
+    for (const finding of environment) {
+      lines.push(`  ${finding.severity} · ${finding.check} — ${finding.gist}`);
     }
   }
   const changed = tailEvents(paths.instanceLedger, 200)

@@ -25,10 +25,29 @@ export function gitArgv(args, platform = process.platform) {
  * @returns {Promise<string>}
  */
 export function git(args, { cwd } = {}) {
+  return run(gitArgv(args), args, { cwd });
+}
+
+/**
+ * Runs one git command with none of the harness's own settings in front of it,
+ * in an environment the caller states. The answer is the host's, not this
+ * process's — a command that carries `core.longPaths=true` answers the
+ * question of whether the host holds that setting with a yes it supplied
+ * itself (ADR-0030). `env` defaults to the daemon's own.
+ * @param {string[]} args
+ * @param {{cwd?: string, env?: object}} [opts]
+ * @returns {Promise<string>}
+ */
+export function gitPlain(args, { cwd, env } = {}) {
+  return run([...args], args, { cwd, env });
+}
+
+function run(argv, args, { cwd, env }) {
   return new Promise((resolve, reject) => {
     // The failure names the command the caller asked for, not the invocation
     // this module built around it.
-    execFile('git', gitArgv(args), { cwd, windowsHide: true }, (error, stdout, stderr) => {
+    const options = { cwd, windowsHide: true, ...(env !== undefined && { env }) };
+    execFile('git', argv, options, (error, stdout, stderr) => {
       if (error) {
         reject(new Error(`git ${args.join(' ')} failed: ${String(stderr).trim() || error.message}`));
       } else {

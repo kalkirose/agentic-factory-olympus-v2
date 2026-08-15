@@ -25,6 +25,7 @@ import { readGraphSource } from '../frontier/source.mjs';
 import { TripwireWatcher } from '../tripwires/watcher.mjs';
 import { EvalScheduler } from '../eval/review.mjs';
 import { Notifier } from './notifier.mjs';
+import { checkSeatEnvironment } from './environment.mjs';
 import { scaffoldHome, homePaths, runLedgerPath } from './home.mjs';
 import { acquireLock } from './lock.mjs';
 
@@ -223,6 +224,7 @@ export class Daemon {
         pid: process.pid,
         runsResumed,
       });
+      await this.stampSeatEnvironment();
       await this.sweepOrphanWorkspaces();
       this.archiveStaleControlFiles();
       this.watchConfig();
@@ -240,6 +242,34 @@ export class Daemon {
       }
       this.teardown();
       throw error;
+    }
+  }
+
+  /**
+   * Stamps what this host's seat environment is missing: one quiet event per
+   * defect, once per instance, right behind the start it belongs to. A clean
+   * host stamps nothing, and no finding stops the start — the daemon runs
+   * degraded and says so, rather than refusing work over a condition a human
+   * may already know about (ADR-0030).
+   */
+  async stampSeatEnvironment() {
+    let findings;
+    try {
+      findings = await checkSeatEnvironment({ paths: this.paths, config: this.config });
+    } catch (error) {
+      // The check itself is the only thing that can fail here, and a check
+      // that failed is a check nobody ran: say so instead of reading as clean.
+      findings = [
+        {
+          check: 'seat-environment',
+          severity: 'degraded',
+          reason: 'check-failed',
+          gist: `the seat-environment check did not complete: ${error.message}`,
+        },
+      ];
+    }
+    for (const finding of findings) {
+      this.ledger.append('seat-environment', { actor: ACTOR, ...finding });
     }
   }
 

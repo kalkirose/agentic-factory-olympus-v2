@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, renameSync, readdirSync, existsSync } from 'node:fs';
+import { writeFileSync, renameSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
@@ -90,6 +90,83 @@ test('a live config edit applies and stamps config-changed', async (t) => {
   assert.equal(stamp.accepted, true);
   assert.ok(stamp.changedKeys.includes('semaphores'));
   assert.equal(daemon.config.semaphores['model-a'], 2);
+});
+
+// The seat environment is a fact about the host, so the fixture states the
+// host: a runner name nothing on any PATH answers to, and a trust store that
+// records no workspace at all.
+const FIXTURE_RUNNER = 'olympus-fixture-runner';
+
+function untrustedHost(t, home) {
+  const store = join(home, 'host');
+  mkdirSync(store, { recursive: true });
+  writeFileSync(join(store, `.${FIXTURE_RUNNER}.json`), JSON.stringify({ projects: {} }) + '\n');
+  const key = 'OLYMPUS_FIXTURE_RUNNER_CONFIG_DIR';
+  const before = process.env[key];
+  process.env[key] = store;
+  t.after(() => {
+    if (before === undefined) delete process.env[key];
+    else process.env[key] = before;
+  });
+  writeFileSync(
+    join(home, 'instance.json'),
+    JSON.stringify({
+      version: 1,
+      claudeCommand: [FIXTURE_RUNNER],
+      projects: { alpha: { repoUrl: 'unused' } },
+    }) + '\n',
+  );
+}
+
+test('the seat environment is checked once, and no finding stops the start', async (t) => {
+  const home = tempDir();
+  mkdirSync(home, { recursive: true });
+  untrustedHost(t, home);
+  const daemon = new Daemon(home);
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  assert.equal(daemon.running, true);
+  const found = instanceEvents(home).filter((e) => e.event === 'seat-environment');
+  const started = instanceEvents(home).find((e) => e.event === 'daemon-started');
+  assert.ok(found.every((e) => e.seq > started.seq));
+  const runner = found.filter((e) => e.check === 'runner-command');
+  assert.equal(runner.length, 1);
+  assert.equal(runner[0].severity, 'blocking');
+  // One per path the seats work in: the workspace root and the project clone.
+  const trust = found.filter((e) => e.check === 'runner-trust');
+  assert.deepEqual(
+    trust.map((e) => e.path).sort(),
+    [homePaths(home).worktrees, join(homePaths(home).clones, 'alpha.git')].sort(),
+  );
+  // Once per instance: nothing the daemon does afterwards asks again.
+  const before = found.length;
+  writeFileSync(
+    homePaths(home).instanceConfig,
+    JSON.stringify({
+      version: 1,
+      logLevel: 'debug',
+      claudeCommand: [FIXTURE_RUNNER],
+      projects: { alpha: { repoUrl: 'unused' } },
+    }) + '\n',
+  );
+  await waitFor(() => instanceEvents(home).find((e) => e.event === 'config-changed'), {
+    label: 'config-changed stamp',
+  });
+  assert.equal(instanceEvents(home).filter((e) => e.event === 'seat-environment').length, before);
+});
+
+test('an instance with no project stamps no seat-environment finding', async (t) => {
+  const home = tempDir();
+  const daemon = new Daemon(home);
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  assert.ok(!instanceEvents(home).some((e) => e.event === 'seat-environment'));
 });
 
 test('an invalid config edit is refused and the old config stays live', async (t) => {

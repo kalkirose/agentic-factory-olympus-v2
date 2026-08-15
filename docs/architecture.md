@@ -141,6 +141,13 @@ Two levels; the ownership test decides placement.
   still ahead, degrades the next seat at the spawn — the same stamp, marked as
   standing on the run's own record (ADR-0021). The ledger records the actual
   model from the transcript.
+- **Seat environment.** At start the daemon reads the three host properties
+  every seat depends on and stamps what it finds: the configured runner
+  command resolves to an executable file, the runner CLI records trust for the
+  paths seats work in, and git in each project clone holds the long-path
+  support a deep run worktree needs. One quiet `seat-environment` stamp per
+  defect, once per instance; a clean host says nothing, and no finding stops
+  the start (ADR-0030).
 - **Semaphores.** The daemon holds a global concurrency semaphore per model
   across all runs. A seat waits on the semaphore; it never fails on it.
 - **Web tools.** Web search on spec-birth and dev seats only. Judgment seats

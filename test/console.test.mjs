@@ -55,6 +55,42 @@ test('status renders chips, loud before queue, runs, and arming', (t) => {
   assert.match(status, /alpha: armed, slot cap 3/);
 });
 
+test('status carries what this start found in the seat environment', (t) => {
+  const { paths } = seededHome(t);
+  const instance = openInstanceStore(paths);
+  instance.append('daemon-started', { actor: 'daemon', pid: 1, runsResumed: [] });
+  instance.append('seat-environment', {
+    actor: 'daemon',
+    check: 'runner-trust',
+    severity: 'degraded',
+    reason: 'untrusted',
+    path: 'C:/home/worktrees',
+    gist: 'the runner holds no trust record covering C:/home/worktrees',
+  });
+  // The start after a defect was fixed is the whole record: a finding behind
+  // an older start describes a host that no longer runs the seats.
+  instance.append('daemon-stopped', { actor: 'daemon', trigger: 'api' });
+  instance.append('daemon-started', { actor: 'daemon', pid: 2, runsResumed: [] });
+  instance.close();
+  const status = renderStatus(paths);
+  assert.ok(!status.includes('SEAT ENVIRONMENT'));
+
+  const next = openInstanceStore(paths);
+  next.append('seat-environment', {
+    actor: 'daemon',
+    check: 'runner-command',
+    severity: 'blocking',
+    reason: 'unresolvable',
+    path: 'runner',
+    gist: 'the seat runner runner resolves to no executable file on this host',
+  });
+  next.close();
+  const after = renderStatus(paths);
+  assert.match(after, /SEAT ENVIRONMENT \(1 at this start\)/);
+  assert.match(after, /blocking · runner-command — the seat runner runner resolves/);
+  assert.ok(!after.includes('runner-trust'));
+});
+
 test('the queue render is answerable from the record alone', (t) => {
   const { paths } = seededHome(t);
   const rendered = renderQueue(paths);

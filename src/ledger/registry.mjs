@@ -107,6 +107,12 @@ export const INSTANCE_EVENTS = new Set([
   // (ADR-0016). Every ordinary exit path stamps `daemon-stopped`, so this
   // event means a death no exit path saw.
   'daemon-crash-detected',
+  // One defect in the environment this instance's seats will run in, found by
+  // the start-time check and stamped once: a runner the host cannot execute, a
+  // path its CLI will not trust, a clone whose git cannot hold the harness's
+  // own path lengths. Informational — the daemon starts on every one of them,
+  // and a clean host stamps none (ADR-0030).
+  'seat-environment',
   'launch',
   // A launch the daemon refused. The console's reason file says why to
   // whoever asked; this says it to everyone reading the instance ledger.
