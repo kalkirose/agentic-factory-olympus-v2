@@ -2,7 +2,7 @@
 // A stream-classed append lands in its source ledger and, in the same call,
 // as a pointer entry in the matching index — indexing holds by construction,
 // never by call-site discipline.
-import { existsSync, renameSync } from 'node:fs';
+import { cpSync, existsSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { Ledger, readEvents } from '../ledger/ledger.mjs';
 import {
@@ -139,9 +139,32 @@ export function resolveClosedRun(paths, runId, fields) {
  * Moves a closed run's directory — ledger and artifacts together — to the
  * archive. Refuses an open run and an already-archived run id. Close the
  * run's store first; an open file handle blocks the move on Windows.
+ *
+ * The move retries, and then copies, because the handle that blocks it is
+ * not the harness's own. A reader outside the daemon — an editor, a tail, a
+ * backup scanner — holds a run ledger for as long as it holds it, and the run
+ * underneath has already closed. A brief retry clears the readers that pass;
+ * a copy clears the rest. A copy whose source will not delete is still an
+ * archive: the copy is the authority from that moment, and the live directory
+ * left behind is named in the return so the caller can say so (ADR-0015).
+ *
  * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ * @param {{attempts?: number, delayMs?: number, rename?: Function, copy?: Function,
+ *   remove?: Function, sleep?: (ms: number) => void}} [io] the filesystem seam.
+ *   A held handle is a real condition no portable test can stage, so the
+ *   calls the condition breaks are injectable.
+ * @returns {{ledger: string, method: 'rename'|'copy', attempts: number,
+ *   leftover: string|null}}
  */
-export function archiveRun(paths, runId) {
+export function archiveRun(paths, runId, io = {}) {
+  const {
+    attempts = 5,
+    delayMs = 20,
+    rename = renameSync,
+    copy = cpSync,
+    remove = rmSync,
+    sleep = sleepSync,
+  } = io;
   const liveDir = join(paths.runs, runId);
   const archiveDir = join(paths.archivedRuns, runId);
   if (existsSync(archiveDir)) throw new Error(`run ${runId} is already archived`);
@@ -150,6 +173,43 @@ export function archiveRun(paths, runId) {
   if (!events.some((e) => e.event === 'run-closed')) {
     throw new Error(`run ${runId} is open; archive follows run-closed`);
   }
-  renameSync(liveDir, archiveDir);
-  return archivedRunLedgerPath(paths, runId);
+  const ledger = archivedRunLedgerPath(paths, runId);
+  let blocked;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      rename(liveDir, archiveDir);
+      return { ledger, method: 'rename', attempts: attempt, leftover: null };
+    } catch (error) {
+      blocked = error;
+      if (attempt < attempts) sleep(delayMs * attempt);
+    }
+  }
+  try {
+    copy(liveDir, archiveDir, { recursive: true });
+  } catch (error) {
+    // A half-written archive directory reads as a finished archive to the
+    // guard above, and to every reader that falls back to the archive. The
+    // failure takes it with it.
+    try {
+      remove(archiveDir, { recursive: true, force: true });
+    } catch {
+      // Best effort. The throw below is the answer either way.
+    }
+    throw new Error(
+      `run ${runId} did not archive: rename ${blocked.message}; copy ${error.message}`,
+    );
+  }
+  try {
+    remove(liveDir, { recursive: true, force: true });
+    return { ledger, method: 'copy', attempts, leftover: null };
+  } catch {
+    return { ledger, method: 'copy', attempts, leftover: liveDir };
+  }
+}
+
+// The archive sits in a synchronous close path and the wait between attempts
+// is milliseconds, so the pause is synchronous too. A private buffer nothing
+// else can notify is the portable form of a sleep this short.
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }

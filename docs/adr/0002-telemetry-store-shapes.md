@@ -25,7 +25,8 @@ shapes:
 - **Archive layout.** `archive/runs/<runId>` under the daemon home. The
   whole run directory moves after `run-closed`; an open run does not
   archive. Readers fall back to the archive, so open loud items outlive
-  their run.
+  their run. What the move does when a held file handle blocks it is
+  ADR-0015.
 - **Window math.** The escapes window divides by the window size (10), not
   by the ship count, so the ceiling stays conservative before ten ships.
 

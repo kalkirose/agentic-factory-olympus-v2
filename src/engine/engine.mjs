@@ -8,7 +8,8 @@
 // a parked escalation, or a transition in progress (a running handler). The
 // engine checks at every handler settle; a violation stamps loud and leaves
 // the run open — alert, never auto-kill. The console resolves or kills it.
-import { readdirSync } from 'node:fs';
+import { readdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
 import { runCost } from '../ledger/cost.mjs';
 import {
@@ -19,7 +20,7 @@ import {
 } from '../ledger/registry.mjs';
 import { OWNER_EVENTS, settleOwnedLoud } from '../ledger/resolution.mjs';
 import { checkAnswer, runParkForms } from '../ledger/parks.mjs';
-import { runLedgerPath } from '../daemon/home.mjs';
+import { runLedgerPath, archivedRunLedgerPath } from '../daemon/home.mjs';
 import { openRunStore, archiveRun } from '../telemetry/stores.mjs';
 import { deriveRunState } from './replay.mjs';
 import { superviseSeat } from './supervise.mjs';
@@ -36,15 +37,26 @@ export class RunEngine {
    *   onParked?: (info: {runId: string, project: string, lane: string, type: string}) => void,
    *   semaphores?: import('../seats/semaphore.mjs').ModelSemaphores,
    *   seatDefaults?: () => object,
+   *   archiveIo?: object,
    *   onEvent?: (project: string, line: object, ledger: string) => void}} opts
    *   seatDefaults supplies machine-scoped runSeat options (claudeCommand)
    *   read fresh per dispatch, so a live config edit applies. onEvent fires
    *   on every run-store append, project-attributed and carrying its source
-   *   ledger — the event key every in-daemon observer reads.
+   *   ledger — the event key every in-daemon observer reads. archiveIo is the
+   *   archive's filesystem seam, read at every call.
    */
   constructor(
     paths,
-    { instanceStore, getSlotCap, onClosed, onParked, semaphores, seatDefaults, onEvent },
+    {
+      instanceStore,
+      getSlotCap,
+      onClosed,
+      onParked,
+      semaphores,
+      seatDefaults,
+      archiveIo,
+      onEvent,
+    },
   ) {
     this.paths = paths;
     this.instanceStore = instanceStore ?? null;
@@ -53,6 +65,7 @@ export class RunEngine {
     this.onParked = onParked ?? null;
     this.semaphores = semaphores ?? null;
     this.seatDefaults = seatDefaults ?? (() => ({}));
+    this.archiveIo = archiveIo ?? {};
     this.onEvent = onEvent ?? null;
     this.lanes = new Map();
     this.runs = new Map();
@@ -418,12 +431,101 @@ export class RunEngine {
     run.store.append('run-closed', { actor, state, ...extra });
     run.store.close();
     this.runs.delete(run.runId);
-    archiveRun(this.paths, run.runId);
+    this.archiveClosedRun(run.runId);
     try {
       this.onClosed?.({ runId: run.runId, project: run.project, lane: run.lane, state });
     } catch {
       // The hook owns its errors; a close never fails on it.
     }
+  }
+
+  // -- archive --------------------------------------------------------------
+
+  /**
+   * Moves a closed run to the archive, and never fails its caller. The move is
+   * the last step of a close and the only one that touches a directory a
+   * process outside the harness may be holding open. A blocked move changes
+   * nothing about the run: it closed as it closed, and everything it earned is
+   * in the ledger under it. So the daemon stamps the block loud and carries on
+   * — a run directory in the wrong place is a housekeeping fact, never a fault
+   * of the daemon that could not do the housekeeping (ADR-0015).
+   * @returns {boolean} whether the run is in the archive now
+   */
+  archiveClosedRun(runId) {
+    let moved;
+    try {
+      moved = archiveRun(this.paths, runId, this.archiveIo);
+    } catch (error) {
+      this.stampArchiveFailure(runId, error);
+      return false;
+    }
+    if (!this.instanceStore) return true;
+    try {
+      this.instanceStore.append('run-archived', {
+        actor: ACTOR,
+        runId,
+        method: moved.method,
+        ...(moved.leftover !== null && { leftover: moved.leftover }),
+      });
+      // The stamp owns any open archive-failure record for this run, and the
+      // instance ledger has no per-append sweep of its own, so the pairing
+      // happens where the stamp lands.
+      settleOwnedLoud(this.instanceStore, { actor: ACTOR });
+    } catch {
+      // The run is archived. No bookkeeping behind that undoes it.
+    }
+    return true;
+  }
+
+  /**
+   * A closed run still under `runs/` at a daemon start. Either the move was
+   * blocked at its close, and this start retries it, or the archive already
+   * holds the run and what is left here is the source of a copy whose delete
+   * was blocked. The leftover goes, against proof that the copy is whole: an
+   * archive short of the live ledger is not the run, and that is worth the
+   * owner's attention rather than a delete.
+   * @returns {boolean} whether the archive is the only copy now
+   */
+  sweepClosedRun(runId) {
+    const archived = readEvents(archivedRunLedgerPath(this.paths, runId));
+    if (archived.length === 0) return this.archiveClosedRun(runId);
+    const live = readEvents(runLedgerPath(this.paths, runId));
+    if (archived.length < live.length) {
+      this.stampArchiveFailure(
+        runId,
+        new Error(`the archived ledger holds ${archived.length} of ${live.length} events`),
+      );
+      return false;
+    }
+    try {
+      (this.archiveIo.remove ?? rmSync)(join(this.paths.runs, runId), {
+        recursive: true,
+        force: true,
+      });
+    } catch {
+      // The archived copy is the authority and the archive stamp already named
+      // the leftover. A directory that will not go is not an alert.
+      return false;
+    }
+    return true;
+  }
+
+  stampArchiveFailure(runId, error) {
+    if (!this.instanceStore) return;
+    // One open record per run. A start that retries the move and is blocked
+    // again reports the same block, and the strip carries it once.
+    const events = readEvents(this.paths.instanceLedger);
+    const resolved = new Set(events.filter((e) => e.event === 'resolved').map((e) => e.resolves));
+    const open = events.some(
+      (e) => e.event === 'archive-failed' && e.runId === runId && !resolved.has(e.seq),
+    );
+    if (open) return;
+    this.instanceStore.append('archive-failed', {
+      actor: ACTOR,
+      runId,
+      reason: error.message,
+      gist: gist(`${runId} closed but did not archive: ${error.message}`),
+    });
   }
 
   // -- liveness -------------------------------------------------------------
@@ -458,6 +560,12 @@ export class RunEngine {
    * Resumes every open run from its ledger. A parked or violated run stays
    * waiting on the human; every other run re-enters its recorded stage. A run
    * the engine cannot resume (unknown lane or stage) violates loud.
+   *
+   * A closed run still sitting under `runs/` is a move that was blocked at its
+   * close, so the start sweeps it up. The handle that blocked it belonged to
+   * another process and rarely survives the gap between two daemons; the run
+   * lives in the archive (ADR-0002), and until it gets there its loud record
+   * stays open and nothing else would ever move it.
    */
   resumeOpenRuns() {
     const resumed = [];
@@ -465,7 +573,10 @@ export class RunEngine {
       const events = readEvents(runLedgerPath(this.paths, runId));
       if (events.length === 0) continue;
       const state = deriveRunState(events);
-      if (state.closed) continue;
+      if (state.closed) {
+        this.sweepClosedRun(runId);
+        continue;
+      }
       const run = this.trackRun({
         runId,
         project: state.project,

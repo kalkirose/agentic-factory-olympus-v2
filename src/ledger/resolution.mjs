@@ -9,8 +9,9 @@
 // The table below is the whole answer, one entry per loud class. Every loud
 // event in the registry has an entry, and an entry either names the ledger
 // event that owns the record or says in `by` who else settles it. A class with
-// an owner needs no call-site discipline: the engine sweeps the run ledger
-// whenever an owning event lands.
+// an owner needs no call-site discipline: the sweep runs where the owning
+// event is appended — the run ledger for a run-scoped class, the instance
+// ledger for an instance-scoped one.
 import { LOUD_EVENTS } from './registry.mjs';
 
 /**
@@ -70,6 +71,19 @@ export const LOUD_OWNERSHIP = {
   'budget-breach': [{ name: 'threshold', by: 'the run close' }],
   // The run stopped being a run. Nothing the run can stamp answers that.
   'liveness-violation': [{ name: 'stall', by: 'the human, from a console' }],
+  // The run closed and its directory did not move. What answers that is the
+  // move landing, so the owner is the archive stamp of the same run — the one
+  // the next daemon start writes when it sweeps up what was left behind. A
+  // different run reaching the archive says nothing about this one, which is
+  // what the predicate holds (ADR-0015).
+  'archive-failed': [
+    {
+      name: 'blocked-move',
+      owner: 'run-archived',
+      owns: (item, archived) => archived.runId === item.runId,
+      fields: (item) => ({ runId: item.runId }),
+    },
+  ],
   // Instance-scoped, and both are conditions rather than records: the frontier
   // re-evaluates them on every sweep and pairs the resolution when the
   // condition lifts.

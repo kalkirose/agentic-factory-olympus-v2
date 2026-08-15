@@ -123,6 +123,16 @@ export const INSTANCE_EVENTS = new Set([
   // A launch the daemon refused. The console's reason file says why to
   // whoever asked; this says it to everyone reading the instance ledger.
   'launch-rejected',
+  // A closed run reached the archive: at its close, or at the start that
+  // swept it up afterwards. It carries how the directory travelled (`rename`
+  // or `copy`) and the live directory a copy could not delete, and it is the
+  // event that answers an `archive-failed` record for the same run.
+  'run-archived',
+  // A closed run that did not reach the archive. Loud, because the run is
+  // over and the move is the one part of a close that a process outside the
+  // harness can block: the daemon carries on, and the record is what says a
+  // run directory is sitting where no run lives (ADR-0015).
+  'archive-failed',
   // A push notification that did not get through: the transport failed, the
   // target answered with an error, or it ran past its timeout. The event a
   // reader can no longer trust the push for is named, so the pull surfaces
@@ -175,6 +185,7 @@ export const LOUD_EVENTS = new Set([
   'factory-starvation',
   'repairs-owed',
   'budget-breach',
+  'archive-failed',
 ]);
 
 // The close-out backstop. A loud record resolves at the event that owns it

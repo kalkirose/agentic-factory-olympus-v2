@@ -2,10 +2,11 @@
 
 Status: accepted (2026-08-15)
 
-Two things in the harness reach a terminal state and stay there: a run, and a
-loud record. Both are governed here, because both go wrong the same way — a
-machine ends something on its own authority that the owner wanted to decide,
-or leaves something open that nothing will ever close.
+Three things in the harness reach a terminal state and stay there: a run, the
+directory the closed run leaves behind, and a loud record. All three are
+governed here, because they go wrong the same way — a machine ends something
+on its own authority that the owner wanted to decide, or leaves something open
+that nothing will ever close.
 
 ## Decision: how a run ends
 
@@ -73,6 +74,49 @@ spec-gate parks, `strengthen-again` at `second-zero-kill`,
 `fresh-pass` at `second-stall`, `retry` at a provisioning gate. The way out is
 the same `abandon` at all of them.
 
+## Decision: how a closed run reaches the archive
+
+A close ends by moving the run's directory — ledger and artifacts together —
+to `archive/runs/<runId>`. It follows `run-closed`, it never runs for an open
+run, and it is the only step of a close that touches a path a process outside
+the harness can be holding.
+
+- **The rename retries first.** Five attempts, with a backoff that grows by
+  20 ms per attempt: about a fifth of a second in all. A reader that is
+  passing over the ledger — a tail, an editor, a scanner — is gone inside that
+  window, and the move lands as the move.
+- **Then the move copies.** A rename the ladder could not complete becomes a
+  recursive copy of the directory into the archive, and a delete of the
+  source. Copying reads the files rather than renaming their parent, so it
+  gets past the class of hold that blocks a rename outright.
+- **A copy the source outlives is still an archive.** If the delete fails, the
+  copy is the authority from that moment and the live directory left behind is
+  named on the archive stamp. Readers already resolve a run id to the archive,
+  so the copy is where the run lives whether or not the leftover ever goes.
+  Nothing about it is loud: there is no decision in it for the owner.
+- **A failed copy leaves nothing half-written.** A partial archive directory
+  reads as a finished archive, both to the guard that refuses a second archive
+  and to every reader that falls back to the archive. A copy that throws takes
+  its own directory with it, and the run stays exactly where it was.
+- **A blocked move is stamped, and the daemon carries on.** `archive-failed`
+  on the instance ledger, loud, one open record per run, carrying the run id
+  and what the filesystem said. Nothing else about the close changes: the run
+  closed in its recorded state, its slot is free, and its ledger is complete
+  where it stands.
+- **The next start sweeps.** Daemon start walks `runs/`, and a closed run
+  sitting there is archived before anything else runs. The hold belonged to
+  another process and rarely survives the gap between two daemons. The archive
+  stamp that lands is what answers the loud record.
+- **The same sweep clears a leftover.** A closed run whose archive directory
+  already exists is the source of a copy, so the start deletes it — against
+  proof that the copy is whole, which is an archived ledger no shorter than
+  the live one. An archive shorter than that is not the run, and the sweep
+  says so loud instead of deleting anything.
+- **The guards do not move.** An open run is refused, an already-archived id
+  is refused, and both answers come before the first filesystem call: a
+  refused archive never spends a retry ladder on a run it was never going to
+  move.
+
 ## Decision: how a loud record ends
 
 Every loud class names the event that owns it, in one table
@@ -87,12 +131,13 @@ event lands.
   hooks every run-ledger append; an append of an owning event sweeps the
   ledger and pairs every resolution its own events owe. No lane has to
   remember to clear a record another lane opened, and a resolution never fails
-  the append it followed.
+  the append it followed. An instance-scoped class pairs the same way, at the
+  one place its owning event is stamped.
 - **The owner must land behind the record.** A candidate owner is an event of
   the named type at a higher seq, judged by the rule's own predicate where
   the class needs one. A record already carrying a `resolved` is skipped, so
   the sweep is idempotent across a restart.
-- **The four owned pairings.** A capture refusal is owned by
+- **The four run-scoped pairings.** A capture refusal is owned by
   `implementation-committed`, the capture that got through. A capture
   take-back is owned by `re-freeze`, which re-takes the frozen surface the
   write reached. A green-but-no-merge alert is owned by `merged`. A harness
@@ -103,6 +148,11 @@ event lands.
   run, live path first and then the archive, and only onto a run that already
   closed. It is best effort: the breach record is a fact either way, and a
   repair that shipped never fails on the bookkeeping of the run it repaired.
+- **A blocked archive is owned by the archive that lands.** The record says a
+  closed run is still sitting in `runs/`; the `run-archived` stamp of the same
+  run says it no longer is. The pairing is by run id, because another run
+  reaching the archive says nothing about this one. The owning event is
+  instance-scoped, so the sweep runs where that stamp is appended.
 - **Two classes have no ledger owner.** A budget breach asks nothing of
   anyone, so its life ends when the run it reported on does. A liveness
   violation says the run stopped being a run, so only the human clears it.
@@ -161,6 +211,36 @@ the gate keys its park on the round. A recovery park needs no key: the failure
 itself proves that the last retry was spent, and an abandoned park closes the
 run at the next stage entry, so no stale answer can survive.
 
+## Why a blocked move is never the daemon's fault
+
+A run closed shipped. Every seat had reported, the merge had landed, the
+close-out had run. The rename that moves the directory to the archive answered
+EPERM, because a process outside the harness was holding the run ledger open.
+The daemon read the throw as a fault of its own and stopped.
+
+Two costs sat on either side of that throw, and they are not the same size. A
+run directory in the wrong place costs a reader nothing: every reader already
+resolves a run id to the live path first and then the archive, because it has
+to. A daemon that stops costs every open run in the instance, every queued
+launch behind them, and the human's next free hour. The harness answered the
+cheaper of the two conditions with the more expensive of the two actions,
+which is the same error the close routes above were written to prevent.
+
+The hold is also never the harness's own. The run's store is closed before the
+move — that is the discipline the archive step has always carried — so the
+handle belongs to an editor, a tail, a scanner, a backup pass. Nothing the
+harness does makes another process let go. Waiting is therefore the entire
+cure for the readers that pass, and copying the files instead of renaming
+their parent is the cure for most of the rest, and neither one is a decision
+the owner needs to make.
+
+What the owner does need is to be told. An archive that quietly did not happen
+leaves a closed run in a directory that means "running", and nobody finds it
+until something else goes wrong. So the block is loud, once per run, and the
+start-time sweep exists to answer it: the record is not a chore for the human,
+it is a statement that the harness owes itself a retry and will take it at the
+next opportunity it has.
+
 ## Why a loud record ends at its owner, not at the run
 
 The loud strip is the one surface the owner is shown before being asked to
@@ -212,6 +292,19 @@ If the park detail on the ledger grows past a readable line, the close keeps
 the reason alone and the detail stays in the park record. Trigger: a park
 event that no console can render. Reversal cost: low. One spread disappears
 from the abandon route.
+
+If the retry ladder proves too short for the holds this harness actually meets
+— a scanner that keeps a directory for seconds rather than milliseconds — the
+attempt count and the backoff grow, and the ladder moves off the close path
+into a deferred sweep so the close never waits on it. Trigger: two blocked
+moves that a longer wait would have cleared. Reversal cost: low. Two numbers,
+or one call site.
+
+If the ledger-length proof behind a leftover delete turns out to be too weak —
+a copy that lost an artifact while the ledger travelled whole — the proof
+becomes a per-file comparison of the two directories. Trigger: one leftover
+deleted over an archive that was missing something. Reversal cost: low. One
+comparison, at the place that already walks `runs/`.
 
 If an owning-event pairing proves too eager — a record cleared while the
 condition it reported still holds — that class loses its owner and returns to

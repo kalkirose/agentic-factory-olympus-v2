@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import {
@@ -110,10 +110,13 @@ test('archiveRun moves a closed run directory to the archive', (t) => {
   store.append('run-launched', { actor: 'daemon', lane: 'story' });
   store.append('run-closed', { actor: 'daemon', outcome: 'shipped' });
   store.close();
-  const archivedPath = archiveRun(paths, 'r1');
-  assert.equal(archivedPath, archivedRunLedgerPath(paths, 'r1'));
+  const moved = archiveRun(paths, 'r1');
+  assert.equal(moved.ledger, archivedRunLedgerPath(paths, 'r1'));
+  assert.equal(moved.method, 'rename');
+  assert.equal(moved.attempts, 1);
+  assert.equal(moved.leftover, null);
   assert.ok(!existsSync(join(paths.runs, 'r1')));
-  assert.equal(readEvents(archivedPath).length, 2);
+  assert.equal(readEvents(moved.ledger).length, 2);
 });
 
 test('archiveRun refuses an open run and a repeated archive', (t) => {
@@ -121,13 +124,96 @@ test('archiveRun refuses an open run and a repeated archive', (t) => {
   const open = openRunStore(paths, 'r1');
   open.append('run-launched', { actor: 'daemon', lane: 'story' });
   open.close();
-  assert.throws(() => archiveRun(paths, 'r1'), /is open/);
+  // The guards answer before the filesystem is touched at all: a refused
+  // archive never spends a retry ladder on a run it was never going to move.
+  const touched = [];
+  const io = { rename: (...args) => touched.push(args), sleep: () => {} };
+  assert.throws(() => archiveRun(paths, 'r1', io), /is open/);
   const reopened = openRunStore(paths, 'r1');
   reopened.append('run-closed', { actor: 'daemon', outcome: 'killed' });
   reopened.close();
   archiveRun(paths, 'r1');
-  assert.throws(() => archiveRun(paths, 'r1'), /already archived/);
-  assert.throws(() => archiveRun(paths, 'r2'), /has no ledger/);
+  assert.throws(() => archiveRun(paths, 'r1', io), /already archived/);
+  assert.throws(() => archiveRun(paths, 'r2', io), /has no ledger/);
+  assert.deepEqual(touched, []);
+});
+
+// -- a held handle ------------------------------------------------------------
+
+test('a blocked rename retries with backoff, then archives by copy', (t) => {
+  const paths = home(t);
+  const store = openRunStore(paths, 'r1');
+  store.append('run-launched', { actor: 'daemon', lane: 'story' });
+  store.append('run-closed', { actor: 'daemon', state: 'shipped' });
+  store.close();
+  writeFileSync(join(paths.runs, 'r1', 'spec.md'), 'the artifacts travel too\n');
+  const waits = [];
+  let renames = 0;
+  const moved = archiveRun(paths, 'r1', {
+    rename: () => {
+      renames++;
+      throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
+    },
+    sleep: (ms) => waits.push(ms),
+  });
+  assert.equal(renames, 5);
+  assert.deepEqual(waits, [20, 40, 60, 80]);
+  assert.equal(moved.method, 'copy');
+  assert.equal(moved.leftover, null);
+  // The whole directory travelled, and the live one is gone.
+  assert.equal(readEvents(moved.ledger).length, 2);
+  assert.equal(
+    readFileSync(join(paths.archivedRuns, 'r1', 'spec.md'), 'utf8'),
+    'the artifacts travel too\n',
+  );
+  assert.ok(!existsSync(join(paths.runs, 'r1')));
+});
+
+test('a copy whose source will not delete leaves the copy authoritative', (t) => {
+  const paths = home(t);
+  const store = openRunStore(paths, 'r1');
+  store.append('run-launched', { actor: 'daemon', lane: 'story' });
+  store.append('run-closed', { actor: 'daemon', state: 'shipped' });
+  store.close();
+  const moved = archiveRun(paths, 'r1', {
+    rename: () => {
+      throw new Error('EPERM: operation not permitted, rename');
+    },
+    remove: () => {
+      throw new Error('EBUSY: resource busy or locked, rmdir');
+    },
+    sleep: () => {},
+  });
+  assert.equal(moved.method, 'copy');
+  assert.equal(moved.leftover, join(paths.runs, 'r1'));
+  assert.equal(readEvents(moved.ledger).length, 2);
+  assert.ok(existsSync(join(paths.runs, 'r1')));
+});
+
+test('a copy that fails takes its half-written archive directory with it', (t) => {
+  const paths = home(t);
+  const store = openRunStore(paths, 'r1');
+  store.append('run-launched', { actor: 'daemon', lane: 'story' });
+  store.append('run-closed', { actor: 'daemon', state: 'shipped' });
+  store.close();
+  const removed = [];
+  assert.throws(
+    () =>
+      archiveRun(paths, 'r1', {
+        rename: () => {
+          throw new Error('EPERM: operation not permitted, rename');
+        },
+        copy: () => {
+          mkdirSync(join(paths.archivedRuns, 'r1'), { recursive: true });
+          throw new Error('EPERM: operation not permitted, copyfile');
+        },
+        remove: (target) => removed.push(target),
+        sleep: () => {},
+      }),
+    /did not archive: rename EPERM.*copy EPERM/,
+  );
+  assert.deepEqual(removed, [join(paths.archivedRuns, 'r1')]);
+  assert.ok(existsSync(join(paths.runs, 'r1')));
 });
 
 test('escapes store accepts only escape events', (t) => {

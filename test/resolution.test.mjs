@@ -39,7 +39,7 @@ test('an owning event is an event some ledger can actually stamp', () => {
   }
   assert.deepEqual(
     [...OWNER_EVENTS].sort(),
-    ['implementation-committed', 'merged', 're-freeze', 'verdict-rendered'],
+    ['implementation-committed', 'merged', 're-freeze', 'run-archived', 'verdict-rendered'],
   );
 });
 
