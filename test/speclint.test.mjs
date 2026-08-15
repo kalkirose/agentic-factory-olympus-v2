@@ -261,6 +261,123 @@ test('(e) a test file outside the test paths is named with its criterion', (t) =
   assert.match(defects[0], /the test mapping of AC-1 names src\/feature\.spec\.mjs/);
 });
 
+// -- (i) a mapping is one bullet on one line ---------------------------------
+
+test('(i) a rewrapped mapping bullet is one shape defect, never a path defect', (t) => {
+  // The shape a line-cap compression produces: the path holds the bullet line,
+  // the behavior wraps under it. Read word by word, every wrapped line opens a
+  // mapping that names an English word as a test file.
+  const sections = [
+    [
+      '## AC-1',
+      '',
+      'The behavior the criterion names.',
+      '',
+      'Test mapping:',
+      '- tests/feature.test.mjs —',
+      '  after the doubling, f(2) is 4 and the call took',
+      '  each argument the criterion names.',
+      '',
+      'Named constants:',
+      '- FACTOR = 2',
+      '',
+      'Supersedes:',
+      '- None',
+      '',
+    ].join('\n'),
+    section('AC-2', ['tests/feature.test.mjs — f("x") throws']),
+  ].join('\n');
+  const defects = lint(t, spec({ sections }));
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(defects[0], /the test mapping is rewrapped or malformed at AC-1 line 8:/);
+  assert.match(defects[0], /a mapping is one bullet on one line/);
+  assert.ok(!/not under an acceptance test path/.test(defects[0]), defects[0]);
+});
+
+test('(i) a list nested under a mapping bullet is the same defect', (t) => {
+  // The other compression: one path, and the behaviors regrouped under it.
+  const sections = [
+    [
+      '## AC-1',
+      '',
+      'The behavior the criterion names.',
+      '',
+      'Test mapping:',
+      '- tests/feature.test.mjs',
+      '  - f(2) is 4',
+      '  - each number doubles',
+      '',
+      'Supersedes:',
+      '- None',
+      '',
+    ].join('\n'),
+    section('AC-2', ['tests/feature.test.mjs — f("x") throws']),
+  ].join('\n');
+  const defects = lint(t, spec({ sections }));
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(defects[0], /rewrapped or malformed at AC-1 line 8/);
+});
+
+test('(i) every criterion that lost the shape is named in the one defect', (t) => {
+  const wrapped = (id) =>
+    [
+      `## ${id}`,
+      '',
+      'The behavior the criterion names.',
+      '',
+      'Test mapping:',
+      '- tests/feature.test.mjs —',
+      '  the behavior wraps to this line.',
+      '- tests/feature.test.mjs —',
+      '  and this one wraps too.',
+      '',
+      'Supersedes:',
+      '- None',
+      '',
+    ].join('\n');
+  const defects = lint(t, spec({ sections: [wrapped('AC-1'), wrapped('AC-2')].join('\n') }));
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(defects[0], /at AC-1 lines 8, 10; AC-2 lines 21, 23:/);
+});
+
+test('(i) a well-formed bullet with a bad path is still a path defect', (t) => {
+  // Rule (i) never covers for rule (e): the shape is right, the path is wrong,
+  // and the message is the one the lint always gave.
+  const sections = [
+    section('AC-1', ['src/feature.spec.mjs — f(2) is 4']),
+    section('AC-2', ['tests/feature.test.mjs — f("x") throws']),
+  ].join('\n');
+  const defects = lint(t, spec({ sections }));
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(defects[0], /the test mapping of AC-1 names src\/feature\.spec\.mjs/);
+});
+
+test('(i) a wrapped bullet no longer swallows the mappings under it', (t) => {
+  // The silent half of the same defect: the list ended at the first wrapped
+  // line, so every rule stopped reading there. The bullets after it are read.
+  const sections = [
+    [
+      '## AC-1',
+      '',
+      'The behavior the criterion names.',
+      '',
+      'Test mapping:',
+      '- tests/feature.test.mjs —',
+      '  the behavior wraps to this line.',
+      '- src/late.spec.mjs — f(3) is 6',
+      '',
+      'Supersedes:',
+      '- None',
+      '',
+    ].join('\n'),
+    section('AC-2', ['tests/feature.test.mjs — f("x") throws']),
+  ].join('\n');
+  const defects = lint(t, spec({ sections }));
+  assert.equal(defects.length, 2, defects.join(' | '));
+  assert.match(defects[0], /the test mapping of AC-1 names src\/late\.spec\.mjs/);
+  assert.match(defects[1], /rewrapped or malformed at AC-1 line 8/);
+});
+
 // -- (f) a superseded test exists --------------------------------------------
 
 test('(f) a supersede that names no file in the worktree is named', (t) => {

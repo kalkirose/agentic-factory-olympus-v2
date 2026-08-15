@@ -180,7 +180,8 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   any judging seat spawns: the criterion sections match the card's id set,
   the cap holds, the touched-paths block parses and its entries clear the
   lane's diff policy, every planned test file lives under a test path, every
-  superseded file exists, and a dev-owned test-path entry names one file. A
+  superseded file exists, a dev-owned test-path entry names one file, and
+  every test mapping is one bullet on one line with its path first. A
   failure is a work-product defect — one corrective invocation, then the
   `seat-failure` park — and never spends a gate round.
 - **Spec gate**: one fresh-context round on the born spec (grounding

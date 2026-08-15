@@ -43,6 +43,16 @@ const ENVIRONMENT_SECTION = 'environment';
  */
 const GLOB_MARKERS = /[*?]/;
 
+/**
+ * What tells a path from a word. A mapping bullet opens with the repo-relative
+ * path of a test file, and a path carries a directory separator or a file
+ * extension. An English word carries neither, so a bullet that opens with one
+ * is a bullet whose path went somewhere else. That is a shape defect, which
+ * rule (i) reports, and never a path defect: no rule about paths can say one
+ * true thing about the word a rewrap left at the start of a line.
+ */
+const PATH_TOKEN = /\/|\.[A-Za-z0-9]{1,10}$/;
+
 const HEADING = /^#{1,6}\s+(.*\S)\s*$/;
 const ENVIRONMENT_HEADING = /^environment\b/i;
 const TOUCHED_FENCE = /^```touched-paths\b/;
@@ -143,6 +153,21 @@ export function lintSpec(specText, { card, cardPath = null, worktree, testPaths 
           'no run ships it, so no spec may plan it.',
       );
     }
+  }
+
+  // (i) every mapping is one bullet on one line, path first.
+  const rewrapped = sections.filter((s) => s.rewrapped.length > 0);
+  if (rewrapped.length > 0) {
+    const places = rewrapped.map(
+      (s) =>
+        `${s.id} ${s.rewrapped.length === 1 ? 'line' : 'lines'} ${s.rewrapped.join(', ')}`,
+    );
+    defects.push(
+      `the test mapping is rewrapped or malformed at ${places.join('; ')}: a mapping is one ` +
+        'bullet on one line, the test path first, then " — ", then the behavior the test ' +
+        'asserts. A mapping never wraps across lines and never carries a nested list; meet the ' +
+        `${SPEC_LINE_CAP}-line cap with shorter prose instead.`,
+    );
   }
   return defects;
 }
@@ -370,7 +395,7 @@ function specSections(lines, known) {
   const sections = [];
   let current = null;
   let headings = 0;
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
     const heading = HEADING.exec(line);
     if (heading) {
       const id = heading[1].split(/\s+/)[0].replace(/^[`*]+/, '').replace(/[`*:.]+$/, '');
@@ -380,36 +405,83 @@ function specSections(lines, known) {
       if (current) sections.push(current);
       continue;
     }
-    if (current) current.body.push(line);
+    if (current) current.body.push({ text: line, line: index + 1 });
   }
-  return sections.map((section) => ({
-    id: section.id,
-    testMappings: labelledItems(section.body, TEST_MAPPING_LABEL).map(testMapping),
-    supersedes: labelledItems(section.body, SUPERSEDES_LABEL).map(supersede).filter(Boolean),
-  }));
+  return sections.map((section) => {
+    const mapping = labelledItems(section.body, TEST_MAPPING_LABEL);
+    const read = mapping.items.map((item) => ({ ...testMapping(item.text), line: item.line }));
+    return {
+      id: section.id,
+      testMappings: read.filter(isMapping),
+      // A bullet the mapping shape does not fit says nothing about a path, so
+      // it never reaches rules (d), (e) and (h). Its line joins rule (i).
+      rewrapped: unique([...mapping.broken, ...read.filter((m) => !isMapping(m)).map((m) => m.line)])
+        .sort((a, b) => a - b),
+      supersedes: labelledItems(section.body, SUPERSEDES_LABEL)
+        .items.map((item) => supersede(item.text))
+        .filter(Boolean),
+    };
+  });
 }
 
-/** The list items that follow a label line, up to the first line that is
- * neither blank nor an item. */
+/**
+ * The list items that follow a label line, up to the first line that is
+ * neither blank nor an item.
+ *
+ * An item is one bullet on one line at the list's own indent. A line indented
+ * past that bullet is the bullet's wrapped tail or a list nested under it, and
+ * either one broke the shape the template states: the list stays open — the
+ * bullets after it are still items — and the bullet the line belongs to is
+ * reported once.
+ *
+ * @returns {{items: {text: string, line: number}[], broken: number[]}} `broken`
+ *   holds the line of each bullet whose shape the list lost.
+ */
 function labelledItems(body, label) {
   const items = [];
+  const broken = [];
   let inside = false;
-  for (const line of body) {
-    if (label.test(line.trim())) {
+  let indent = null;
+  let bullet = null;
+  for (const { text, line } of body) {
+    if (label.test(text.trim())) {
       inside = true;
+      indent = null;
+      bullet = null;
       continue;
     }
     if (!inside) continue;
-    const item = LIST_ITEM.exec(line);
+    const width = text.length - text.trimStart().length;
+    const item = LIST_ITEM.exec(text);
     if (item) {
-      items.push(item[1]);
+      if (indent === null) indent = width;
+      if (width > indent) broken.push(bullet ?? line);
+      else {
+        bullet = line;
+        items.push({ text: item[1], line });
+      }
       continue;
     }
     // A blank line inside a list is still the list; prose after it is not.
-    if (line.trim().length === 0) continue;
+    if (text.trim().length === 0) continue;
+    if (indent !== null && width > indent) {
+      broken.push(bullet ?? line);
+      continue;
+    }
     inside = false;
+    indent = null;
+    bullet = null;
   }
-  return items;
+  return { items, broken };
+}
+
+/**
+ * A mapping the lint can read: the first token is a path, and a behavior
+ * follows it. A bullet that fails either one is a bullet whose mapping was
+ * rewrapped away from it.
+ */
+function isMapping(mapping) {
+  return PATH_TOKEN.test(mapping.path) && mapping.behavior.length > 0;
 }
 
 /** `<path> — <the behavior the test asserts>`. */

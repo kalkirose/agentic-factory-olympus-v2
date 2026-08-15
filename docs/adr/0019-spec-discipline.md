@@ -11,9 +11,11 @@ structured field the freeze acts on.
   block names the parts and their order: a header (card key, base sha, the
   scope exclusions the card states); one section per acceptance criterion on
   the card, in card order, each titled with the criterion id and holding the
-  intent (three sentences at most), a `Test mapping:` list whose items open
-  with the planned test file path, a `Named constants:` list of `NAME = value`
-  entries, and a `Supersedes:` list of frozen tests the criterion contradicts
+  intent (three sentences at most), a `Test mapping:` list whose items are one
+  bullet on one line opening with the planned test file path
+  (`<path> — <the behavior the test asserts>`), a `Named constants:` list of
+  `NAME = value` entries, and a `Supersedes:` list of frozen tests the
+  criterion contradicts
   (`<path> — keep|supersede — <replacement clause>`); then exactly one
   ` ```touched-paths ` block; then an environment section naming only the
   environment variables the card names. The whole document runs to 400 lines
@@ -26,7 +28,7 @@ structured field the freeze acts on.
   does not takes its position (`AC-1`, `AC-2`). The card is the only source of
   the set, so the spec cannot invent a section and cannot drop one.
 - **The lint is deterministic, and it runs at birth and after every
-  amendment**, before any judging seat spawns. Eight rules, each with a
+  amendment**, before any judging seat spawns. Nine rules, each with a
   message that names the defect and the file:
   (a) every card criterion id appears as exactly one section, in card order,
   none missing, none extra;
@@ -41,7 +43,11 @@ structured field the freeze acts on.
   (g) every touched-paths entry owned by `dev` under a test path names one
   file, never a directory and never a glob;
   (h) no touched-paths entry and no test-mapping path matches a
-  `forbiddenPatterns` shape.
+  `forbiddenPatterns` shape;
+  (i) every test mapping is one bullet on one line, the path first. A bullet
+  that wraps across lines, a list nested under a bullet, and a bullet that
+  opens with anything but a path are one defect that names the bullets, never
+  a path defect on the words the wrap exposed.
 - **A touched-paths entry is a literal path; a config path entry is a glob.**
   Inside the block, only `*` and `?` mark a pattern. Brackets, parentheses,
   braces and spaces are characters the path carries, because they are
@@ -188,6 +194,35 @@ names the card and the heading it read, and the lane parks it `stage-blocked`
 (ADR-0015) at readiness and at the two stages that lint a spec. No seat is
 asked to correct it: a seat cannot fix a parse, and the corrective invocation
 it would spend is spent on a document that was never the problem.
+
+## Correction, 2026-08-15: the mapping list has a shape, and rule (i) reads it
+
+A spec came back at 448 lines. The seat compressed it under the cap by
+rewrapping its test-mapping bullets: the path kept the bullet line, the
+behavior moved to indented lines under it. The list is the one structure the
+lint reads in a criterion section, and the rewrap took it apart. The reader
+stopped at the first wrapped line, so four of every five mappings were never
+checked at all, and the words the wrap left at the start of a line were read as
+test paths. Rule (e) then said, twelve times, that a mapping named `after`, or
+`the`, or `each`, and that no acceptance test path held it. The seat spent its
+one corrective invocation on twelve sentences about English words, and the run
+parked.
+
+Two things were wrong, and both are fixed here. The list reader treated a
+wrapped line as the end of the list, which is why the mappings under it
+vanished silently; it now keeps the list open and attributes the line to the
+bullet above it. And no rule stated the shape, so the shape defect had to
+surface as whatever the next rule made of the wreckage. Rule (i) states it: a
+mapping is one bullet on one line, path first. A bullet whose shape the list
+lost never becomes a mapping, so rules (d), (e) and (h) never see it, and one
+message names every bullet that lost it.
+
+The template says the same thing twice, because the seat has to know it in two
+places: in the mapping line, which now carries the written form
+(`<path> — <the behavior the test asserts>`) and the one-line rule; and beside
+the cap, which now says to meet the cap with shorter prose and never by
+reflowing a structured list. A cap that a seat can only meet by breaking the
+document's one machine-read structure is a cap that buys nothing.
 
 ## Fallback paths
 
