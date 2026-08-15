@@ -54,6 +54,9 @@ export function escalationQueue(paths, { roadmap } = {}) {
       // The record's own statement of what it will take back, so every queue
       // item is answerable from the item (ADR-0029).
       ...(record.event === 'park' && { answers: acceptedForms(record) }),
+      // What an `ack` answer would record, by fingerprint, so the operator
+      // reads the identity here and hands it to a revoke later (ADR-0032).
+      ...(Array.isArray(record.acks) && { acks: record.acks }),
       ...(record.refs && { refs: record.refs }),
       ...(record.card && { card: record.card }),
       ...(storyKey && { storyKey }),

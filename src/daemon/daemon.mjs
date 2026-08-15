@@ -10,6 +10,7 @@ import { ModelSemaphores } from '../seats/semaphore.mjs';
 import { RunIsolation } from '../isolation/isolation.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
 import { checkAnswer } from '../ledger/parks.mjs';
+import { ACK_OPTION, standingAcksFor } from '../ledger/acks.mjs';
 import {
   cloneDir,
   ensureBareClone,
@@ -99,6 +100,10 @@ export class Daemon {
     // An answer targets a run park (runId) or an instance park (seq).
     this.registerCommand('answer', async (command) => {
       if (command.runId !== undefined) {
+        // An `ack` answer records its acknowledgments before the run resumes
+        // on it: the run's next step reads the standing set, and the acks
+        // outlive the run either way.
+        this.recordAcks(command);
         this.engine.answer({
           runId: command.runId,
           actor: command.actor,
@@ -109,6 +114,12 @@ export class Daemon {
         this.answerInstancePark(command);
       }
       this.frontier.queueSweepAll();
+    });
+    // A revoke ends one standing acknowledgment: the fingerprint it names and
+    // no other. An unsolved harness defect stays acknowledged while its
+    // neighbour is fixed, so nothing here clears a set (ADR-0032).
+    this.registerCommand('revoke', async (command) => {
+      this.revokeAck(command);
     });
     this.registerCommand('kill', async (command) => {
       this.engine.killRun(command.runId, { actor: command.actor });
@@ -484,6 +495,70 @@ export class Daemon {
       ...(option !== undefined && { option }),
       ...(answer !== undefined && { answer }),
       ...(target.card !== undefined && { card: target.card }),
+    });
+  }
+
+  // -- finding acknowledgments (ADR-0032) -----------------------------------
+
+  /**
+   * Records the standing acknowledgments an `ack` answer buys, from the park
+   * record and from nothing else. A park that does not offer the option is
+   * refused by the engine, in the one refusal that quotes the forms, and
+   * nothing is written on the way there.
+   * @param {{runId: string, actor: string, option?: string}} cmd
+   */
+  recordAcks({ runId, actor, option }) {
+    if (option !== ACK_OPTION) return;
+    const run = this.engine.runs.get(runId);
+    const record = run?.parked ? run.parkRecord : null;
+    if (!record?.answers?.options?.includes(ACK_OPTION) || !Array.isArray(record.acks)) return;
+    for (const ack of record.acks) {
+      this.ledger.append('finding-ack', {
+        actor,
+        project: run.project,
+        fingerprint: ack.fingerprint,
+        class: ack.class,
+        summary: ack.summary,
+        runId,
+        parkSeq: record.seq,
+      });
+    }
+  }
+
+  /**
+   * Ends one standing acknowledgment. The fingerprint says which, and the fix
+   * says what the revoke stands on — a harness commit, a PR, the repair that
+   * armed. Every other ack keeps standing: an unsolved harness defect is
+   * unsolved whatever was fixed beside it.
+   * @param {{actor: string, project: string, fingerprint: string, fix: string,
+   *   note?: string}} cmd
+   */
+  revokeAck({ actor, project, fingerprint, fix, note }) {
+    if (typeof actor !== 'string' || actor.length === 0) throw new Error('a revoke requires an actor');
+    if (typeof project !== 'string' || project.length === 0) {
+      throw new Error('a revoke requires the project the acknowledgment is scoped to');
+    }
+    if (typeof fingerprint !== 'string' || fingerprint.length === 0) {
+      throw new Error('a revoke names the one fingerprint it ends');
+    }
+    if (typeof fix !== 'string' || fix.length === 0) {
+      throw new Error('a revoke carries the fix it stands on (--fix)');
+    }
+    const standing = standingAcksFor(this.paths, project);
+    const ack = standing.get(fingerprint);
+    if (!ack) {
+      throw new Error(
+        `no acknowledgment stands for ${fingerprint} in ${project}` +
+          (standing.size > 0 ? ` — standing: ${[...standing.keys()].join(', ')}` : ''),
+      );
+    }
+    return this.ledger.append('finding-ack-revoked', {
+      actor,
+      project,
+      fingerprint,
+      fix,
+      ackSeq: ack.seq,
+      ...(note !== undefined && { note }),
     });
   }
 

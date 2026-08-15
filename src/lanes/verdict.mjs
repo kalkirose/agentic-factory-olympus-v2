@@ -15,7 +15,10 @@
 // Re-freeze steps and operational fixes never consume implementation budget.
 // An operational fix on a CI verdict whose open findings are all env-class
 // takes no cycle at all: it hands the run back to ship, where the CI re-run
-// is the test, and stamps the skip on the ledger.
+// is the test, and stamps the skip on the ledger. A finding that persists past
+// its fix parks the provisioning gate, unless every one of them is a harness
+// defect an operator already acknowledged — then the lane answers the gate on
+// that authority and stamps both the ack it used and the fix (ADR-0032).
 //
 // Every handler re-derives its position from the run ledger and the git
 // state, so a daemon restart resumes mid-verdict without memory.
@@ -45,6 +48,13 @@ import {
   recaptureLine,
   violationLine,
 } from '../seats/diffpolicy.mjs';
+import {
+  ACK_OPTION,
+  coveringAck,
+  findingFingerprint,
+  isAckable,
+  standingAcksFor,
+} from '../ledger/acks.mjs';
 import { runSpectrum, persistentReds, cyclePlan } from './spectrum.mjs';
 import { furyRound, generalistReview } from './review.mjs';
 import { freezeAnchor } from './resume.mjs';
@@ -537,22 +547,43 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
     } else {
       const park = answeredPark(events, 'provisioning-gate');
       if (!park?.answer || park.answer.seq < last.seq) {
-        return parkDirective('provisioning-gate', {
-          ...GATE_FORMS,
-          question:
-            'These findings persist after an operational fix; confirm the substrate is repaired:\n' +
-            ops.map((f) => `- [${f.class}] ${f.summary} (evidence: ${f.evidence})`).join('\n'),
-          refs: [last.record],
+        // The gate the operator already answered. Every finding it would ask
+        // about is a harness defect somebody recorded as known, so the lane
+        // answers on that authority and stamps twice: the ack it used, and the
+        // fix that stands on it. A first gate for a fingerprint finds no ack
+        // and reaches the human, which is where an ack comes from (ADR-0032).
+        const standing = standingAcksFor(ctx.paths, ctx.project);
+        const used = ops.map((f) => coveringAck(standing, f));
+        if (!used.every(Boolean)) return gateFor(ops, last);
+        ctx.store.append('finding-ack-used', {
+          actor: ACTOR,
+          findings: ops.map((f) => f.id),
+          acks: ops.map((f, i) => ({
+            finding: f.id,
+            fingerprint: used[i].fingerprint,
+            ackSeq: used[i].seq,
+            ackedBy: used[i].actor,
+          })),
         });
+        ctx.store.append('operational-fix', {
+          actor: ACTOR,
+          findings: ops.map((f) => f.id),
+          source: 'ack',
+          acks: [...new Set(used.map((a) => a.fingerprint))],
+          ...skipStamp,
+        });
+        if (skip) return { next: nextStage };
+        acted = true;
+      } else {
+        ctx.store.append('operational-fix', {
+          actor: park.answer.actor,
+          findings: ops.map((f) => f.id),
+          source: 'answer',
+          ...skipStamp,
+        });
+        if (skip) return { next: nextStage };
+        acted = true;
       }
-      ctx.store.append('operational-fix', {
-        actor: park.answer.actor,
-        findings: ops.map((f) => f.id),
-        source: 'answer',
-        ...skipStamp,
-      });
-      if (skip) return { next: nextStage };
-      acted = true;
     }
   }
 
@@ -654,6 +685,44 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
 
   if (!acted) throw new Error('verdict ladder found no route for the open findings');
   return null;
+}
+
+// What an `ack` answer at the gate is worth, said at the gate. The operator
+// reads the fingerprints off this text and hands one back to the revoke.
+const ACK_NOTE =
+  'Answer "ack" to record every harness finding above as known and deferred, ' +
+  'by the fingerprint beside it: a later gate whose findings are all ' +
+  'acknowledged answers itself, on the record, and never reaches you. An ack ' +
+  'stands until `olympusctl revoke` names its fingerprint and the fix behind ' +
+  'it — a restart never clears one.';
+
+/**
+ * The provisioning gate for a set of persisting findings. It offers `ack`
+ * only when it names a finding an ack may cover, and then it carries those
+ * fingerprints on the record: the answer records what the record names
+ * (ADR-0032).
+ */
+function gateFor(ops, last) {
+  const offered = ops.filter(isAckable).map((f) => ({
+    fingerprint: findingFingerprint(f),
+    class: f.class,
+    summary: gist(f.summary),
+  }));
+  const line = (f) =>
+    `- [${f.class}] ${f.summary} (evidence: ${f.evidence})` +
+    (isAckable(f) ? ` · ${findingFingerprint(f)}` : '');
+  return parkDirective('provisioning-gate', {
+    ...GATE_FORMS,
+    ...(offered.length > 0 && {
+      options: [...GATE_FORMS.options, ACK_OPTION],
+      acks: offered,
+    }),
+    question:
+      'These findings persist after an operational fix; confirm the substrate is repaired:\n' +
+      ops.map(line).join('\n') +
+      (offered.length > 0 ? `\n${ACK_NOTE}` : ''),
+    refs: [last.record],
+  });
 }
 
 /**

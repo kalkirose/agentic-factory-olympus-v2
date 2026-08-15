@@ -138,8 +138,13 @@ export function freezeExclusions(paths, runId) {
  * options it offers, the free-text slot it wants, or both. `text` is the label
  * for that slot and says what the text is for. The engine adds `abandon` and
  * writes the whole declaration onto the record (ADR-0029).
+ *
+ * `acks` names the findings an `ack` answer records a standing acknowledgment
+ * for. It rides the record because the record is what the daemon writes those
+ * acks from: the stage that raised the park is long gone by the time the
+ * answer lands (ADR-0032).
  */
-export function parkDirective(type, { question, options, text, refs }) {
+export function parkDirective(type, { question, options, text, refs, acks }) {
   return {
     park: {
       type,
@@ -147,6 +152,7 @@ export function parkDirective(type, { question, options, text, refs }) {
       ...(options && { options }),
       ...(text && { text }),
       ...(refs && { refs }),
+      ...(acks && { acks }),
     },
   };
 }

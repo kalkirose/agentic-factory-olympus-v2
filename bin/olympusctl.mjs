@@ -14,11 +14,19 @@
 //                       [--resume-from <runId>]
 //   olympusctl kill     --home <dir> --run <id>
 //   olympusctl resolve  --home <dir> [--run <id>] --seq <n> [--note <text>]
+//   olympusctl revoke   --home <dir> --project <name> --fingerprint <f>
+//                       --fix <ref> [--note <text>]
 // --home falls back to OLYMPUSD_HOME; --actor defaults to console:<os user>.
 // Every park states the answer forms it takes, and `queue` prints them per
 // item: the options it offers, the free-text slot it wants, or both. Every
 // park of a run also takes --option abandon, which closes the run on the
 // condition the park recorded.
+// A provisioning gate that names a harness finding also takes --option ack: it
+// answers the gate and records that finding as known and deferred, by the
+// fingerprint `queue` prints beside it. A later gate whose findings are all
+// acknowledged answers itself on the record. `status` lists every standing
+// acknowledgment; `revoke` ends the one its fingerprint names, and carries the
+// fix it stands on. Nothing else ends one — a restart least of all.
 // The intake ticket is the repair lane's spec: --lane repair requires
 // --ticket, and no other lane accepts one. A repo-relative ticket path names
 // a ticket committed in the run worktree; an absolute path names a ticket in
@@ -56,6 +64,8 @@ function parseArgs(argv) {
     ['--ticket', 'ticket'],
     ['--resume-from', 'resumeFrom'],
     ['--note', 'note'],
+    ['--fingerprint', 'fingerprint'],
+    ['--fix', 'fix'],
   ]);
   for (let i = 0; i < rest.length; i++) {
     const key = flags.get(rest[i]);
@@ -84,14 +94,16 @@ function queueCommand(paths, command) {
 const { command, opts } = parseArgs(process.argv.slice(2));
 if (!command) {
   fail(
-    'usage: olympusctl <status|queue|frontier|answer|arm|pause|launch|kill|resolve> --home <dir>\n' +
+    'usage: olympusctl <status|queue|frontier|answer|arm|pause|launch|kill|resolve|revoke> --home <dir>\n' +
       '       answer: (--run <id> | --seq <n>) (--option <o> | --text <t>)\n' +
       '               queue prints the forms each park accepts; every run park\n' +
       '               takes --option abandon, which closes the run\n' +
       '       launch: --project <name> [--lane <name>] [--card <path>] [--ticket <path>]\n' +
       '               [--resume-from <runId>]\n' +
       '       --lane repair requires --ticket; no other lane accepts one\n' +
-      '       --resume-from is story-lane only and takes no --card',
+      '       --resume-from is story-lane only and takes no --card\n' +
+      '       revoke: --project <name> --fingerprint <f> --fix <ref> [--note <text>]\n' +
+      '               ends the one acknowledgment its fingerprint names; status lists them',
   );
 }
 if (!opts.home) fail('--home (or OLYMPUSD_HOME) is required');
@@ -170,6 +182,18 @@ if (command === 'status') {
   });
 } else if (command === 'kill') {
   queueCommand(paths, { command: 'kill', actor, runId: need(opts, 'run') });
+} else if (command === 'revoke') {
+  // One fingerprint, one fix. There is no form that ends every acknowledgment
+  // at once: a harness defect nobody fixed is still there after the one beside
+  // it was fixed (ADR-0032).
+  queueCommand(paths, {
+    command: 'revoke',
+    actor,
+    project: need(opts, 'project'),
+    fingerprint: need(opts, 'fingerprint'),
+    fix: need(opts, 'fix'),
+    ...(opts.note !== undefined && { note: opts.note }),
+  });
 } else if (command === 'resolve') {
   queueCommand(paths, {
     command: 'resolve',

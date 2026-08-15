@@ -10,7 +10,10 @@ import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
 import { postFreeze, repairLane } from '../src/lanes/verdict.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
-import { readEvents } from '../src/ledger/ledger.mjs';
+import { Ledger, readEvents } from '../src/ledger/ledger.mjs';
+import { INSTANCE_EVENTS } from '../src/ledger/registry.mjs';
+import { findingFingerprint, standingAcksFor } from '../src/ledger/acks.mjs';
+import { writeControlCommand } from '../src/daemon/control.mjs';
 import { openLoud } from '../src/telemetry/readers.mjs';
 import { tempDir, removeDir, waitFor, initOriginRepo, projectConfigJson } from './helpers.mjs';
 
@@ -840,6 +843,194 @@ test('a harness finding stamps gate-integrity loud and resolves when the layer r
   assert.equal(resolved.resolves, loud.seq);
   assert.equal(resolved.resolvedEvent, 'gate-integrity');
   assert.equal(events.filter((e) => e.event === 'operational-fix').length, 1);
+});
+
+// -- acknowledged harness findings (ADR-0032) --------------------------------
+
+/** A layer red for its first `redRuns` invocations, green after. */
+function decayingLayer(marker, redRuns) {
+  return [
+    'node',
+    '-e',
+    `const fs=require('fs');const p=${JSON.stringify(`../${marker}`)};` +
+      "const n=fs.existsSync(p)?Number(fs.readFileSync(p,'utf8')):0;fs.writeFileSync(p,String(n+1));" +
+      `process.exit(n>=${redRuns}?0:1);`,
+  ];
+}
+
+/** The fingerprint the triage fixture's finding for a layer reaches. */
+function layerFingerprint(cls, layer) {
+  return findingFingerprint({
+    class: cls,
+    summary: `broken ${layer}`,
+    evidence: `red output of ${layer}`,
+  });
+}
+
+/** Records one standing ack, as a prior run's answered gate left it. */
+function seedAck(paths, { project, fingerprint, actor = 'operator' }) {
+  const ledger = new Ledger(paths.instanceLedger, { allowedEvents: INSTANCE_EVENTS });
+  ledger.append('finding-ack', {
+    actor,
+    project,
+    fingerprint,
+    class: 'harness',
+    summary: 'a known harness defect',
+  });
+  ledger.close();
+}
+
+/** The console path for an answer: the inbox, claimed by the daemon. */
+async function answerFromConsole(fx, command) {
+  writeControlCommand(fx.paths, { actor: 'operator', ...command });
+  await fx.daemon.drainControlInbox();
+}
+
+test('a harness gate answered "ack" records the finding, and the next gate answers itself', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat(() => ({ class: 'harness' })),
+    ...furyClean(),
+  };
+  // Red through three cycles of two runs each: cycle 1 earns the operational
+  // fix, cycle 2 parks the gate, cycle 3 meets the ack the answer recorded.
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'hlayer', command: 'hlayer' },
+    ],
+    commands: { suite: SUITE_CMD, hlayer: decayingLayer('hcount', 6) },
+  });
+  const { runId } = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  // The gate names the option and the identity the option records.
+  assert.deepEqual(park.answers.options, ['retry', 'ack', 'abandon']);
+  const fingerprint = layerFingerprint('harness', 'hlayer');
+  assert.deepEqual(park.acks, [
+    { fingerprint, class: 'harness', summary: 'broken hlayer' },
+  ]);
+  assert.ok(park.question.includes(fingerprint));
+  assert.ok(park.question.includes('known and deferred'));
+
+  await answerFromConsole(fx, { command: 'answer', runId, option: 'ack' });
+  const instance = readEvents(fx.paths.instanceLedger);
+  const ack = instance.find((e) => e.event === 'finding-ack');
+  assert.equal(ack.project, 'proj');
+  assert.equal(ack.fingerprint, fingerprint);
+  assert.equal(ack.actor, 'operator');
+  assert.equal(ack.runId, runId);
+  assert.equal(ack.parkSeq, park.seq);
+
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The first gate reached the human; the repeat did not park at all.
+  assert.equal(events.filter((e) => e.event === 'park' && e.type === 'provisioning-gate').length, 1);
+  const used = events.find((e) => e.event === 'finding-ack-used');
+  assert.deepEqual(used.findings, ['F1']);
+  assert.deepEqual(used.acks, [
+    { finding: 'F1', fingerprint, ackSeq: ack.seq, ackedBy: 'operator' },
+  ]);
+  // Nothing silent: the fix says what answered it.
+  const fixes = events.filter((e) => e.event === 'operational-fix');
+  assert.deepEqual(
+    fixes.map((e) => e.source ?? null),
+    [null, 'answer', 'ack'],
+  );
+  assert.deepEqual(fixes.at(-1).acks, [fingerprint]);
+});
+
+test('an ack from an earlier run answers this run\'s gate, and a revoke parks it again', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat(() => ({ class: 'harness' })),
+    ...furyClean(),
+  };
+  const gates = [
+    { name: 'unit', command: 'suite' },
+    { name: 'hlayer', command: 'hlayer' },
+  ];
+  const fingerprint = layerFingerprint('harness', 'hlayer');
+  const other = layerFingerprint('harness', 'somewhere-else');
+
+  // The ack outlives the run that recorded it: this daemon never saw that run,
+  // and it never parks the gate.
+  const acked = verdictFixture(t, { seats, gates, commands: { suite: SUITE_CMD, hlayer: decayingLayer('hcount', 4) } });
+  seedAck(acked.paths, { project: 'proj', fingerprint });
+  seedAck(acked.paths, { project: 'proj', fingerprint: other });
+  const first = await acked.launch();
+  let events = await waitClosed(acked.paths, first.runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!events.some((e) => e.event === 'park'));
+  assert.equal(events.find((e) => e.event === 'finding-ack-used').acks[0].fingerprint, fingerprint);
+
+  // A revoke ends the one fingerprint it names. The ack beside it still
+  // stands, and the gate it covers nothing for parks like any other.
+  const revoked = verdictFixture(t, { seats, gates, commands: { suite: SUITE_CMD, hlayer: decayingLayer('hcount', 4) } });
+  seedAck(revoked.paths, { project: 'proj', fingerprint });
+  seedAck(revoked.paths, { project: 'proj', fingerprint: other });
+  const second = await revoked.launch();
+  revoked.daemon.revokeAck({
+    actor: 'operator',
+    project: 'proj',
+    fingerprint,
+    fix: 'harness abc1234: the triage capture armed',
+  });
+  const park = await waitParked(revoked.paths, second.runId, 'provisioning-gate');
+  assert.ok(park.question.includes(fingerprint));
+  const standing = standingAcksFor(revoked.paths, 'proj');
+  assert.deepEqual([...standing.keys()], [other]);
+  revoked.daemon.engine.answer({ runId: second.runId, actor: 'operator', option: 'retry' });
+  events = await waitClosed(revoked.paths, second.runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+});
+
+test('a gate mixing an acked harness finding with an env one parks all the same', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat((layer) => ({ class: layer === 'hlayer' ? 'harness' : 'env' })),
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'hlayer', command: 'hlayer' },
+      { name: 'elayer', command: 'elayer' },
+    ],
+    commands: {
+      suite: SUITE_CMD,
+      hlayer: decayingLayer('hcount', 6),
+      elayer: ['node', '-e', "process.exit(require('fs').existsSync('../env-broken')?1:0)"],
+    },
+    seedExtra: async (ctx, worktree) => {
+      writeFileSync(join(worktree, '..', 'env-broken'), 'x');
+    },
+  });
+  const { runId, worktree } = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  // Only the harness finding is offered: an ack never covers the substrate.
+  assert.deepEqual(park.acks.map((a) => a.class), ['harness']);
+  assert.ok(park.question.includes('[env]'));
+  await answerFromConsole(fx, { command: 'answer', runId, option: 'ack' });
+  assert.equal(readEvents(fx.paths.instanceLedger).filter((e) => e.event === 'finding-ack').length, 1);
+
+  // The env finding is uncovered, so the gate reaches the human again.
+  const second = await waitFor(
+    () => {
+      const parks = readEvents(runLedgerPath(fx.paths, runId)).filter(
+        (e) => e.event === 'park' && e.type === 'provisioning-gate',
+      );
+      return parks.length > 1 ? parks[1] : null;
+    },
+    { label: 'the second provisioning gate', attempts: 600, intervalMs: 100 },
+  );
+  assert.ok(second.question.includes('[env]'));
+  rmSync(join(worktree, '..', 'env-broken'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'retry' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!events.some((e) => e.event === 'finding-ack-used'));
 });
 
 test('confirm-to-block: only verifier-confirmed HIGHs enter the verdict; repair resolves them', async (t) => {

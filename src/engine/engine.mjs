@@ -234,7 +234,7 @@ export class RunEngine {
       return;
     }
     if (directive.park) {
-      const { type, question, options, text, refs, reason, detail } = directive.park;
+      const { type, question, options, text, refs, reason, detail, acks } = directive.park;
       if (!PARK_TYPES.has(type)) {
         this.stampViolation(run, `park type not in the catalog: ${type}`);
         return;
@@ -250,7 +250,7 @@ export class RunEngine {
         this.stampViolation(run, `park at ${run.stage} declares no answer form`);
         return;
       }
-      this.park(run, { type, question, options, text, refs, reason, detail });
+      this.park(run, { type, question, options, text, refs, reason, detail, acks });
       return;
     }
     if (directive.close) {
@@ -340,7 +340,11 @@ export class RunEngine {
   // site's declaration plus the `abandon` every run park owes (ADR-0029). It
   // is the whole of the answer contract: the record is what validates an
   // answer, what a refusal quotes, and what the console renders.
-  park(run, { type, question, options, text, refs, reason, detail }) {
+  //
+  // `acks` says what one of those options will record: the findings an `ack`
+  // answer acknowledges, by fingerprint. It sits on the record so the daemon
+  // writes the acks from the record and from nothing else (ADR-0032).
+  park(run, { type, question, options, text, refs, reason, detail, acks }) {
     run.parked = true;
     const line = run.store.append('park', {
       actor: ACTOR,
@@ -350,6 +354,7 @@ export class RunEngine {
       ...(refs && { refs }),
       ...(reason && { reason }),
       ...(detail && { detail }),
+      ...(acks && { acks }),
       gist: gist(`${type}: ${question}`),
     });
     run.parkRecord = line;

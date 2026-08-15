@@ -56,6 +56,14 @@ export const RUN_EVENTS = new Set([
   'fresh-pass',
   're-freeze',
   'operational-fix',
+  // The gate answered itself on a standing acknowledgment: every finding it
+  // would have asked about is a harness defect an operator already recorded as
+  // known. Quiet, because the gate is answered and the run proceeds as it does
+  // on any answer — but never silent, because the run took a human's authority
+  // without asking the human. It names the findings, the fingerprints, the ack
+  // events and who recorded them, and the `operational-fix` beside it carries
+  // `source: 'ack'` (ADR-0032).
+  'finding-ack-used',
   // gate integrity (loud)
   'gate-integrity',
   // The run passed the budget its lane was given. Loud, because the owner is
@@ -138,6 +146,13 @@ export const INSTANCE_EVENTS = new Set([
   // reader can no longer trust the push for is named, so the pull surfaces
   // stay the authority they always were (ADR-0028).
   'notify-failed',
+  // One operator statement that a harness defect is known and deferred, and
+  // the revoke that ends it. Together they are the whole store of standing
+  // acknowledgments: the set is folded from this pair, so it survives every
+  // restart and changes only when somebody says so (ADR-0032). The revoke
+  // names one fingerprint and carries the fix it stands on.
+  'finding-ack',
+  'finding-ack-revoked',
   'workspace-released',
   'arming-changed',
   'config-changed',

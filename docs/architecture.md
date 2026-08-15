@@ -71,7 +71,9 @@ Three stores plus two indexes, all append-only, all under the daemon home:
 
 - **Per-run ledger** — every run event; archived with the run.
 - **Instance ledger** — run-independent events: daemon lifecycle, launches,
-  arming changes, config changes, starvation, tripwire breaches.
+  arming changes, config changes, starvation, tripwire breaches, and the
+  acknowledgment pairs the standing set of known harness defects is folded
+  from.
 - **Escapes ledger** — central record of post-merge defects and chores; the
   counted source for quality metrics.
 - **Stream indexes** — two central files (queued, loud). The daemon appends a
@@ -256,8 +258,11 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   briefed by born spec + frozen suite + stall brief, never the prior tree; a
   second stall escalates. Suite-defect → re-freeze step by the suite seat at
   a new SHA. Env/harness → operational fix by an orchestrator job; an env-only
-  CI verdict takes no cycle behind its fix. Re-freeze and operational fixes
-  cost no implementation budget.
+  CI verdict takes no cycle behind its fix. A finding that persists past its
+  fix parks the provisioning gate, unless every one of them is a harness
+  defect an operator acknowledged: then the lane answers the gate on that
+  authority and stamps both the acknowledgment it used and the fix
+  (ADR-0032). Re-freeze and operational fixes cost no implementation budget.
 - **Fury round.** Six lenses on five seats (architecture + minimality merge
   into one code-shape seat with per-lens reporting; interface fires only on
   UI diffs). One round per pass, on the candidate tree, before the verdict
@@ -340,6 +345,15 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   park of a run, so the close-by-abandon route is open at all of them; the
   card-invalidated park has no run behind it and offers none. A refusal quotes
   the forms, and the queue renders the answer line off the same declaration.
+- **A known harness defect is answered once.** A provisioning gate that names
+  a harness finding also offers `ack`, which answers the gate and records that
+  finding as known and deferred, by a fingerprint derived from what the
+  finding says rather than from the run that raised it. A later gate whose
+  findings are all acknowledged answers itself and stamps what it stood on.
+  Acknowledgments never cover an env or product finding, are folded from
+  `finding-ack` / `finding-ack-revoked` pairs in the instance ledger so a
+  restart clears none, and end one at a time through `olympusctl revoke`,
+  which carries the fix it stands on (ADR-0032).
 - **Escalation queue**: always open, answerable from the record alone,
   presented FIFO with roadmap-order tiebreak, answered in any order.
 - **Streams.** Queued: park events + tripwire breaches. Loud: liveness

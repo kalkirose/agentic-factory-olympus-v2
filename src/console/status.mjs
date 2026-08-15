@@ -8,6 +8,7 @@ import { deriveRunState } from '../engine/replay.mjs';
 import { runLedgerPath } from '../daemon/home.mjs';
 import { readLock, pidAlive } from '../daemon/lock.mjs';
 import { withDefaults } from '../config/instance.mjs';
+import { standingAckList } from '../ledger/acks.mjs';
 import { openLoud } from '../telemetry/readers.mjs';
 import { escalationQueue } from '../telemetry/queue.mjs';
 
@@ -122,6 +123,19 @@ export function renderStatus(paths) {
       );
     }
   }
+  // Every harness defect the factory is currently allowed to walk past. It
+  // belongs on the status page and not only in a park that has been answered:
+  // an ack outlives the run that recorded it and every restart after, and the
+  // only thing that ends one is an operator reading this line (ADR-0032).
+  const acks = standingAckList(readEvents(paths.instanceLedger));
+  if (acks.length > 0) {
+    lines.push('');
+    lines.push(`STANDING ACKS (${acks.length})`);
+    for (const ack of acks) {
+      lines.push(`  ${ack.project} ${ack.fingerprint} — ${ack.summary} (${ack.actor}, ${ack.ts})`);
+    }
+    lines.push('  revoke: olympusctl revoke --project <p> --fingerprint <f> --fix <ref>');
+  }
   const environment = seatEnvironment(paths);
   if (environment.length > 0) {
     lines.push('');
@@ -159,6 +173,9 @@ export function renderQueue(paths, { roadmap } = {}) {
       lines.push(`    ${item.gist}`);
     }
     if (item.refs) lines.push(`    refs: ${JSON.stringify(item.refs)}`);
+    for (const ack of item.acks ?? []) {
+      lines.push(`    ack ${ack.fingerprint} — ${ack.summary}`);
+    }
     if (item.answers) {
       // Straight off the record: the forms the park declared are the forms the
       // engine will take, so the line an operator reads is the line that works.
