@@ -23,6 +23,9 @@ Around the daemon:
 - **Eval seat** — an instance-scoped judgment seat fired every five story-lane
   ships. Its report lands under `eval/` in the daemon home; the queued
   `eval-review` event points to it. Proposals only; nothing self-executes.
+- **Notifier** — one optional push target (webhook or command argv) the
+  instance config names. It sends parks, budget breaches and run closes out of
+  the daemon and does nothing else. Unconfigured, it is not there.
 
 ```mermaid
 flowchart LR
@@ -91,9 +94,9 @@ backstop for the classes no event owns.
 Two levels; the ownership test decides placement.
 
 - **Instance config** — daemon home, machine-scoped: model semaphores, paths,
-  ledger home, notification-stream wiring, slot caps keyed by project, and the
-  name patterns this host holds credentials in (`secretEnv`). The console edits
-  it live; no PR.
+  ledger home, notification-stream wiring, the push `notifier` target, slot
+  caps keyed by project, and the name patterns this host holds credentials in
+  (`secretEnv`). The console edits it live; no PR.
 - **Project config** — one JSON versioned in the project repo: repo facts,
   commands, gates, conventions, lane specifics, per-lane budget thresholds,
   the external credentials the work needs with the read-only probe that
@@ -321,7 +324,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   violation, gate-integrity defect, diff-policy violation, red-merge breach,
   factory starvation, owed repairs, budget breach. Consoles render loud first,
   then queue depth, and a loud item leaves the strip as soon as the event that
-  owns it lands. Pull only.
+  owns it lands.
+- **Reading is pull; three events also push.** A park, a budget breach and a
+  run close go to the instance's notifier target when one is configured. Every
+  console surface stays a read of the ledgers.
 
 ## Liveness
 

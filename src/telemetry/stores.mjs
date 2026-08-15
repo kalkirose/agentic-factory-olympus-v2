@@ -31,8 +31,9 @@ export class TelemetryStore {
    *   ('instance', 'escapes', or 'run:<runId>')
    * @param {string} ledgerPath
    * @param {Set<string>} allowedEvents
-   * @param {{onAppend?: (line: object) => void}} [opts] onAppend fires after
-   *   every append — the tripwire watcher's event key. The hook owns its
+   * @param {{onAppend?: (line: object, ledger: string) => void}} [opts]
+   *   onAppend fires after every append, with the source-ledger id — the
+   *   tripwire watcher's and the notifier's event key. The hook owns its
    *   errors; a failing hook never fails the append.
    */
   constructor(paths, id, ledgerPath, allowedEvents, { onAppend } = {}) {
@@ -62,7 +63,7 @@ export class TelemetryStore {
     }
     if (this.onAppend) {
       try {
-        this.onAppend(line);
+        this.onAppend(line, this.id);
       } catch {
         // the hook owns its errors
       }

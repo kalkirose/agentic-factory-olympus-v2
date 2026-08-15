@@ -23,6 +23,7 @@ import { FrontierLauncher } from '../frontier/autolaunch.mjs';
 import { readGraphSource } from '../frontier/source.mjs';
 import { TripwireWatcher } from '../tripwires/watcher.mjs';
 import { EvalScheduler } from '../eval/review.mjs';
+import { Notifier } from './notifier.mjs';
 import { scaffoldHome, homePaths, runLedgerPath } from './home.mjs';
 import { acquireLock } from './lock.mjs';
 
@@ -49,22 +50,25 @@ export class Daemon {
   /**
    * @param {string} home
    * @param {{handleSignals?: boolean, lanes?: Record<string, object>,
-   *   composeRunner?: Function, evalSeatDefaults?: () => object}} opts
+   *   composeRunner?: Function, evalSeatDefaults?: () => object,
+   *   notifierTransport?: {fetchImpl?: Function, spawnImpl?: Function}}} opts
    *   lanes: lane name → {stages, handlers}, registered on the run engine at
    *   start; `lanes/assemble.mjs` builds the graph the daemon binary passes,
    *   and a fixture graph substitutes it in tests. composeRunner
    *   substitutes the compose child process (tests only); evalSeatDefaults
-   *   substitutes the eval seat's dispatch defaults (tests only).
+   *   substitutes the eval seat's dispatch defaults (tests only);
+   *   notifierTransport substitutes the push transport (tests only).
    */
   constructor(
     home,
-    { handleSignals = false, lanes = {}, composeRunner, evalSeatDefaults } = {},
+    { handleSignals = false, lanes = {}, composeRunner, evalSeatDefaults, notifierTransport } = {},
   ) {
     this.paths = homePaths(home);
     this.handleSignals = handleSignals;
     this.lanes = lanes;
     this.composeRunner = composeRunner;
     this.evalSeatDefaults = evalSeatDefaults;
+    this.notifierTransport = notifierTransport;
     this.running = false;
     this.config = null;
     this.lock = null;
@@ -75,6 +79,7 @@ export class Daemon {
     this.frontier = null;
     this.tripwires = null;
     this.evals = null;
+    this.notifier = null;
     this.pendingTeardowns = new Set();
     this.launchCounter = 0;
     this.watchers = [];
@@ -153,10 +158,21 @@ export class Daemon {
     try {
       this.config = loadInstanceConfig(this.paths.home);
       this.paths = scaffoldHome(this.paths.home, this.config);
-      // The watcher exists before any store opens with its hook; the hooks
-      // read `this.tripwires` late so construction order stays simple.
+      // The watcher and the notifier exist before any store opens with its
+      // hook; the hooks read `this.tripwires` and `this.notifier` late so
+      // construction order stays simple.
       this.ledger = openInstanceStore(this.paths, {
-        onAppend: (line) => this.tripwires?.notify(line.project, line),
+        onAppend: (line, ledger) => {
+          this.tripwires?.notify(line.project, line);
+          this.notifier?.notify({ ledger, project: line.project, line });
+        },
+      });
+      this.notifier = new Notifier({
+        ledger: this.ledger,
+        // Read live, like every other machine-scoped value: a target the
+        // operator wires while the daemon runs takes the next event.
+        config: () => this.config.notifier,
+        ...(this.notifierTransport ?? {}),
       });
       this.isolation = new RunIsolation(this.paths, {
         composeCommand: () => this.config.composeCommand,
@@ -186,7 +202,10 @@ export class Daemon {
         onParked: (info) => this.frontier.queueSweep(info.project),
         semaphores: this.semaphores,
         seatDefaults: () => this.seatDefaults(),
-        onEvent: (project, line) => this.tripwires?.notify(project, line),
+        onEvent: (project, line, ledger) => {
+          this.tripwires?.notify(project, line);
+          this.notifier?.notify({ ledger, project, line });
+        },
       });
       for (const [name, lane] of Object.entries(this.lanes)) {
         this.engine.registerLane(name, lane);
@@ -737,6 +756,9 @@ export class Daemon {
       if (this.frontier) await this.frontier.drain();
       if (this.tripwires) await this.tripwires.stop();
       if (this.evals) await this.evals.stop();
+      // Last of the observers: a push in flight may still owe a failure stamp,
+      // and the ledger closes right after this.
+      if (this.notifier) await this.notifier.stop();
       this.stampStop({ actor: actor ?? ACTOR, trigger, ...(signal && { signal }) });
       this.teardown();
       if (this.onStopped) this.onStopped();
@@ -761,6 +783,7 @@ export class Daemon {
       process.off('unhandledRejection', this.faultHandler);
       this.faultHandler = null;
     }
+    this.notifier = null;
     if (this.ledger) {
       this.ledger.close();
       this.ledger = null;

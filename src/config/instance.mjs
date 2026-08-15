@@ -32,6 +32,11 @@ export function defaultInstanceConfig() {
     // holds credentials in. Named, they are stripped from every seat that does
     // not execute the project's suite (ADR-0023). Absent, no seat's
     // environment differs from the daemon's own.
+    //
+    // And absent by default: `notifier`, one push target for the three events
+    // an idle factory turns on — `{url}` for a webhook or `{command}` for an
+    // argv, with an optional `timeoutMs` (ADR-0028). Absent, the daemon pushes
+    // nothing and behaves exactly as it did before the field existed.
   };
 }
 
@@ -103,13 +108,44 @@ export function validateInstanceConfig(config) {
   }
   for (const key of ['composeCommand', 'claudeCommand', 'ghCommand']) {
     if (config[key] === undefined) continue;
-    const ok =
-      Array.isArray(config[key]) &&
-      config[key].length > 0 &&
-      config[key].every((v) => typeof v === 'string' && v.length > 0);
-    if (!ok) err(key, 'must be a non-empty argv array of strings');
+    if (!isArgv(config[key])) err(key, 'must be a non-empty argv array of strings');
   }
+  if (config.notifier !== undefined) validateNotifier(config.notifier, err);
   return errors;
+}
+
+/**
+ * One target, named one way. A config that names both a URL and a command
+ * says nothing about which one the operator meant, and a config that names
+ * neither is an empty section pretending to be wiring: both are refused here
+ * rather than half-honored at the first park.
+ */
+function validateNotifier(notifier, err) {
+  if (!isPlainObject(notifier)) {
+    err('notifier', 'must be an object');
+    return;
+  }
+  const hasUrl = notifier.url !== undefined;
+  const hasCommand = notifier.command !== undefined;
+  if (hasUrl === hasCommand) err('notifier', 'takes exactly one of url and command');
+  if (hasUrl) {
+    const ok = typeof notifier.url === 'string' && /^https?:\/\/\S/.test(notifier.url);
+    if (!ok) err('notifier.url', 'must be an http or https URL');
+  }
+  if (hasCommand && !isArgv(notifier.command)) {
+    err('notifier.command', 'must be a non-empty argv array of strings');
+  }
+  if (notifier.timeoutMs !== undefined) {
+    if (!Number.isInteger(notifier.timeoutMs) || notifier.timeoutMs < 1) {
+      err('notifier.timeoutMs', 'must be an integer >= 1');
+    }
+  }
+}
+
+function isArgv(value) {
+  return (
+    Array.isArray(value) && value.length > 0 && value.every((v) => typeof v === 'string' && v.length > 0)
+  );
 }
 
 function validateProject(name, project, err) {

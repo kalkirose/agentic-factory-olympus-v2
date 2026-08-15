@@ -111,6 +111,11 @@ export const INSTANCE_EVENTS = new Set([
   // A launch the daemon refused. The console's reason file says why to
   // whoever asked; this says it to everyone reading the instance ledger.
   'launch-rejected',
+  // A push notification that did not get through: the transport failed, the
+  // target answered with an error, or it ran past its timeout. The event a
+  // reader can no longer trust the push for is named, so the pull surfaces
+  // stay the authority they always were (ADR-0028).
+  'notify-failed',
   'workspace-released',
   'arming-changed',
   'config-changed',
