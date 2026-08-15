@@ -12,7 +12,8 @@
 //                          mergeSha?, behindBase, autoMergeArmed}
 //   checkRuns(sha)       → [{name, status, conclusion?, startedAt?, completedAt?}]
 //   rerunFailed(sha)     → re-runs the failed jobs of the sha's runs
-//   checkOutput(sha, name) → failure-log tail for one check
+//   checkOutput(sha, name) → failure-log tail for one check, or a parenthetical
+//                          saying why no log is retrievable; never throws
 import { runCommand } from '../lanes/exec.mjs';
 
 const OUTPUT_LIMIT = 400000;
@@ -50,6 +51,23 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
     const result = await gh(args, opts);
     if (result.code !== 0) return null;
     return JSON.parse(result.output);
+  }
+
+  /**
+   * The check runs of one commit, raw. This is the only name authority on the
+   * ship path: a check is named after the job that produced it, and the
+   * watcher stamps that name. A workflow run carries the name of the
+   * workflow, so a check cannot be found among workflow runs by name.
+   */
+  async function commitCheckRuns(sha, opts) {
+    const data = await ghJson(
+      [
+        'api', `repos/${repo}/commits/${sha}/check-runs`, '--paginate',
+        '-q', '{check_runs: [.check_runs[]]}',
+      ],
+      opts,
+    );
+    return data?.check_runs ?? [];
   }
 
   return {
@@ -107,11 +125,7 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
     },
 
     async checkRuns(sha) {
-      const data = await ghJson([
-        'api', `repos/${repo}/commits/${sha}/check-runs`, '--paginate',
-        '-q', '{check_runs: [.check_runs[]]}',
-      ]);
-      return (data?.check_runs ?? []).map((run) => ({
+      return (await commitCheckRuns(sha)).map((run) => ({
         name: run.name,
         status: run.status, // queued | in_progress | completed
         conclusion: run.conclusion ?? null,
@@ -133,16 +147,43 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
       }
     },
 
+    // The triage input is only as good as this string, so every path out of
+    // here says what it is: the log tail, or the reason there is none.
     async checkOutput(sha, name) {
-      const runs = await ghJson([
-        'run', 'list', '-R', repo, '--commit', sha, '--json', 'databaseId,name,conclusion',
-      ]);
-      const match = (runs ?? []).find((run) => run.name === name && run.conclusion !== 'success');
-      if (!match) return '(no failure log found)';
-      const log = await gh(['run', 'view', String(match.databaseId), '-R', repo, '--log-failed'], {
-        allowFail: true,
-      });
-      return log.output.slice(-LOG_TAIL);
+      try {
+        const named = (await commitCheckRuns(sha, { allowFail: true })).filter(
+          (run) => run.name === name,
+        );
+        const match = named.find((run) => run.conclusion && run.conclusion !== 'success');
+        if (!match) {
+          const state = named[0]
+            ? `it is ${named[0].status}${named[0].conclusion ? `/${named[0].conclusion}` : ''}`
+            : 'the commit carries no check of that name';
+          return `(no failure log for ${name}: ${state})`;
+        }
+        // The check run of a workflow job links to the job it reports on;
+        // that link carries the job id the log calls answer to. A check from
+        // any other app has no job and no log to read.
+        const job = /\/actions\/runs\/\d+\/job\/(\d+)/.exec(match.details_url ?? '');
+        if (!job) {
+          return `(no failure log for ${name}: no workflow job behind the check, at ${match.details_url || 'no url'})`;
+        }
+        const failed = await logOfJob(job[1], '--log-failed');
+        if (failed.code === 0 && failed.output.trim()) return failed.output.slice(-LOG_TAIL);
+        // A job killed before a step failed (cancelled, timed out, lost its
+        // runner) reports no failed step at all; its whole log is then the
+        // only account of what happened.
+        const whole = await logOfJob(job[1], '--log');
+        if (whole.code === 0 && whole.output.trim()) return whole.output.slice(-LOG_TAIL);
+        const why = (whole.output || failed.output).trim().slice(-500) || 'it answered with nothing';
+        return `(no failure log for ${name}: the forge would not read job ${job[1]}: ${why})`;
+      } catch (error) {
+        return `(no failure log for ${name}: ${error.message})`;
+      }
     },
   };
+
+  function logOfJob(jobId, mode) {
+    return gh(['run', 'view', '--job', jobId, '-R', repo, mode], { allowFail: true });
+  }
 }

@@ -22,6 +22,12 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   `prState`, `checkRuns`, `rerunFailed`, `checkOutput`. `ship/forge.mjs`
   implements it over the `gh` CLI with an injectable runner; tests substitute
   a fake with the same shape. A forge for another host is one new module.
+  A check is named after the job behind it, while a workflow run is named
+  after its workflow, so `checkOutput` resolves the failed job through the
+  commit's check runs — the same read the watcher stamps from — and takes the
+  job link found there to the log. It is total: when no log can be read it
+  answers with the reason, because that string is the triage input and an
+  absence with no reason reads as a check that told nobody anything.
 - **The forge is per run, not per graph.** The engine registers lanes once at
   daemon start, while one instance holds many projects, each with its own
   repository. `shipStep` therefore takes a resolver, `forgeFor(ctx)`, and the
@@ -145,8 +151,7 @@ check at cutover, like the claude CLI items in ADR-0005:
   `mergeStateStatus === 'BEHIND'` as the behind signal on the chosen plan.
 - `repos/{repo}/branches/{base}/protection/required_status_checks` shape for
   rulesets vs classic protection (rulesets may need a different endpoint).
-- `gh run rerun --failed` coverage when a commit has several workflow runs;
-  `gh run list --commit` name matching against check-run names.
+- `gh run rerun --failed` coverage when a commit has several workflow runs.
 - Auto-merge surviving a leased force-push of the head branch.
 
 ## Fallback paths

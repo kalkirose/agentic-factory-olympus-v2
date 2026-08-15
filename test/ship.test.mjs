@@ -1110,3 +1110,112 @@ test('an unreadable auto-merge capability reads as off, never as a stage failure
   // provisioning gate, and the daemon never self-clears it.
   assert.deepEqual(pf, { autoMergeAllowed: false, strict: true, requiredChecks: ['ci'] });
 });
+
+/** A commit whose failed check is one job of a workflow of another name. */
+function checkOutputRunner({ log = null, logCode = 0, checkRuns = null } = {}) {
+  const calls = [];
+  const runner = async (argv) => {
+    calls.push(argv);
+    if (argv[1] === 'api' && argv[2].endsWith('/check-runs')) {
+      return {
+        code: 0,
+        output: JSON.stringify({
+          check_runs: checkRuns ?? [
+            {
+              name: 'build-web',
+              status: 'completed',
+              conclusion: 'success',
+              details_url: 'https://github.com/acme/widgets/actions/runs/900/job/11',
+            },
+            {
+              name: 'build-api',
+              status: 'completed',
+              conclusion: 'failure',
+              details_url: 'https://github.com/acme/widgets/actions/runs/900/job/22',
+            },
+          ],
+        }),
+      };
+    }
+    if (argv[1] === 'run' && argv[2] === 'view') return { code: logCode, output: log ?? '' };
+    // A workflow run answers with the name of the workflow, never the name of
+    // the check: a resolution over `gh run list` matches nothing at all.
+    if (argv[1] === 'run' && argv[2] === 'list') {
+      return { code: 0, output: JSON.stringify([{ databaseId: 900, name: 'PR', conclusion: 'failure' }]) };
+    }
+    return { code: 0, output: '' };
+  };
+  return { calls, runner };
+}
+
+test('the gh adapter reads a failed log through the check the watcher named', async () => {
+  const { calls, runner } = checkOutputRunner({ log: 'step\tassertion failed: 1 !== 2\n' });
+  const out = await gitHubForge({ repo: 'acme/widgets', runner }).checkOutput('sha1', 'build-api');
+  assert.match(out, /assertion failed/);
+  // The check names the job; the job id comes off the check's own link, and
+  // the log call asks for that job. Any name match against workflow runs
+  // resolves nothing, so the adapter must not go that way for a log.
+  assert.deepEqual(calls.at(-1), [
+    'gh', 'run', 'view', '--job', '22', '-R', 'acme/widgets', '--log-failed',
+  ]);
+  assert.ok(!calls.some((argv) => argv[1] === 'run' && argv[2] === 'list'));
+});
+
+test('the captured log is the tail, and the tail belongs to the failed check', async () => {
+  const { calls, runner } = checkOutputRunner({ log: 'x'.repeat(9000) + 'END' });
+  const out = await gitHubForge({ repo: 'acme/widgets', runner }).checkOutput('sha1', 'build-api');
+  assert.ok(out.length <= 3000, `tail is ${out.length} characters`);
+  assert.ok(out.endsWith('END'));
+  assert.ok(calls.some((argv) => argv.includes('--job') && argv.includes('22')));
+});
+
+test('a job that reports no failed step falls back to the whole job log', async () => {
+  const calls = [];
+  const { runner: base } = checkOutputRunner();
+  const runner = async (argv) => {
+    calls.push(argv);
+    if (argv.includes('--log-failed')) return { code: 0, output: '' }; // cancelled before a step failed
+    if (argv.includes('--log')) return { code: 0, output: 'the runner lost the job\n' };
+    return base(argv);
+  };
+  const out = await gitHubForge({ repo: 'acme/widgets', runner }).checkOutput('sha1', 'build-api');
+  assert.match(out, /the runner lost the job/);
+  assert.ok(calls.some((argv) => argv.includes('--log-failed')));
+});
+
+test('a log the forge will not give up is reported with the reason, never as a bare absence', async () => {
+  const { runner } = checkOutputRunner({ logCode: 1, log: 'gh: Not Found (HTTP 404)' });
+  const forge = gitHubForge({ repo: 'acme/widgets', runner });
+  const out = await forge.checkOutput('sha1', 'build-api');
+  // The triage seat reads this string. An absence with no reason sends it to
+  // fetch the log itself, so the reason travels with the failure.
+  assert.match(out, /job 22/);
+  assert.match(out, /HTTP 404/);
+
+  const missing = await forge.checkOutput('sha1', 'nothing-of-that-name');
+  assert.match(missing, /no check of that name/);
+
+  const green = await forge.checkOutput('sha1', 'build-web');
+  assert.match(green, /completed\/success/);
+
+  const foreign = gitHubForge({
+    repo: 'acme/widgets',
+    runner: checkOutputRunner({
+      checkRuns: [
+        {
+          name: 'build-api',
+          status: 'completed',
+          conclusion: 'failure',
+          details_url: 'https://coverage.example/report/7',
+        },
+      ],
+    }).runner,
+  });
+  assert.match(await foreign.checkOutput('sha1', 'build-api'), /no workflow job/);
+});
+
+test('a forge that cannot run at all still answers the triage input with a reason', async () => {
+  const runner = async () => ({ code: null, output: '', error: 'spawn gh ENOENT' });
+  const out = await gitHubForge({ repo: 'acme/widgets', runner }).checkOutput('sha1', 'build-api');
+  assert.match(out, /ENOENT/);
+});
