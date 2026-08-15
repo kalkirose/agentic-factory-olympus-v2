@@ -87,6 +87,14 @@ export const RUN_EVENTS = new Set([
   'check-transition',
   'ci-flake',
   'branch-update',
+  // One state of the forge that is not a state of a check: a pull request in
+  // conflict with its base, for which the forge builds no merge ref and runs
+  // no workflow, or a head sha it carries no check run of any name for. The
+  // watcher would read either as a check that has yet to arrive, so each is
+  // named here and routed (ADR-0008). Quiet — every kind has a route, and the
+  // route stamps what it did — but never silent, because a run that waits on
+  // the forge must say what it waits on.
+  'forge-anomaly',
   'merge-round',
   'merged',
   'merge-commit-check',

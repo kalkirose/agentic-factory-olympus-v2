@@ -8,7 +8,10 @@
 //
 // The check watcher is a ledger-stamping process: every observed state
 // change stamps `check-transition`; pending is a state, never a verdict; no
-// wall-clock timeout detects anything. Persistent CI reds render a red
+// wall-clock timeout detects anything. Two forge states are not check states
+// at all and are classified before the watcher sees them — a request in
+// conflict with its base, and a head sha the forge carries no check run for.
+// Both stamp `forge-anomaly` and take a route. Persistent CI reds render a red
 // verdict (`source: 'ci'`) and re-enter the verdict stage — the same
 // four-class triage, the same routes, the same shared budgets as in-run
 // reds. An env-only verdict comes back here for the re-run without a local
@@ -80,6 +83,14 @@ const RED = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'st
 const TERMINAL = new Set([...GREEN, ...RED]);
 const LOG_TAIL = 1500;
 
+/**
+ * The watcher's bound on a head sha the forge carries no check run of any
+ * name for. It is a count of poll outcomes that saw nothing, never a span of
+ * wall-clock time: the recovery route fires on observations, and `pollMs`
+ * stays what it always was — cadence, not detection.
+ */
+export const CHECKLESS_POLLS = 20;
+
 export const CARD_SWEEP_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -132,6 +143,11 @@ export function shipStep({ forgeFor, pollMs = 15000, enqueueRepair = null } = {}
 function shipHandler({ forgeFor, pollMs }) {
   return async function ship(ctx) {
     const base = await shipBase(ctx, forgeFor);
+    // Poll outcomes of this stage entry that saw no check run at all, per
+    // head sha. The count lives here and the route's decisions live in the
+    // ledger: a restart re-enters the stage and counts again, while the
+    // stamps below still say which recovery step the run already spent.
+    const checkless = new Map();
     for (;;) {
       if (ctx.stopped()) return null;
       const events = runEvents(ctx);
@@ -186,12 +202,24 @@ function shipHandler({ forgeFor, pollMs }) {
         if (directive) return directive;
         continue;
       }
-      if (st.behindBase) {
+      if (st.conflicting) {
+        // A competing story merged under this request. The forge builds no
+        // merge ref for a request in conflict, so no pull-request workflow
+        // runs and no check can ever arrive: the state takes the update path
+        // a request behind its base takes, and it is stamped before it does.
+        forgeAnomaly(ctx, events, {
+          kind: 'merge-conflicting',
+          pr: opened.pr,
+          sha: st.headSha,
+          detail: `PR #${opened.pr} is in conflict with ${base.defaultBranch}`,
+        });
+      }
+      if (st.behindBase || st.conflicting) {
         const directive = await branchUpdate(ctx, base);
         if (directive) return directive;
         continue;
       }
-      const directive = await watchChecks(ctx, base, opened, st);
+      const directive = await watchChecks(ctx, base, opened, st, checkless);
       if (directive) return directive;
       await sleep(pollMs);
     }
@@ -312,10 +340,21 @@ function stampTransitions(ctx, opened, sha, runs) {
   }
 }
 
-async function watchChecks(ctx, base, opened, st) {
+async function watchChecks(ctx, base, opened, st, checkless) {
   const sha = st.headSha;
   const runs = await base.forge.checkRuns(sha);
   stampTransitions(ctx, opened, sha, runs);
+  if (runs.length === 0) {
+    // No check of any name on the head of an open request the forge does not
+    // call conflicting: the required set is not late, it was never delivered.
+    // Counted, then routed — the watcher does not wait on it.
+    const polls = (checkless.get(sha) ?? 0) + 1;
+    checkless.set(sha, polls);
+    if (polls < CHECKLESS_POLLS) return null;
+    checkless.set(sha, 0);
+    return checklessSha(ctx, base, opened, sha, polls);
+  }
+  checkless.delete(sha);
   const requiredRuns = (opened.required ?? []).map((name) => runs.find((r) => r.name === name));
   if (requiredRuns.some((r) => !r)) return null; // not all appeared: pending
   const redNow = requiredRuns.filter((r) => RED.has(normalize(r)));
@@ -325,6 +364,61 @@ async function watchChecks(ctx, base, opened, st) {
     return greenNoMerge(ctx, base, opened, sha);
   }
   return null; // pending is a state, never a verdict
+}
+
+/**
+ * One forge state the ship loop cannot read as a check state, stamped once
+ * per head sha. Quiet: every kind here has a route of its own and the route
+ * stamps what it did. Never silent: a loop that waits on the forge says what
+ * it is waiting on, and both kinds are states a check watcher would otherwise
+ * read as pending forever.
+ */
+function forgeAnomaly(ctx, events, fields) {
+  const stamped = events.some(
+    (e) => e.event === 'forge-anomaly' && e.kind === fields.kind && e.sha === fields.sha,
+  );
+  return stamped ? null : ctx.store.append('forge-anomaly', { actor: ACTOR, ...fields });
+}
+
+/**
+ * A head sha the forge carries no check run for. The recovery is bounded and
+ * finite: one re-delivery, then the human. The re-delivery is the update
+ * path — the one push this stage owns that leaves the run's work as it
+ * stands. A default branch that moved gives the forge a new head to build
+ * for; one that did not leaves the branch where it was, and the stamped
+ * `branch-update` says which of the two happened. An answered gate grants the
+ * next attempt, the way the re-run and the re-arm are granted.
+ */
+async function checklessSha(ctx, base, opened, sha, polls) {
+  const events = runEvents(ctx);
+  forgeAnomaly(ctx, events, {
+    kind: 'checkless-sha',
+    pr: opened.pr,
+    sha,
+    polls,
+    detail: `no check run of any name on ${sha} after ${polls} polls`,
+  });
+  const lastTry = [...events]
+    .reverse()
+    .find((e) => e.event === 'operational-fix' && e.kind === 'check-redelivery' && e.sha === sha);
+  const granted = answeredPark(events, 'provisioning-gate');
+  if (!lastTry || (granted?.answer && granted.answer.seq > lastTry.seq)) {
+    ctx.store.append('operational-fix', {
+      actor: ACTOR,
+      kind: 'check-redelivery',
+      pr: opened.pr,
+      sha,
+    });
+    return branchUpdate(ctx, base);
+  }
+  return parkDirective('provisioning-gate', {
+    ...GATE_FORMS,
+    question:
+      `The forge holds no check run of any name on ${sha} (PR #${opened.pr}), and a ` +
+      're-delivery brought none. The required checks ' +
+      `(${(opened.required ?? []).join(', ')}) cannot arrive on their own. ` +
+      'Repair the delivery, then answer.',
+  });
 }
 
 function checkMarks(events, sha, name) {

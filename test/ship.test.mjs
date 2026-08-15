@@ -16,7 +16,7 @@ import {
   runLedgerPath,
 } from '../src/daemon/home.mjs';
 import { postFreeze, repairLane } from '../src/lanes/verdict.mjs';
-import { shipStep } from '../src/lanes/ship.mjs';
+import { shipStep, CHECKLESS_POLLS } from '../src/lanes/ship.mjs';
 import { gitHubForge, parseGitHubRepo } from '../src/ship/forge.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
@@ -99,6 +99,11 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
     autoChecks: null,
     onRerun: null,
     reruns: [],
+    // A default branch the head does not carry answers as `behindBase`. With
+    // this on it answers as `conflicting` instead — the state the forge
+    // reports when the two sides touched the same lines — so a scenario picks
+    // which of the two routes it drives.
+    conflictMode: false,
   };
   const head = (ref) => gitSync(['rev-parse', ref], origin).trim();
   const isAncestor = (a, b) => {
@@ -164,14 +169,17 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
           headSha: pr.headShaAtMerge,
           mergeSha: pr.mergeSha,
           behindBase: false,
+          conflicting: false,
           autoMergeArmed: false,
         };
       }
+      const behind = !isAncestor('main', pr.head);
       return {
         state: pr.state,
         headSha: head(pr.head),
         mergeSha: null,
-        behindBase: !isAncestor('main', pr.head),
+        behindBase: state.conflictMode ? false : behind,
+        conflicting: state.conflictMode ? behind : false,
         autoMergeArmed: pr.armed,
       };
     },
@@ -789,9 +797,103 @@ test('a competing merge updates the branch: merge main in, re-run, auto-merge fi
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   assert.ok(!events.some((e) => e.event === 'merge-round'));
+  // a request behind its base is an ordinary state of the ship loop
+  assert.ok(!events.some((e) => e.event === 'forge-anomaly'));
   // the merged main carries both sides
   assert.equal(gitSync(['show', 'main:src/feature.mjs'], fx.origin), GOOD_FEATURE);
   assert.match(gitSync(['show', 'main:docs/note.md'], fx.origin), /competing change/);
+});
+
+test('a request in conflict takes the update route, and says so first', async (t) => {
+  const fx = shipFixture(t);
+  fx.forge.state.autoChecks = () => [running()];
+  fx.forge.state.conflictMode = true;
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  commitTree(fx.origin, { 'docs/note.md': 'competing change\n' }, 'competing merge');
+  const anomaly = await waitEvent(fx.paths, runId, (e) => e.event === 'forge-anomaly', 'forge-anomaly');
+  assert.equal(anomaly.kind, 'merge-conflicting');
+  assert.equal(anomaly.pr, 7);
+  assert.equal(anomaly.sha, opened.sha);
+  assert.match(anomaly.detail, /in conflict with main/);
+  // the same update the behind-base state takes: merge main in, push
+  const update = await waitEvent(fx.paths, runId, (e) => e.event === 'branch-update', 'branch-update');
+  assert.equal(update.fromSha, opened.sha);
+  assert.equal(update.mainSha, gitSync(['rev-parse', 'main'], fx.origin).trim());
+  assert.notEqual(update.toSha, update.fromSha);
+  // the push carries a new head, and CI runs on it
+  fx.forge.setChecks(update.toSha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // one stamp for the state, not one per poll
+  assert.equal(events.filter((e) => e.event === 'forge-anomaly').length, 1);
+  assert.equal(gitSync(['show', 'main:src/feature.mjs'], fx.origin), GOOD_FEATURE);
+  assert.match(gitSync(['show', 'main:docs/note.md'], fx.origin), /competing change/);
+});
+
+test('a conflict inside the update of a conflicting request takes the fresh pass', async (t) => {
+  const fx = shipFixture(t, {
+    seats: {
+      dev: ({ prompt }) => {
+        if (prompt.includes('textual conflicts')) return { exitCode: 1 }; // the round fails
+        return { files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } };
+      },
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  fx.forge.state.conflictMode = true;
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  commitTree(fx.origin, { 'src/feature.mjs': ALT_FEATURE }, 'conflicting main work');
+  const anomaly = await waitEvent(fx.paths, runId, (e) => e.event === 'forge-anomaly', 'forge-anomaly');
+  assert.equal(anomaly.kind, 'merge-conflicting');
+  const fresh = await waitEvent(fx.paths, runId, (e) => e.event === 'fresh-pass', 'fresh-pass');
+  assert.equal(fresh.trigger, 'merge-conflict');
+  fx.forge.state.autoChecks = () => [green()];
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const round = events.find((e) => e.event === 'merge-round');
+  assert.equal(round.resolved, false);
+  assert.ok(events.some((e) => e.event === 'stall' && e.reason === 'merge-conflict'));
+  // the fresh tree was born on updated main: the conflict dissolved there
+  assert.equal(gitSync(['show', 'main:src/feature.mjs'], fx.origin), GOOD_FEATURE);
+});
+
+test('a head sha the forge builds no check for is stamped, re-delivered once, then parked', async (t) => {
+  const fx = shipFixture(t);
+  fx.forge.state.autoChecks = () => []; // the forge delivers nothing for any sha
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  const anomaly = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'forge-anomaly' && e.kind === 'checkless-sha',
+    'checkless-sha anomaly',
+  );
+  assert.equal(anomaly.pr, 7);
+  assert.equal(anomaly.sha, opened.sha);
+  assert.equal(anomaly.polls, CHECKLESS_POLLS);
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  assert.match(park.question, /no check run of any name/);
+  assert.ok(park.question.includes(opened.sha));
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  // one anomaly stamp, one re-delivery, and no check state invented for a sha
+  // that carries none
+  assert.equal(live.filter((e) => e.event === 'forge-anomaly').length, 1);
+  assert.deepEqual(
+    live.filter((e) => e.event === 'operational-fix').map((e) => e.kind),
+    ['check-redelivery'],
+  );
+  assert.ok(!live.some((e) => e.event === 'check-transition'));
+  // the re-delivery took the update path and found the branch where it was
+  const update = live.find((e) => e.event === 'branch-update');
+  assert.equal(update.fromSha, update.toSha);
+  // the substrate is repaired and the gate answered: the same sha ships
+  fx.forge.setChecks(opened.sha, [green()]);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'retry' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.find((e) => e.event === 'merged').sha, opened.sha);
 });
 
 test('textual conflicts take the merge round; test hunks go to the suite seat', async (t) => {
@@ -1168,6 +1270,7 @@ test('the gh adapter builds the documented argv and maps the answers', async () 
       state: 'OPEN',
       headRefOid: 'abc123',
       mergeCommit: null,
+      mergeable: 'MERGEABLE',
       mergeStateStatus: 'BEHIND',
       autoMergeRequest: { enabledAt: 'now' },
     }),
@@ -1187,8 +1290,33 @@ test('the gh adapter builds the documented argv and maps the answers', async () 
     headSha: 'abc123',
     mergeSha: null,
     behindBase: true,
+    conflicting: false,
     autoMergeArmed: true,
   });
+});
+
+test('the gh adapter classifies the conflicting state from the answer that names it', async () => {
+  const view = (extra) => async () => ({
+    code: 0,
+    output: JSON.stringify({
+      state: 'OPEN',
+      headRefOid: 'abc123',
+      mergeCommit: null,
+      autoMergeRequest: null,
+      ...extra,
+    }),
+  });
+  const conflicting = async (extra) =>
+    (await gitHubForge({ repo: 'acme/widgets', runner: view(extra) }).prState(7)).conflicting;
+  // Both of the forge's answers about a request in conflict carry it, and
+  // either one on its own is the classification: no merge ref is built, so no
+  // workflow runs and the head sha can carry no check at all.
+  assert.equal(await conflicting({ mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }), true);
+  assert.equal(await conflicting({ mergeable: 'CONFLICTING', mergeStateStatus: 'UNKNOWN' }), true);
+  assert.equal(await conflicting({ mergeable: 'UNKNOWN', mergeStateStatus: 'DIRTY' }), true);
+  // Every other state is one the ship loop already knows how to read.
+  assert.equal(await conflicting({ mergeable: 'MERGEABLE', mergeStateStatus: 'BLOCKED' }), false);
+  assert.equal(await conflicting({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNSTABLE' }), false);
 });
 
 test('the preflight reads the auto-merge capability over the repository api', async () => {

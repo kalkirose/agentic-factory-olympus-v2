@@ -9,7 +9,7 @@
 //                          open PR for the branch is returned, never doubled
 //   armAutoMerge(number) → {armed, reason?}; never throws on refusal
 //   prState(number)      → {state: 'open'|'merged'|'closed', headSha,
-//                          mergeSha?, behindBase, autoMergeArmed}
+//                          mergeSha?, behindBase, conflicting, autoMergeArmed}
 //   checkRuns(sha)       → [{name, status, conclusion?, startedAt?, completedAt?}]
 //   rerunFailed(sha)     → re-runs the failed jobs of the sha's runs
 //   checkOutput(sha, name) → failure-log tail for one check, or a parenthetical
@@ -113,13 +113,20 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
     async prState(number) {
       const view = await ghJson([
         'pr', 'view', String(number), '-R', repo,
-        '--json', 'state,headRefOid,mergeCommit,mergeStateStatus,autoMergeRequest',
+        '--json', 'state,headRefOid,mergeCommit,mergeable,mergeStateStatus,autoMergeRequest',
       ]);
       return {
         state: view.state.toLowerCase(), // open | merged | closed
         headSha: view.headRefOid,
         mergeSha: view.mergeCommit?.oid ?? null,
         behindBase: view.mergeStateStatus === 'BEHIND',
+        // A pull request in textual conflict with its base, named by both of
+        // the forge's answers about it: `mergeable` is CONFLICTING and the
+        // merge state is DIRTY. The forge builds no merge ref for such a
+        // request, so it starts no pull-request workflow and the head sha can
+        // never carry a check. The ship step routes the state; it is not a
+        // check that has yet to arrive.
+        conflicting: view.mergeable === 'CONFLICTING' || view.mergeStateStatus === 'DIRTY',
         autoMergeArmed: view.autoMergeRequest != null,
       };
     },

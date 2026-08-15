@@ -22,6 +22,12 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   `prState`, `checkRuns`, `rerunFailed`, `checkOutput`. `ship/forge.mjs`
   implements it over the `gh` CLI with an injectable runner; tests substitute
   a fake with the same shape. A forge for another host is one new module.
+  `prState` is where the host's own words about a request become the states
+  the ship loop routes on: open, merged or closed; behind its base; in
+  conflict with its base. The gh adapter reads the last one off both answers
+  that carry it (`mergeable === 'CONFLICTING'`, `mergeStateStatus === 'DIRTY'`)
+  and hands the loop a boolean, so a forge on another host classifies in its
+  own vocabulary and the ship step keeps one.
   A check is named after the job behind it, while a workflow run is named
   after its workflow, so `checkOutput` resolves the failed job through the
   commit's check runs — the same read the watcher stamps from — and takes the
@@ -50,7 +56,12 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   own timestamps on terminal states. Pending is a state, never a verdict;
   no wall-clock timeout detects anything; `pollMs` is cadence only. All
   terminal states are covered: per-check, PR merged, PR closed (run fails
-  `pr-closed`), merge-commit checks, and green-but-no-merge.
+  `pr-closed`), merge-commit checks, and green-but-no-merge. Two states of
+  the forge are classified before the watcher reads any check, because the
+  watcher would read either as a check that has yet to arrive: a request in
+  conflict with its base, and a head sha the forge carries no check run of
+  any name for. Each stamps `forge-anomaly` — one kind, one head sha, one
+  stamp — and takes the route named below.
 - **One red regime.** A red required check gets one automatic re-run of the
   failed jobs (`rerun-requested` stamp per check; a green re-run stamps
   `ci-flake`, never a finding). Persistent reds enter the shared four-class
@@ -62,12 +73,22 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   harness-class red: `gate-integrity` (loud) once per sha, one re-arm
   attempt (`operational-fix`, kind `auto-merge-rearm`), then
   `provisioning-gate`. The merge landing appends the paired `resolved`.
-- **Competing merges ride the update path.** A PR behind its base gets the
-  daemon-driven update: fetch, merge the default branch into the run branch
-  (never a rebase, never a force-push), push, `branch-update` stamp with
-  `fromSha`/`toSha`/`mainSha` — later check transitions on `toSha` are the
-  update's re-run linkage.
-- **Merge round on textual conflicts, once.** Conflict hunks split by path:
+- **Competing merges ride the update path.** A PR behind its base and a PR
+  the forge calls conflicting get the same daemon-driven update: fetch, merge
+  the default branch into the run branch (never a rebase, never a
+  force-push), push, `branch-update` stamp with `fromSha`/`toSha`/`mainSha` —
+  later check transitions on `toSha` are the update's re-run linkage. The
+  conflicting state stamps `forge-anomaly` (kind `merge-conflicting`) before
+  the update runs, and it is a route rather than a wait for a reason the
+  watcher cannot see: the forge builds no merge ref for a request in
+  conflict, so it starts no pull-request workflow, the head sha carries no
+  check that could ever turn green or red, and a watcher holding out for the
+  required set holds out for something nobody will send. Re-delivering the
+  request changes none of that; taking the base into the branch is what does.
+- **Merge round on textual conflicts, once.** A conflicting request meets
+  this round by definition, and a competing merge meets it when the two sides
+  touched the same lines; the round is the same either way.
+  Conflict hunks split by path:
   test-path conflicts go to the suite seat and commit as a re-freeze
   (`suite-committed` phase `re-freeze` + `re-freeze` stamp moving the suite
   sha); the rest goes to a fresh dev seat with a conflict brief (hunk list,
@@ -76,6 +97,21 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   (`merge-conflict`), then the run's one fresh pass born on updated main —
   reset to the fetched main head, frozen suite carried forward — where the
   conflict dissolves. A second stall parks `second-stall`.
+- **A head with no check at all is a forge state.** On an open request the
+  forge does not call conflicting, an empty check-run answer for the current
+  head means the sha was never delivered: the required checks are not late,
+  they do not exist, and a poll that keeps asking will keep hearing the same
+  nothing. The watcher counts the poll outcomes that saw no check
+  (`CHECKLESS_POLLS`), then stamps `forge-anomaly` (kind `checkless-sha`,
+  with the count) and spends one recovery: an `operational-fix` of kind
+  `check-redelivery` and the update path, which is the one push this stage
+  owns that leaves the run's work exactly as it stands. A default branch that
+  moved hands the forge a new head to build for; one that did not leaves the
+  branch where it was, and the `branch-update` stamp says which of the two
+  happened. The next bound with that re-delivery already spent parks
+  `provisioning-gate`, naming the sha, the request and the required set. An
+  answered gate grants the next re-delivery, exactly as it grants the next
+  failed-jobs re-run and the next auto-merge re-arm.
 - **Push discipline.** Loop pushes carry an explicit lease on the remote
   head the loop just observed (`--force-with-lease=branch:sha`) — a fresh
   pass rewrites the run branch's history, and the lease forces over exactly
@@ -123,6 +159,32 @@ with zero duplicated policy. The prior-open handoff keeps finding ids stable
 across the seam, so an env red that survives its fix still converges on
 `provisioning-gate` instead of looping the fix arm.
 
+## Why the checkless bound counts polls and not minutes
+
+No wall-clock span detects anything here: a stage that has waited twenty
+minutes has learned nothing a stage that waited two has not. What the
+checkless route acts on is a repeated observation — the forge was asked for
+the checks of one sha and answered with none, N times — and that is evidence.
+`pollMs` stays cadence, and the bound stays a count of answers.
+
+The count itself lives in the stage entry, not in the ledger: a stamp per
+barren poll would fill the ledger with one fact repeated, and the ledger's
+job here is to hold the classification and the recovery step spent on it. So
+a restart counts again from zero and re-earns the bound. It cannot lose the
+park, because both stamps outlive the restart — the second bound still finds
+the re-delivery spent and parks on it. The cost of a restart is one more
+round of polling, and nothing else.
+
+## Why a forge anomaly is a quiet record
+
+Both kinds have a route that runs without the owner: the conflicting state
+dissolves in the update path, and the checkless state spends its one
+re-delivery and then parks — and that park is already a queued item whose
+question names the anomaly. A loud record would ask for eyes the route does
+not need, and it would owe an owning event to answer it. The event exists for
+the opposite reason to an alert: no ship stage may sit on a state of the
+forge and say nothing about it.
+
 ## Why the breach conversion lives in close-out
 
 Ship stamps `merged` with the red flag and hands over; close-out converts.
@@ -147,8 +209,10 @@ check at cutover, like the claude CLI items in ADR-0005:
 
 - `gh pr create` exit behavior when an open PR for the branch exists (the
   adapter tolerates failure and re-views by branch).
-- `pr view --json autoMergeRequest` as the armed signal, and
-  `mergeStateStatus === 'BEHIND'` as the behind signal on the chosen plan.
+- `pr view --json autoMergeRequest` as the armed signal,
+  `mergeStateStatus === 'BEHIND'` as the behind signal, and
+  `mergeable === 'CONFLICTING'` with `mergeStateStatus === 'DIRTY'` as the
+  conflicting signal on the chosen plan.
 - `repos/{repo}/branches/{base}/protection/required_status_checks` shape for
   rulesets vs classic protection (rulesets may need a different endpoint).
 - `gh run rerun --failed` coverage when a commit has several workflow runs.
@@ -160,6 +224,14 @@ If the observed-lease push still races (remote moved between observe and
 push), the push rejection parks `provisioning-gate` — safe but noisy.
 Trigger: repeated push parks on the same run. Fix: re-derive `expected` from
 a fresh `prState` inside the retry; cost low, one call.
+
+If the checkless bound proves too tight — a forge that routinely takes longer
+than `CHECKLESS_POLLS` cadences to create the first check run of a sha — the
+constant rises, or it becomes instance config beside `ghCommand`, which is
+where the ownership test puts a fact about the host. Trigger: `forge-anomaly`
+stamps of kind `checkless-sha` on shas whose checks then arrive by
+themselves. Reversal cost: low — one constant, and the route under it does
+not change.
 
 If direct card pushes prove unlandable (org-wide protection on the default
 branch), route the sweep through a `cards/<runId>` branch with its own

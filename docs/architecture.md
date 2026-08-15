@@ -287,6 +287,13 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   the run ledger: per-check, PR merged/closed, merge-commit checks, and
   "green but auto-merge did not fire" (harness-class red). Pending is a
   state, never a verdict.
+- **Forge states are not check states** (ADR-0008). A request the forge calls
+  conflicting gets no merge ref, so it runs no workflow and its head can
+  carry no check at all; it takes the branch-update route a request behind
+  its base takes. A head sha with no check run of any name was never
+  delivered; after a bounded count of polls that saw nothing, the run spends
+  one re-delivery and then parks a provisioning gate. Both stamp
+  `forge-anomaly` first — a watcher may not sit on either and say nothing.
 - **One red regime.** CI reds get one automatic re-run of failed jobs, then
   the same four-class triage and the same routes as in-run reds. Budgets are
   shared.
