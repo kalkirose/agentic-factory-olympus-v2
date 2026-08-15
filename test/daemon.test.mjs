@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, renameSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
+import { writeFileSync, readFileSync, renameSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
@@ -16,11 +16,19 @@ function instanceEvents(home) {
 
 // Control files follow the write-then-rename convention so the daemon never
 // reads a half-written command.
-function writeControl(home, command) {
+function writeControl(home, command, name = 'cmd') {
   const paths = homePaths(home);
-  const tmp = join(paths.control, 'cmd.tmp');
+  const tmp = join(paths.control, `${name}.tmp`);
   writeFileSync(tmp, JSON.stringify(command) + '\n');
-  renameSync(tmp, join(paths.control, 'cmd.json'));
+  renameSync(tmp, join(paths.control, `${name}.json`));
+}
+
+/** The reason files the daemon left, as `{name, reason}`. */
+function rejectionReasons(home) {
+  const dir = homePaths(home).controlRejected;
+  return readdirSync(dir)
+    .filter((f) => f.endsWith('.reason.txt'))
+    .map((f) => ({ name: f, reason: readFileSync(join(dir, f), 'utf8').trim() }));
 }
 
 test('start scaffolds the home and stamps lifecycle events', async (t) => {
@@ -235,7 +243,49 @@ test('control files from before start are archived as stale', async (t) => {
   await daemon.start();
   assert.equal(daemon.running, true);
   assert.equal(readdirSync(homePaths(home).control).filter((f) => f.endsWith('.json')).length, 0);
+  assert.deepEqual(
+    rejectionReasons(home).map((r) => r.reason),
+    ['stale: written while the daemon was down'],
+  );
   await daemon.stop();
+});
+
+// The stale rule reads "written while the daemon was down", and a start step
+// that takes time must not widen that to "written while the daemon was busy
+// starting". One orphan-workspace sweep held a start for 28 seconds, and every
+// command a console queued in that window was archived as stale.
+test('a command queued while the start runs is not stale', async (t) => {
+  const home = tempDir();
+  scaffoldHome(home);
+  writeControl(home, { actor: 'tester', command: 'stop' }, 'while-down');
+  const daemon = new Daemon(home);
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  const sweep = daemon.sweepOrphanWorkspaces.bind(daemon);
+  daemon.sweepOrphanWorkspaces = async () => {
+    await sweep();
+    // The console reads a started daemon and queues its command, long before
+    // the start has worked through the rest of its steps.
+    writeControl(home, { actor: 'tester', command: 'stop' }, 'after-start');
+  };
+  await daemon.start();
+  await waitFor(() => instanceEvents(home).at(-1)?.event === 'daemon-stopped', {
+    label: 'daemon stopped by the queued command',
+  });
+  // The one written first is the only stale one; the one written after the
+  // start ran as asked.
+  const rejected = rejectionReasons(home);
+  assert.equal(rejected.length, 1);
+  assert.match(rejected[0].name, /while-down\.json/);
+  assert.equal(rejected[0].reason, 'stale: written while the daemon was down');
+  const done = readdirSync(homePaths(home).controlDone);
+  assert.equal(done.length, 1);
+  assert.match(done[0], /after-start\.json/);
+  const stopped = instanceEvents(home).at(-1);
+  assert.equal(stopped.event, 'daemon-stopped');
+  assert.equal(stopped.trigger, 'control');
 });
 
 // -- exit stamping -----------------------------------------------------------

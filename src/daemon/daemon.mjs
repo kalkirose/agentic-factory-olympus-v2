@@ -160,6 +160,13 @@ export class Daemon {
     try {
       this.config = loadInstanceConfig(this.paths.home);
       this.paths = scaffoldHome(this.paths.home, this.config);
+      // The stale set is fixed here, before this instance stamps its start and
+      // before the first start step that can take time. Whatever waits in the
+      // inbox at this moment was written while nothing was reading it. Reading
+      // the inbox later instead would sweep a command a console queued against
+      // the live daemon: the start still has an orphan-workspace sweep in front
+      // of it, and one `git worktree remove` can hold it for half a minute.
+      const queuedWhileDown = this.inboxFiles();
       // The watcher and the notifier exist before any store opens with its
       // hook; the hooks read `this.tripwires` and `this.notifier` late so
       // construction order stays simple.
@@ -226,7 +233,7 @@ export class Daemon {
       });
       await this.stampSeatEnvironment();
       await this.sweepOrphanWorkspaces();
-      this.archiveStaleControlFiles();
+      this.archiveStaleControlFiles(queuedWhileDown);
       this.watchConfig();
       this.watchControl();
       if (this.handleSignals) this.installSignalHandlers();
@@ -234,6 +241,12 @@ export class Daemon {
       this.frontier.queueSweepAll();
       // One start-time check fires a review owed from before a restart.
       this.evals.notify();
+      // The watcher reports changes from its own registration on, and a drain
+      // before `running` returns early, so a command that arrived during the
+      // start waits for an unrelated write to be noticed. One drain here claims
+      // it. Not awaited: a launch command owns a whole provisioning, and the
+      // start does not stand behind it.
+      this.drainControlInbox().catch(() => {});
       return { runsResumed };
     } catch (error) {
       if (this.engine) {
@@ -606,8 +619,15 @@ export class Daemon {
 
   // -- control channel ------------------------------------------------------
 
-  archiveStaleControlFiles() {
-    for (const file of this.inboxFiles()) {
+  /**
+   * Archives the commands that were already waiting when this instance took
+   * its home. The list is the one the start captured, never a fresh read of
+   * the inbox: a command written after that moment belongs to this instance,
+   * however long the rest of the start takes, and drains like any other.
+   * @param {string[]} queuedWhileDown
+   */
+  archiveStaleControlFiles(queuedWhileDown) {
+    for (const file of queuedWhileDown) {
       this.rejectControlFile(file, 'stale: written while the daemon was down');
     }
   }
