@@ -9,6 +9,7 @@ import { RunEngine } from '../engine/engine.mjs';
 import { ModelSemaphores } from '../seats/semaphore.mjs';
 import { RunIsolation } from '../isolation/isolation.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
+import { checkAnswer } from '../ledger/parks.mjs';
 import {
   cloneDir,
   ensureBareClone,
@@ -433,13 +434,7 @@ export class Daemon {
     if (events.some((e) => e.event === 'answer' && e.parkSeq === seq)) {
       throw new Error(`park at seq ${seq} is already answered`);
     }
-    if (option !== undefined) {
-      if (!Array.isArray(target.options) || !target.options.includes(option)) {
-        throw new Error(`option not offered by the escalation record: ${option}`);
-      }
-    } else if (typeof answer !== 'string' || answer.length === 0) {
-      throw new Error('answer requires an option or answer text');
-    }
+    checkAnswer(target, { option, answer });
     this.ledger.append('answer', {
       actor,
       parkSeq: seq,

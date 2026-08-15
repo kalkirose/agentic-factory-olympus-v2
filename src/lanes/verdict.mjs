@@ -61,6 +61,7 @@ import {
   seatReportAfter,
   readJson,
   parkDirective,
+  GATE_FORMS,
   withAbandonGuard,
   attemptLimit,
   answeredPath,
@@ -504,6 +505,7 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
         question:
           'Verdict triage found an intent-level suite conflict:\n' +
           intent.map((f) => `- ${f.summary} (evidence: ${f.evidence})`).join('\n'),
+        text: 'the decision the spec amendment must follow',
         refs: [last.record],
       });
     }
@@ -536,6 +538,7 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
       const park = answeredPark(events, 'provisioning-gate');
       if (!park?.answer || park.answer.seq < last.seq) {
         return parkDirective('provisioning-gate', {
+          ...GATE_FORMS,
           question:
             'These findings persist after an operational fix; confirm the substrate is repaired:\n' +
             ops.map((f) => `- [${f.class}] ${f.summary} (evidence: ${f.evidence})`).join('\n'),
@@ -615,12 +618,9 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
             `${last.open.length} open findings):\n` +
             open.map((f) => `- ${findingLine(f)}`).join('\n') +
             '\nThe verdict history is in the run records. Pick an option.',
-          options: ['repair-again', 'fresh-pass', 'fail'],
+          options: ['repair-again', 'fresh-pass'],
           refs: [last.record],
         });
-      }
-      if (park.answer.option === 'fail') {
-        return { close: { state: 'failed', reason: 'second-stall' } };
       }
       if (park.answer.option === 'fresh-pass') {
         const outcome = await freshPass(ctx, base, mode, {
@@ -1147,7 +1147,10 @@ async function verdictBase(ctx, mode) {
         `No intake ticket at ${ticketPath ?? '(no path)'}. Answer "retry" after placing ` +
           'the ticket, answer with a corrected absolute ticket path, or "abandon" to ' +
           'close the run.',
-        { ...(typeof ticket === 'string' && { ticket }) },
+        {
+          text: 'a corrected absolute ticket path',
+          ...(typeof ticket === 'string' && { ticket }),
+        },
       ),
     };
   }

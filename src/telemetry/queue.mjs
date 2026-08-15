@@ -4,6 +4,7 @@
 // (or when its run closes); a breach closes on its paired `resolved`.
 // Presentation is FIFO with a roadmap-order tiebreak — no priority machinery.
 import { readEvents } from '../ledger/ledger.mjs';
+import { acceptedForms } from '../ledger/parks.mjs';
 import { streamIndexPath, readStreamIndex } from './streams.mjs';
 import { ledgerPathFor } from './readers.mjs';
 
@@ -50,7 +51,9 @@ export function escalationQueue(paths, { roadmap } = {}) {
       event: record.event,
       ...(record.type && { type: record.type }),
       ...(record.question && { question: record.question }),
-      ...(record.options && { options: record.options }),
+      // The record's own statement of what it will take back, so every queue
+      // item is answerable from the item (ADR-0029).
+      ...(record.event === 'park' && { answers: acceptedForms(record) }),
       ...(record.refs && { refs: record.refs }),
       ...(record.card && { card: record.card }),
       ...(storyKey && { storyKey }),

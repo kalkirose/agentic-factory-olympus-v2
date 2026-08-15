@@ -9,7 +9,7 @@
 // probe's own output never reaches the ledger or the park text: the process
 // holds a credential, and anything it prints can carry one (ADR-0027).
 import { runCommand } from './exec.mjs';
-import { ACTOR, commandError, parkDirective } from './shared.mjs';
+import { ACTOR, GATE_FORMS, commandError, parkDirective } from './shared.mjs';
 
 /**
  * Probes every credential the project config declares, in order, and stops at
@@ -45,6 +45,7 @@ async function probeOne(ctx, config, { name, env: variable, probe }, { phase, cw
   if (typeof held !== 'string' || held.trim().length === 0) {
     stamp({ ok: false, reason: 'absent' });
     return parkDirective('provisioning-gate', {
+      ...GATE_FORMS,
       question:
         `The ${name} credential is not on this host: ${variable} is unset at the ${phase} gate. ` +
         'Set it, then answer to probe again.',
@@ -68,6 +69,7 @@ async function probeOne(ctx, config, { name, env: variable, probe }, { phase, cw
   if (run.code !== 0) {
     stamp({ ok: false, reason: 'refused', code: run.code });
     return parkDirective('provisioning-gate', {
+      ...GATE_FORMS,
       question:
         `The ${name} credential probe answered no at the ${phase} gate: ` +
         `the value in ${variable} does not work (exit ${run.code}). ` +

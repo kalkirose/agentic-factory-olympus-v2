@@ -15,6 +15,10 @@
 //   olympusctl kill     --home <dir> --run <id>
 //   olympusctl resolve  --home <dir> [--run <id>] --seq <n> [--note <text>]
 // --home falls back to OLYMPUSD_HOME; --actor defaults to console:<os user>.
+// Every park states the answer forms it takes, and `queue` prints them per
+// item: the options it offers, the free-text slot it wants, or both. Every
+// park of a run also takes --option abandon, which closes the run on the
+// condition the park recorded.
 // The intake ticket is the repair lane's spec: --lane repair requires
 // --ticket, and no other lane accepts one. A repo-relative ticket path names
 // a ticket committed in the run worktree; an absolute path names a ticket in
@@ -81,6 +85,9 @@ const { command, opts } = parseArgs(process.argv.slice(2));
 if (!command) {
   fail(
     'usage: olympusctl <status|queue|frontier|answer|arm|pause|launch|kill|resolve> --home <dir>\n' +
+      '       answer: (--run <id> | --seq <n>) (--option <o> | --text <t>)\n' +
+      '               queue prints the forms each park accepts; every run park\n' +
+      '               takes --option abandon, which closes the run\n' +
       '       launch: --project <name> [--lane <name>] [--card <path>] [--ticket <path>]\n' +
       '               [--resume-from <runId>]\n' +
       '       --lane repair requires --ticket; no other lane accepts one\n' +
@@ -119,7 +126,10 @@ if (command === 'status') {
       ? { runId: opts.run }
       : { seq: Number(need(opts, 'seq')) };
   if (opts.option === undefined && opts.text === undefined) {
-    fail('--option or --text is required');
+    fail(
+      '--option or --text is required; `olympusctl queue` prints the forms this park ' +
+        'accepts, and every run park takes --option abandon',
+    );
   }
   queueCommand(paths, {
     command: 'answer',

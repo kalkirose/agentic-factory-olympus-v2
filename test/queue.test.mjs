@@ -30,7 +30,7 @@ test('parks and breaches join the queue and leave on answer / resolve', (t) => {
     actor: 'daemon',
     type: 'open-decisions',
     question: 'Decide the scope of s1.',
-    options: ['narrow', 'wide'],
+    answers: { options: ['narrow', 'wide', 'abandon'] },
     gist: 'open-decisions: s1',
   });
   const instance = openInstanceStore(paths);
@@ -54,7 +54,13 @@ test('parks and breaches join the queue and leave on answer / resolve', (t) => {
   assert.equal(runEntry.type, 'open-decisions');
   assert.equal(runEntry.storyKey, 's1');
   assert.equal(runEntry.question, 'Decide the scope of s1.');
-  assert.deepEqual(runEntry.options, ['narrow', 'wide']);
+  // Every queue item carries the record's own answer forms (ADR-0029); a park
+  // written before the declaration existed derives them.
+  assert.deepEqual(runEntry.answers, { options: ['narrow', 'wide', 'abandon'], text: null });
+  assert.deepEqual(queue.find((e) => e.card === 'stories/s2.md').answers, {
+    options: ['abandon'],
+    text: 'your answer',
+  });
   assert.equal(openCardParks(paths).length, 1);
 
   // Paired closes: an answer for each park, a resolution for the breach.

@@ -111,7 +111,14 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
   assertStatusRenders(assert, ctl(fx, ['status']));
   const queue = ctl(fx, ['queue']);
   assert.match(queue, /open-decisions/);
-  assert.match(queue, new RegExp(`answer: olympusctl answer --run ${runId} --text`));
+  // The queue prints the forms the park declared, abandon included, and the
+  // command line that takes them (ADR-0029).
+  assert.match(queue, /options: abandon/);
+  assert.match(queue, /text: the decisions, resolved/);
+  assert.match(
+    queue,
+    new RegExp(`answer: olympusctl answer --run ${runId} --option <option> \\| --text`),
+  );
   ctl(fx, ['answer', '--run', runId, '--text', 'No; f trusts the value it is given.']);
 
   await pollFor('the freeze', () => runEvents(fx, runId).some((e) => e.event === 'freeze'), {

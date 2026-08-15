@@ -34,7 +34,7 @@ function seededHome(t) {
     actor: 'daemon',
     type: 'open-decisions',
     question: 'Decide the scope of s1.',
-    options: ['narrow', 'wide'],
+    answers: { options: ['narrow', 'wide', 'abandon'], text: 'the scope, in words' },
     gist: 'open-decisions: s1',
   });
   run.close();
@@ -61,8 +61,11 @@ test('the queue render is answerable from the record alone', (t) => {
   assert.match(rendered, /open-decisions · run:r1#3/);
   assert.match(rendered, /story: s1/);
   assert.match(rendered, /Decide the scope of s1\./);
-  assert.match(rendered, /options: narrow \| wide/);
-  assert.match(rendered, /olympusctl answer --run r1 --option <option>/);
+  // The forms come off the record, so the line an operator reads is the line
+  // the engine takes (ADR-0029).
+  assert.match(rendered, /options: narrow \| wide \| abandon/);
+  assert.match(rendered, /text: the scope, in words/);
+  assert.match(rendered, /olympusctl answer --run r1 --option <option> \| --text "<answer>"/);
 });
 
 test('olympusctl writes control commands and renders status', (t) => {

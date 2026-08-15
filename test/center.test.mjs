@@ -112,7 +112,7 @@ function seededHome(t, { withClone = false } = {}) {
     actor: ACTOR,
     type: 'intent-conflict',
     question: 'Which intent stands?',
-    options: ['card', 'shipped-spec'],
+    answers: { options: ['card', 'shipped-spec', 'abandon'] },
     gist: 'intent-conflict: s-4',
   });
   parked.close();

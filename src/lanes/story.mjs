@@ -297,6 +297,7 @@ function readinessHandler(postFreezeStage) {
           question:
             `Resolve the open decisions on ${card.key ?? cardPath}:\n` +
             card.openDecisions.map((d) => `- ${d}`).join('\n'),
+          text: 'the decisions, resolved',
           refs: [cardPath],
         });
       }
@@ -513,6 +514,7 @@ async function specBirth(ctx) {
   if (report.outcome === 'grounding-conflict') {
     return parkDirective('grounding-conflict', {
       question: report.conflict?.trim() || report.summary,
+      text: 'how the spec should stand against the conflict',
       refs: [base.cardPath],
     });
   }
@@ -683,13 +685,12 @@ async function specGate(ctx) {
             'The gate stops here rather than spend a counted round on a document ' +
             `that is not getting closer. The spec stands at ${base.specPath}. ` +
             'Answer "round" for one more amendment and re-check, or "abandon" to close the run.',
-          options: ['round', 'abandon'],
+          options: ['round'],
           refs: [base.cardPath],
         });
       }
-      if (asked.answer?.option !== 'round') {
-        return { close: { state: 'failed', reason: 'spec-gate-stalled' } };
-      }
+      // An `abandon` answer never reaches here: the guard closed the run at
+      // this stage entry (ADR-0015). A granted round falls through.
     }
     // The cap is where the human enters, not where the spec dies. An
     // exhausted gate holds a spec that is a known list of findings away from
@@ -707,13 +708,12 @@ async function specGate(ctx) {
             'Notes do not hold the spec; they travel to the suite seat as proof obligations. ' +
             `The spec stands at ${base.specPath}. ` +
             'Answer "round" for one more amendment and re-check, or "abandon" to close the run.',
-          options: ['round', 'abandon'],
+          options: ['round'],
           refs: [base.cardPath],
         });
       }
-      if (asked.answer?.option !== 'round') {
-        return { close: { state: 'failed', reason: 'spec-gate-exhausted' } };
-      }
+      // As above: `abandon` closed the run at the guard, so a park that is
+      // answered at all was answered `round`.
     }
     // A counted round with findings open: the birth seat amends, then the
     // gate re-checks the amended sections only.
@@ -757,6 +757,7 @@ async function gateRound(ctx, base, { round }) {
     return {
       directive: parkDirective('intent-conflict', {
         question: conflict.detail?.trim() || result.report.summary,
+        text: 'the decision the amendment must follow',
         refs: [base.cardPath],
       }),
     };
@@ -894,7 +895,7 @@ async function adversary(ctx) {
             `Adversary round ${round} scored 0/${WAVES} after a strengthening round. Survivors:\n` +
             survivorLines(ctx, round, survivors) +
             '\nPick an option.',
-          options: ['strengthen-again', 'fail'],
+          options: ['strengthen-again'],
         });
       }
       if (park.answer.option === 'strengthen-again') {
@@ -902,12 +903,12 @@ async function adversary(ctx) {
         if (fail) return fail;
         continue;
       }
-      if (park.answer.option === 'fail') {
-        return { close: { state: 'failed', reason: 'second-zero-kill' } };
-      }
+      // `abandon` closed the run at the guard, and the record offers nothing
+      // else; an answer that is neither asks again rather than pick for the
+      // human.
       return parkDirective('second-zero-kill', {
         question: 'The answer picked no option. Pick one.',
-        options: ['strengthen-again', 'fail'],
+        options: ['strengthen-again'],
       });
     }
     // 3) Full kill: nothing to amend.
@@ -984,7 +985,7 @@ async function adversary(ctx) {
               gaps.map((g) => g.wave),
             ) +
             '\nPick an option.',
-          options: ['accept-spec-indifferent', 'fail'],
+          options: ['accept-spec-indifferent'],
         });
       }
       if (park.answer.option === 'accept-spec-indifferent') {
@@ -1001,12 +1002,10 @@ async function adversary(ctx) {
         }
         continue;
       }
-      if (park.answer.option === 'fail') {
-        return { close: { state: 'failed', reason: 'unkilled-gap-survivor' } };
-      }
+      // `abandon` closed the run at the guard; anything else asks again.
       return parkDirective('unkilled-gap-survivor', {
         question: 'The answer picked no option. Pick one.',
-        options: ['accept-spec-indifferent', 'fail'],
+        options: ['accept-spec-indifferent'],
       });
     }
     return { next: 'freeze' };

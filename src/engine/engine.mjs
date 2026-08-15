@@ -18,6 +18,7 @@ import {
   SEAT_TERMINAL_EVENTS,
 } from '../ledger/registry.mjs';
 import { OWNER_EVENTS, settleOwnedLoud } from '../ledger/resolution.mjs';
+import { checkAnswer, runParkForms } from '../ledger/parks.mjs';
 import { runLedgerPath } from '../daemon/home.mjs';
 import { openRunStore, archiveRun } from '../telemetry/stores.mjs';
 import { deriveRunState } from './replay.mjs';
@@ -220,7 +221,7 @@ export class RunEngine {
       return;
     }
     if (directive.park) {
-      const { type, question, options, refs, reason, detail } = directive.park;
+      const { type, question, options, text, refs, reason, detail } = directive.park;
       if (!PARK_TYPES.has(type)) {
         this.stampViolation(run, `park type not in the catalog: ${type}`);
         return;
@@ -229,7 +230,14 @@ export class RunEngine {
         this.stampViolation(run, `park at ${run.stage} carries no question`);
         return;
       }
-      this.park(run, { type, question, options, refs, reason, detail });
+      // A park that declares neither an option nor a text slot would offer the
+      // human `abandon` alone: the stage asked a question it will not read the
+      // answer to.
+      if ((options ?? []).length === 0 && typeof text !== 'string') {
+        this.stampViolation(run, `park at ${run.stage} declares no answer form`);
+        return;
+      }
+      this.park(run, { type, question, options, text, refs, reason, detail });
       return;
     }
     if (directive.close) {
@@ -314,19 +322,24 @@ export class RunEngine {
   // `reason` and `detail` belong to a recoverable failure: they carry the
   // close the run would have taken, so the abandon answer closes on the
   // original condition rather than on whatever the resumed stage meets.
-  park(run, { type, question, options, refs, reason, detail }) {
+  //
+  // `answers` is the record's own statement of what it will take back, the
+  // site's declaration plus the `abandon` every run park owes (ADR-0029). It
+  // is the whole of the answer contract: the record is what validates an
+  // answer, what a refusal quotes, and what the console renders.
+  park(run, { type, question, options, text, refs, reason, detail }) {
     run.parked = true;
-    run.parkRecord = { type, question, options };
     const line = run.store.append('park', {
       actor: ACTOR,
       type,
       question,
-      ...(options && { options }),
+      answers: runParkForms({ options, text }),
       ...(refs && { refs }),
       ...(reason && { reason }),
       ...(detail && { detail }),
       gist: gist(`${type}: ${question}`),
     });
+    run.parkRecord = line;
     run.parkSeq = line.seq;
     try {
       // A park frees its slot; the hook lets the frontier fill it.
@@ -346,14 +359,9 @@ export class RunEngine {
     if (!run || run.closed) throw new Error(`no open run: ${runId}`);
     if (!run.parked) throw new Error(`run ${runId} is not parked`);
     if (typeof actor !== 'string' || actor.length === 0) throw new Error('answer requires an actor');
-    if (option !== undefined) {
-      const offered = run.parkRecord?.options;
-      if (!Array.isArray(offered) || !offered.includes(option)) {
-        throw new Error(`option not offered by the escalation record: ${option}`);
-      }
-    } else if (typeof answer !== 'string' || answer.length === 0) {
-      throw new Error('answer requires an option or answer text');
-    }
+    // The record is the authority on its own answer forms, and the refusal
+    // quotes them, so a rejected answer never sends the operator to the source.
+    checkAnswer(run.parkRecord, { option, answer });
     run.store.append('answer', {
       actor,
       parkSeq: run.parkSeq,

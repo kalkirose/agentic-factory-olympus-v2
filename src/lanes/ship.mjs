@@ -24,6 +24,7 @@ import {
   archivedRunLedgerPath,
 } from '../daemon/home.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
+import { instanceParkForms } from '../ledger/parks.mjs';
 import { openEscapesStore, resolveClosedRun } from '../telemetry/stores.mjs';
 import { recordEscape, ticketEscape, fixEscape, readEscapeSet } from '../telemetry/escapes.mjs';
 import { cloneDir, fetchClone, branchSha } from '../isolation/clones.mjs';
@@ -62,6 +63,7 @@ import {
   freezeExclusions,
   invocationCount,
   parkDirective,
+  GATE_FORMS,
   withAbandonGuard,
   blocked,
   underAny,
@@ -216,6 +218,7 @@ async function openPr(ctx, base) {
       ...(pf.requiredChecks.length > 0 ? [] : [`no required checks on ${base.defaultBranch}`]),
     ];
     return parkDirective('provisioning-gate', {
+      ...GATE_FORMS,
       question: `The ship preflight failed:\n${missing.map((m) => `- ${m}`).join('\n')}`,
     });
   }
@@ -231,6 +234,7 @@ async function openPr(ctx, base) {
   const arm = await base.forge.armAutoMerge(pr.number);
   if (!arm.armed) {
     return parkDirective('provisioning-gate', {
+      ...GATE_FORMS,
       question: `Auto-merge would not arm on PR #${pr.number}: ${arm.reason ?? 'refused'}`,
     });
   }
@@ -256,6 +260,7 @@ async function pushBranch(ctx, base, { expected = null } = {}) {
     return null;
   } catch (error) {
     return parkDirective('provisioning-gate', {
+      ...GATE_FORMS,
       question: `The remote rejected the push of ${base.branch}:\n${error.message}`,
     });
   }
@@ -438,6 +443,7 @@ async function greenNoMerge(ctx, base, opened, sha) {
     if (arm.armed) return null;
   }
   return parkDirective('provisioning-gate', {
+    ...GATE_FORMS,
     question:
       `PR #${opened.pr} is green but auto-merge did not fire and would not re-arm. ` +
       'Repair the merge substrate, then answer.',
@@ -617,11 +623,8 @@ async function mergeStall(ctx, base, failedRound) {
         `(${failedRound.cause}). Conflicted files:\n` +
         failedRound.conflicts.map((f) => `- ${f}`).join('\n') +
         '\nPick an option.',
-      options: ['fresh-pass', 'fail'],
+      options: ['fresh-pass'],
     });
-  }
-  if (park.answer.option === 'fail') {
-    return { close: { state: 'failed', reason: 'second-stall' } };
   }
   return mergeFreshPass(ctx, base, { mainSha: failedRound.mainSha, stallSeq: stall.seq });
 }
@@ -940,6 +943,7 @@ async function watchMergeCommit(ctx, base, merged, pollMs) {
       continue;
     }
     return parkDirective('provisioning-gate', {
+      ...GATE_FORMS,
       question:
         'Merge-commit checks stay red after a re-run; repair the substrate, then answer:\n' +
         reds.map((r) => `- ${r.name}`).join('\n'),
@@ -1019,6 +1023,10 @@ async function cardSweep(ctx, base, merged) {
       card: inv.card,
       runId: ctx.runId,
       question: `The ship of ${base.storyKey ?? ctx.runId} invalidated ${inv.card}: ${inv.reason}`,
+      // The one park with no run behind it, so the one park that offers no
+      // abandon: the answer unblocks the card, and there is nothing to close
+      // (ADR-0029).
+      answers: instanceParkForms({ text: 'what you did about the card' }),
       gist: gist(`card-invalidated: ${inv.card} — ${inv.reason}`),
     });
   }

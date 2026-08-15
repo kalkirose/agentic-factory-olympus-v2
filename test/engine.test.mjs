@@ -88,9 +88,22 @@ test('park frees the slot; a validated answer resumes at the parked stage', asyn
   assert.equal(queued[0].event, 'park');
   assert.equal(queued[0].ledger, 'run:r1');
 
-  assert.throws(() => engine.answer({ runId: 'r1', actor: 'operator', option: 'reboot' }), /not offered/);
+  // Every refusal quotes the forms the record declared, and the declaration
+  // holds the abandon the site never named (ADR-0029).
+  assert.throws(
+    () => engine.answer({ runId: 'r1', actor: 'operator', option: 'reboot' }),
+    /not offered by the escalation record: reboot — this park accepts --option created\|skip\|abandon$/,
+  );
   assert.throws(() => engine.answer({ runId: 'r1', actor: '', option: 'created' }), /actor/);
-  assert.throws(() => engine.answer({ runId: 'r1', actor: 'operator' }), /option or answer/);
+  assert.throws(
+    () => engine.answer({ runId: 'r1', actor: 'operator' }),
+    /an answer is required — this park accepts --option created\|skip\|abandon$/,
+  );
+  // The park declared no text slot, so text is refused with the same line.
+  assert.throws(
+    () => engine.answer({ runId: 'r1', actor: 'operator', answer: 'done it' }),
+    /takes no answer text/,
+  );
 
   engine.answer({ runId: 'r1', actor: 'operator', option: 'created' });
   await waitFor(() => archivedEvents(paths, 'r1').some((e) => e.event === 'run-closed'), {

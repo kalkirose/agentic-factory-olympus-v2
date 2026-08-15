@@ -5,6 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
+import { isAbandon } from '../ledger/parks.mjs';
 import { runLedgerPath, runReportPath } from '../daemon/home.mjs';
 import {
   DEFAULT_CONSTITUTION_PATH,
@@ -132,24 +133,57 @@ export function freezeExclusions(paths, runId) {
   return Array.isArray(record?.frozenExclusions) ? record.frozenExclusions : [];
 }
 
-export function parkDirective(type, { question, options, refs }) {
-  return { park: { type, question, ...(options && { options }), ...(refs && { refs }) } };
+/**
+ * A park directive. The site declares what the park will take back: the
+ * options it offers, the free-text slot it wants, or both. `text` is the label
+ * for that slot and says what the text is for. The engine adds `abandon` and
+ * writes the whole declaration onto the record (ADR-0029).
+ */
+export function parkDirective(type, { question, options, text, refs }) {
+  return {
+    park: {
+      type,
+      question,
+      ...(options && { options }),
+      ...(text && { text }),
+      ...(refs && { refs }),
+    },
+  };
 }
+
+// Every provisioning gate asks the operator for the same thing: repair the
+// substrate this run cannot touch, then say so. The option carries the whole
+// answer, and the text slot carries a note beside it — the gate re-reads the
+// substrate either way. Declaring both is what makes the gates answerable
+// with the same habit as every other park (ADR-0029).
+export const GATE_FORMS = Object.freeze({
+  options: ['retry'],
+  text: 'a note on what you repaired',
+});
 
 // -- recoverable failures (ADR-0015) -----------------------------------------
 
 // Terminal-state discipline: a run reaches `run-closed` through the ship
-// path, a human kill, or a human answering a park with its abandon option.
-// Every other failure parks under one of these types, so a run holding sound
-// work waits for a decision instead of dying with the condition it met.
+// path, a human kill, or a human answering a park with `abandon`. Every other
+// failure parks under one of these types, so a run holding sound work waits
+// for a decision instead of dying with the condition it met.
 export const RECOVERY_PARKS = new Set(['seat-failure', 'stage-blocked', 'command-error']);
-export const RECOVERY_OPTIONS = Object.freeze(['retry', 'abandon']);
+export const RECOVERY_OPTIONS = Object.freeze(['retry']);
 
 /** The run's latest recovery park of any type, with its answer. */
 export function lastRecoveryPark(events) {
+  return lastParkWhere(events, (e) => RECOVERY_PARKS.has(e.type));
+}
+
+/** The run's latest park of any type, with its answer. */
+export function lastPark(events) {
+  return lastParkWhere(events, () => true);
+}
+
+function lastParkWhere(events, match) {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
-    if (e.event !== 'park' || !RECOVERY_PARKS.has(e.type)) continue;
+    if (e.event !== 'park' || !match(e)) continue;
     const answer = events.slice(i + 1).find((a) => a.event === 'answer' && a.parkSeq === e.seq);
     return { park: e, answer: answer ?? null };
   }
@@ -157,17 +191,18 @@ export function lastRecoveryPark(events) {
 }
 
 /**
- * The abandon route: a recovery park answered `abandon` closes the run with
- * the reason and detail its park recorded. Checked at every stage entry, so
- * the answer lands before the stage spends anything else.
+ * The abandon route: any park answered `abandon` closes the run with the
+ * reason and detail its park recorded, or, where the park recorded neither,
+ * on the condition its type names. Checked at every stage entry, so the answer
+ * lands before the stage spends anything else.
  */
 export function abandonedClose(events) {
-  const asked = lastRecoveryPark(events);
-  if (asked?.answer?.option !== 'abandon') return null;
+  const asked = lastPark(events);
+  if (!isAbandon(asked?.answer)) return null;
   return {
     close: {
       state: 'failed',
-      reason: asked.park.reason ?? 'abandoned',
+      reason: asked.park.reason ?? asked.park.type,
       ...(asked.park.detail ?? {}),
       abandoned: asked.park.seq,
     },
@@ -194,12 +229,21 @@ export function withAbandonGuard(handlers) {
   );
 }
 
+// What free text says at a recovery park: the operator repaired something and
+// the stage should meet it. A text answer buys the same one attempt an option
+// answer buys, so both forms are declared and both are counted the same way.
+const RECOVERY_TEXT = 'what you changed before the retry';
+
 /**
  * Routes a recoverable failure: the run parks with `retry` and `abandon`
  * instead of closing. One answer buys one attempt — the failure that follows
  * a bought retry parks again, so no arm loops on its own authority.
+ *
+ * `text` names the free-text slot for parks that read the answer's words (the
+ * corrected ticket path); it is a declaration, not park detail, so it never
+ * reaches the close an abandon takes.
  */
-export function recover(ctx, { type, reason, question, refs, ...detail }) {
+export function recover(ctx, { type, reason, question, refs, text, ...detail }) {
   const abandoned = abandonedClose(runEvents(ctx));
   if (abandoned) return abandoned;
   return {
@@ -208,13 +252,17 @@ export function recover(ctx, { type, reason, question, refs, ...detail }) {
       reason,
       question,
       options: [...RECOVERY_OPTIONS],
+      text: text ?? RECOVERY_TEXT,
       ...(refs && { refs }),
       ...(Object.keys(detail).length > 0 && { detail }),
     },
   };
 }
 
-/** A stage precondition the run cannot settle itself. */
+/**
+ * A stage precondition the run cannot settle itself. A `text` key in `detail`
+ * declares the park's free-text slot rather than becoming park detail.
+ */
 export function blocked(ctx, reason, question, detail = {}) {
   return recover(ctx, { type: 'stage-blocked', reason, question, ...detail });
 }

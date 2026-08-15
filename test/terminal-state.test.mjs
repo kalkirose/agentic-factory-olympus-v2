@@ -37,18 +37,14 @@ title: Alpha feature
 Provide f(x) that doubles x in src/feature.mjs.
 ${FIXTURE_ACCEPTANCE}`;
 
-// The closed set of terminal routes. A new entry belongs to a design-level
-// decision recorded in an ADR, never to a call site that found a new way to
-// give up: `<answer>` is the abandon route, which closes on the reason the
-// answered park recorded.
+// The closed set of terminal routes, now two. A new entry belongs to a
+// design-level decision recorded in an ADR, never to a call site that found a
+// new way to give up. Every park of every type offers `abandon`, and that one
+// route closes on the reason the answered park recorded — so no park type
+// carries a close of its own.
 const CLOSE_SET = new Set([
   'shipped', // the ship step's close-out
   'failed:<answer>', // the abandon route (lanes/shared.mjs)
-  'failed:spec-gate-exhausted', // park spec-gate-exhausted, answered "abandon"
-  'failed:spec-gate-stalled', // park spec-gate-stalled, answered "abandon"
-  'failed:second-zero-kill', // park second-zero-kill, answered "fail"
-  'failed:unkilled-gap-survivor', // park unkilled-gap-survivor, answered "fail"
-  'failed:second-stall', // park second-stall, answered "fail"
 ]);
 
 // -- source scan -------------------------------------------------------------
@@ -317,7 +313,7 @@ test('a missing card parks; a retry re-runs readiness and the run goes on', asyn
   const { runId, worktree } = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'stage-blocked');
   assert.equal(park.reason, 'card-missing');
-  assert.deepEqual(park.options, ['retry', 'abandon']);
+  assert.deepEqual(park.answers.options, ['retry', 'abandon']);
   assert.ok(park.question.includes(CARD_PATH));
   // The run is parked, not closed: nothing archived it.
   assert.ok(!existsSync(archivedRunLedgerPath(fx.paths, runId)));
@@ -358,7 +354,7 @@ test('a card lint that cannot run parks under command-error', async (t) => {
   const { runId } = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'command-error');
   assert.equal(park.reason, 'lint-command-error');
-  assert.deepEqual(park.options, ['retry', 'abandon']);
+  assert.deepEqual(park.answers.options, ['retry', 'abandon']);
   fx.answer(runId, { option: 'abandon' });
   const closed = (await waitClosed(fx.paths, runId)).find((e) => e.event === 'run-closed');
   assert.equal(closed.reason, 'lint-command-error');
@@ -517,7 +513,7 @@ test('the convergence park replays across a restart, and one answer buys one rou
   });
   const { runId } = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'spec-gate-stalled');
-  assert.deepEqual(park.options, ['round', 'abandon']);
+  assert.deepEqual(park.answers.options, ['round', 'abandon']);
   const gateCalls = () => fx.calls.filter((c) => c.seat === 'spec-gate');
   assert.equal(gateCalls().length, 2);
   // The gate's position is the ledger and the run's files, so a restart over a

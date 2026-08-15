@@ -135,11 +135,19 @@ export function renderQueue(paths, { roadmap } = {}) {
       lines.push(`    ${item.gist}`);
     }
     if (item.refs) lines.push(`    refs: ${JSON.stringify(item.refs)}`);
-    if (item.options) {
-      lines.push(`    options: ${item.options.join(' | ')}`);
-      lines.push(`    answer: olympusctl answer ${target} --option <option>`);
-    } else if (item.event === 'park') {
-      lines.push(`    answer: olympusctl answer ${target} --text "<answer>"`);
+    if (item.answers) {
+      // Straight off the record: the forms the park declared are the forms the
+      // engine will take, so the line an operator reads is the line that works.
+      const ways = [];
+      if (item.answers.options?.length > 0) {
+        lines.push(`    options: ${item.answers.options.join(' | ')}`);
+        ways.push('--option <option>');
+      }
+      if (item.answers.text) {
+        lines.push(`    text: ${item.answers.text}`);
+        ways.push('--text "<answer>"');
+      }
+      lines.push(`    answer: olympusctl answer ${target} ${ways.join(' | ')}`);
     } else {
       lines.push(`    resolve: olympusctl resolve ${item.runId ? `${target} ` : ''}--seq ${item.seq}`);
     }

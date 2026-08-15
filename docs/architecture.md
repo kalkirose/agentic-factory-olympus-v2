@@ -315,9 +315,14 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   spec-gate exhaustion; spec-gate non-convergence; unkilled-gap survivor;
   second 0/3 adversary round; second stall; card invalidated at ship-time
   sweep; provisioning gate.
-- Park = stamped escalation record (question, context refs, options) + a
+- Park = stamped escalation record (question, context refs, answer forms) + a
   queued-stream event. The answer is a state change from any console session;
   the daemon validates, stamps who and when, resumes at the parked state.
+- **Every park states what it accepts, on the record**: the options it offers,
+  the free-text slot it wants, or both. The engine adds `abandon` to every
+  park of a run, so the close-by-abandon route is open at all of them; the
+  card-invalidated park has no run behind it and offers none. A refusal quotes
+  the forms, and the queue renders the answer line off the same declaration.
 - **Escalation queue**: always open, answerable from the record alone,
   presented FIFO with roadmap-order tiebreak, answered in any order.
 - **Streams.** Queued: park events + tripwire breaches. Loud: liveness

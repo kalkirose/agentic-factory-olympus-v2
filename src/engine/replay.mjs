@@ -39,7 +39,10 @@ export function deriveRunState(events) {
         break;
       case 'park':
         state.parkSeq = e.seq;
-        state.parkRecord = { type: e.type, question: e.question, options: e.options };
+        // The record itself, because the record is what an answer is judged
+        // against: a restart validates against the same declaration the park
+        // wrote (ADR-0029).
+        state.parkRecord = e;
         break;
       case 'answer':
         state.lastAnswer = { actor: e.actor, ts: e.ts, option: e.option, answer: e.answer };

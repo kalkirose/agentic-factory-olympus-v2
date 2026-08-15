@@ -444,7 +444,7 @@ ${FIXTURE_ACCEPTANCE}`;
   assert.ok(exhausted.question.includes('spent 2 rounds'));
   // The park counts the two channels apart: only the blocking count held it.
   assert.ok(exhausted.question.includes('blocking findings: 1; notes: 1'));
-  assert.deepEqual(exhausted.options, ['round', 'abandon']);
+  assert.deepEqual(exhausted.answers.options, ['round', 'abandon']);
   fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   const events = await waitClosed(fx.paths, runId);
   const closed = events.find((e) => e.event === 'run-closed');
@@ -640,7 +640,7 @@ test('a blocking set that does not shrink parks at once, cap unspent', async (t)
   const stalled = await waitParked(fx.paths, runId, 'spec-gate-stalled');
   assert.ok(stalled.question.includes('not converging'));
   assert.ok(stalled.question.includes('3 blocking findings against 3 in round 1'));
-  assert.deepEqual(stalled.options, ['round', 'abandon']);
+  assert.deepEqual(stalled.answers.options, ['round', 'abandon']);
   fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   const events = await waitClosed(fx.paths, runId);
   const closed = events.find((e) => e.event === 'run-closed');
@@ -891,7 +891,7 @@ test('an intent conflict never burns a round; a seat crash parks, and abandon cl
   fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'Keep the card constraint.' });
   // The crashed seat parks with the recoverable options; only the answer closes.
   const crashed = await waitParked(fx.paths, runId, 'seat-failure');
-  assert.deepEqual(crashed.options, ['retry', 'abandon']);
+  assert.deepEqual(crashed.answers.options, ['retry', 'abandon']);
   assert.equal(crashed.detail.seat, 'suite');
   fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   const events = await waitClosed(fx.paths, runId);
@@ -961,7 +961,7 @@ test('an unkilled gap blocks the freeze until the human accepts it', async (t) =
   const fx = storyFixture(t, { seats });
   const runId = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'unkilled-gap-survivor');
-  assert.deepEqual(park.options, ['accept-spec-indifferent', 'fail']);
+  assert.deepEqual(park.answers.options, ['accept-spec-indifferent', 'abandon']);
   assert.ok(park.question.includes('wave 1'));
   fx.daemon.engine.answer({ runId, actor: 'operator', option: 'accept-spec-indifferent' });
   const events = await waitClosed(fx.paths, runId);
@@ -1014,10 +1014,10 @@ test('a second zero-kill round escalates with the survivor set', async (t) => {
   const fx = storyFixture(t, { seats });
   const runId = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'second-zero-kill');
-  assert.deepEqual(park.options, ['strengthen-again', 'fail']);
+  assert.deepEqual(park.answers.options, ['strengthen-again', 'abandon']);
   assert.ok(park.question.includes('0/3'));
   assert.ok(park.question.includes('f returns 0'));
-  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'fail' });
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   const events = await waitClosed(fx.paths, runId);
   const closed = events.find((e) => e.event === 'run-closed');
   assert.equal(closed.state, 'failed');
@@ -1158,7 +1158,7 @@ The goal above states them.
   const runId = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'stage-blocked');
   assert.equal(park.reason, 'card-no-criteria');
-  assert.deepEqual(park.options, ['retry', 'abandon']);
+  assert.deepEqual(park.answers.options, ['retry', 'abandon']);
   // The message names the card and the heading the parse read.
   assert.ok(park.question.includes('stories/alpha.md'), park.question);
   assert.ok(park.question.includes('acceptance heading'), park.question);

@@ -904,7 +904,7 @@ test('confirm-to-block: only verifier-confirmed HIGHs enter the verdict; repair 
   assert.equal(events.filter((e) => e.event === 'repair-round').length, 1);
 });
 
-test('stall → fresh pass → second stall parks; fail closes the run', async (t) => {
+test('stall → fresh pass → second stall parks; abandon closes the run', async (t) => {
   const seats = {
     dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
     ...furyClean(),
@@ -925,9 +925,9 @@ test('stall → fresh pass → second stall parks; fail closes the run', async (
   const fx = verdictFixture(t, { seats });
   const { runId } = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'second-stall');
-  assert.deepEqual(park.options, ['repair-again', 'fresh-pass', 'fail']);
+  assert.deepEqual(park.answers.options, ['repair-again', 'fresh-pass', 'abandon']);
   assert.ok(park.question.includes('stalled again'));
-  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'fail' });
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   const events = await waitClosed(fx.paths, runId);
   const closed = events.find((e) => e.event === 'run-closed');
   assert.equal(closed.state, 'failed');
@@ -1097,7 +1097,7 @@ test('a triage seat that fails its own checks parks the run; a judge is not the 
   const fx = verdictFixture(t, { seats, gates: [{ name: 'unit', command: 'suite' }] });
   const { runId } = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'seat-failure');
-  assert.deepEqual(park.options, ['retry', 'abandon']);
+  assert.deepEqual(park.answers.options, ['retry', 'abandon']);
   assert.equal(park.detail.seat, 'verdict-triage');
   assert.equal(park.detail.cause, 'work-product-defect');
   // The corrective invocation ran before the park; the answer buys one more.
@@ -1135,7 +1135,7 @@ test('a missing intake ticket parks, and the answer hands over a corrected path'
   const { runId } = await fx.launchFromConsole({ lane: 'repair', ticket: 'tickets/gone.md' });
   const park = await waitParked(fx.paths, runId, 'stage-blocked');
   assert.equal(park.reason, 'ticket-missing');
-  assert.deepEqual(park.options, ['retry', 'abandon']);
+  assert.deepEqual(park.answers.options, ['retry', 'abandon']);
   assert.ok(!fx.calls.some((c) => c.seat === 'dev'));
   // The answer carries the ticket itself: an absolute path the daemon holds.
   const corrected = join(fx.paths.runs, runId, 'ticket.md');
@@ -1272,7 +1272,7 @@ test('a repeat violation parks seat-failure and the loud record stays open', asy
   const fx = verdictFixture(t, { seats, diffPolicy: POLICY });
   const { runId } = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'seat-failure');
-  assert.deepEqual(park.options, ['retry', 'abandon']);
+  assert.deepEqual(park.answers.options, ['retry', 'abandon']);
   assert.equal(park.detail.seat, 'dev');
   assert.equal(park.detail.cause, 'work-product-defect');
   // One corrective ran before the park, and no candidate was ever committed.

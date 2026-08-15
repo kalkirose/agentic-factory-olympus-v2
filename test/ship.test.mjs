@@ -957,6 +957,12 @@ test('the preflight parks a provisioning gate until the substrate is ready', asy
   const runId = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'provisioning-gate');
   assert.match(park.question, /auto-merge is not allowed/);
+  // A gate takes the same option every other park takes, a note in words, or
+  // the abandon (ADR-0029). This one is answered in words.
+  assert.deepEqual(park.answers, {
+    options: ['retry', 'abandon'],
+    text: 'a note on what you repaired',
+  });
   fx.forge.state.autoMergeAllowed = true;
   fx.daemon.engine.answer({ runId, actor: 'kalki', answer: 'auto-merge enabled' });
   const events = await waitClosed(fx.paths, runId);
@@ -990,7 +996,9 @@ test('a credential that went stale in the run parks the ship gate before the PR'
   assert.ok(!live.some((e) => e.event === 'pr-opened'));
   assert.ok(!readFileSync(runLedgerPath(fx.paths, runId), 'utf8').includes(PROBE_LEAK));
   set('live');
-  fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'key rotated' });
+  // The option form at a gate: the operator repaired the substrate and the run
+  // asks the same question again.
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'retry' });
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   assert.deepEqual(

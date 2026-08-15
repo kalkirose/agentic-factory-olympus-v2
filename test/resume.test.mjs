@@ -174,7 +174,7 @@ function waitParked(paths, runId, type) {
 /** A refusal parks; the owner abandons it, and the close names the reason. */
 async function abandon(fx, runId) {
   const park = await waitParked(fx.paths, runId, 'stage-blocked');
-  assert.deepEqual(park.options, ['retry', 'abandon']);
+  assert.deepEqual(park.answers.options, ['retry', 'abandon']);
   fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   const events = await waitClosed(fx.paths, runId);
   return { park, events, closed: events.find((e) => e.event === 'run-closed') };

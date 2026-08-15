@@ -43,7 +43,13 @@ function stubStoryLane(behavior, launched) {
         if (!ctx.lastAnswer) launched.push(key);
         const mode = behavior[key] ?? 'ship';
         if (mode === 'park' && !ctx.lastAnswer) {
-          return { park: { type: 'open-decisions', question: `Decide the scope of ${key}.` } };
+          return {
+            park: {
+              type: 'open-decisions',
+              question: `Decide the scope of ${key}.`,
+              text: 'the scope',
+            },
+          };
         }
         if (mode === 'fail') return { close: { state: 'failed', reason: 'fixture' } };
         return { close: { state: 'shipped' } };

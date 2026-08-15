@@ -13,25 +13,34 @@ A run reaches `run-closed` through three routes only:
 
 1. the ship step's close-out, which closes `shipped`;
 2. a human kill, which closes `killed`;
-3. a human answering a park with its abandon option, which closes `failed`.
+3. a human answering any park with `abandon`, which closes `failed`.
 
 Every other condition that a lane meets on its own parks the run. A refusal
 that happens before provisioning throws at the console or at the daemon
 handler and opens no run at all, so it stamps nothing.
 
+- **Every park type offers the abandon.** The engine writes it into the
+  answer-forms declaration of every park record, so no park site can raise a
+  question the owner cannot end (ADR-0029). The route is one, whatever the
+  park was about.
 - **Three recovery park types** are in the closed catalog: `seat-failure` (a
   seat work product past its corrective invocation), `stage-blocked` (a stage
   precondition the run cannot settle itself), and `command-error` (a
-  configured command that could not run). Each one offers the same two
-  options, `retry` and `abandon`. A recovery park is the same `park` event
-  under a new type; it is no new ledger event.
+  configured command that could not run). Each one offers `retry` beside the
+  abandon, and a text slot for what the operator changed. A recovery park is
+  the same `park` event under a new type; it is no new ledger event.
 - **The park carries the close it replaced.** The park event holds `reason`
   and `detail`, which are the close directive the condition would have taken.
   `abandon` closes on that record, so the run fails on the original reason
-  with its original fields, whatever the resumed stage meets afterwards.
+  with its original fields, whatever the resumed stage meets afterwards. A
+  decision park records no close of its own, so it closes on the condition its
+  type names: a `second-stall` park answered `abandon` fails on
+  `second-stall`.
 - **The abandon guard runs at stage entry.** `withAbandonGuard` wraps every
-  handler of every lane. An answered abandon closes the run before the stage
-  spends anything else, so the answer never buys one more seat.
+  handler of every lane, and reads the run's latest park of any type. An
+  answered abandon closes the run before the stage spends anything else, so
+  the answer never buys one more seat, and no park type needs a close
+  directive of its own.
 - **One answer buys one attempt.** A bought retry re-enters the stage once.
   The failure that follows it parks again, and the next answer is a fresh
   decision. Nothing loops on its own authority, and no arm counts elapsed
@@ -54,12 +63,15 @@ handler and opens no run at all, so it stamps nothing.
 - **A structural test holds the closed set.** It scans the source for every
   close directive, asserts the set of `state:reason` routes, and asserts that
   `run-closed` is stamped in the engine alone, from the directive route and
-  the kill. A new close route fails CI until it is added deliberately.
+  the kill. The set is two entries: the ship close-out, and the abandon route
+  with the reason its park recorded. A new close route fails CI until it is
+  added deliberately.
 
-The spec-gate exhaustion park keeps its own options (`round` and `abandon`).
-The four option parks that close on a human answer keep their reasons
-(`spec-gate-exhausted`, `second-zero-kill`, `unkilled-gap-survivor`,
-`second-stall`).
+The decision parks keep their own affirmative options: `round` at the two
+spec-gate parks, `strengthen-again` at `second-zero-kill`,
+`accept-spec-indifferent` at `unkilled-gap-survivor`, `repair-again` and
+`fresh-pass` at `second-stall`, `retry` at a provisioning gate. The way out is
+the same `abandon` at all of them.
 
 ## Decision: how a loud record ends
 
