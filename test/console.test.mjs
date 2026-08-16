@@ -176,3 +176,92 @@ test('a repair launch carries its ticket; lane and ticket must agree', (t) => {
   assert.match(wrongLane.stderr, /--ticket applies to --lane repair only \(lane: story\)/);
   assert.equal(readdirSync(paths.control).filter((f) => f.endsWith('.json')).length, 1);
 });
+
+test('a repair launch carries the escape it repairs; the daemon reads the rest', (t) => {
+  const { root, paths } = seededHome(t);
+  const bin = join(import.meta.dirname, '..', 'bin', 'olympusctl.mjs');
+  const home = join(root, 'home');
+  const ctl = (args) =>
+    execFileSync(process.execPath, [bin, ...args], { encoding: 'utf8', windowsHide: true });
+  const refused = (args) => {
+    try {
+      ctl(args);
+    } catch (error) {
+      return { status: error.status, stderr: error.stderr };
+    }
+    throw new Error(`expected olympusctl to refuse: ${args.join(' ')}`);
+  };
+
+  const repair = ['--project', 'alpha', '--lane', 'repair', '--ticket', 'tickets/t1.md'];
+  ctl(['launch', '--home', home, ...repair, '--escape', '4']);
+  const file = readdirSync(paths.control).find((f) => f.startsWith('launch'));
+  const launch = JSON.parse(readFileSync(join(paths.control, file), 'utf8'));
+  // A number, not the string an argv gives: the daemon takes an integer seq.
+  assert.equal(launch.escape, 4);
+
+  // An escape rides the run payload for the close-out fix-back to read back;
+  // on any other lane nothing would ever read it.
+  const wrongLane = refused([
+    'launch',
+    '--home',
+    home,
+    '--project',
+    'alpha',
+    '--escape',
+    '4',
+  ]);
+  assert.equal(wrongLane.status, 2);
+  assert.match(wrongLane.stderr, /--escape applies to --lane repair only \(lane: story\)/);
+  const notASeq = refused(['launch', '--home', home, ...repair, '--escape', 'the first one']);
+  assert.equal(notASeq.status, 2);
+  assert.match(notASeq.stderr, /--escape takes the escape's seq in the escapes ledger/);
+  assert.equal(readdirSync(paths.control).filter((f) => f.endsWith('.json')).length, 1);
+});
+
+test('a fixed-mark queues with its evidence and is refused without it', (t) => {
+  const { root, paths } = seededHome(t);
+  const bin = join(import.meta.dirname, '..', 'bin', 'olympusctl.mjs');
+  const home = join(root, 'home');
+  const ctl = (args) =>
+    execFileSync(process.execPath, [bin, ...args], { encoding: 'utf8', windowsHide: true });
+  const refused = (args) => {
+    try {
+      ctl(args);
+    } catch (error) {
+      return { status: error.status, stderr: error.stderr };
+    }
+    throw new Error(`expected olympusctl to refuse: ${args.join(' ')}`);
+  };
+
+  ctl([
+    'fixed',
+    '--home',
+    home,
+    '--escape',
+    '2',
+    '--evidence',
+    'fixed by hand on the default branch',
+    '--actor',
+    'human',
+  ]);
+  const file = readdirSync(paths.control).find((f) => f.startsWith('fixed'));
+  assert.deepEqual(JSON.parse(readFileSync(join(paths.control, file), 'utf8')), {
+    command: 'fixed',
+    actor: 'human',
+    escape: 2,
+    evidence: 'fixed by hand on the default branch',
+  });
+
+  // A mark with nothing behind it retires a defect on somebody's memory, so
+  // the evidence is not optional and blank is not evidence.
+  const noEvidence = refused(['fixed', '--home', home, '--escape', '2']);
+  assert.equal(noEvidence.status, 2);
+  assert.match(noEvidence.stderr, /--evidence is required/);
+  const blank = refused(['fixed', '--home', home, '--escape', '2', '--evidence', '   ']);
+  assert.equal(blank.status, 2);
+  assert.match(blank.stderr, /--evidence cannot be empty/);
+  const noEscape = refused(['fixed', '--home', home, '--evidence', 'fixed by hand']);
+  assert.equal(noEscape.status, 2);
+  assert.match(noEscape.stderr, /--escape is required/);
+  assert.equal(readdirSync(paths.control).filter((f) => f.endsWith('.json')).length, 1);
+});

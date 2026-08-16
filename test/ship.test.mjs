@@ -301,7 +301,18 @@ const BASE_SEATS = {
 
 function shipFixture(
   t,
-  { seats = {}, pollMs = 30, forgeOpts = {}, enqueue = false, slotCap = 2, config = {} } = {},
+  {
+    seats = {},
+    pollMs = 30,
+    forgeOpts = {},
+    enqueue = false,
+    slotCap = 2,
+    config = {},
+    // Registers the ship-carrying repair lane under the name the console
+    // route requires: `--lane repair` is the only lane a ticket and an escape
+    // reach, so a test of that route needs the real close-out behind it.
+    repairShips = false,
+  } = {},
 ) {
   const root = tempDir();
   const origin = initOriginRepo(join(root, 'origin'), {
@@ -339,20 +350,21 @@ function shipFixture(
   });
   const post = postFreeze({ afterVerdict: shipLane });
   const done = { stages: ['done'], handlers: { done: async () => ({ close: { state: 'shipped' } }) } };
+  const repairship = {
+    stages: ['seed-fix', ...shipLane.stages],
+    handlers: {
+      'seed-fix': async (ctx) => {
+        writeFileSync(join(ctx.payload.worktree, 'src/fix.mjs'), 'export const fixed = true;\n');
+        await commitAll(ctx.payload.worktree, 'fix: seed');
+        return { next: 'ship' };
+      },
+      ...shipLane.handlers,
+    },
+  };
   const lanes = {
     story: { stages: ['seed', ...post.stages], handlers: { seed: seedHandler(), ...post.handlers } },
-    repair: repairLane({ afterVerdict: done }),
-    repairship: {
-      stages: ['seed-fix', ...shipLane.stages],
-      handlers: {
-        'seed-fix': async (ctx) => {
-          writeFileSync(join(ctx.payload.worktree, 'src/fix.mjs'), 'export const fixed = true;\n');
-          await commitAll(ctx.payload.worktree, 'fix: seed');
-          return { next: 'ship' };
-        },
-        ...shipLane.handlers,
-      },
-    },
+    repair: repairShips ? repairship : repairLane({ afterVerdict: done }),
+    repairship,
   };
   const daemon = new Daemon(join(root, 'home'), { lanes });
   const fixture = seatFixture({ ...BASE_SEATS, ...seats });
@@ -1055,6 +1067,44 @@ test('a repair-lane ship stamps the escape fixed at close-out', async (t) => {
   assert.deepEqual(owedRepairs(fx.paths, 'proj'), []);
 });
 
+test('a console repair launch stamps its escape fixed at close-out', async (t) => {
+  const fx = shipFixture(t, { repairShips: true });
+  const store = openEscapesStore(fx.paths);
+  const recorded = recordEscape(store, {
+    actor: 'daemon',
+    category: 'product-escape',
+    defectLine: 'f(3) returns 5 in production',
+    detectionSource: 'human-report',
+    attribution: 'alpha-1',
+    refs: { project: 'proj', runId: 'seed' },
+  });
+  const ticket = repairTicketPath(fx.paths, recorded.seq);
+  writeFileSync(ticket, '# Fix f(3)\n');
+  ticketEscape(store, { actor: 'daemon', escape: recorded.seq, ticket });
+  store.close();
+  fx.forge.state.autoChecks = () => [green()];
+  await fx.daemon.start();
+  fx.daemon.engine.seatDefaults = () => ({ commandFor: seatFixture(BASE_SEATS).commandFor });
+  // The console names the ticket and nothing else. The daemon reads the
+  // escape off it, so the payload the close-out fix-back looks at is the
+  // payload the sweep would have built.
+  const { runId } = await fx.daemon.launchCommand({
+    actor: 'console:operator',
+    project: 'proj',
+    lane: 'repair',
+    ticket,
+  });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.find((e) => e.event === 'run-launched').escapeSeq, recorded.seq);
+  const escapes = readEscapeSet(fx.paths.escapesLedger);
+  assert.equal(escapes[0].fixed, true);
+  assert.equal(escapes[0].fixedBy, 'repair');
+  assert.equal(escapes[0].fixRefs.runId, runId);
+  // The loop closes for the console route as it does for the sweep's.
+  assert.deepEqual(owedRepairs(fx.paths, 'proj'), []);
+});
+
 test('the escape fix clears the red-merge breach it was recorded for', async (t) => {
   const fx = shipFixture(t);
   const store = openEscapesStore(fx.paths);
@@ -1106,6 +1156,55 @@ test('the escape fix clears the red-merge breach it was recorded for', async (t)
   assert.equal(resolution.resolves, breach.seq);
   assert.equal(resolution.resolvedEvent, 'red-merge-breach');
   assert.equal(resolution.owner, 'escape-fixed');
+  assert.deepEqual(
+    openLoud(fx.paths).filter((e) => e.event === 'red-merge-breach'),
+    [],
+  );
+});
+
+test('an operator fixed-mark clears the breach the way a shipped repair does', (t) => {
+  const fx = shipFixture(t);
+  const store = openEscapesStore(fx.paths);
+  const recorded = recordEscape(store, {
+    actor: 'daemon',
+    category: 'product-escape',
+    defectLine: 'f(3) returns 5 in production',
+    detectionSource: 'harness-self',
+    attribution: 'alpha-1',
+    refs: { project: 'proj', runId: 'seed' },
+  });
+  const ticket = repairTicketPath(fx.paths, recorded.seq);
+  writeFileSync(ticket, '# Fix f(3)\n');
+  ticketEscape(store, { actor: 'daemon', escape: recorded.seq, ticket });
+  store.close();
+  const seed = new TelemetryStore(
+    fx.paths,
+    'run:seed',
+    archivedRunLedgerPath(fx.paths, 'seed'),
+    RUN_EVENTS,
+  );
+  seed.append('run-launched', { actor: 'daemon', project: 'proj', lane: 'story' });
+  const breach = seed.append('red-merge-breach', {
+    actor: 'daemon',
+    pr: 3,
+    escapes: [recorded.seq],
+    ticketed: [recorded.seq],
+    gist: 'red merge on PR #3',
+  });
+  seed.append('run-closed', { actor: 'daemon', state: 'shipped' });
+  seed.close();
+  assert.equal(openLoud(fx.paths).length, 1);
+  fx.daemon.markEscapeFixed({
+    actor: 'console:operator',
+    escape: recorded.seq,
+    evidence: 'fixed by hand on the default branch',
+  });
+  // The strip asks whether the defect is still in the product, and it is out
+  // either way; the resolution says which route took it out.
+  const seeded = readEvents(archivedRunLedgerPath(fx.paths, 'seed'));
+  const resolution = seeded.find((e) => e.event === 'resolved');
+  assert.equal(resolution.resolves, breach.seq);
+  assert.equal(resolution.owner, 'escape-marked-fixed');
   assert.deepEqual(
     openLoud(fx.paths).filter((e) => e.event === 'red-merge-breach'),
     [],

@@ -395,7 +395,18 @@ loud.
 Owed breach repairs take their slots first: a sweep launches the ticketed
 escapes that have no repair run before it looks at the story frontier
 (ADR-0024). A pause is never bypassed — a paused project with owed repairs
-goes loud instead, and the stamp resolves when the repairs launch.
+goes loud instead, and the stamp resolves when the repairs launch or the
+escapes it names are fixed some other way.
+
+An escape ends by a repair run's close-out (`escape-fixed`, with the run, the
+PR and the merge behind it) or by an operator's fixed-mark
+(`escape-marked-fixed`, `olympusctl fixed`, with the required evidence it
+stands on). The owed set retires on either; the ledger says which happened.
+Every repair launch carries the escape it repairs in its run payload, whether
+the sweep built it, the console named it with `--escape`, or the daemon read
+it off the ticket path — the close-out fix-back reads that field and nothing
+else, and a console launch that names no open escape is refused before it
+takes a slot.
 
 Owed decision-record reconciliations launch second, after repairs and
 before stories (ADR-0026): shipped runs judged owed at close-out, minus

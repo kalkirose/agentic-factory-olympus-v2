@@ -161,28 +161,31 @@ export class FrontierLauncher {
     const d = this.daemon;
     if (!d.engine.lanes.has('repair')) return 0;
     const owed = owedRepairs(d.paths, project);
-    if (owed.length === 0) return 0;
-    if (!armed) {
-      this.noteOwedRepairs(project, owed);
-      return 0;
-    }
     let waiting = 0;
-    for (let i = 0; i < owed.length; i++) {
-      if (!d.running || !this.isArmed(project)) break;
-      if (!d.engine.hasFreeSlot(project)) {
-        waiting = owed.length - i;
-        break;
-      }
-      try {
-        await d.launchRun(repairLaunch(owed[i]));
-      } catch {
-        // One failed launch ends the pass; the escape stays owed and the next
-        // trigger retries it. The refusal stamps itself, and the story
-        // frontier keeps moving — a repair that cannot launch at all must not
-        // stop everything else.
-        break;
+    if (!armed) {
+      if (owed.length > 0) this.noteOwedRepairs(project, owed);
+    } else {
+      for (let i = 0; i < owed.length; i++) {
+        if (!d.running || !this.isArmed(project)) break;
+        if (!d.engine.hasFreeSlot(project)) {
+          waiting = owed.length - i;
+          break;
+        }
+        try {
+          await d.launchRun(repairLaunch(owed[i]));
+        } catch {
+          // One failed launch ends the pass; the escape stays owed and the
+          // next trigger retries it. The refusal stamps itself, and the story
+          // frontier keeps moving — a repair that cannot launch at all must
+          // not stop everything else.
+          break;
+        }
       }
     }
+    // Every pass, and not only a pass that launched: an owed set empties
+    // without a launch whenever somebody fixes an escape out of band, and an
+    // item nothing retires is a loud strip that stays lit over work that is
+    // done.
     this.clearOwedRepairs(project);
     return waiting;
   }

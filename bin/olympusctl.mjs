@@ -10,12 +10,14 @@
 //   olympusctl arm      --home <dir> --project <name>
 //   olympusctl pause    --home <dir> --project <name>
 //   olympusctl launch   --home <dir> --project <name> [--lane <name>]
-//                       [--card <path>] [--ticket <path>]
+//                       [--card <path>] [--ticket <path>] [--escape <n>]
 //                       [--resume-from <runId>]
 //   olympusctl kill     --home <dir> --run <id>
 //   olympusctl resolve  --home <dir> [--run <id>] --seq <n> [--note <text>]
 //   olympusctl revoke   --home <dir> --project <name> --fingerprint <f>
 //                       --fix <ref> [--note <text>]
+//   olympusctl fixed    --home <dir> --escape <n> --evidence <text>
+//                       [--note <text>]
 // --home falls back to OLYMPUSD_HOME; --actor defaults to console:<os user>.
 // Every park states the answer forms it takes, and `queue` prints them per
 // item: the options it offers, the free-text slot it wants, or both. Every
@@ -31,6 +33,12 @@
 // --ticket, and no other lane accepts one. A repo-relative ticket path names
 // a ticket committed in the run worktree; an absolute path names a ticket in
 // the daemon home.
+// A repair launch carries the escape it repairs, and the close-out stamps that
+// escape fixed when the repair merges. --escape names it; without the option
+// the daemon reads it off the ticket path when an open escape already names
+// that file. `fixed` is the other route: it marks an escape fixed out of band,
+// takes the evidence it stands on, and stamps an event of its own — an
+// operator's statement is never filed as a repair run's fix-back.
 // --resume-from names a prior story run whose freeze the new run inherits:
 // story lane only, and the prior run supplies the card, so --card is refused
 // beside it.
@@ -62,6 +70,8 @@ function parseArgs(argv) {
     ['--card', 'card'],
     ['--lane', 'lane'],
     ['--ticket', 'ticket'],
+    ['--escape', 'escape'],
+    ['--evidence', 'evidence'],
     ['--resume-from', 'resumeFrom'],
     ['--note', 'note'],
     ['--fingerprint', 'fingerprint'],
@@ -85,6 +95,15 @@ function need(opts, name) {
   return opts[name];
 }
 
+/** An escape is named by the seq of its record in the escapes ledger. */
+function escapeSeq(value) {
+  const seq = Number(value);
+  if (!Number.isInteger(seq) || seq < 1) {
+    fail(`--escape takes the escape's seq in the escapes ledger (got: ${value})`);
+  }
+  return seq;
+}
+
 function queueCommand(paths, command) {
   const file = writeControlCommand(paths, command);
   console.log(`queued: ${file}`);
@@ -94,16 +113,20 @@ function queueCommand(paths, command) {
 const { command, opts } = parseArgs(process.argv.slice(2));
 if (!command) {
   fail(
-    'usage: olympusctl <status|queue|frontier|answer|arm|pause|launch|kill|resolve|revoke> --home <dir>\n' +
+    'usage: olympusctl <status|queue|frontier|answer|arm|pause|launch|kill|resolve|revoke|fixed> --home <dir>\n' +
       '       answer: (--run <id> | --seq <n>) (--option <o> | --text <t>)\n' +
       '               queue prints the forms each park accepts; every run park\n' +
       '               takes --option abandon, which closes the run\n' +
       '       launch: --project <name> [--lane <name>] [--card <path>] [--ticket <path>]\n' +
-      '               [--resume-from <runId>]\n' +
+      '               [--escape <n>] [--resume-from <runId>]\n' +
       '       --lane repair requires --ticket; no other lane accepts one\n' +
+      '       --escape is repair-lane only; without it the ticket path names\n' +
+      '               the escape when an open escape record already names it\n' +
       '       --resume-from is story-lane only and takes no --card\n' +
       '       revoke: --project <name> --fingerprint <f> --fix <ref> [--note <text>]\n' +
-      '               ends the one acknowledgment its fingerprint names; status lists them',
+      '               ends the one acknowledgment its fingerprint names; status lists them\n' +
+      '       fixed:  --escape <n> --evidence <text> [--note <text>]\n' +
+      '               marks an escape fixed out of band; the evidence is required',
   );
 }
 if (!opts.home) fail('--home (or OLYMPUSD_HOME) is required');
@@ -171,6 +194,11 @@ if (command === 'status') {
   if (lane !== 'repair' && opts.ticket !== undefined) {
     fail(`--ticket applies to --lane repair only (lane: ${lane})`);
   }
+  // The escape rides the run payload, and the close-out stamps that escape
+  // fixed when the repair merges. On any other lane nothing would read it.
+  if (lane !== 'repair' && opts.escape !== undefined) {
+    fail(`--escape applies to --lane repair only (lane: ${lane})`);
+  }
   queueCommand(paths, {
     command: 'launch',
     actor,
@@ -178,6 +206,7 @@ if (command === 'status') {
     ...(opts.lane !== undefined && { lane: opts.lane }),
     ...(opts.card !== undefined && { card: opts.card }),
     ...(opts.ticket !== undefined && { ticket: opts.ticket }),
+    ...(opts.escape !== undefined && { escape: escapeSeq(opts.escape) }),
     ...(opts.resumeFrom !== undefined && { resumeFrom: opts.resumeFrom }),
   });
 } else if (command === 'kill') {
@@ -192,6 +221,20 @@ if (command === 'status') {
     project: need(opts, 'project'),
     fingerprint: need(opts, 'fingerprint'),
     fix: need(opts, 'fix'),
+    ...(opts.note !== undefined && { note: opts.note }),
+  });
+} else if (command === 'fixed') {
+  // The honest route for a defect somebody took out of the product without
+  // the factory: it ends the escape, and it says so in an event of its own,
+  // with the evidence a later reader stands on. Nothing derives that evidence
+  // — a mark with nothing behind it retires a defect on somebody's memory.
+  const evidence = need(opts, 'evidence');
+  if (evidence.trim().length === 0) fail('--evidence cannot be empty');
+  queueCommand(paths, {
+    command: 'fixed',
+    actor,
+    escape: escapeSeq(need(opts, 'escape')),
+    evidence,
     ...(opts.note !== undefined && { note: opts.note }),
   });
 } else if (command === 'resolve') {

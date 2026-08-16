@@ -192,10 +192,14 @@ export const INSTANCE_EVENTS = new Set([
 // The escape lifecycle: recorded → ticketed (the repair ticket the harness
 // wrote for it, absolute path) → fixed. The ticket stamp follows the file it
 // names, so a ticketed escape always has a ticket to repair from (ADR-0024).
+// An escape ends one of two ways and the ledger says which: `escape-fixed` is
+// a repair run's close-out, `escape-marked-fixed` is an operator's statement
+// that the defect is out of the product, with the evidence it stands on.
 export const ESCAPES_EVENTS = new Set([
   'escape-recorded',
   'escape-ticketed',
   'escape-fixed',
+  'escape-marked-fixed',
 ]);
 
 // Stream classing. Every stream-classed append also lands as a pointer in

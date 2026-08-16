@@ -1,16 +1,24 @@
 // The frontier's repair pass: the owed set derived from the escapes ledger
 // and the repair runs' own launch stamps, the launch order against the story
 // frontier, the slot-blocked retry, the paused project's loud stamp, and the
-// restart that owes nothing twice.
+// restart that owes nothing twice. With them, the two console routes that end
+// an escape — a repair launch that carries it, and an operator's fixed-mark.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, repairTicketPath } from '../src/daemon/home.mjs';
+import { writeControlCommand } from '../src/daemon/control.mjs';
 import { openEscapesStore } from '../src/telemetry/stores.mjs';
-import { recordEscape, ticketEscape, fixEscape } from '../src/telemetry/escapes.mjs';
-import { owedRepairs } from '../src/frontier/repairs.mjs';
+import {
+  recordEscape,
+  ticketEscape,
+  fixEscape,
+  readEscapeSet,
+} from '../src/telemetry/escapes.mjs';
+import { owedRepairs, launchEscape } from '../src/frontier/repairs.mjs';
+import { listRunEvents } from '../src/telemetry/readers.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { readStreamIndex } from '../src/telemetry/streams.mjs';
 import {
@@ -195,6 +203,146 @@ test('a paused project stamps its owed repairs loud once and resolves at launch'
   assert.equal(owedStamps(fx.paths).all.length, 1);
   assert.ok(fx.launched.includes(`repair:${first}`));
   assert.ok(fx.launched.includes(`repair:${second}`));
+});
+
+test('a repair launch carries the escape it was named, or the ticket names it', (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const paths = scaffoldHome(dir);
+  const seq = seedEscape(paths);
+  const ticket = repairTicketPath(paths, seq);
+  // Named outright, and derived from a ticket an escape record already names:
+  // both routes reach the same linkage the sweep builds for itself.
+  assert.deepEqual(launchEscape(paths, { ticket, escape: seq }), { seq, attribution: 'alpha-1' });
+  assert.deepEqual(launchEscape(paths, { ticket }), { seq, attribution: 'alpha-1' });
+  // A ticket the operator wrote by hand belongs to no escape, and a repair
+  // against one is a legitimate run with nothing to stamp back.
+  assert.equal(launchEscape(paths, { ticket: join(dir, 'tickets', 'by-hand.md') }), null);
+  assert.equal(launchEscape(paths, { ticket: 'tickets/in-the-worktree.md' }), null);
+  // A number that names no open escape is refused: silently dropping it loses
+  // the fix-back, and stamping it fixes an escape nobody repaired.
+  assert.throws(() => launchEscape(paths, { ticket, escape: 99 }), /no escape at seq 99/);
+  assert.throws(() => launchEscape(paths, { ticket, escape: 99 }), /open escapes: 1/);
+  assert.throws(() => launchEscape(paths, { ticket, escape: 'one' }), /integer seq/);
+  const store = openEscapesStore(paths);
+  fixEscape(store, {
+    actor: 'daemon',
+    fixes: seq,
+    category: 'product-escape',
+    attribution: 'alpha-1',
+    refs: { runId: 'r9', pr: 9 },
+  });
+  store.close();
+  assert.throws(() => launchEscape(paths, { ticket, escape: seq }), /already fixed \(repair\)/);
+  // The ticket of a fixed escape names nothing: the escape it belonged to is
+  // closed, and the run that repairs from it stamps nothing back.
+  assert.equal(launchEscape(paths, { ticket }), null);
+});
+
+test('a console repair launch carries its escape into the run payload', async (t) => {
+  const fx = fixture(t, { cards: ['s1'], slotCap: 2 });
+  await fx.daemon.start();
+  const derived = seedEscape(fx.paths, { defectLine: 'the derived defect' });
+  const named = seedEscape(fx.paths, { defectLine: 'the named defect' });
+  // The project stays paused: nothing here is the sweep's work.
+  await fx.daemon.launchCommand({
+    actor: 'console:operator',
+    project: 'alpha',
+    lane: 'repair',
+    ticket: repairTicketPath(fx.paths, derived),
+  });
+  await fx.daemon.launchCommand({
+    actor: 'console:operator',
+    project: 'alpha',
+    lane: 'repair',
+    ticket: join(fx.paths.tickets, 'by-hand.md'),
+    escape: named,
+  });
+  await waitFor(() => fx.launched.length === 2, { ...WAIT, label: 'two console repairs' });
+  assert.deepEqual(fx.launched, [`repair:${derived}`, `repair:${named}`]);
+  const launches = readEvents(fx.paths.instanceLedger).filter(
+    (e) => e.event === 'launch' && e.lane === 'repair',
+  );
+  assert.equal(launches.length, 2);
+  // The payload is where the close-out fix-back looks, and the attribution
+  // rides with it so the fix carries the story the defect came from.
+  const stamps = listRunEvents(fx.paths, { lane: 'repair' }).map(({ events }) =>
+    events.find((line) => line.event === 'run-launched'),
+  );
+  assert.deepEqual(
+    stamps.map((e) => e.escapeSeq).sort(),
+    [derived, named].sort(),
+  );
+  assert.deepEqual(stamps.map((e) => e.attribution), ['alpha-1', 'alpha-1']);
+  // Both escapes are answered by a repair run that exists.
+  assert.deepEqual(owedRepairs(fx.paths, 'alpha'), []);
+});
+
+test('a console launch that names no open escape is refused, loud, before a slot', async (t) => {
+  const fx = fixture(t, { cards: ['s1'], slotCap: 2 });
+  await fx.daemon.start();
+  const seq = seedEscape(fx.paths);
+  writeControlCommand(fx.paths, {
+    command: 'launch',
+    actor: 'console:operator',
+    project: 'alpha',
+    lane: 'repair',
+    ticket: repairTicketPath(fx.paths, seq),
+    escape: 99,
+  });
+  const rejected = await waitFor(
+    () => readEvents(fx.paths.instanceLedger).find((e) => e.event === 'launch-rejected'),
+    { ...WAIT, label: 'the launch was refused' },
+  );
+  assert.match(rejected.reason, /no escape at seq 99/);
+  assert.deepEqual(fx.launched, []);
+  assert.deepEqual(
+    owedRepairs(fx.paths, 'alpha').map((e) => e.seq),
+    [seq],
+  );
+});
+
+test('an operator fixed-mark retires the owed repair and the loud item', async (t) => {
+  const fx = fixture(t, { cards: ['s1'], slotCap: 2 });
+  await fx.daemon.start();
+  const seq = seedEscape(fx.paths);
+  // Paused, so the owed repair goes loud instead of launching.
+  await fx.daemon.frontier.queueSweep('alpha');
+  assert.equal(owedStamps(fx.paths).open.length, 1);
+  writeControlCommand(fx.paths, {
+    command: 'fixed',
+    actor: 'console:operator',
+    escape: seq,
+    evidence: 'fixed by hand on the default branch',
+  });
+  await waitFor(() => owedStamps(fx.paths).open.length === 0, { ...WAIT, label: 'owed resolved' });
+  // Nothing ran: the defect left the product without the factory, and the
+  // ledger says so under an event no repair run writes.
+  assert.deepEqual(fx.launched, []);
+  const marked = readEvents(fx.paths.escapesLedger).find((e) => e.event === 'escape-marked-fixed');
+  assert.equal(marked.fixes, seq);
+  assert.equal(marked.actor, 'console:operator');
+  assert.equal(marked.evidence, 'fixed by hand on the default branch');
+  assert.equal(readEscapeSet(fx.paths.escapesLedger)[0].fixedBy, 'operator');
+  assert.deepEqual(owedRepairs(fx.paths, 'alpha'), []);
+});
+
+test('a fixed-mark without evidence is refused and the escape stays owed', async (t) => {
+  const fx = fixture(t, { cards: ['s1'], slotCap: 2 });
+  await fx.daemon.start();
+  const seq = seedEscape(fx.paths);
+  const file = writeControlCommand(fx.paths, {
+    command: 'fixed',
+    actor: 'console:operator',
+    escape: seq,
+  });
+  const reason = join(fx.paths.controlRejected, `${file}.reason.txt`);
+  await waitFor(() => existsSync(reason), { ...WAIT, label: 'the mark was refused' });
+  assert.match(readFileSync(reason, 'utf8'), /carries the evidence it stands on/);
+  assert.deepEqual(
+    owedRepairs(fx.paths, 'alpha').map((e) => e.seq),
+    [seq],
+  );
 });
 
 test('a restarted daemon owes nothing the first one already launched', async (t) => {

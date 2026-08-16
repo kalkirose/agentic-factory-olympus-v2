@@ -3,8 +3,10 @@
 // and the run engine that owns every open run.
 import { watch, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { openInstanceStore, resolveClosedRun } from '../telemetry/stores.mjs';
+import { openEscapesStore, openInstanceStore, resolveClosedRun } from '../telemetry/stores.mjs';
 import { openWorkspaceLeftovers } from '../telemetry/readers.mjs';
+import { markEscapeFixed as appendFixedMark, readEscapeSet } from '../telemetry/escapes.mjs';
+import { settleBreachOf } from '../telemetry/breaches.mjs';
 import { loadInstanceConfig, INSTANCE_CONFIG_FILE } from '../config/instance.mjs';
 import { RunEngine } from '../engine/engine.mjs';
 import { ModelSemaphores } from '../seats/semaphore.mjs';
@@ -23,6 +25,7 @@ import { parseProjectConfig } from '../config/project.mjs';
 import { parseIntentCard } from '../lanes/card.mjs';
 import { readInheritance, closeState } from '../lanes/resume.mjs';
 import { FrontierLauncher } from '../frontier/autolaunch.mjs';
+import { launchEscape } from '../frontier/repairs.mjs';
 import { readGraphSource } from '../frontier/source.mjs';
 import { TripwireWatcher } from '../tripwires/watcher.mjs';
 import { EvalScheduler } from '../eval/review.mjs';
@@ -155,6 +158,13 @@ export class Daemon {
     });
     this.registerCommand('launch', async (command) => {
       await this.launchCommand(command);
+      this.frontier.queueSweepAll();
+    });
+    // An escape somebody fixed outside the factory. The mark ends the escape
+    // the way a repair run's close-out does, and the sweep that follows it
+    // retires the owed repair and the loud item that named it (ADR-0024).
+    this.registerCommand('fixed', async (command) => {
+      this.markEscapeFixed(command);
       this.frontier.queueSweepAll();
     });
     // A resolve targets a loud item: an open run (through the engine, with
@@ -452,10 +462,14 @@ export class Daemon {
    * A resume names the run whose freeze it inherits. It belongs to the story
    * lane, and the prior run supplies the card, so both mismatches are refused
    * here as well.
+   * A repair launch carries the escape it repairs, from the number the
+   * operator named or from the ticket path when an open escape names that
+   * file. The payload is the only place the close-out fix-back looks, so the
+   * console route stamps the escapes ledger exactly as the sweep's does.
    * @param {{actor: string, project: string, lane?: string, card?: string,
-   *   ticket?: string, resumeFrom?: string}} command
+   *   ticket?: string, escape?: number, resumeFrom?: string}} command
    */
-  async launchCommand({ actor, project, lane = 'story', card, ticket, resumeFrom }) {
+  async launchCommand({ actor, project, lane = 'story', card, ticket, escape, resumeFrom }) {
     if (typeof actor !== 'string' || actor.length === 0) throw new Error('launch requires an actor');
     if (resumeFrom !== undefined) {
       if (lane !== 'story') {
@@ -465,15 +479,26 @@ export class Daemon {
         throw new Error('a resume takes its card from the prior run; name no card');
       }
     }
+    let carried = null;
     if (lane === 'repair') {
       if (typeof ticket !== 'string' || ticket.length === 0) {
         throw new Error('a repair launch requires a ticket path');
       }
-    } else if (ticket !== undefined) {
-      throw new Error(`a ticket applies to the repair lane only (lane: ${lane})`);
+      carried = launchEscape(this.paths, { ticket, escape });
+    } else {
+      if (ticket !== undefined) {
+        throw new Error(`a ticket applies to the repair lane only (lane: ${lane})`);
+      }
+      if (escape !== undefined) {
+        throw new Error(`an escape applies to the repair lane only (lane: ${lane})`);
+      }
     }
     const payload = {};
     if (ticket !== undefined) payload.ticket = ticket;
+    if (carried) {
+      payload.escapeSeq = carried.seq;
+      payload.attribution = carried.attribution;
+    }
     if (resumeFrom !== undefined) payload.resumeFrom = resumeFrom;
     if (card !== undefined) {
       payload.card = card;
@@ -525,6 +550,42 @@ export class Daemon {
       ...(answer !== undefined && { answer }),
       ...(target.card !== undefined && { card: target.card }),
     });
+  }
+
+  /**
+   * Records that an escape was fixed outside the factory: a merge nobody ran
+   * through the harness, a defect that turned out to be gone. The mark is its
+   * own event, so no reader takes an operator's statement for a repair run's
+   * fix-back, and the evidence is required — a mark with nothing behind it
+   * retires a defect on somebody's memory. The breach the escape belonged to
+   * settles with it, exactly as it does behind a shipped repair (ADR-0024).
+   * @param {{actor: string, escape: number, evidence: string, note?: string}} cmd
+   */
+  markEscapeFixed({ actor, escape, evidence, note }) {
+    if (typeof actor !== 'string' || actor.length === 0) {
+      throw new Error('a fixed-mark requires an actor');
+    }
+    if (!Number.isInteger(escape)) {
+      throw new Error('a fixed-mark names the escape seq it closes (--escape)');
+    }
+    if (typeof evidence !== 'string' || evidence.trim().length === 0) {
+      throw new Error('a fixed-mark carries the evidence it stands on (--evidence)');
+    }
+    const store = openEscapesStore(this.paths);
+    let line;
+    try {
+      line = appendFixedMark(store, {
+        actor,
+        fixes: escape,
+        evidence,
+        ...(note !== undefined && { note }),
+      });
+    } finally {
+      store.close();
+    }
+    const entry = readEscapeSet(this.paths.escapesLedger).find((e) => e.seq === escape);
+    if (entry) settleBreachOf(this.paths, entry);
+    return line;
   }
 
   // -- finding acknowledgments (ADR-0032) -----------------------------------

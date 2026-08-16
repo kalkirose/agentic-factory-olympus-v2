@@ -1,10 +1,11 @@
 // Escapes ledger: the central, counted record of post-merge defects and
-// chores. Three-event lifecycle — `escape-recorded` at repair-lane launch or
-// red-merge conversion, `escape-ticketed` when the harness has written the
-// repair ticket the escape is repaired from, `escape-fixed` at repair-lane
-// close; all three linked by the recorded seq. The recorded category is a
-// routing hint until fixed; the fix carries the final category and
-// attribution.
+// chores. Lifecycle — `escape-recorded` at repair-lane launch or red-merge
+// conversion, `escape-ticketed` when the harness has written the repair
+// ticket the escape is repaired from, then one of the two ends: `escape-fixed`
+// at repair-lane close, or `escape-marked-fixed` when an operator fixed it
+// outside the factory and says what that stands on. Every event is linked by
+// the recorded seq. The recorded category is a routing hint until fixed; a
+// repair-lane fix carries the final category and attribution.
 import { isAbsolute } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
 
@@ -90,6 +91,28 @@ export function ticketEscape(store, { actor, escape, ticket, refs }) {
   return store.append('escape-ticketed', { actor, escape, ticket, ...(refs && { refs }) });
 }
 
+// The two events that end an escape. A repair run's close-out stamps
+// `escape-fixed` with the run and the merge behind it; an operator who fixed
+// the defect outside the factory stamps `escape-marked-fixed` with the
+// evidence they stand on. Both close the escape, and the ledger says which
+// one happened — a repair the factory ran and a claim a human made are not
+// the same fact (ADR-0024).
+export const ESCAPE_FIX_EVENTS = new Set(['escape-fixed', 'escape-marked-fixed']);
+
+/** The event that closed this escape, or undefined. */
+function fixOf(events, seq) {
+  return events.find((e) => ESCAPE_FIX_EVENTS.has(e.event) && e.fixes === seq);
+}
+
+/** The escape-recorded event at this seq, or a throw naming what is there. */
+function requireRecord(events, seq) {
+  const target = events.find((e) => e.seq === seq);
+  if (!target || target.event !== 'escape-recorded') {
+    throw new Error(`no escape-recorded at seq ${seq}`);
+  }
+  return target;
+}
+
 /**
  * Appends the linked `escape-fixed` event with the final category and
  * attribution. Refuses an unknown target and a double fix.
@@ -106,28 +129,56 @@ export function fixEscape(store, { actor, fixes, category, attribution, refs }) 
   }
   if (!refs) throw new Error('escape-fixed requires a fix ref');
   const events = readEvents(store.ledger.path);
-  const target = events.find((e) => e.seq === fixes);
-  if (!target || target.event !== 'escape-recorded') {
-    throw new Error(`no escape-recorded at seq ${fixes}`);
-  }
-  if (events.some((e) => e.event === 'escape-fixed' && e.fixes === fixes)) {
-    throw new Error(`escape at seq ${fixes} is already fixed`);
-  }
+  requireRecord(events, fixes);
+  const fixed = fixOf(events, fixes);
+  if (fixed) throw new Error(`escape at seq ${fixes} is already fixed (${fixed.event})`);
   return store.append('escape-fixed', { actor, fixes, category, attribution, refs });
+}
+
+/**
+ * Appends the linked `escape-marked-fixed` event: an operator states that the
+ * defect is out of the product, and no repair run says so. The evidence is
+ * required, because a mark with nothing behind it retires a defect on
+ * somebody's memory. Refuses an unknown target and a double fix.
+ * @param {import('./stores.mjs').TelemetryStore} store the escapes store
+ * @param {{actor: string, fixes: number, evidence: string, note?: string}} fields
+ */
+export function markEscapeFixed(store, { actor, fixes, evidence, note }) {
+  if (typeof actor !== 'string' || actor.length === 0) {
+    throw new Error('escape-marked-fixed requires an actor');
+  }
+  if (!Number.isInteger(fixes)) {
+    throw new Error('escape-marked-fixed requires an integer fixes seq');
+  }
+  if (typeof evidence !== 'string' || evidence.trim().length === 0) {
+    throw new Error('escape-marked-fixed requires the evidence the mark stands on');
+  }
+  const events = readEvents(store.ledger.path);
+  requireRecord(events, fixes);
+  const fixed = fixOf(events, fixes);
+  if (fixed) throw new Error(`escape at seq ${fixes} is already fixed (${fixed.event})`);
+  return store.append('escape-marked-fixed', {
+    actor,
+    fixes,
+    evidence,
+    ...(note !== undefined && { note }),
+  });
 }
 
 /**
  * Reads the escapes ledger into one entry per recorded escape, with the
  * ticket and the fix merged in where they exist. `category` and
- * `attribution` are final values (from the fix when fixed, else from the
- * record); `ticket` is the repair ticket's absolute path, or null.
+ * `attribution` are final values (from the fix when it carries them, else
+ * from the record); `ticket` is the repair ticket's absolute path, or null.
+ * `fixed` is true for either end, and `fixedBy` says which: `repair` for a
+ * repair run's close-out, `operator` for a mark.
  */
 export function readEscapeSet(path) {
   const events = readEvents(path);
   const fixes = new Map();
   const tickets = new Map();
   for (const e of events) {
-    if (e.event === 'escape-fixed') fixes.set(e.fixes, e);
+    if (ESCAPE_FIX_EVENTS.has(e.event)) fixes.set(e.fixes, e);
     else if (e.event === 'escape-ticketed') tickets.set(e.escape, e);
   }
   const set = [];
@@ -139,12 +190,17 @@ export function readEscapeSet(path) {
       recordedTs: e.ts,
       defectLine: e.defectLine,
       detectionSource: e.detectionSource,
-      category: fix ? fix.category : e.category,
-      attribution: fix ? fix.attribution : e.attribution,
+      // An operator mark carries no classification: the record's own category
+      // and attribution stand, so the quality-bar window counts the escape as
+      // it was recorded rather than losing it to an undefined class.
+      category: fix?.category ?? e.category,
+      attribution: fix?.attribution ?? e.attribution,
       refs: e.refs,
       ticket: tickets.get(e.seq)?.ticket ?? null,
       fixed: Boolean(fix),
-      fixRefs: fix ? fix.refs : undefined,
+      fixedBy: fix ? (fix.event === 'escape-fixed' ? 'repair' : 'operator') : undefined,
+      fixRefs: fix?.refs,
+      fixEvidence: fix?.evidence,
     });
   }
   return set;

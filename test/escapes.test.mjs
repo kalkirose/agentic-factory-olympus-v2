@@ -7,10 +7,12 @@ import {
   recordEscape,
   ticketEscape,
   fixEscape,
+  markEscapeFixed,
   readEscapeSet,
   openEscapes,
   escapesWindow,
 } from '../src/telemetry/escapes.mjs';
+import { readEvents } from '../src/ledger/ledger.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
 function escapesStore(t) {
@@ -153,6 +155,71 @@ test('a fix must point at a recorded escape, once, with a fix ref', (t) => {
   assert.throws(() => fixEscape(store, { ...fix, refs: undefined }), /requires a fix ref/);
   fixEscape(store, fix);
   assert.throws(() => fixEscape(store, fix), /already fixed/);
+  store.close();
+});
+
+test('an operator fixed-mark ends the escape under an event of its own', (t) => {
+  const { paths, store } = escapesStore(t);
+  const recorded = recordEscape(store, {
+    actor: 'daemon',
+    category: 'product-escape',
+    defectLine: 'f(3) returns 5 in production',
+    detectionSource: 'human-report',
+    attribution: 'alpha-1',
+  });
+  markEscapeFixed(store, {
+    actor: 'console:operator',
+    fixes: recorded.seq,
+    evidence: 'fixed by hand on the default branch',
+    note: 'found while reading the module',
+  });
+  store.close();
+  // The ledger says which route ended it: a repair run the factory ran and a
+  // statement a human made are not the same fact.
+  const events = readEvents(paths.escapesLedger);
+  assert.deepEqual(
+    events.map((e) => e.event),
+    ['escape-recorded', 'escape-marked-fixed'],
+  );
+  const set = readEscapeSet(paths.escapesLedger);
+  assert.equal(set[0].fixed, true);
+  assert.equal(set[0].fixedBy, 'operator');
+  assert.equal(set[0].fixEvidence, 'fixed by hand on the default branch');
+  assert.equal(set[0].fixRefs, undefined);
+  // The mark classifies nothing, so the record's own values stand and the
+  // quality-bar window still counts the escape.
+  assert.equal(set[0].category, 'product-escape');
+  assert.equal(set[0].attribution, 'alpha-1');
+  assert.equal(openEscapes(paths.escapesLedger).length, 0);
+});
+
+test('a fixed-mark needs evidence, a real target, and no fix in front of it', (t) => {
+  const { store } = escapesStore(t);
+  const recorded = recordEscape(store, {
+    actor: 'daemon',
+    category: 'harness',
+    defectLine: 'watcher missed a check transition',
+    detectionSource: 'harness-self',
+  });
+  const mark = { actor: 'console:operator', fixes: recorded.seq, evidence: 'merged by hand' };
+  assert.throws(() => markEscapeFixed(store, { ...mark, fixes: 99 }), /no escape-recorded at seq/);
+  assert.throws(() => markEscapeFixed(store, { ...mark, evidence: undefined }), /requires the evidence/);
+  assert.throws(() => markEscapeFixed(store, { ...mark, evidence: '   ' }), /requires the evidence/);
+  assert.throws(() => markEscapeFixed(store, { ...mark, actor: '' }), /requires an actor/);
+  markEscapeFixed(store, mark);
+  // Neither route may fix an escape the other one closed.
+  assert.throws(() => markEscapeFixed(store, mark), /already fixed \(escape-marked-fixed\)/);
+  assert.throws(
+    () =>
+      fixEscape(store, {
+        actor: 'daemon',
+        fixes: recorded.seq,
+        category: 'harness',
+        attribution: 'unattributed',
+        refs: { pr: 3 },
+      }),
+    /already fixed \(escape-marked-fixed\)/,
+  );
   store.close();
 });
 

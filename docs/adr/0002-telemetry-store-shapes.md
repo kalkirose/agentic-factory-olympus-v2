@@ -21,9 +21,12 @@ shapes:
   targets and double resolution. The open set = index entries without a
   linked resolution, and for a record that carries no index entry, a read of
   its own ledger.
-- **Escapes linkage.** `escape-fixed` carries `fixes` (the seq of its
-  `escape-recorded`). The fix's category and attribution are the final
-  values; the recorded ones stay a routing hint. One fix per record.
+- **Escapes linkage.** `escape-fixed` and `escape-marked-fixed` carry `fixes`
+  (the seq of their `escape-recorded`): the first is a repair run's close-out,
+  the second an operator's out-of-band mark with the evidence it stands on. A
+  repair fix's category and attribution are the final values; the recorded
+  ones stay a routing hint, and a mark reclassifies nothing. One fix per
+  record, by either event.
 - **Archive layout.** `archive/runs/<runId>` under the daemon home. The
   whole run directory moves after `run-closed`; an open run does not
   archive. Readers fall back to the archive, so open loud items outlive
