@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { homePaths, scaffoldHome } from '../src/daemon/home.mjs';
 import { cloneDir, ensureBareClone, fetchClone, branchSha, readBlobFromBranch } from '../src/isolation/clones.mjs';
@@ -282,6 +282,81 @@ test('a workspace that is already gone is not swept at all', async (t) => {
   assert.deepEqual(errors, []);
   assert.equal(swept, null);
   assert.deepEqual(sweep.roots, []);
+});
+
+// -- the retry ladder under every removal ------------------------------------
+// A run workspace is a checked-out application, and a hold on one file in it
+// refuses the whole removal. The hold is another process's and no portable
+// test can stage one, so the delete call is the seam.
+
+/** A delete a hold refuses for its first `holds` calls, then lets through. */
+function heldRemove(holds) {
+  const remove = (path, options) => {
+    remove.calls++;
+    if (remove.calls <= holds) {
+      throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+    }
+    return rmSync(path, options);
+  };
+  remove.calls = 0;
+  return remove;
+}
+
+/** A daemon home with one workspace under it and no run behind it. */
+function stagedWorkspace(t, runId) {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const paths = scaffoldHome(join(root, 'home'));
+  mkdirSync(join(workspaceRoot(paths, runId), 'tree'), { recursive: true });
+  return paths;
+}
+
+test('a workspace a hold refuses is asked again, and the release lands', async (t) => {
+  const paths = stagedWorkspace(t, 'r30');
+  const remove = heldRemove(2);
+  const isolation = new RunIsolation(paths, {
+    sweepProcesses: fakeSweep(),
+    removalIo: { remove, sleep: async () => {} },
+  });
+  const { errors, leftover } = await isolation.release('r30');
+  assert.deepEqual(errors, []);
+  assert.equal(leftover, null);
+  assert.equal(remove.calls, 3);
+  assert.ok(!existsSync(workspaceRoot(paths, 'r30')));
+});
+
+test('a workspace nothing will delete comes back named', async (t) => {
+  const paths = stagedWorkspace(t, 'r31');
+  const remove = heldRemove(Infinity);
+  const isolation = new RunIsolation(paths, {
+    sweepProcesses: fakeSweep(),
+    removalIo: { remove, sleep: async () => {}, attempts: 3 },
+  });
+  const { errors, leftover } = await isolation.release('r31');
+  assert.equal(remove.calls, 3);
+  // The workspace is where it was, the release says why, and it names the
+  // directory — nothing else in the harness would ever come back to it.
+  assert.equal(leftover, workspaceRoot(paths, 'r31'));
+  assert.ok(existsSync(workspaceRoot(paths, 'r31')));
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /^workspace root: .*EBUSY/);
+});
+
+test('a removal a second attempt cannot change is reported at once', async (t) => {
+  const paths = stagedWorkspace(t, 'r32');
+  const remove = () => {
+    remove.calls++;
+    throw new Error('ENOSPC: no space left on device');
+  };
+  remove.calls = 0;
+  const isolation = new RunIsolation(paths, {
+    sweepProcesses: fakeSweep(),
+    removalIo: { remove, sleep: async () => {} },
+  });
+  const { errors, leftover } = await isolation.release('r32');
+  assert.equal(remove.calls, 1);
+  assert.equal(leftover, workspaceRoot(paths, 'r32'));
+  assert.match(errors[0], /ENOSPC/);
 });
 
 test('a sweep that could not run is reported and the release goes on', async (t) => {

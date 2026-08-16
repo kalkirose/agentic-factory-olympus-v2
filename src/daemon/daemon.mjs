@@ -4,6 +4,7 @@
 import { watch, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { openInstanceStore, resolveClosedRun } from '../telemetry/stores.mjs';
+import { openWorkspaceLeftovers } from '../telemetry/readers.mjs';
 import { loadInstanceConfig, INSTANCE_CONFIG_FILE } from '../config/instance.mjs';
 import { RunEngine } from '../engine/engine.mjs';
 import { ModelSemaphores } from '../seats/semaphore.mjs';
@@ -32,6 +33,10 @@ import { acquireLock } from './lock.mjs';
 
 const ACTOR = 'daemon';
 const CONFIG_DEBOUNCE_MS = 150; // collapses editor multi-writes; not a detector
+// The period of the orphan-workspace sweep. Low by design: it exists so a
+// leftover clears without a restart, and nothing in the harness waits on it
+// (ADR-0004). Every tick that finds nothing writes nothing.
+const WORKSPACE_SWEEP_MS = 15 * 60 * 1000;
 // The events that bound one instance's life. A tail that is not a clean stop
 // is a death nothing recorded.
 const LIFECYCLE_EVENTS = new Set(['daemon-started', 'daemon-stopped']);
@@ -54,23 +59,33 @@ export class Daemon {
    * @param {string} home
    * @param {{handleSignals?: boolean, lanes?: Record<string, object>,
    *   composeRunner?: Function, evalSeatDefaults?: () => object,
+   *   workspaceSweepMs?: number,
    *   notifierTransport?: {fetchImpl?: Function, spawnImpl?: Function}}} opts
    *   lanes: lane name → {stages, handlers}, registered on the run engine at
    *   start; `lanes/assemble.mjs` builds the graph the daemon binary passes,
    *   and a fixture graph substitutes it in tests. composeRunner
    *   substitutes the compose child process (tests only); evalSeatDefaults
    *   substitutes the eval seat's dispatch defaults (tests only);
+   *   workspaceSweepMs shortens the orphan-sweep period (tests only);
    *   notifierTransport substitutes the push transport (tests only).
    */
   constructor(
     home,
-    { handleSignals = false, lanes = {}, composeRunner, evalSeatDefaults, notifierTransport } = {},
+    {
+      handleSignals = false,
+      lanes = {},
+      composeRunner,
+      evalSeatDefaults,
+      workspaceSweepMs = WORKSPACE_SWEEP_MS,
+      notifierTransport,
+    } = {},
   ) {
     this.paths = homePaths(home);
     this.handleSignals = handleSignals;
     this.lanes = lanes;
     this.composeRunner = composeRunner;
     this.evalSeatDefaults = evalSeatDefaults;
+    this.workspaceSweepMs = workspaceSweepMs;
     this.notifierTransport = notifierTransport;
     this.running = false;
     this.config = null;
@@ -84,10 +99,18 @@ export class Daemon {
     this.evals = null;
     this.notifier = null;
     this.pendingTeardowns = new Set();
+    // The run ids a release holds and the run ids a provision holds. Both keep
+    // the periodic sweep off a workspace somebody else is already working on:
+    // a second delete of one tree reports the first one's failures, and a
+    // workspace whose run has not reached the engine yet is not an orphan.
+    this.releasing = new Set();
+    this.provisioning = new Set();
     this.launchCounter = 0;
     this.watchers = [];
     this.commands = new Map();
     this.configTimer = null;
+    this.sweepTimer = null;
+    this.sweeping = false;
     this.stopPromise = null;
     this.stopStamped = false;
     this.signalHandler = null;
@@ -247,6 +270,7 @@ export class Daemon {
       this.archiveStaleControlFiles(queuedWhileDown);
       this.watchConfig();
       this.watchControl();
+      this.armWorkspaceSweep();
       if (this.handleSignals) this.installSignalHandlers();
       this.running = true;
       this.frontier.queueSweepAll();
@@ -321,7 +345,10 @@ export class Daemon {
       payload.resumeFrom !== undefined ? this.resolveResume(project, lane, payload) : null;
     runId = runId ?? `${project}-${Date.now().toString(36)}-${++this.launchCounter}`;
     // Past this point the run has a name, and every refusal carries it: the
-    // rejection stamp names the run that would have existed.
+    // rejection stamp names the run that would have existed. The name is also
+    // what holds the orphan sweep off the workspace this launch is about to
+    // create: until the engine holds the run, nothing else says it is alive.
+    this.provisioning.add(runId);
     try {
       if (this.engine.runs.has(runId)) throw new Error(`run ${runId} is already live`);
       if (readEvents(runLedgerPath(this.paths, runId)).length > 0) {
@@ -365,6 +392,8 @@ export class Daemon {
     } catch (error) {
       if (error instanceof Error) error.runId ??= runId;
       throw error;
+    } finally {
+      this.provisioning.delete(runId);
     }
   }
 
@@ -606,13 +635,24 @@ export class Daemon {
   }
 
   async releaseWorkspace(runId, { project, orphan = false, keepBranch = false } = {}) {
+    // One release per run at a time. The close-time teardown and a sweep tick
+    // can name the same workspace, and the second delete of one tree reports
+    // the first one's work as its own failure.
+    if (this.releasing.has(runId)) return;
+    this.releasing.add(runId);
+    let released = null;
     let errors;
-    let swept;
     try {
-      ({ errors, swept } = await this.isolation.release(runId, { project, keepBranch }));
+      released = await this.isolation.release(runId, { project, keepBranch });
+      errors = released.errors;
     } catch (error) {
+      // The release collects the errors of its own steps, so a throw is the
+      // release failing as a whole — and it says nothing about what is on disk.
       errors = [error.message];
+    } finally {
+      this.releasing.delete(runId);
     }
+    const swept = released?.swept;
     this.ledger.append('workspace-released', {
       actor: ACTOR,
       runId,
@@ -622,17 +662,64 @@ export class Daemon {
       // What the release had to end before it could delete anything. Silent
       // when the workspace held nothing, which is the ordinary case.
       ...(swept?.count > 0 && { swept: { count: swept.count, names: swept.names } }),
+      ...(released?.leftover && { leftover: released.leftover }),
       ...(errors.length > 0 && { errors }),
     });
+    if (released === null) return;
+    if (released.leftover !== null) this.recordWorkspaceLeftover(runId, released.leftover, errors);
+    else this.settleWorkspaceLeftover(runId);
+  }
+
+  /**
+   * Records a workspace the release could not delete, and never fails its
+   * caller. The run is over and it closed as it closed; a directory nothing
+   * would delete is housekeeping the harness owes itself, so the record is
+   * quiet and the daemon carries on (ADR-0004). One open record per run: a
+   * sweep that tries again and is blocked again reports the same directory.
+   */
+  recordWorkspaceLeftover(runId, path, errors) {
+    try {
+      if (openWorkspaceLeftovers(this.paths).has(runId)) return;
+      this.ledger.append('workspace-leftover', {
+        actor: ACTOR,
+        runId,
+        path,
+        reason: errors.join('; '),
+      });
+    } catch {
+      // A record of a directory is never worth a second failure.
+    }
+  }
+
+  /** Answers the open leftover record of a run whose workspace is now gone. */
+  settleWorkspaceLeftover(runId) {
+    try {
+      const open = openWorkspaceLeftovers(this.paths).get(runId);
+      if (open) this.ledger.resolve({ actor: ACTOR, resolves: open.seq, runId, path: open.path });
+    } catch {
+      // The workspace is gone. No bookkeeping behind that brings it back.
+    }
   }
 
   /**
    * Releases workspaces whose run is not open — a daemon that died between
-   * run close and teardown leaves these behind. Runs at start.
+   * run close and teardown leaves these behind — and retries every leftover a
+   * release could not delete. Runs at start and on the periodic timer.
+   *
+   * A run that is provisioning owns its workspace as much as an open run does:
+   * its directory exists before the engine holds the run, and a sweep that
+   * read it as an orphan would delete a live checkout.
    */
   async sweepOrphanWorkspaces() {
-    const open = new Set(this.engine.runs.keys());
-    for (const runId of this.isolation.orphanRunIds(open)) {
+    const open = new Set([...this.engine.runs.keys(), ...this.provisioning]);
+    const ids = new Set(this.isolation.orphanRunIds(open));
+    // A recorded leftover is swept whether or not its directory is still
+    // there. One somebody deleted by hand leaves a record that only a release
+    // answers, and a release of a workspace that is gone is the answer.
+    for (const runId of openWorkspaceLeftovers(this.paths).keys()) {
+      if (!open.has(runId)) ids.add(runId);
+    }
+    for (const runId of ids) {
       // Same branch rule as a normal close; a workspace with no ledger at all
       // reads as not shipped, which is the safe side of the guess.
       await this.releaseWorkspace(runId, {
@@ -640,6 +727,31 @@ export class Daemon {
         keepBranch: closeState(this.paths, runId) !== 'shipped',
       });
     }
+  }
+
+  /**
+   * Arms the periodic orphan sweep. A leftover is a retry the harness owes
+   * itself, and a restart is too long to wait for one: the hold that blocked
+   * the release is another process's, and most of them let go within minutes.
+   * The tick stamps only what it acts on, so an instance with nothing left
+   * behind writes nothing for as long as it runs.
+   */
+  armWorkspaceSweep() {
+    this.sweepTimer = setInterval(() => this.sweepWorkspacesOnTick(), this.workspaceSweepMs);
+    // Housekeeping never holds the process open on its own.
+    this.sweepTimer.unref();
+  }
+
+  sweepWorkspacesOnTick() {
+    if (!this.running || this.sweeping) return;
+    this.sweeping = true;
+    const task = this.sweepOrphanWorkspaces()
+      .catch(() => {})
+      .finally(() => {
+        this.sweeping = false;
+        this.pendingTeardowns.delete(task);
+      });
+    this.pendingTeardowns.add(task);
   }
 
   // -- instance config ------------------------------------------------------
@@ -888,6 +1000,8 @@ export class Daemon {
 
   teardown() {
     clearTimeout(this.configTimer);
+    clearInterval(this.sweepTimer);
+    this.sweepTimer = null;
     for (const watcher of this.watchers) watcher.close();
     this.watchers = [];
     if (this.signalHandler) {

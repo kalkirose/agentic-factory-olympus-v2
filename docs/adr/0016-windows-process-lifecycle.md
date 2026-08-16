@@ -35,7 +35,8 @@ below is byte for byte what shipped before.
   processes whose command line or image path sits inside the run's workspace,
   ends each one, and only then removes the worktrees. What it ended is stamped
   on `workspace-released` as `swept: {count, names}`. A sweep is refused
-  outright on a root that is relative or shorter than four characters.
+  outright on a root that is relative or shorter than four characters. What
+  the removal does when the sweep is not enough is ADR-0004.
 - **Every exit stamps.** `daemon-stopped` is written by the control stop, by
   SIGINT, SIGTERM, SIGBREAK and SIGHUP, by `process.on('exit')` as the floor
   under all of them, and by a fault handler that stamps and then exits

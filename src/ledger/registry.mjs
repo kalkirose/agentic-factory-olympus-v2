@@ -162,6 +162,12 @@ export const INSTANCE_EVENTS = new Set([
   'finding-ack',
   'finding-ack-revoked',
   'workspace-released',
+  // A run workspace the release could not delete, naming the directory that
+  // stayed behind. Quiet: the run is over, every reader already looks past
+  // the workspace root, and the answer is a retry the harness owes itself
+  // rather than a decision for the owner. It stays open until a sweep deletes
+  // what it names, and the `resolved` beside it is that sweep (ADR-0004).
+  'workspace-leftover',
   'arming-changed',
   'config-changed',
   'factory-starvation',

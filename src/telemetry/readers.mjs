@@ -65,6 +65,26 @@ export function openBreaches(paths) {
 }
 
 /**
+ * Workspaces a release could not delete and no sweep has cleared yet, by run
+ * id. The records are quiet, so they carry no stream entry and the query reads
+ * the instance ledger itself. One run holds at most one open record; a later
+ * record for the same run replaces the view of it, which is what a reader
+ * wants — the last statement about a directory is the true one.
+ * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ * @returns {Map<string, object>}
+ */
+export function openWorkspaceLeftovers(paths) {
+  const events = readEvents(paths.instanceLedger);
+  const resolved = new Set(events.filter((e) => e.event === 'resolved').map((e) => e.resolves));
+  const open = new Map();
+  for (const event of events) {
+    if (event.event !== 'workspace-leftover' || resolved.has(event.seq)) continue;
+    open.set(event.runId, event);
+  }
+  return open;
+}
+
+/**
  * All run ledgers, live and archived, optionally filtered by the launching
  * project and lane. Each entry: runId, archived flag, project, lane, and the
  * full event list. A ledger without a `run-launched` stamp matches nothing.

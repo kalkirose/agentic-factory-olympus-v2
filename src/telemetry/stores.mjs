@@ -15,13 +15,15 @@ import {
 import { runLedgerPath, archivedRunLedgerPath } from '../daemon/home.mjs';
 import { appendStreamEntry } from './streams.mjs';
 
-// Loud items, breaches, baseline proposals, and eval reviews take a paired
-// `resolved` append; nothing else does.
+// Loud items, breaches, baseline proposals, eval reviews, and the quiet
+// records that name a job the harness owes itself take a paired `resolved`
+// append; nothing else does.
 export const RESOLVABLE_EVENTS = new Set([
   ...LOUD_EVENTS,
   'tripwire-breach',
   'baseline-proposal',
   'eval-review',
+  'workspace-leftover',
 ]);
 
 export class TelemetryStore {

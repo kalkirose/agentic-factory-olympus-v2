@@ -16,9 +16,11 @@ shapes:
   must carry a one-line `gist`; the append is refused before the ledger
   write when it does not.
 - **Resolution pairing.** A `resolved` event in the source ledger carries
-  `resolves` (the target seq). Only loud events and `tripwire-breach` take a
-  resolution; the store refuses unknown targets and double resolution. The
-  open set = index entries without a linked resolution.
+  `resolves` (the target seq). Loud events take a resolution, as do the quiet
+  records that name a job the harness owes itself; the store refuses unknown
+  targets and double resolution. The open set = index entries without a
+  linked resolution, and for a record that carries no index entry, a read of
+  its own ledger.
 - **Escapes linkage.** `escape-fixed` carries `fixes` (the seq of its
   `escape-recorded`). The fix's category and attribution are the final
   values; the recorded ones stay a routing hint. One fix per record.

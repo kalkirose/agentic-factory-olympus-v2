@@ -8,6 +8,7 @@ import { homePaths, runLedgerPath, scaffoldHome } from '../src/daemon/home.mjs';
 import { readLock } from '../src/daemon/lock.mjs';
 import { Ledger, readEvents } from '../src/ledger/ledger.mjs';
 import { RUN_EVENTS } from '../src/ledger/registry.mjs';
+import { openLoud, openWorkspaceLeftovers } from '../src/telemetry/readers.mjs';
 import { tempDir, removeDir, waitFor } from './helpers.mjs';
 
 function instanceEvents(home) {
@@ -403,4 +404,132 @@ test('a console break belongs to whoever it was aimed at, not to the daemon', as
   const stopped = instanceEvents(home).at(-1);
   assert.equal(stopped.event, 'daemon-stopped');
   assert.equal(stopped.signal, 'SIGTERM');
+});
+
+// -- workspaces a release could not delete -----------------------------------
+// A run workspace is a checked-out application tree, and a hold on one file in
+// it refuses the whole removal even after the process sweep has run. The hold
+// belongs to another process, so no portable test can stage one: the delete
+// call and the process sweep are the seams.
+
+/** A delete nothing will let through. */
+function blockedRemove() {
+  throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+}
+
+/** Puts a daemon's removals and its process sweep under the test's control. */
+function stageRemovals(daemon, { remove } = {}) {
+  daemon.isolation.sweepProcesses = async () => ({ count: 0, names: [] });
+  if (remove) daemon.isolation.removalIo = { remove, sleep: async () => {}, attempts: 2 };
+}
+
+/** A workspace directory with no run behind it. Returns its root. */
+function stageWorkspace(home, runId) {
+  const root = join(homePaths(home).worktrees, runId);
+  mkdirSync(join(root, 'tree'), { recursive: true });
+  return root;
+}
+
+test('a workspace nothing will delete is recorded quiet, and the daemon runs on', async (t) => {
+  const home = tempDir();
+  const daemon = new Daemon(home);
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  stageRemovals(daemon, { remove: blockedRemove });
+  const root = stageWorkspace(home, 'r1');
+  await daemon.releaseWorkspace('r1', {});
+
+  const released = instanceEvents(home).find((e) => e.event === 'workspace-released');
+  assert.equal(released.ok, false);
+  assert.equal(released.leftover, root);
+  const record = instanceEvents(home).find((e) => e.event === 'workspace-leftover');
+  assert.equal(record.runId, 'r1');
+  assert.equal(record.path, root);
+  assert.match(record.reason, /EBUSY/);
+  // The run is over and the record asks the owner for nothing, so it is on no
+  // alert strip — and the daemon that could not do the housekeeping runs on.
+  assert.deepEqual(openLoud(homePaths(home)), []);
+  assert.equal(daemon.running, true);
+  // A second release blocked the same way reports the same directory once.
+  await daemon.releaseWorkspace('r1', {});
+  assert.equal(instanceEvents(home).filter((e) => e.event === 'workspace-leftover').length, 1);
+  assert.ok(existsSync(root));
+});
+
+test('a start sweeps up a recorded leftover and answers the record', async (t) => {
+  const home = tempDir();
+  t.after(() => removeDir(home));
+  const blocked = new Daemon(home);
+  await blocked.start();
+  stageRemovals(blocked, { remove: blockedRemove });
+  const root = stageWorkspace(home, 'r1');
+  await blocked.releaseWorkspace('r1', {});
+  const record = instanceEvents(home).find((e) => e.event === 'workspace-leftover');
+  await blocked.stop();
+  assert.ok(existsSync(root));
+
+  // The next daemon over the same home. The hold belonged to the process that
+  // held it and rarely survives the gap between two daemons, so the start
+  // sweep is where the harness takes the retry it owes itself.
+  const revived = new Daemon(home);
+  t.after(async () => revived.stop());
+  await revived.start();
+  assert.ok(!existsSync(root));
+  const events = instanceEvents(home);
+  const resolution = events.find((e) => e.event === 'resolved');
+  assert.equal(resolution.resolves, record.seq);
+  assert.equal(resolution.resolvedEvent, 'workspace-leftover');
+  assert.equal(resolution.runId, 'r1');
+  assert.equal(openWorkspaceLeftovers(homePaths(home)).size, 0);
+  assert.equal(events.filter((e) => e.event === 'workspace-released').at(-1).orphan, true);
+});
+
+test('the periodic sweep clears what a release left, and is silent otherwise', async (t) => {
+  const home = tempDir();
+  const daemon = new Daemon(home, { workspaceSweepMs: 20 });
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  stageRemovals(daemon);
+  // Ticks over an instance with nothing left behind write nothing at all.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.deepEqual(instanceEvents(home).filter((e) => e.event === 'workspace-released'), []);
+
+  const root = stageWorkspace(home, 'r1');
+  const released = await waitFor(
+    () => instanceEvents(home).find((e) => e.event === 'workspace-released'),
+    { label: 'the periodic sweep to release the workspace' },
+  );
+  assert.equal(released.runId, 'r1');
+  assert.equal(released.ok, true);
+  assert.equal(released.orphan, true);
+  assert.ok(!existsSync(root));
+});
+
+test('a sweep leaves the workspace of a run that is still provisioning', async (t) => {
+  const home = tempDir();
+  const daemon = new Daemon(home);
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  stageRemovals(daemon);
+  const root = stageWorkspace(home, 'r-launching');
+  // The workspace exists before the engine holds the run, and a sweep that
+  // read it as an orphan would delete a live checkout under its launch.
+  daemon.provisioning.add('r-launching');
+  await daemon.sweepOrphanWorkspaces();
+  assert.ok(existsSync(root));
+  assert.deepEqual(instanceEvents(home).filter((e) => e.event === 'workspace-released'), []);
+
+  daemon.provisioning.delete('r-launching');
+  await daemon.sweepOrphanWorkspaces();
+  assert.ok(!existsSync(root));
+  assert.equal(instanceEvents(home).filter((e) => e.event === 'workspace-released').length, 1);
 });

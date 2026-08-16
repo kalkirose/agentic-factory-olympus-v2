@@ -4,13 +4,14 @@
 // close: stack down, worktrees gone, run branch gone. The workspace record
 // (workspace.json in the run directory) is a run artifact — it archives with
 // the run and makes release restart-safe.
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseProjectConfig } from '../config/project.mjs';
 import { runLedgerPath } from '../daemon/home.mjs';
 import { sweepPathHolders } from '../engine/processes.mjs';
 import { git } from './git.mjs';
 import { cloneDir, ensureBareClone, fetchClone, branchSha, readBlobFromBranch } from './clones.mjs';
+import { removeTree, removeWithRetry } from './removal.mjs';
 import { addRunWorktree, removeRunWorktrees, workspaceRoot } from './worktrees.mjs';
 import { stackUp, stackDown } from './stacks.mjs';
 
@@ -18,14 +19,17 @@ export class RunIsolation {
   /**
    * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
    * @param {{composeCommand?: () => string[], composeRunner?: Function,
-   *   sweepProcesses?: Function}} opts
-   *   sweepProcesses substitutes the process sweep (tests only).
+   *   sweepProcesses?: Function, removalIo?: object}} opts
+   *   sweepProcesses substitutes the process sweep (tests only). removalIo is
+   *   the removal ladder's seam — the delete call and the wait between
+   *   attempts — read at every call.
    */
-  constructor(paths, { composeCommand, composeRunner, sweepProcesses } = {}) {
+  constructor(paths, { composeCommand, composeRunner, sweepProcesses, removalIo } = {}) {
     this.paths = paths;
     this.composeCommand = composeCommand ?? (() => ['docker', 'compose']);
     this.composeRunner = composeRunner;
     this.sweepProcesses = sweepProcesses ?? sweepPathHolders;
+    this.removalIo = removalIo ?? {};
     this.cloneLocks = new Map();
   }
 
@@ -126,7 +130,12 @@ export class RunIsolation {
    * workspace root gone. `keepBranch` leaves the run branch in the clone — the
    * caller sets it for a run whose work never reached the remote. Collects
    * errors instead of stopping at the first: teardown runs every step it can.
-   * Returns { errors, record, swept }.
+   *
+   * Every removal below goes through the retry ladder, because the tree it
+   * deletes is a checked-out application and a file in it can still be held
+   * (ADR-0004). `leftover` names the workspace that survived every attempt, so
+   * the caller can record a directory that nothing would find on its own.
+   * Returns { errors, record, swept, leftover }.
    */
   async release(runId, { project, keepBranch = false } = {}) {
     const errors = [];
@@ -156,7 +165,10 @@ export class RunIsolation {
     if (owner && existsSync(cloneDir(this.paths, owner))) {
       try {
         await this.withClone(owner, () =>
-          removeRunWorktrees(cloneDir(this.paths, owner), this.paths, runId, { keepBranch }),
+          removeWithRetry(
+            () => removeRunWorktrees(cloneDir(this.paths, owner), this.paths, runId, { keepBranch }),
+            this.removalIo,
+          ),
         );
       } catch (error) {
         errors.push(`worktree: ${error.message}`);
@@ -164,7 +176,7 @@ export class RunIsolation {
     }
     if (existsSync(root)) {
       try {
-        rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+        await removeTree(root, this.removalIo);
       } catch (error) {
         errors.push(`workspace root: ${error.message}`);
       }
@@ -177,12 +189,15 @@ export class RunIsolation {
     const runDir = join(this.paths.runs, runId);
     if (existsSync(runDir) && !existsSync(runLedgerPath(this.paths, runId))) {
       try {
-        rmSync(runDir, { recursive: true, force: true, maxRetries: 3 });
+        await removeTree(runDir, this.removalIo);
       } catch (error) {
         errors.push(`run dir: ${error.message}`);
       }
     }
-    return { errors, record, swept };
+    // The workspace as it stands after every step has run, rather than what
+    // any one step reported: a root that is gone is gone whichever removal
+    // took it, and a root that is still there is one nothing took.
+    return { errors, record, swept, leftover: existsSync(root) ? root : null };
   }
 
   /**
