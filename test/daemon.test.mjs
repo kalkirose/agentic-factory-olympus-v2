@@ -235,6 +235,97 @@ test('unknown and malformed commands are rejected with a reason', async (t) => {
   assert.equal(reasons.length, 1);
 });
 
+// The inbox is a directory, and a directory takes writes from any process.
+// A writer that does not publish by rename is readable while it is still
+// being written, and the drain that lands in that window held a valid command
+// and refused it.
+test('a command file caught mid-write is read again before it is judged', async (t) => {
+  const home = tempDir();
+  const daemon = new Daemon(home);
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  const file = join(homePaths(home).control, 'mid-write.json');
+  const whole = JSON.stringify({ actor: 'tester', command: 'stop' }) + '\n';
+  let pauses = 0;
+  // What the foreign writer does in the window between the two reads: it
+  // finishes.
+  daemon.pauseBeforeReread = async () => {
+    pauses++;
+    writeFileSync(file, whole);
+  };
+  writeFileSync(file, whole.slice(0, 14));
+  await waitFor(() => !daemon.running, { label: 'the command ran on the second read' });
+  assert.equal(pauses, 1);
+  assert.deepEqual(rejectionReasons(home), []);
+  const done = readdirSync(homePaths(home).controlDone);
+  assert.equal(done.length, 1);
+  assert.match(done[0], /mid-write\.json/);
+  const stopped = instanceEvents(home).at(-1);
+  assert.equal(stopped.event, 'daemon-stopped');
+  assert.equal(stopped.actor, 'tester');
+});
+
+// The second read is a tolerance, not a pardon: a file that is corrupt is
+// corrupt twice, and the refusal it earns is the one it always earned.
+test('a command file that fails both reads is refused with its reason', async (t) => {
+  const home = tempDir();
+  const daemon = new Daemon(home);
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  let pauses = 0;
+  daemon.pauseBeforeReread = async () => {
+    pauses++;
+  };
+  writeFileSync(join(homePaths(home).control, 'corrupt.json'), '{"actor": "tester", "comm');
+  await waitFor(() => rejectionReasons(home).length === 1, { label: 'command refused' });
+  assert.ok(pauses >= 1, 'the file was read twice before the refusal');
+  assert.equal(daemon.running, true);
+  const [rejected] = rejectionReasons(home);
+  assert.match(rejected.name, /corrupt\.json/);
+  assert.equal(rejected.reason, 'not valid JSON');
+  assert.equal(
+    readdirSync(homePaths(home).controlRejected).filter((f) => f.endsWith('.json')).length,
+    1,
+  );
+});
+
+// Two drains can be in flight at once — the watcher fires per file, and a
+// drain waits on the handler of the command before it. The claim is a rename,
+// so one of them wins; the loser reads a file that is not there any more. That
+// is the winner's business, and a refusal filed for it names a command that
+// ran (its reason file sits beside a done/ entry that carries the same name).
+test('a command another drain already claimed is not refused', async (t) => {
+  const home = tempDir();
+  const daemon = new Daemon(home);
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  const paths = homePaths(home);
+  let pauses = 0;
+  daemon.pauseBeforeReread = async () => {
+    pauses++;
+  };
+  // The listing one drain took, and the file the competing drain claimed and
+  // ran between that listing and this read.
+  writeFileSync(
+    join(paths.controlDone, '1-claimed.json'),
+    JSON.stringify({ actor: 'tester', command: 'stop' }) + '\n',
+  );
+  daemon.inboxFiles = () => [join(paths.control, 'claimed.json')];
+  await daemon.drainControlInbox();
+  assert.deepEqual(rejectionReasons(home), []);
+  assert.equal(pauses, 0, 'a file that is gone costs no wait');
+  assert.equal(daemon.running, true);
+});
+
 test('control files from before start are archived as stale', async (t) => {
   const home = tempDir();
   t.after(() => removeDir(home));

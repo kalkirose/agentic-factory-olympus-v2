@@ -2,7 +2,7 @@
 // queue render, and the olympusctl command path into the control inbox.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { scaffoldHome } from '../src/daemon/home.mjs';
@@ -134,6 +134,44 @@ test('olympusctl writes control commands and renders status', (t) => {
   assert.equal(pause.command, 'pause');
   assert.equal(pause.project, 'alpha');
   assert.match(pause.actor, /^console:/);
+});
+
+// The name the daemon claims is created by the rename and never by a write,
+// so a reader of the inbox sees a whole command or no file at all. A console
+// runs in its own process, and the daemon's intake reads on a directory
+// watch: any write straight to the claimed name puts a partial file in front
+// of it — first the empty file the create leaves, then the blocks as they
+// land.
+test('a queued command appears under its claimed name whole or not at all', async (t) => {
+  const { root, paths } = seededHome(t);
+  const bin = join(import.meta.dirname, '..', 'bin', 'olympusctl.mjs');
+  const home = join(root, 'home');
+  const answer = 'x'.repeat(20000);
+  const ctl = spawn(
+    process.execPath,
+    [bin, 'answer', '--home', home, '--run', 'r1', '--text', answer, '--actor', 'tester'],
+    { windowsHide: true, stdio: 'ignore' },
+  );
+  const exited = new Promise((resolve) => ctl.on('exit', resolve));
+  let running = true;
+  exited.then(() => {
+    running = false;
+  });
+  // The first sighting is the one that matters: under a rename it is already
+  // the whole command, and under a plain write it is whatever had landed.
+  let sighting = null;
+  while (sighting === null) {
+    const name = readdirSync(paths.control).find((f) => f.endsWith('.json'));
+    if (name) sighting = readFileSync(join(paths.control, name), 'utf8');
+    else if (!running) break;
+    else await new Promise((resolve) => setImmediate(resolve));
+  }
+  await exited;
+  assert.equal(ctl.exitCode, 0);
+  assert.notEqual(sighting, null);
+  assert.equal(JSON.parse(sighting).answer, answer);
+  // Nothing of the temporary name survives the publish.
+  assert.deepEqual(readdirSync(paths.control).filter((f) => f.endsWith('.tmp')), []);
 });
 
 test('a repair launch carries its ticket; lane and ticket must agree', (t) => {

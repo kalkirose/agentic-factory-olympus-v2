@@ -56,6 +56,13 @@ const STOP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'];
 const IGNORED_SIGNALS = ['SIGBREAK'];
 const EXIT_SIGNALS = [...STOP_SIGNALS, ...IGNORED_SIGNALS];
 const FAULT_MAX = 600; // a stamp carries the head of a stack, not the stack
+// How often one control file is read before the intake judges it, and the
+// pause between those reads. Two reads and 50 ms: a file caught mid-write is
+// whole by the second read, and a file that is really corrupt is refused
+// while the console that wrote it is still watching. Not a detector — the
+// verdict comes from the read, never from the wait running out.
+const CONTROL_READS = 2;
+const CONTROL_REREAD_MS = 50;
 
 export class Daemon {
   /**
@@ -892,16 +899,50 @@ export class Daemon {
     this.watchers.push(watcher);
   }
 
+  /**
+   * Reads one command file, and reads it a second time when the first read
+   * gives back no command. The inbox is a directory, and a directory takes
+   * writes from any process: a writer that does not publish by rename leaves
+   * its file readable while it is still being written, and the drain that
+   * lands in that window refuses a command nothing is wrong with. The harness
+   * writers all rename (`control.mjs`), so the second read is the tolerance
+   * the intake extends to the writers it does not own — one short pause, then
+   * the same verdict as before. A file that is corrupt is corrupt twice.
+   *
+   * @param {string} file
+   * @returns {Promise<{command: object}|{reason: string}|{gone: true}>}
+   */
+  async readControlFile(file) {
+    for (let read = 1; ; read++) {
+      const result = readCommandFile(file);
+      if (result.command !== undefined || result.gone || read === CONTROL_READS) return result;
+      await this.pauseBeforeReread();
+    }
+  }
+
+  /**
+   * The wait between the two reads of one command file. Long enough for a
+   * small write to finish, short enough that a corrupt file is still refused
+   * while the console that wrote it is looking. A method because a file
+   * caught mid-write is a race no portable test can stage: a test replaces
+   * this to say what happens in the window.
+   */
+  pauseBeforeReread() {
+    return new Promise((resolve) => setTimeout(resolve, CONTROL_REREAD_MS));
+  }
+
   async drainControlInbox() {
     if (!this.running) return;
     for (const file of this.inboxFiles()) {
-      let command;
-      try {
-        command = JSON.parse(readFileSync(file, 'utf8'));
-      } catch {
-        this.rejectControlFile(file, 'not valid JSON');
+      const read = await this.readControlFile(file);
+      // Gone between the listing and the read: another drain claimed it and
+      // owns what happens to it. This one has nothing to refuse.
+      if (read.gone) continue;
+      if (read.reason !== undefined) {
+        this.rejectControlFile(file, read.reason);
         continue;
       }
+      const command = read.command;
       if (typeof command.command !== 'string' || typeof command.actor !== 'string') {
         this.rejectControlFile(file, 'command and actor are required strings');
         continue;
@@ -1088,6 +1129,37 @@ export class Daemon {
       this.lock = null;
     }
   }
+}
+
+/**
+ * One read of one command file: the command it holds, the reason it holds
+ * none, or that it is no longer there. A missing file is its own answer and
+ * never a reason: the drain lists the inbox and reads a moment later, and a
+ * competing drain claims by rename in between. Refusing on that read files a
+ * refusal against a command that ran.
+ * @param {string} file
+ * @returns {{command: object}|{reason: string}|{gone: true}}
+ */
+function readCommandFile(file) {
+  let text;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return { gone: true };
+    return { reason: `unreadable: ${error.message}` };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { reason: 'not valid JSON' };
+  }
+  // Valid JSON that is not an object carries no fields at all, and the drain
+  // reads `command` and `actor` off whatever this hands back.
+  if (parsed === null || typeof parsed !== 'object') {
+    return { reason: 'command and actor are required strings' };
+  }
+  return { command: parsed };
 }
 
 function diffKeys(a, b) {

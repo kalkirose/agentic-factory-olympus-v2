@@ -1,6 +1,10 @@
-// Control-channel writer, shared by every console entry point. Write-then-
-// rename so the daemon never reads a half-written command; the daemon's
-// feedback is the done/ and rejected/ directories, never a return channel.
+// Control-channel writer, shared by every console entry point. Every command
+// is written under a temporary name in the inbox directory itself — the same
+// volume, so the rename that follows is a publish and not a copy — and the
+// intake claims `.json` names only. The rename is therefore the whole
+// appearance of the command: there is no moment at which the name the daemon
+// reads holds a partial file. The daemon's feedback is the done/ and
+// rejected/ directories, never a return channel.
 import { writeFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
