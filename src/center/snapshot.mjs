@@ -30,8 +30,8 @@ export const TARGET_HOURS = 4;
 // composition (storyLane → postFreeze → shipStep; repairLane → shipStep).
 // A run on an unknown lane falls back to its observed stages.
 export const LANE_STAGES = {
-  story: [...PRE_FREEZE_STAGES, 'implementation', 'verdict', 'ship', 'close-out'],
-  repair: ['fix', 'verdict', 'ship', 'close-out'],
+  story: [...PRE_FREEZE_STAGES, 'implementation', 'verdict', 'update', 'ship', 'close-out'],
+  repair: ['fix', 'verdict', 'update', 'ship', 'close-out'],
 };
 
 const ENVELOPE_KEYS = new Set(['seq', 'ts', 'event', 'actor', 'stream', 'refs']);

@@ -276,6 +276,22 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 
 - The run ends at close-out, not at the green verdict. In-loop ship, no
   batching.
+- **The update stage** (ADR-0033) sits between the verdict and the ship. The
+  run takes the project's ship token there, and its first act under the token
+  is the branch update against the default branch as it stands after the
+  previous holder's merge. An update that moved the tree hands the run back to
+  the verdict, so the tree that opens a request is a tree a verdict certified;
+  a base that did not move costs one fetch and a stamp. A conflict surfaces
+  here, before any request, and takes the merge round it always took.
+  `UPDATE_CAP` bounds the updates per implementation pass; past it the run
+  falls through to the ship-stage update.
+- **The ship token** (ADR-0033) is one per project, derived from the run
+  ledgers: a run between its acquire or its `pr-opened` and its `merged` or
+  its close holds it, and every other open run that stamped a wait is in the
+  queue, ordered by the stamp it queued with. No file, no lock — a restart
+  re-derives the same holder and the same order. Only the holder opens or
+  merges a request; the slot cap stays the concurrency knob for everything
+  before that.
 - **Ship preflight.** Before the PR opens: every declared credential probes
   again, because a key the launch proved can go stale inside a run and CI is
   the most expensive way to learn it (ADR-0027); then branch protection and
@@ -334,8 +350,12 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   competing merge the daemon merges main into the open branch (never
   force-push); full CI re-runs; auto-merge stays armed. A textual conflict
   gets one merge round (fresh dev seat, conflict brief, resolution only;
-  test-file hunks route to the suite seat); a failed round is a stall. No
-  merge-order machinery: launch follows roadmap order, merge order is free.
+  test-file hunks route to the suite seat); a failed round is a stall.
+- **Merge order.** Ships are serial per project and everything before them is
+  not: the ship token (ADR-0033) admits one run at a time from the update
+  stage to its merge, and the queue order is derived from the ledgers. Launch
+  still follows roadmap order; merge order is the order the runs reached the
+  seam.
 
 ## Escalations and the human
 

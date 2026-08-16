@@ -220,7 +220,12 @@ function verdictHandler(mode, nextStage) {
             e.seq > last.seq &&
             (e.event === 'implementation-committed' ||
               e.event === 're-freeze' ||
-              e.event === 'operational-fix'),
+              e.event === 'operational-fix' ||
+              // The update stage merged the default branch into the tree and
+              // handed it back. The render behind it judged a tree that no
+              // longer exists, and the whole point of that update is that the
+              // verdict certifies the tree that lands (ADR-0033).
+              (e.event === 'pre-verdict-update' && e.ran === true)),
         );
       if (needCycle) {
         const outcome = await runCycle(ctx, base, mode, { cycle: renders.length + 1 });

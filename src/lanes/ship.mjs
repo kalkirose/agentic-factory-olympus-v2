@@ -1,10 +1,17 @@
 // The ship step: the run ends at close-out, not at the green verdict.
-// `shipStep({forgeFor})` supplies the two stages after the verdict — `ship`
-// (PR open with auto-merge armed, the check watcher, the CI red route, the
-// competing-merge update, the merge round) and `close-out` (red-merge breach
-// conversion, merge-commit checks to terminal, the card sweep, the
-// reconciliation judgment, the configured learning artifact, the escape
-// fix-back, ledger close).
+// `shipStep({forgeFor})` supplies the three stages after the verdict —
+// `update` (the ship token, then the branch update that precedes the final
+// verdict), `ship` (PR open with auto-merge armed, the check watcher, the CI
+// red route, the competing-merge update, the merge round) and `close-out`
+// (red-merge breach conversion, merge-commit checks to terminal, the card
+// sweep, the reconciliation judgment, the configured learning artifact, the
+// escape fix-back, ledger close).
+//
+// Ships are serial per project and everything before them is not. The update
+// stage holds the seam: a run takes the project's ship token there, merges the
+// default branch into its tree under it, and hands a moved tree back to the
+// verdict — so the verdict certifies the tree that lands, and no other run of
+// the project can merge between the two (ADR-0033).
 //
 // The check watcher is a ledger-stamping process: every observed state
 // change stamps `check-transition`; pending is a state, never a verdict; no
@@ -39,6 +46,7 @@ import {
   resetHard,
 } from '../isolation/tree.mjs';
 import { testEditDenyRules } from '../seats/boundary.mjs';
+import { takeShipToken } from '../ship/token.mjs';
 import { parseIntentCard } from './card.mjs';
 import { probeCredentials } from './probes.mjs';
 import { SUITE_SCHEMA } from './story.mjs';
@@ -86,6 +94,15 @@ const LOG_TAIL = 1500;
  */
 export const CHECKLESS_POLLS = 20;
 
+/**
+ * The bound on the branch updates one implementation pass takes before its
+ * final verdict. Under the token the base moves only when a human merges, so
+ * the second update in one pass is already the sign that this tree is chasing
+ * a branch it will not catch; past the bound the run ships and the ship stage
+ * takes the update, exactly as it did before the pre-verdict one existed.
+ */
+export const UPDATE_CAP = 2;
+
 export const CARD_SWEEP_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -125,12 +142,83 @@ export const CARD_SWEEP_SCHEMA = {
 export function shipStep({ forgeFor, pollMs = 15000, enqueueRepair = null } = {}) {
   if (typeof forgeFor !== 'function') throw new Error('shipStep requires a forgeFor resolver');
   return {
-    stages: ['ship', 'close-out'],
+    stages: ['update', 'ship', 'close-out'],
     handlers: withAbandonGuard({
+      update: updateHandler({ forgeFor, pollMs }),
       ship: shipHandler({ forgeFor, pollMs }),
       'close-out': closeOutHandler({ forgeFor, pollMs, enqueueRepair }),
     }),
   };
+}
+
+// -- the update stage --------------------------------------------------------
+
+/**
+ * The seam between a green verdict and the request. The run takes the
+ * project's ship token here, and its first act under the token is the branch
+ * update against the default branch as it stands after the previous holder's
+ * merge. An update that moved the tree hands the run back to the verdict — the
+ * tree that ships is the tree a verdict certified — and a base that did not
+ * move costs one fetch and a stamp. Conflicts take the route they have always
+ * taken, one stage earlier, where the repair is cheapest: no request is open,
+ * no CI round is spent, and the verdict that follows covers the merged result.
+ */
+function updateHandler({ forgeFor, pollMs }) {
+  return async function update(ctx) {
+    const base = await shipBase(ctx, forgeFor);
+    for (;;) {
+      if (ctx.stopped()) return null;
+      // The wait is on a state change in another run's ledger — the merge that
+      // ends the holder's turn — and never on a span of time. `pollMs` is the
+      // cadence of the reading, as it is for the check watcher.
+      if (!takeShipToken(ctx)) {
+        await sleep(pollMs);
+        continue;
+      }
+      return preVerdictUpdate(ctx, base);
+    }
+  };
+}
+
+// Why a capped pass leaves the update to the ship stage. The stamp carries it,
+// because an update the run decided not to take must read as a decision.
+const UPDATE_CAP_NOTE =
+  'the base moved twice under one pass: the ship stage takes the update from ' +
+  'here, as it did before this one existed';
+
+async function preVerdictUpdate(ctx, base) {
+  const events = runEvents(ctx);
+  const pass = currentPass(events);
+  const taken = events.filter(
+    (e) => e.event === 'pre-verdict-update' && e.pass === pass && e.ran,
+  ).length;
+  if (taken >= UPDATE_CAP) {
+    if (!events.some((e) => e.event === 'pre-verdict-update' && e.pass === pass && e.capped)) {
+      ctx.store.append('pre-verdict-update', {
+        actor: ACTOR,
+        pass,
+        ran: false,
+        capped: true,
+        updates: taken,
+        cap: UPDATE_CAP,
+        note: UPDATE_CAP_NOTE,
+      });
+    }
+    return { next: 'ship' };
+  }
+  // No push: there is no request to update yet, and a run branch pushed here
+  // would meet a later fresh pass's rewrite with a plain push.
+  const out = await branchUpdate(ctx, base, { push: false, stamp: false });
+  if (out.directive) return out.directive;
+  const ran = out.toSha !== out.fromSha;
+  ctx.store.append('pre-verdict-update', {
+    actor: ACTOR,
+    pass,
+    ran,
+    mainSha: out.mainSha,
+    ...(ran && { fromSha: out.fromSha, toSha: out.toSha }),
+  });
+  return ran ? { next: 'verdict' } : { next: 'ship' };
 }
 
 // -- the ship stage ----------------------------------------------------------
@@ -171,6 +259,13 @@ function shipHandler({ forgeFor, pollMs }) {
       }
       const opened = findLast(events, 'pr-opened');
       if (!opened) {
+        // The token gate again, for the run that reached ship without the
+        // update stage: only its holder opens a request. A run that took the
+        // token there takes nothing here and stamps nothing.
+        if (!takeShipToken(ctx)) {
+          await sleep(pollMs);
+          continue;
+        }
         const directive = await openPr(ctx, base);
         if (directive) return directive;
         continue;
@@ -210,8 +305,8 @@ function shipHandler({ forgeFor, pollMs }) {
         });
       }
       if (st.behindBase || st.conflicting) {
-        const directive = await branchUpdate(ctx, base);
-        if (directive) return directive;
+        const out = await branchUpdate(ctx, base);
+        if (out.directive) return out.directive;
         continue;
       }
       const directive = await watchChecks(ctx, base, opened, st, checkless);
@@ -404,7 +499,7 @@ async function checklessSha(ctx, base, opened, sha, polls) {
       pr: opened.pr,
       sha,
     });
-    return branchUpdate(ctx, base);
+    return (await branchUpdate(ctx, base)).directive ?? null;
   }
   return parkDirective('provisioning-gate', {
     ...GATE_FORMS,
@@ -565,7 +660,16 @@ async function stampMerged(ctx, base, opened, st) {
 
 // -- competing-merge branch update -------------------------------------------
 
-async function branchUpdate(ctx, base) {
+/**
+ * Merges the default branch into the run tree. Both stages take it: the ship
+ * stage on a request behind its base or in conflict with it, and the update
+ * stage before the final verdict. `push` and `stamp` are the whole difference
+ * — before the request exists there is nothing on the forge to update, and the
+ * update stage's own stamp carries the shas.
+ * @returns {Promise<{directive: object} |
+ *   {directive?: undefined, fromSha: string, toSha: string, mainSha: string}>}
+ */
+async function branchUpdate(ctx, base, { push: doPush = true, stamp = true } = {}) {
   const events = runEvents(ctx);
   // One merge round only: a failed round takes the stall route until a fresh
   // pass (born on updated main) dissolves the conflict.
@@ -573,7 +677,7 @@ async function branchUpdate(ctx, base) {
     .reverse()
     .find((e) => e.event === 'merge-round' && e.resolved === false);
   if (failedRound && !events.some((e) => e.event === 'fresh-pass' && e.seq > failedRound.seq)) {
-    return mergeStall(ctx, base, failedRound);
+    return { directive: await mergeStall(ctx, base, failedRound) };
   }
   const clone = cloneDir(ctx.paths, ctx.project);
   await fetchClone(clone);
@@ -585,19 +689,33 @@ async function branchUpdate(ctx, base) {
     `merge ${base.defaultBranch} into ${base.branch}`,
   );
   if (merged.ok) {
-    const directive = await pushBranch(ctx, base);
-    if (directive) return directive;
+    if (doPush) {
+      const directive = await pushBranch(ctx, base);
+      if (directive) return { directive };
+    }
     // The linkage stamp: later check transitions on toSha are the update's
     // re-run.
-    ctx.store.append('branch-update', { actor: ACTOR, fromSha, toSha: merged.sha, mainSha });
-    return null;
+    if (stamp) {
+      ctx.store.append('branch-update', { actor: ACTOR, fromSha, toSha: merged.sha, mainSha });
+    }
+    return { fromSha, toSha: merged.sha, mainSha };
   }
-  return mergeRound(ctx, base, { fromSha, mainSha, conflicts: merged.conflicts });
+  return mergeRound(
+    ctx,
+    base,
+    { fromSha, mainSha, conflicts: merged.conflicts },
+    { push: doPush, stamp },
+  );
 }
 
 // -- the merge round ---------------------------------------------------------
 
-async function mergeRound(ctx, base, { fromSha, mainSha, conflicts }) {
+async function mergeRound(
+  ctx,
+  base,
+  { fromSha, mainSha, conflicts },
+  { push: doPush = true, stamp = true } = {},
+) {
   const testConflicts = conflicts.filter((f) => underAny(f, base.testPaths));
   const codeConflicts = conflicts.filter((f) => !underAny(f, base.testPaths));
   const brief = await incomingBrief(base, mainSha);
@@ -658,7 +776,7 @@ async function mergeRound(ctx, base, { fromSha, mainSha, conflicts }) {
       conflicts,
       cause,
     });
-    return mergeStall(ctx, base, round);
+    return { directive: await mergeStall(ctx, base, round) };
   }
   const sha = await concludeMerge(
     base.worktree,
@@ -669,8 +787,10 @@ async function mergeRound(ctx, base, { fromSha, mainSha, conflicts }) {
     ctx.store.append('suite-committed', { actor: ACTOR, sha, phase: 're-freeze', files: testConflicts });
     ctx.store.append('re-freeze', { actor: ACTOR, sha, files: testConflicts, findings: [] });
   }
-  const directive = await pushBranch(ctx, base);
-  if (directive) return directive;
+  if (doPush) {
+    const directive = await pushBranch(ctx, base);
+    if (directive) return { directive };
+  }
   ctx.store.append('merge-round', {
     actor: ACTOR,
     resolved: true,
@@ -679,8 +799,8 @@ async function mergeRound(ctx, base, { fromSha, mainSha, conflicts }) {
     conflicts,
     ...(testConflicts.length > 0 && { testFiles: testConflicts }),
   });
-  ctx.store.append('branch-update', { actor: ACTOR, fromSha, toSha: sha, mainSha });
-  return null;
+  if (stamp) ctx.store.append('branch-update', { actor: ACTOR, fromSha, toSha: sha, mainSha });
+  return { fromSha, toSha: sha, mainSha };
 }
 
 // A failed merge round is a stall: the run's one fresh pass is born on

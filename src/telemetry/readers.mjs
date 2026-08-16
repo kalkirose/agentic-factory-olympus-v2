@@ -111,6 +111,26 @@ export function listRunEvents(paths, { project, lane } = {}) {
 }
 
 /**
+ * Live run ledgers, optionally filtered by the launching project. The archive
+ * is not read: the callers here ask about runs that can still act, and the
+ * archive grows for the life of the instance while a closed run answers
+ * nothing. A ledger without a `run-launched` stamp matches nothing.
+ * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ * @param {{project?: string}} [filter]
+ */
+export function listLiveRuns(paths, { project } = {}) {
+  const out = [];
+  for (const runId of runDirs(paths.runs)) {
+    const events = readEvents(runLedgerPath(paths, runId));
+    const launch = events.find((e) => e.event === 'run-launched');
+    if (!launch) continue;
+    if (project !== undefined && launch.project !== project) continue;
+    out.push({ runId, project: launch.project, lane: launch.lane, events });
+  }
+  return out;
+}
+
+/**
  * Shipped story-lane runs, live and archived, in ship order (by the `merged`
  * stamp). Each entry: runId, project, ts of the merge, archived flag.
  * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths

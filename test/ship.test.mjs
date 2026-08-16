@@ -16,11 +16,11 @@ import {
   runLedgerPath,
 } from '../src/daemon/home.mjs';
 import { postFreeze, repairLane } from '../src/lanes/verdict.mjs';
-import { shipStep, CHECKLESS_POLLS } from '../src/lanes/ship.mjs';
+import { shipStep, CHECKLESS_POLLS, UPDATE_CAP } from '../src/lanes/ship.mjs';
 import { gitHubForge, parseGitHubRepo } from '../src/ship/forge.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
-import { openEscapesStore, TelemetryStore } from '../src/telemetry/stores.mjs';
+import { openEscapesStore, openRunStore, TelemetryStore } from '../src/telemetry/stores.mjs';
 import { openLoud } from '../src/telemetry/readers.mjs';
 import { RUN_EVENTS } from '../src/ledger/registry.mjs';
 import { recordEscape, ticketEscape, readEscapeSet } from '../src/telemetry/escapes.mjs';
@@ -1348,6 +1348,171 @@ test('a failed merge round stalls into the fresh pass born on updated main', asy
   assert.equal(impl.pass, 2);
   // the fresh tree was born on updated main: no further update needed
   assert.equal(gitSync(['show', 'main:src/feature.mjs'], fx.origin), GOOD_FEATURE);
+});
+
+// -- the update stage: the ship token, then the pre-verdict update -----------
+
+test('a base that did not move costs one stamped no-op, and the token comes first', async (t) => {
+  const fx = shipFixture(t);
+  const mainAtLaunch = gitSync(['rev-parse', 'main'], fx.origin).trim();
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const update = events.find((e) => e.event === 'pre-verdict-update');
+  assert.equal(update.ran, false);
+  assert.equal(update.mainSha, mainAtLaunch);
+  assert.equal(update.pass, 1);
+  // The order of the seam: the token, then the update, then the request.
+  assert.deepEqual(
+    events
+      .filter((e) => ['ship-token', 'pre-verdict-update', 'pr-opened'].includes(e.event))
+      .map((e) => e.event),
+    ['ship-token', 'pre-verdict-update', 'pr-opened'],
+  );
+  assert.equal(events.find((e) => e.event === 'ship-token').state, 'acquired');
+  // A base where the run left it asks for no second judgment.
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 1);
+});
+
+test('a base that moved is merged in before the final verdict, and judged there', async (t) => {
+  const fx = shipFixture(t);
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'freeze', 'freeze');
+  commitTree(fx.origin, { 'docs/note.md': 'competing change\n' }, 'competing merge');
+  const update = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'pre-verdict-update' && e.ran,
+    'the pre-verdict update',
+  );
+  assert.equal(update.mainSha, gitSync(['rev-parse', 'main'], fx.origin).trim());
+  assert.notEqual(update.toSha, update.fromSha);
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  assert.equal(opened.sha, update.toSha);
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The verdict that sent the run to the forge judged the merged tree.
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.equal(renders.length, 2);
+  assert.equal(renders.at(-1).verdict, 'green');
+  assert.equal(renders.at(-1).sha, update.toSha);
+  assert.ok(renders.at(-1).seq > update.seq);
+  // The request opened current, so the ship stage owed no update of its own.
+  assert.ok(!events.some((e) => e.event === 'branch-update'));
+  assert.equal(gitSync(['show', 'main:src/feature.mjs'], fx.origin), GOOD_FEATURE);
+  assert.match(gitSync(['show', 'main:docs/note.md'], fx.origin), /competing change/);
+});
+
+test('a conflict the pre-verdict update meets takes the merge round, before the request', async (t) => {
+  const fx = shipFixture(t);
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'freeze', 'freeze');
+  commitTree(fx.origin, { 'src/feature.mjs': ALT_FEATURE }, 'conflicting main work');
+  const round = await waitEvent(fx.paths, runId, (e) => e.event === 'merge-round', 'merge-round');
+  assert.equal(round.resolved, true);
+  assert.deepEqual(round.conflicts, ['src/feature.mjs']);
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The repair happened where it is cheapest: no request, no CI round spent.
+  assert.ok(round.seq < opened.seq);
+  assert.ok(!events.some((e) => e.event === 'forge-anomaly'));
+  const conflictCall = fx.calls.find(
+    (c) => c.seat === 'dev' && c.prompt.includes('textual conflicts'),
+  );
+  assert.ok(conflictCall);
+  assert.equal(gitSync(['show', 'main:src/feature.mjs'], fx.origin), GOOD_FEATURE);
+});
+
+test('the update cap falls through to the ship-stage update', async (t) => {
+  const fx = shipFixture(t);
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const ranUpdates = () =>
+    readEvents(runLedgerPath(fx.paths, runId)).filter(
+      (e) => e.event === 'pre-verdict-update' && e.ran,
+    ).length;
+  await waitEvent(fx.paths, runId, (e) => e.event === 'freeze', 'freeze');
+  commitTree(fx.origin, { 'docs/one.md': 'one\n' }, 'competing merge one');
+  await waitFor(() => ranUpdates() === 1, { attempts: 600, intervalMs: 100, label: 'first update' });
+  commitTree(fx.origin, { 'docs/two.md': 'two\n' }, 'competing merge two');
+  await waitFor(() => ranUpdates() === 2, { attempts: 600, intervalMs: 100, label: 'second update' });
+  const capped = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'pre-verdict-update' && e.capped,
+    'the update cap',
+  );
+  assert.equal(capped.ran, false);
+  assert.equal(capped.cap, UPDATE_CAP);
+  assert.equal(capped.updates, UPDATE_CAP);
+  // Past the cap the ship stage takes the update, exactly as it always did.
+  commitTree(fx.origin, { 'docs/three.md': 'three\n' }, 'competing merge three');
+  const update = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'branch-update',
+    'the ship-stage update',
+  );
+  assert.ok(update.seq > capped.seq);
+  fx.forge.setChecks(update.toSha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.filter((e) => e.event === 'pre-verdict-update' && e.ran).length, UPDATE_CAP);
+  assert.equal(events.filter((e) => e.event === 'pre-verdict-update' && e.capped).length, 1);
+});
+
+test('a run waits for the ship token, and its first act under it is the update', async (t) => {
+  const fx = shipFixture(t);
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  // Another run of the project is mid-ship: its request is open and unmerged,
+  // so it holds the token and nothing here may open one.
+  const holder = openRunStore(fx.paths, 'proj-holder');
+  t.after(() => holder.close());
+  holder.append('run-launched', { actor: 'daemon', project: 'proj', lane: 'story' });
+  holder.append('pr-opened', { actor: 'daemon', pr: 99, branch: 'run/other', base: 'main' });
+  const waited = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'ship-token' && e.state === 'waiting',
+    'the token wait',
+  );
+  assert.equal(waited.holder, 'proj-holder');
+  assert.equal(waited.ahead, 0);
+  assert.ok(!readEvents(runLedgerPath(fx.paths, runId)).some((e) => e.event === 'pr-opened'));
+  // The holder merges: main moves, and its turn is over.
+  commitTree(fx.origin, { 'docs/note.md': 'the holder shipped\n' }, 'the holder merge');
+  holder.append('merged', { actor: 'daemon', pr: 99, sha: 'a'.repeat(40), red: false });
+  const acquired = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'ship-token' && e.state === 'acquired',
+    'the acquire',
+  );
+  const update = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'pre-verdict-update',
+    'the first act under the token',
+  );
+  assert.ok(update.seq > acquired.seq);
+  assert.equal(update.ran, true);
+  assert.equal(update.mainSha, gitSync(['rev-parse', 'main'], fx.origin).trim());
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  assert.ok(opened.seq > update.seq);
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The request opened on the post-merge base: it never went behind.
+  assert.ok(!events.some((e) => e.event === 'branch-update'));
 });
 
 // -- gh adapter units --------------------------------------------------------

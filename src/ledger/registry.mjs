@@ -83,6 +83,19 @@ export const RUN_EVENTS = new Set([
   // the artifact, so an alert would report a handled case (ADR-0017).
   'diff-policy-recapture',
   // ship
+  // The per-project ship token, at the two moments a run's own ledger is what
+  // says where the token went: the wait, and the acquire. The token itself is
+  // derived from these stamps and from `pr-opened`/`merged` across the open
+  // runs of a project, never from a file — so a restart re-derives the holder
+  // it had, and a stamp records a move rather than storing a right (ADR-0033).
+  'ship-token',
+  // The branch update the run takes under the token, just before its final
+  // verdict: the tree the verdict certifies is then the tree that lands.
+  // Stamped whether it ran or found the base where the run left it — a run
+  // that merges the default branch into its own tree on its own authority
+  // says so either way — and `capped` is the pass that stopped chasing a
+  // moving base and left the update to the ship stage (ADR-0033).
+  'pre-verdict-update',
   'pr-opened',
   'check-transition',
   'ci-flake',

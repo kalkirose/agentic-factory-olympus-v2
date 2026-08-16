@@ -4,6 +4,10 @@ Status: accepted (2026-08-10)
 Superseded in part by ADR-0024: a red-merge breach tickets each escape and
 enqueues its repair for the frontier sweep. `shipStep` takes `enqueueRepair`
 in place of `spawnRepair`, and nothing in the lane graph launches a run.
+Superseded in part by ADR-0033: `shipStep` supplies three stages — `update`,
+`ship`, `close-out`. The branch update runs before the final verdict, so the
+verdict certifies the tree that lands, and only the holder of the project's
+ship token opens or merges a request.
 
 ## Decision
 

@@ -12,8 +12,15 @@ import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome } from '../src/daemon/home.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
-const STORY_STAGES = [...PRE_FREEZE_STAGES, 'implementation', 'verdict', 'ship', 'close-out'];
-const REPAIR_STAGES = ['fix', 'verdict', 'ship', 'close-out'];
+const STORY_STAGES = [
+  ...PRE_FREEZE_STAGES,
+  'implementation',
+  'verdict',
+  'update',
+  'ship',
+  'close-out',
+];
+const REPAIR_STAGES = ['fix', 'verdict', 'update', 'ship', 'close-out'];
 
 function twoProjectConfig() {
   return withDefaults({
