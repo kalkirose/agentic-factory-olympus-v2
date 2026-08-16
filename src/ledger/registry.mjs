@@ -27,6 +27,13 @@ export const RUN_EVENTS = new Set([
   // run lifecycle
   'run-launched',
   'stage-entered',
+  // What a stage that runs no seat says while it polls: what it waits on, the
+  // poll outcomes behind the stamp, and its time in the stage. One stamp per
+  // batch of poll outcomes, so a stage that settles quickly stamps none and a
+  // stage that waits for hours stamps a handful. Quiet — waiting is not a
+  // fault — but never silent, because a stage nothing stamps for reads the
+  // same at one minute as at three hours (ADR-0034).
+  'stage-heartbeat',
   'run-closed',
   ...SEAT_EVENTS,
   // One read-only probe of one external credential, at the launch gate or at
@@ -190,6 +197,11 @@ export const INSTANCE_EVENTS = new Set([
   // the repairs launch (ADR-0024).
   'repairs-owed',
   'tripwire-breach',
+  // A stage of one run past the duration band the same stage of the same lane
+  // built in the ledgers. It sits in the instance ledger because the watcher
+  // wrote it, and the watcher holds no run: detection that cannot reach into a
+  // run cannot change one (ADR-0034).
+  'stage-overrun',
   'baseline-proposal',
   'eval-review',
   // Instance-scoped escalations: a park that waits on the human but belongs
@@ -220,6 +232,12 @@ export const ESCAPES_EVENTS = new Set([
 export const QUEUED_EVENTS = new Set([
   'park',
   'tripwire-breach',
+  // One stage of one run past the duration band of that stage, read from the
+  // heartbeat the stage stamped. Queued, because it asks the operator to look
+  // and asks the run for nothing: the record names the stage, the elapsed and
+  // the band it left, and the run carries on untouched. It opens once per
+  // stage and closes when the stage moves on (ADR-0034).
+  'stage-overrun',
   'baseline-proposal',
   'eval-review',
 ]);

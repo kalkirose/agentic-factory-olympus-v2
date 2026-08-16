@@ -223,7 +223,7 @@ export class Daemon {
       // construction order stays simple.
       this.ledger = openInstanceStore(this.paths, {
         onAppend: (line, ledger) => {
-          this.tripwires?.notify(line.project, line);
+          this.tripwires?.notify(line.project, line, ledger);
           this.notifier?.notify({ ledger, project: line.project, line });
         },
       });
@@ -263,7 +263,7 @@ export class Daemon {
         semaphores: this.semaphores,
         seatDefaults: () => this.seatDefaults(),
         onEvent: (project, line, ledger) => {
-          this.tripwires?.notify(project, line);
+          this.tripwires?.notify(project, line, ledger);
           this.notifier?.notify({ ledger, project, line });
         },
       });

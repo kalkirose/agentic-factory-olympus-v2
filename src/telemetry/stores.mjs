@@ -21,6 +21,7 @@ import { appendStreamEntry } from './streams.mjs';
 export const RESOLVABLE_EVENTS = new Set([
   ...LOUD_EVENTS,
   'tripwire-breach',
+  'stage-overrun',
   'baseline-proposal',
   'eval-review',
   'workspace-leftover',

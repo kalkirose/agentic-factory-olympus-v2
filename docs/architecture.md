@@ -19,7 +19,9 @@ Around the daemon:
 - **Command center** — a standalone read-only page plus a small GET server
   rooted at the daemon home. The daemon does not know it exists.
 - **Tripwire watcher** — a supervised in-daemon process that re-evaluates
-  tripwires when matching events append. It classifies and executes nothing.
+  tripwires when matching events append, and reads stage duration against the
+  duration history when a stage heartbeat appends. It classifies and executes
+  nothing, and it holds no run.
 - **Eval seat** — an instance-scoped judgment seat fired every five story-lane
   ships. Its report lands under `eval/` in the daemon home; the queued
   `eval-review` event points to it. Proposals only; nothing self-executes.
@@ -383,7 +385,7 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   which carries the fix it stands on (ADR-0032).
 - **Escalation queue**: always open, answerable from the record alone,
   presented FIFO with roadmap-order tiebreak, answered in any order.
-- **Streams.** Queued: park events + tripwire breaches. Loud: liveness
+- **Streams.** Queued: park events, tripwire breaches, stage overruns. Loud: liveness
   violation, gate-integrity defect, diff-policy violation, red-merge breach,
   factory starvation, owed repairs, budget breach. Consoles render loud first,
   then queue depth, and a loud item leaves the strip as soon as the event that
@@ -400,7 +402,11 @@ Four layers, no timeouts:
 2. The liveness invariant: every open run holds an in-flight child, a parked
    escalation, or a transition in progress. A violation is a harness-class
    red, loud.
-3. Progress telemetry stamps compared against per-seat-type duration history.
+3. Progress telemetry compared against duration history. A seat stamps its own
+   progress. A stage that runs no seat stamps a heartbeat instead — one per
+   batch of poll outcomes, naming what it waits on — and a stage past the
+   duration band of that stage of that lane opens a queued record for the
+   operator (ADR-0034).
 4. A breach alerts, never auto-kills; a generous per-seat cost ceiling
    terminates as a guardrail and records a seat-failure event.
 
@@ -442,6 +448,13 @@ answer. The in-daemon watcher is event-keyed: an append that matches a
 tripwire's trigger events re-evaluates it. A breach opens once, stays open
 until resolved, re-arms at resolution. Wall-clock as trigger stays banned;
 durations are legal metric data.
+
+One tripwire stands outside the registry, because it watches the harness and
+not a project's quality: stage duration. Its key is the heartbeat a polling
+stage stamps, its band is what the same stage of the same lane did in the
+other runs of the project, and its answer is a queued record naming the stage,
+the elapsed and the band. Under five completed visits there is no band and the
+watcher says nothing (ADR-0034).
 
 Standing quality bar (written by the runs themselves, never mined from
 outside): escaped defects per story (ceiling 0.5, rolling 10 ships),

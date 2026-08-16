@@ -13,6 +13,11 @@
 // verdict — so the verdict certifies the tree that lands, and no other run of
 // the project can merge between the two (ADR-0033).
 //
+// These three stages run no seat, so they are the run's silent stretches: a
+// poll outcome that changes nothing stamps nothing. Each poll loop therefore
+// carries a heartbeat, one stamp per batch of poll outcomes, saying what it
+// waits on (ADR-0034).
+//
 // The check watcher is a ledger-stamping process: every observed state
 // change stamps `check-transition`; pending is a state, never a verdict; no
 // wall-clock timeout detects anything. Two forge states are not check states
@@ -31,6 +36,7 @@ import { repairTicketPath, reconcileTicketPath, runReportPath } from '../daemon/
 import { readEvents } from '../ledger/ledger.mjs';
 import { instanceParkForms } from '../ledger/parks.mjs';
 import { openEscapesStore } from '../telemetry/stores.mjs';
+import { stageHeartbeat } from '../telemetry/heartbeat.mjs';
 import { recordEscape, ticketEscape, fixEscape, readEscapeSet } from '../telemetry/escapes.mjs';
 import { settleBreachOf } from '../telemetry/breaches.mjs';
 import { cloneDir, fetchClone, branchSha } from '../isolation/clones.mjs';
@@ -166,12 +172,14 @@ export function shipStep({ forgeFor, pollMs = 15000, enqueueRepair = null } = {}
 function updateHandler({ forgeFor, pollMs }) {
   return async function update(ctx) {
     const base = await shipBase(ctx, forgeFor);
+    const heart = stageHeartbeat(ctx);
     for (;;) {
       if (ctx.stopped()) return null;
       // The wait is on a state change in another run's ledger — the merge that
       // ends the holder's turn — and never on a span of time. `pollMs` is the
       // cadence of the reading, as it is for the check watcher.
       if (!takeShipToken(ctx)) {
+        heart.beat('ship-token');
         await sleep(pollMs);
         continue;
       }
@@ -231,6 +239,9 @@ function shipHandler({ forgeFor, pollMs }) {
     // ledger: a restart re-enters the stage and counts again, while the
     // stamps below still say which recovery step the run already spent.
     const checkless = new Map();
+    // The stage runs no seat, so nothing else stamps while it waits on the
+    // forge or on the token. Every poll outcome that changed nothing beats.
+    const heart = stageHeartbeat(ctx);
     for (;;) {
       if (ctx.stopped()) return null;
       const events = runEvents(ctx);
@@ -263,6 +274,7 @@ function shipHandler({ forgeFor, pollMs }) {
         // update stage: only its holder opens a request. A run that took the
         // token there takes nothing here and stamps nothing.
         if (!takeShipToken(ctx)) {
+          heart.beat('ship-token');
           await sleep(pollMs);
           continue;
         }
@@ -311,6 +323,7 @@ function shipHandler({ forgeFor, pollMs }) {
       }
       const directive = await watchChecks(ctx, base, opened, st, checkless);
       if (directive) return directive;
+      heart.beat('checks', { pr: opened.pr, sha: st.headSha });
       await sleep(pollMs);
     }
   };
@@ -1087,6 +1100,8 @@ function escapeCategory(finding) {
 // -- merge-commit checks -----------------------------------------------------
 
 async function watchMergeCommit(ctx, base, merged, pollMs) {
+  // The last poll loop of the run, and the last one nothing else stamps for.
+  const heart = stageHeartbeat(ctx);
   for (;;) {
     if (ctx.stopped()) return 'stopped';
     const runs = await base.forge.checkRuns(merged.mergeSha);
@@ -1108,6 +1123,7 @@ async function watchMergeCommit(ctx, base, merged, pollMs) {
     const reds = runs.filter((r) => RED.has(normalize(r)));
     if (reds.length === 0) {
       if (runs.every((r) => TERMINAL.has(normalize(r)))) return null;
+      heart.beat('merge-commit-checks', { sha: merged.mergeSha });
       await sleep(pollMs);
       continue;
     }
@@ -1144,6 +1160,7 @@ async function watchMergeCommit(ctx, base, merged, pollMs) {
       for (const r of needRerun) {
         ctx.store.append('merge-commit-check', { actor: ACTOR, check: r.name, status: 'rerun-requested' });
       }
+      heart.beat('merge-commit-checks', { sha: merged.mergeSha });
       await sleep(pollMs);
       continue;
     }
@@ -1152,6 +1169,7 @@ async function watchMergeCommit(ctx, base, merged, pollMs) {
       return lastRed > lastRerun;
     });
     if (!persistent) {
+      heart.beat('merge-commit-checks', { sha: merged.mergeSha });
       await sleep(pollMs);
       continue;
     }

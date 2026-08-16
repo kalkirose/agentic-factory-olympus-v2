@@ -21,6 +21,7 @@ import { gitHubForge, parseGitHubRepo } from '../src/ship/forge.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { openEscapesStore, openRunStore, TelemetryStore } from '../src/telemetry/stores.mjs';
+import { BEATS_PER_STAMP } from '../src/telemetry/heartbeat.mjs';
 import { openLoud } from '../src/telemetry/readers.mjs';
 import { RUN_EVENTS } from '../src/ledger/registry.mjs';
 import { recordEscape, ticketEscape, readEscapeSet } from '../src/telemetry/escapes.mjs';
@@ -471,6 +472,41 @@ test('a fixture PR ships green hands-off with full stamps', async (t) => {
   assert.equal(sweep.pushed, true);
   assert.match(gitSync(['show', 'main:stories/alpha.md'], fx.origin), /<!-- swept -->/);
   assert.ok(!events.some((e) => e.event === 'red-merge-breach'));
+});
+
+test('the ship stage beats while it waits, once per batch of poll outcomes', async (t) => {
+  // The stage runs no seat, so before the heartbeat its ledger read the same
+  // after one poll as after a thousand.
+  const fx = shipFixture(t, { pollMs: 5 });
+  fx.forge.state.autoChecks = () => [running()];
+  let polls = 0;
+  const forgeChecks = fx.forge.checkRuns;
+  fx.forge.checkRuns = async (sha) => {
+    polls += 1;
+    return forgeChecks(sha);
+  };
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  await waitFor(
+    () => readEvents(runLedgerPath(fx.paths, runId)).filter((e) => e.event === 'stage-heartbeat').length >= 2,
+    { label: 'two heartbeats', attempts: 600, intervalMs: 50 },
+  );
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const stamps = events.filter((e) => e.event === 'stage-heartbeat');
+  const waiting = stamps.filter((e) => e.stage === 'ship');
+  assert.ok(waiting.length >= 2);
+  assert.equal(waiting[0].waitingOn, 'checks');
+  assert.equal(waiting[0].detail.pr, opened.pr);
+  assert.equal(waiting[0].polls, BEATS_PER_STAMP);
+  assert.equal(waiting[1].polls, 2 * BEATS_PER_STAMP);
+  assert.ok(waiting[1].elapsed >= waiting[0].elapsed);
+  // Low volume by construction: every stamp stands for a whole batch of reads.
+  assert.ok(
+    stamps.length * BEATS_PER_STAMP <= polls,
+    `${stamps.length} stamps over ${polls} polls`,
+  );
 });
 
 test('an owed judgment writes the reconciliation ticket the sweep derives from', async (t) => {
