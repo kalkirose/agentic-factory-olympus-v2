@@ -55,7 +55,11 @@ export class ModelSemaphores {
           seat,
           model,
           waited: true,
-          waitSeq: line.seq,
+          // The grant is handed over by whichever run releases the slot, so
+          // this callback can run after the waiting run closed. Then the wait
+          // stamp never landed and there is no seq to point at, and the
+          // release must carry on regardless (ADR-0015).
+          ...(line && { waitSeq: line.seq }),
         });
         resolve(this.releaser(model));
       });

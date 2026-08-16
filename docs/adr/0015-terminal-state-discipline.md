@@ -117,6 +117,37 @@ the harness can be holding.
   refused archive never spends a retry ladder on a run it was never going to
   move.
 
+## Decision: what a stamp behind the close costs
+
+A run's ledger closes at `run-closed`, and the archive moves the directory
+behind it. An append that arrives after that lands nowhere, answers null to
+its caller, and produces one quiet `late-append` record on the instance
+ledger. It is never a throw.
+
+- **The tolerance is the closed ledger, and nothing else.** A late append is
+  refused for every reason a live one is: an event no registry holds throws,
+  a stream-classed event without a gist throws. Only the closed descriptor is
+  forgiven, and only for a store the harness closed on purpose. The ledger
+  primitive under the store still refuses an append to a closed file, so a
+  writer that holds one directly is unchanged.
+- **It covers every run-scoped append, not the seat exit alone.** The
+  tolerance sits in the telemetry store, so the terminated child's exit
+  stamp, the progress line its stdout was still carrying, a poll the ship
+  watcher had in flight, and a semaphore grant handed over by another run's
+  release are all one case with one answer. A kill that had to be patched
+  per call site would be a kill that faults at the next call site added.
+- **The record names the run, the event and the seat.** `late-append` carries
+  the run id, the event that did not land and the actor and seat behind it —
+  enough to read what was dropped, and none of the payload, which can be a
+  stderr tail or a report. It is quiet: it opens no queue line and no alert,
+  and it takes no resolution, because it asks nobody for anything.
+- **A late append with nowhere to record is still not a fault.** The instance
+  ledger closes at the daemon's own stop, and a seat can outlive that too.
+  The drop stands on its own; the record is best effort behind it.
+- **The kill does not wait.** Terminating the seats and closing the run stay
+  one synchronous act, so a kill lands when the operator asks for it rather
+  than when the last child agrees to die.
+
 ## Decision: how a loud record ends
 
 Every loud class names the event that owns it, in one table
@@ -241,6 +272,37 @@ start-time sweep exists to answer it: the record is not a chore for the human,
 it is a statement that the harness owes itself a retry and will take it at the
 next opportunity it has.
 
+## Why a late stamp is dropped rather than kept
+
+A kill closed a run and the archive moved its directory, both in the act the
+operator asked for. A moment later the terminated seat's process finally
+ended, its exit handler stamped the seat's terminal event into the ledger the
+close had shut, and the append threw. The daemon read the throw as a fault of
+its own, recorded the death and stopped. The kill worked; it cost a restart.
+
+That is the blocked move again, in a second place: the harness answered the
+cheaper of two conditions with the most expensive action it has. A stamp that
+arrives after a close changes nothing a reader will ever ask for. A daemon
+that stops takes every other open run in the instance with it — and a kill is
+exactly the moment an operator is dealing with one problem and can least
+afford a second.
+
+Keeping the stamp is worse than dropping it. Reopening the live ledger
+recreates a run directory the archive just moved, and a directory under
+`runs/` is what the next start reads as a run to resume. Writing into the
+archive gives a finished run a tail written after its own close, when every
+reader of a run treats `run-closed` as the last word. And the content is not
+missed: the close already recorded what ended the seat, with the state and the
+actor. The child's own exit adds the exit code of a process the harness itself
+told to die.
+
+What is worth keeping is the fact of the drop. A machine that discards a write
+says so somewhere, or nobody can tell a tolerated race from a lost stamp. The
+instance ledger is where that record belongs — it is the ledger of the daemon,
+not of a run, and the run in question is over. The record also measures the
+window between a close and the exits behind it, which is the one number that
+would decide whether a kill should ever wait.
+
 ## Why a loud record ends at its owner, not at the run
 
 The loud strip is the one surface the owner is shown before being asked to
@@ -305,6 +367,12 @@ a copy that lost an artifact while the ledger travelled whole — the proof
 becomes a per-file comparison of the two directories. Trigger: one leftover
 deleted over an archive that was missing something. Reversal cost: low. One
 comparison, at the place that already walks `runs/`.
+
+If a dropped stamp turns out to carry something a reader needed — a cost a
+closed run never recorded — the kill waits a bounded moment for the children
+it terminated before it closes, and the drop keeps the payload it names.
+Trigger: one closed run whose recorded cost is short of what its seats spent.
+Reversal cost: low. One await on the close path, or one field on the record.
 
 If an owning-event pairing proves too eager — a record cleared while the
 condition it reported still holds — that class loses its owner and returns to

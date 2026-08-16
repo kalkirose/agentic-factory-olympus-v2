@@ -81,6 +81,49 @@ test('a stream-classed append without a gist is refused', (t) => {
   assert.equal(readStreamIndex(paths.loudStream).length, 0);
 });
 
+// -- a stamp behind the close -------------------------------------------------
+
+test('an append after the close lands nowhere and says so through the late hook', (t) => {
+  const paths = home(t);
+  const late = [];
+  const store = openRunStore(paths, 'r1', { onLate: (record) => late.push(record) });
+  store.append('run-launched', { actor: 'daemon', lane: 'story' });
+  store.append('run-closed', { actor: 'daemon', state: 'killed' });
+  store.close();
+  const dropped = store.append('seat-terminated', {
+    actor: 'daemon',
+    seat: 'dev-1',
+    reason: 'run-killed',
+  });
+  assert.equal(dropped, null);
+  assert.deepEqual(late, [
+    { ledger: 'run:r1', event: 'seat-terminated', actor: 'daemon', seat: 'dev-1' },
+  ]);
+  // The ledger is what the close left, and the file it closed is not reopened.
+  assert.deepEqual(
+    readEvents(runLedgerPath(paths, 'r1')).map((e) => e.event),
+    ['run-launched', 'run-closed'],
+  );
+});
+
+test('a closed store tolerates the close and nothing else', (t) => {
+  const paths = home(t);
+  const late = [];
+  const store = openRunStore(paths, 'r1', { onLate: (record) => late.push(record) });
+  store.close();
+  assert.throws(() => store.append('daemon-started', { actor: 'daemon' }), /not in registry/);
+  assert.throws(() => store.append('gate-integrity', { actor: 'daemon' }), /requires a one-line gist/);
+  assert.deepEqual(late, []);
+});
+
+test('a late append with nowhere to go is dropped, not thrown', (t) => {
+  const paths = home(t);
+  const store = openInstanceStore(paths);
+  store.close();
+  assert.equal(store.append('seat-failure', { actor: 'daemon', seat: 'eval', code: 1 }), null);
+  assert.deepEqual(readEvents(paths.instanceLedger), []);
+});
+
 test('resolve pairs a resolved append to a loud item or a breach', (t) => {
   const paths = home(t);
   const store = openInstanceStore(paths);

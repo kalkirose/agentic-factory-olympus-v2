@@ -220,6 +220,69 @@ test('a handler error and an off-catalog park both violate loud', async (t) => {
   assert.equal(openLoud(paths).length, 2);
 });
 
+// -- a stamp behind the close -------------------------------------------------
+
+// The lane a kill meets in practice: a stage waiting on a child that outlives
+// the close by as long as the host takes to tear the process tree down.
+function seatLane(args) {
+  let exit;
+  const lane = {
+    stages: ['work'],
+    handlers: {
+      work: (ctx) => {
+        exit = ctx.supervise({ seat: 'dev-1', cmd: process.execPath, args: ['-e', args] });
+        return exit.then(() => ({ close: { state: 'failed' } }));
+      },
+    },
+  };
+  return { lane, exited: () => exit };
+}
+
+test('a seat exit behind the kill records late and faults nothing', async (t) => {
+  const { paths, engine } = setup(t, { instance: true });
+  const { lane, exited } = seatLane('setInterval(() => {}, 1000)');
+  engine.registerLane('story', lane);
+  engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+  await waitFor(
+    () => readEvents(runLedgerPath(paths, 'r1')).some((e) => e.event === 'seat-spawned'),
+    { label: 'seat spawned' },
+  );
+  engine.killRun('r1', { actor: 'operator' });
+  // The recorded sequence: the run closed and the archive took the directory,
+  // and only then did the terminated child's exit arrive.
+  assert.equal(archivedEvents(paths, 'r1').at(-1).event, 'run-closed');
+  assert.ok(!existsSync(join(paths.runs, 'r1')));
+  const result = await exited();
+  assert.equal(result.terminated, true);
+  const late = readEvents(paths.instanceLedger).filter((e) => e.event === 'late-append');
+  assert.equal(late.length, 1);
+  assert.equal(late[0].runId, 'r1');
+  assert.equal(late[0].lateEvent, 'seat-terminated');
+  assert.equal(late[0].seat, 'dev-1');
+  assert.equal(late[0].actor, 'daemon');
+  assert.ok(!late[0].stream); // quiet: no queue line, no alert
+  // The closed run keeps the ledger it closed on, and nothing reopened the
+  // directory the archive moved.
+  const archived = archivedEvents(paths, 'r1');
+  assert.ok(!archived.some((e) => e.event === 'seat-terminated'));
+  assert.equal(archived.at(-1).state, 'killed');
+  assert.ok(!existsSync(join(paths.runs, 'r1')));
+});
+
+test('a seat that exits before the close stamps its own run and nothing late', async (t) => {
+  const { paths, engine } = setup(t, { instance: true });
+  const { lane } = seatLane('process.exit(3)');
+  engine.registerLane('story', lane);
+  engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+  await waitFor(() => archivedEvents(paths, 'r1').some((e) => e.event === 'run-closed'), {
+    label: 'run closed and archived',
+  });
+  const failure = archivedEvents(paths, 'r1').find((e) => e.event === 'seat-failure');
+  assert.equal(failure.reason, 'exit');
+  assert.equal(failure.code, 3);
+  assert.ok(!readEvents(paths.instanceLedger).some((e) => e.event === 'late-append'));
+});
+
 // -- a blocked archive --------------------------------------------------------
 
 test('an archive nothing can move stamps loud, and the engine runs on', async (t) => {

@@ -11,6 +11,12 @@
 //   seat-terminated — the orchestrator ended the seat deliberately (run kill,
 //                     daemon stop); not a failure of the seat.
 //
+// A terminal stamp is written whenever the child ends, and the ledger it is
+// written to may be gone by then: a killed run closes and archives without
+// waiting for its children. The store answers that append with a quiet late
+// record instead of a throw (ADR-0015), so this file stamps and resolves the
+// same way whether its run outlived the child or not.
+//
 // One outcome stamps nothing here: a child whose stream said the model is
 // unavailable resolves with reason `model-unavailable` and leaves the stamp to
 // the runner, which owns the choice between a degrade and a failure. Only the

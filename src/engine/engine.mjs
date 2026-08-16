@@ -151,6 +151,7 @@ export class RunEngine {
         this.checkBudget(run, line);
         this.settleLoud(run, line);
       },
+      onLate: (late) => this.recordLateAppend(run, late),
     });
     this.runs.set(runId, run);
     return run;
@@ -423,6 +424,14 @@ export class RunEngine {
 
   // -- close ----------------------------------------------------------------
 
+  /**
+   * Ends an open run on a human's word: every in-flight seat is terminated and
+   * the run closes `killed` in the same call. The close does not wait for the
+   * children to die — a kill lands when the operator asks for it — so a seat
+   * that takes a moment stamps its exit after the ledger closed and the
+   * archive moved. That stamp is recorded late; it is never a fault
+   * (ADR-0015).
+   */
   killRun(runId, { actor = ACTOR } = {}) {
     const run = this.runs.get(runId);
     if (!run || run.closed) throw new Error(`no open run: ${runId}`);
@@ -441,6 +450,33 @@ export class RunEngine {
       this.onClosed?.({ runId: run.runId, project: run.project, lane: run.lane, state });
     } catch {
       // The hook owns its errors; a close never fails on it.
+    }
+  }
+
+  /**
+   * A stamp that arrived for this run after its ledger closed. The kill is
+   * where it happens: the close terminates the seats and does not wait for
+   * them, so a child that takes a moment to die stamps its exit into a ledger
+   * the archive has already moved. The run is over in the state it recorded
+   * and nothing behind that close is news, so the stamp does not go back into
+   * the run — it goes to the instance ledger as a quiet record of a write that
+   * did not land, and the run keeps the terminal state it closed on
+   * (ADR-0015).
+   */
+  recordLateAppend(run, late) {
+    if (!this.instanceStore) return;
+    try {
+      this.instanceStore.append('late-append', {
+        actor: ACTOR,
+        runId: run.runId,
+        lateEvent: late.event,
+        ...(late.actor && { lateActor: late.actor }),
+        ...(late.seat && { seat: late.seat }),
+      });
+    } catch {
+      // The record of a dropped write is the last thing that may cost an
+      // instance. The instance ledger closes at the daemon's own stop, and a
+      // seat can outlive that too.
     }
   }
 

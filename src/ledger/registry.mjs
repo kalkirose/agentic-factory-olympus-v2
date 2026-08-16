@@ -172,6 +172,13 @@ export const INSTANCE_EVENTS = new Set([
   // or `copy`) and the live directory a copy could not delete, and it is the
   // event that answers an `archive-failed` record for the same run.
   'run-archived',
+  // One stamp that arrived for a run whose ledger had already closed: the
+  // terminated child that exited after the kill, or any other run-scoped
+  // append the close outran. It names the run, the event that did not land
+  // and the seat behind it. Quiet: the run is over in the state it recorded,
+  // and a stamp behind that close changes nothing anyone reads. Never silent,
+  // because a machine that drops a write says where it went (ADR-0015).
+  'late-append',
   // A closed run that did not reach the archive. Loud, because the run is
   // over and the move is the one part of a close that a process outside the
   // harness can block: the daemon carries on, and the record is what says a

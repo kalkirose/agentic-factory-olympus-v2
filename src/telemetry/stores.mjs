@@ -34,26 +34,41 @@ export class TelemetryStore {
    *   ('instance', 'escapes', or 'run:<runId>')
    * @param {string} ledgerPath
    * @param {Set<string>} allowedEvents
-   * @param {{onAppend?: (line: object, ledger: string) => void}} [opts]
+   * @param {{onAppend?: (line: object, ledger: string) => void,
+   *   onLate?: (late: {ledger: string, event: string, actor?: string,
+   *   seat?: string}) => void}} [opts]
    *   onAppend fires after every append, with the source-ledger id — the
-   *   tripwire watcher's and the notifier's event key. The hook owns its
-   *   errors; a failing hook never fails the append.
+   *   tripwire watcher's and the notifier's event key. onLate fires instead,
+   *   for an append that arrived after this store closed. Both hooks own
+   *   their errors; a failing hook never fails the append.
    */
-  constructor(paths, id, ledgerPath, allowedEvents, { onAppend } = {}) {
+  constructor(paths, id, ledgerPath, allowedEvents, { onAppend, onLate } = {}) {
     this.paths = paths;
     this.id = id;
+    this.allowedEvents = allowedEvents;
     this.ledger = new Ledger(ledgerPath, { allowedEvents });
     this.onAppend = onAppend ?? null;
+    this.onLate = onLate ?? null;
+    this.closed = false;
   }
 
   /**
    * Appends one event. A stream-classed event requires a `gist` payload
    * field; the same call appends the pointer entry to the stream index.
+   *
+   * An append that arrives after this store closed lands nowhere and answers
+   * null. The close is the deliberate end of a ledger — a run's terminal
+   * state, or the daemon's own stop — and a stamp that comes in behind it is
+   * a child the close already terminated, a poll that was in flight, or a
+   * callback the close outran. None of those is news, and none of them is
+   * worth the instance the throw used to cost (ADR-0015). Everything else a
+   * bad append can be still throws.
    */
   append(event, fields) {
     if (streamOf(event) && (typeof fields.gist !== 'string' || fields.gist.length === 0)) {
       throw new Error(`stream-classed event ${event} requires a one-line gist`);
     }
+    if (this.closed) return this.dropLate(event, fields);
     const line = this.ledger.append(event, fields);
     if (line.stream) {
       appendStreamEntry(this.paths, line.stream, {
@@ -99,7 +114,33 @@ export class TelemetryStore {
     return this.append('resolved', { actor, resolves, resolvedEvent: target.event, ...rest });
   }
 
+  /**
+   * The late append: refused exactly as a live one would be, minus the write.
+   * The registry check stands on both sides of the close, so a call site that
+   * names an event no registry holds is the defect it always was; only the
+   * closed ledger is tolerated. The hook is where the drop becomes a record.
+   */
+  dropLate(event, fields) {
+    if (!this.allowedEvents.has(event)) {
+      throw new Error(`event not in registry: ${event}`);
+    }
+    if (this.onLate) {
+      try {
+        this.onLate({
+          ledger: this.id,
+          event,
+          ...(fields?.actor && { actor: fields.actor }),
+          ...(fields?.seat && { seat: fields.seat }),
+        });
+      } catch {
+        // the hook owns its errors
+      }
+    }
+    return null;
+  }
+
   close() {
+    this.closed = true;
     this.ledger.close();
   }
 }
