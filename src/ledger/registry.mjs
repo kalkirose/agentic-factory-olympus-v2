@@ -115,6 +115,14 @@ export const RUN_EVENTS = new Set([
   // route stamps what it did — but never silent, because a run that waits on
   // the forge must say what it waits on.
   'forge-anomaly',
+  // The watcher held a red check back from triage because the workflow run it
+  // is a job of was still executing, so its log was still being written. One
+  // stamp per wait — the head sha and the run it waited on — never one per
+  // poll. Quiet: waiting is what the watcher does with every state that is not
+  // yet a verdict, and the CI verdict that follows carries how long the wait
+  // ran. Never silent, because a dispatch that did not happen when the ledger
+  // says a check went red is otherwise a gap nobody can read (ADR-0008).
+  'triage-wait',
   'merge-round',
   'merged',
   'merge-commit-check',

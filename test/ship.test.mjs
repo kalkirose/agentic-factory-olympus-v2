@@ -17,7 +17,7 @@ import {
 } from '../src/daemon/home.mjs';
 import { postFreeze, repairLane } from '../src/lanes/verdict.mjs';
 import { shipStep, CHECKLESS_POLLS, UPDATE_CAP } from '../src/lanes/ship.mjs';
-import { gitHubForge, parseGitHubRepo } from '../src/ship/forge.mjs';
+import { gitHubForge, parseGitHubRepo, PartialLogRefusal } from '../src/ship/forge.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { openEscapesStore, openRunStore, TelemetryStore } from '../src/telemetry/stores.mjs';
@@ -87,6 +87,8 @@ const red = (name = 'ci') => ({
   completedAt: '2026-08-10T00:02:00Z',
 });
 const running = (name = 'ci') => ({ name, status: 'in_progress' });
+/** A red check that names the workflow run it is a job of. */
+const redOf = (run, name = 'ci') => ({ ...red(name), run });
 
 // -- fake forge over the fixture origin --------------------------------------
 
@@ -100,6 +102,10 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
     autoChecks: null,
     onRerun: null,
     reruns: [],
+    // Workflow-run states by id, for the checks that name one. A check whose
+    // run is not in here belongs to a run that is over — which is what every
+    // scenario but the wait scenarios assumes.
+    runs: new Map(),
     // A default branch the head does not carry answers as `behindBase`. With
     // this on it answers as `conflicting` instead — the state the forge
     // reports when the two sides touched the same lines — so a scenario picks
@@ -186,6 +192,9 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
     },
     async checkRuns(sha) {
       return checksFor(sha);
+    },
+    async workflowRun(id) {
+      return state.runs.get(String(id)) ?? { id: String(id), status: 'completed', conclusion: 'failure' };
     },
     async rerunFailed(sha) {
       state.reruns.push(sha);
@@ -829,6 +838,89 @@ test('a mixed CI verdict keeps the local sweep: the repair round is judged', asy
   const cycles = new Set(events.filter((e) => e.event === 'layer-result').map((e) => e.cycle));
   assert.ok(cycles.has(3), `the repair round was judged: cycles ${[...cycles]}`);
   assert.equal(events.filter((e) => e.event === 'verdict-rendered').at(-1).verdict, 'green');
+});
+
+// -- triage waits for the workflow run to finish -----------------------------
+
+/** The seats a CI red needs to reach triage and ship the repair behind it. */
+const CI_REPAIR_SEATS = {
+  'verdict-triage': ciTriageSeat(['code-defect']),
+  'repair-dev': () => ({
+    files: { 'src/fix-note.mjs': 'export const note = 1;\n' },
+    report: { summary: 'repaired' },
+  }),
+  'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+};
+
+test('a red check on a workflow run still executing never reaches triage', async (t) => {
+  // The check is one job of the run. It went red while the rest of the run
+  // carried on writing the log the triage would have read.
+  const fx = shipFixture(t, { pollMs: 5, seats: CI_REPAIR_SEATS });
+  fx.forge.state.autoChecks = () => [redOf('900')];
+  fx.forge.state.runs.set('900', { id: '900', status: 'in_progress', conclusion: null });
+  let polls = 0;
+  const forgeChecks = fx.forge.checkRuns;
+  fx.forge.checkRuns = async (sha) => {
+    polls += 1;
+    return forgeChecks(sha);
+  };
+  const runId = await fx.launch();
+  const wait = await waitEvent(fx.paths, runId, (e) => e.event === 'triage-wait', 'triage-wait');
+  assert.equal(wait.run, '900');
+  assert.equal(wait.status, 'in_progress');
+  assert.deepEqual(wait.checks, ['ci']);
+  const reached = polls;
+  await waitFor(() => polls >= reached + 30, {
+    label: 'thirty more poll outcomes',
+    attempts: 600,
+    intervalMs: 20,
+  });
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  // One stamp for the wait, whatever the poll count behind it.
+  assert.equal(live.filter((e) => e.event === 'triage-wait').length, 1);
+  // Nothing the watcher does to a red was done: no triage, and no re-run of
+  // jobs the run still holds.
+  assert.ok(!live.some((e) => e.event === 'verdict-rendered' && e.source === 'ci'));
+  assert.ok(!live.some((e) => e.event === 'check-transition' && e.status === 'rerun-requested'));
+  assert.equal(fx.forge.state.reruns.length, 0);
+});
+
+test('the dispatch comes on the first poll after the workflow run goes terminal', async (t) => {
+  const fx = shipFixture(t, { seats: CI_REPAIR_SEATS });
+  let shas = 0;
+  fx.forge.state.autoChecks = () => (++shas === 1 ? [redOf('900')] : [green()]);
+  fx.forge.state.onRerun = (sha) => fx.forge.setChecks(sha, [redOf('900')]);
+  fx.forge.state.runs.set('900', { id: '900', status: 'in_progress', conclusion: null });
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'triage-wait', 'triage-wait');
+  assert.equal(fx.forge.state.reruns.length, 0);
+  fx.forge.state.runs.set('900', { id: '900', status: 'completed', conclusion: 'failure' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const ciRender = events.find((e) => e.event === 'verdict-rendered' && e.source === 'ci');
+  assert.equal(ciRender.verdict, 'red');
+  // The verdict says how long the watcher held it back, at the one moment the
+  // span is known.
+  assert.ok(Number.isInteger(ciRender.waited), `the CI verdict carries the wait: ${ciRender.waited}`);
+  assert.equal(events.filter((e) => e.event === 'triage-wait').length, 1);
+  assert.equal(fx.forge.state.reruns.length, 1);
+});
+
+test('a red check on a workflow run that finished dispatches with no wait at all', async (t) => {
+  const fx = shipFixture(t, { seats: CI_REPAIR_SEATS });
+  let shas = 0;
+  fx.forge.state.autoChecks = () => (++shas === 1 ? [redOf('900')] : [green()]);
+  fx.forge.state.onRerun = (sha) => fx.forge.setChecks(sha, [redOf('900')]);
+  fx.forge.state.runs.set('900', { id: '900', status: 'completed', conclusion: 'failure' });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const ciRender = events.find((e) => e.event === 'verdict-rendered' && e.source === 'ci');
+  assert.equal(ciRender.verdict, 'red');
+  assert.equal(ciRender.waited, undefined);
+  assert.ok(!events.some((e) => e.event === 'triage-wait'));
+  const finding = events.find((e) => e.event === 'finding');
+  assert.deepEqual(finding.layers, ['ci:ci']);
 });
 
 test('a competing merge updates the branch: merge main in, re-run, auto-merge fires', async (t) => {
@@ -1647,10 +1739,22 @@ test('an unreadable auto-merge capability reads as off, never as a stage failure
 });
 
 /** A commit whose failed check is one job of a workflow of another name. */
-function checkOutputRunner({ log = null, logCode = 0, checkRuns = null } = {}) {
+function checkOutputRunner({ log = null, logCode = 0, checkRuns = null, runStatus = 'completed' } = {}) {
   const calls = [];
   const runner = async (argv) => {
     calls.push(argv);
+    if (argv[1] === 'api' && /\/actions\/runs\/\d+$/.test(argv[2])) {
+      // The state of the workflow run the check is a job of. `null` is the
+      // forge refusing the read, which is not an answer about the run.
+      if (runStatus === null) return { code: 1, output: 'gh: Not Found (HTTP 404)' };
+      return {
+        code: 0,
+        output: JSON.stringify({
+          status: runStatus,
+          conclusion: runStatus === 'completed' ? 'failure' : null,
+        }),
+      };
+    }
     if (argv[1] === 'api' && argv[2].endsWith('/check-runs')) {
       return {
         code: 0,
@@ -1753,4 +1857,47 @@ test('a forge that cannot run at all still answers the triage input with a reaso
   const runner = async () => ({ code: null, output: '', error: 'spawn gh ENOENT' });
   const out = await gitHubForge({ repo: 'acme/widgets', runner }).checkOutput('sha1', 'build-api');
   assert.match(out, /ENOENT/);
+});
+
+test('every check the adapter reports names the workflow run it is a job of', async () => {
+  const { runner } = checkOutputRunner();
+  const forge = gitHubForge({ repo: 'acme/widgets', runner });
+  assert.deepEqual((await forge.checkRuns('sha1')).map((r) => r.run), ['900', '900']);
+  assert.deepEqual(await forge.workflowRun('900'), {
+    id: '900',
+    status: 'completed',
+    conclusion: 'failure',
+  });
+  // A check no workflow produced carries no run: there is nothing to wait for.
+  const foreign = gitHubForge({
+    repo: 'acme/widgets',
+    runner: checkOutputRunner({
+      checkRuns: [{ name: 'coverage', status: 'completed', details_url: 'https://coverage.example/report/7' }],
+    }).runner,
+  });
+  assert.deepEqual((await foreign.checkRuns('sha1')).map((r) => r.run), [null]);
+});
+
+test('the log fetch refuses a workflow run that has not finished', async () => {
+  const { calls, runner } = checkOutputRunner({ log: 'the steps so far\n', runStatus: 'in_progress' });
+  const forge = gitHubForge({ repo: 'acme/widgets', runner });
+  await assert.rejects(
+    () => forge.checkOutput('sha1', 'build-api'),
+    (error) => {
+      // Loud, and never the half-log: a caller that got here has a defect, and
+      // a reason string would travel into a triage prompt as evidence.
+      assert.ok(error instanceof PartialLogRefusal, `refusal class: ${error.name}`);
+      assert.match(error.message, /workflow run 900 is in_progress/);
+      return true;
+    },
+  );
+  assert.ok(!calls.some((argv) => argv.includes('--log-failed') || argv.includes('--log')));
+});
+
+test('a run state the forge will not answer for leaves the log fetch as it was', async () => {
+  // An unreadable state is not a statement that the run is going. Refusing on
+  // it would turn one 404 into a run the harness stops.
+  const { runner } = checkOutputRunner({ log: 'assertion failed\n', runStatus: null });
+  const out = await gitHubForge({ repo: 'acme/widgets', runner }).checkOutput('sha1', 'build-api');
+  assert.match(out, /assertion failed/);
 });

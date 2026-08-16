@@ -312,6 +312,12 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   delivered; after a bounded count of polls that saw nothing, the run spends
   one re-delivery and then parks a provisioning gate. Both stamp
   `forge-anomaly` first — a watcher may not sit on either and say nothing.
+- **A red check is not a finished workflow run** (ADR-0008). A check reports
+  one job, and a job that fails early leaves the rest of its run executing
+  while the log the triage would read is still being written. The watcher
+  holds such a red until the run ends — one `triage-wait` stamp per wait, and
+  the CI verdict carries how long it waited — and the log fetch asserts the
+  same fact before it downloads a byte.
 - **One red regime.** CI reds get one automatic re-run of failed jobs, then
   the same four-class triage and the same routes as in-run reds. Budgets are
   shared.

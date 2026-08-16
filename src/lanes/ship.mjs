@@ -23,7 +23,10 @@
 // wall-clock timeout detects anything. Two forge states are not check states
 // at all and are classified before the watcher sees them — a request in
 // conflict with its base, and a head sha the forge carries no check run for.
-// Both stamp `forge-anomaly` and take a route. Persistent CI reds render a red
+// Both stamp `forge-anomaly` and take a route. A red check whose workflow run
+// is still executing is a third: the check is terminal and the run behind it
+// is not, so the watcher holds the red until the run ends and stamps
+// `triage-wait` once for the wait. Persistent CI reds render a red
 // verdict (`source: 'ci'`) and re-enter the verdict stage — the same
 // four-class triage, the same routes, the same shared budgets as in-run
 // reds. An env-only verdict comes back here for the re-run without a local
@@ -535,7 +538,59 @@ function checkMarks(events, sha, name) {
   return { lastRerun, lastRed };
 }
 
+/**
+ * The workflow runs behind the red checks that are still executing. A check is
+ * one job of a workflow run: a job that fails early turns its check red and
+ * leaves the rest of the run going, so a terminal check is no statement at all
+ * about the run it belongs to. A check with no workflow run behind it — any
+ * other app's check — has nothing to wait for.
+ */
+async function executingRuns(base, redChecks) {
+  const ids = [...new Set(redChecks.map((r) => r.run).filter((id) => id != null).map(String))];
+  const executing = [];
+  for (const id of ids) {
+    const state = await base.forge.workflowRun(id);
+    if (state && state.status !== 'completed') executing.push({ run: id, status: state.status });
+  }
+  return executing;
+}
+
+/**
+ * The one stamp of a held-back dispatch, per head sha and per workflow run.
+ * The stamp's own timestamp is when the wait began, and the CI verdict that
+ * ends it carries the span — so the wait costs the ledger one line however
+ * many poll outcomes it spans.
+ */
+function stampWait(ctx, opened, sha, executing, redChecks) {
+  const events = runEvents(ctx);
+  for (const { run, status } of executing) {
+    if (events.some((e) => e.event === 'triage-wait' && e.sha === sha && e.run === run)) continue;
+    ctx.store.append('triage-wait', {
+      actor: ACTOR,
+      pr: opened.pr,
+      sha,
+      run,
+      status,
+      checks: redChecks.map((r) => r.name),
+    });
+  }
+  return null; // the next poll asks again; an executing run is a state, never a verdict
+}
+
+/** How long the dispatch of this sha was held back, from the wait's own stamp. */
+function waitedFor(events, sha) {
+  const wait = [...events].reverse().find((e) => e.event === 'triage-wait' && e.sha === sha);
+  return wait ? Date.now() - Date.parse(wait.ts) : null;
+}
+
 async function handleRed(ctx, base, opened, sha, redNow) {
+  // Nothing the watcher does to a red belongs to a workflow run still in
+  // flight. The failed-jobs re-run cannot be asked for while the run holds
+  // them, and triage judged on a run that is still writing its log judges half
+  // the evidence — so a red on an executing run is not yet a red the watcher
+  // acts on, and the poll after the run ends is where it acts.
+  const executing = await executingRuns(base, redNow);
+  if (executing.length > 0) return stampWait(ctx, opened, sha, executing, redNow);
   const events = runEvents(ctx);
   const lastOpFix = findLast(events, 'operational-fix')?.seq ?? 0;
   // One automatic re-run of the failed jobs per sha; an operational fix
@@ -563,15 +618,18 @@ async function handleRed(ctx, base, opened, sha, redNow) {
     return lastRed > lastRerun;
   });
   if (!persistent) return null; // the re-run is still in flight
-  return ciTriage(ctx, base, sha, redNow);
+  return ciTriage(ctx, base, sha, redNow, waitedFor(events, sha));
 }
 
 /**
  * Persistent CI reds enter the shared four-class triage and render a red
  * verdict (`source: 'ci'`); the verdict stage routes it — same ladders, same
- * budgets as in-run reds.
+ * budgets as in-run reds. Every red here is a red of a workflow run that has
+ * finished, so the logs the triage reads are whole. `waited` is the span the
+ * watcher held the dispatch back for, and it is on the verdict because that is
+ * the moment the span is known.
  */
-async function ciTriage(ctx, base, sha, redChecks) {
+async function ciTriage(ctx, base, sha, redChecks, waited = null) {
   const events = runEvents(ctx);
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   const cycle = renders.length + 1;
@@ -611,6 +669,7 @@ async function ciTriage(ctx, base, sha, redChecks) {
     verdict: 'red',
     open: openIds,
     record: recordPath,
+    ...(waited != null && { waited }),
   });
   return { next: 'verdict' };
 }

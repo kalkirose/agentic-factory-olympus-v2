@@ -23,7 +23,8 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   and the daemon binary registers it on the engine at start.
 - **The forge interface.** All forge traffic goes through one injected
   object: `preflight`, `openPr` (idempotent per head branch), `armAutoMerge`,
-  `prState`, `checkRuns`, `rerunFailed`, `checkOutput`. `ship/forge.mjs`
+  `prState`, `checkRuns`, `workflowRun`, `rerunFailed`, `checkOutput`.
+  `ship/forge.mjs`
   implements it over the `gh` CLI with an injectable runner; tests substitute
   a fake with the same shape. A forge for another host is one new module.
   `prState` is where the host's own words about a request become the states
@@ -35,9 +36,28 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   A check is named after the job behind it, while a workflow run is named
   after its workflow, so `checkOutput` resolves the failed job through the
   commit's check runs — the same read the watcher stamps from — and takes the
-  job link found there to the log. It is total: when no log can be read it
-  answers with the reason, because that string is the triage input and an
-  absence with no reason reads as a check that told nobody anything.
+  job link found there to the log. That link also names the run, which is why
+  `checkRuns` carries `run` on every check and `workflowRun(id)` answers for
+  the run's own status. `checkOutput` is total over every forge condition:
+  when no log can be read it answers with the reason, because that string is
+  the triage input and an absence with no reason reads as a check that told
+  nobody anything. It refuses exactly one thing, and by exception rather than
+  by reason string — a log asked for before its workflow run finished.
+- **A red check is not a finished workflow run.** A check reports one job. A
+  job that fails early turns its check terminal and leaves the rest of the run
+  executing, and the forge serves that run's logs out of one archive that is
+  only whole when the run is over. The watcher therefore reads two states
+  before it acts on a red: the check's, and the run's. A red whose run is
+  still executing is held — no failed-jobs re-run, which the forge would
+  refuse anyway while it holds the jobs, and no triage — and the poll after
+  the run ends is where the red is acted on, exactly as a red on a finished
+  run always was. The hold stamps `triage-wait` once per head sha and workflow
+  run, never once per poll; the CI verdict that ends the wait carries `waited`,
+  which is the one moment the span of the wait is known. Underneath, the log
+  fetch asserts the same fact for itself and throws `PartialLogRefusal` when it
+  is reached anyway: the assert is on the read that would produce the wrong
+  evidence, so no future caller can reintroduce the defect by taking a
+  different route to the log.
 - **The forge is per run, not per graph.** The engine registers lanes once at
   daemon start, while one instance holds many projects, each with its own
   repository. `shipStep` therefore takes a resolver, `forgeFor(ctx)`, and the
@@ -189,6 +209,38 @@ not need, and it would owe an owning event to answer it. The event exists for
 the opposite reason to an alert: no ship stage may sit on a state of the
 forge and say nothing about it.
 
+## Why the log fetch throws where everything beside it answers with a reason
+
+Every other absence in `checkOutput` is the forge's business: a check of that
+name does not exist, the check did not fail, no workflow job stands behind it,
+the host refused the read. The triage seat can act on all four, so each travels
+to it as a sentence. A partial log is not one of them. It is well-formed
+evidence about the wrong thing, and a seat handed the first half of a run's
+output has no way to tell that a half is what it got — it reads the steps that
+passed and concludes about the ones it cannot see. A reason string would put
+that conclusion one careless caller away, because a caller that ignores the
+string gets the string as the log. The exception is also the loud channel: a
+throw out of a ship stage is a `liveness-violation`, which is what a defect in
+the harness's own reading of a gate should cost.
+
+The watcher's hold and the fetch's assert are deliberately the same fact
+checked twice. The hold is the behavior — it keeps the run moving and costs a
+poll — and the assert is the guarantee, on the one call that can produce the
+wrong answer. Neither is sufficient alone: a hold with no assert is a rule the
+next caller does not know about, and an assert with no hold turns an ordinary
+CI race into a stopped run.
+
+## Why the wait is one quiet stamp and not a heartbeat
+
+The stage heartbeat already says the ship stage is alive and what it waits on
+(ADR-0034), so the wait needs no liveness telemetry of its own. What it needs
+is an account of a decision: the ledger says a required check went red, and the
+next thing the ledger would otherwise say is a triage that happened minutes
+later for no recorded reason. One stamp closes that gap and stays out of the
+way — quiet, because holding a red for the run behind it is ordinary work with
+a route already running, and once per wait, because a stamp per poll would bury
+the run's own events to say one thing repeatedly.
+
 ## Why the breach conversion lives in close-out
 
 Ship stamps `merged` with the red flag and hands over; close-out converts.
@@ -236,6 +288,21 @@ where the ownership test puts a fact about the host. Trigger: `forge-anomaly`
 stamps of kind `checkless-sha` on shas whose checks then arrive by
 themselves. Reversal cost: low — one constant, and the route under it does
 not change.
+
+If waiting for the whole workflow run proves too slow — a run whose remaining
+jobs take far longer than the job that failed, on a repository where the two
+share no logs worth reading together — the wait narrows from the run to the
+job: `workflowRun` gives way to a per-job state read, and the fetch asks for
+one job's log rather than a slice of the run's archive. Trigger: `triage-wait`
+stamps whose `waited` on the CI verdict is a large part of the ship stage.
+Reversal cost: low — one forge method and the predicate in `executingRuns`;
+the stamp, the hold and the assert all stay where they are.
+
+If a forge answers no run state at all (a host with no workflow concept), the
+hold never fires and the fetch never refuses, which is the behavior the ship
+step had before this. That is the deliberate posture for an unreadable state
+too: an unanswered read is not a statement that a run is executing, and
+treating it as one would stop runs over a single refused call.
 
 If direct card pushes prove unlandable (org-wide protection on the default
 branch), route the sweep through a `cards/<runId>` branch with its own

@@ -10,14 +10,42 @@
 //   armAutoMerge(number) → {armed, reason?}; never throws on refusal
 //   prState(number)      → {state: 'open'|'merged'|'closed', headSha,
 //                          mergeSha?, behindBase, conflicting, autoMergeArmed}
-//   checkRuns(sha)       → [{name, status, conclusion?, startedAt?, completedAt?}]
+//   checkRuns(sha)       → [{name, status, conclusion?, startedAt?, completedAt?,
+//                          run?}]; `run` is the id of the workflow run the
+//                          check is a job of, or null for a check no workflow
+//                          produced
+//   workflowRun(id)      → {id, status, conclusion} for one workflow run, or
+//                          null when the forge would not answer
 //   rerunFailed(sha)     → re-runs the failed jobs of the sha's runs
 //   checkOutput(sha, name) → failure-log tail for one check, or a parenthetical
-//                          saying why no log is retrievable; never throws
+//                          saying why no log is retrievable. It answers every
+//                          forge condition with a reason and throws on none of
+//                          them; the one thing it refuses is a log asked for
+//                          before its workflow run finished, which is a defect
+//                          of the caller and throws `PartialLogRefusal`
 import { runCommand } from '../lanes/exec.mjs';
 
 const OUTPUT_LIMIT = 400000;
 const LOG_TAIL = 3000;
+
+/** The check-run link of a workflow job: the run id, then the job id. */
+const JOB_LINK = /\/actions\/runs\/(\d+)\/job\/(\d+)/;
+
+/**
+ * The refusal of a log fetch that arrived before its workflow run was over.
+ * The forge serves the log of a run from one archive, so a run still executing
+ * hands back the steps it has finished so far and nothing about the rest. That
+ * text reads exactly like a whole log, and a gate judged on it is judged on
+ * half the evidence — so the fetch refuses instead of answering, and the
+ * refusal is an exception rather than a reason string: every other absence
+ * here is the forge's business, and this one is the harness's own.
+ */
+export class PartialLogRefusal extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'PartialLogRefusal';
+  }
+}
 
 /** Extracts `owner/name` from the common GitHub remote URL shapes. */
 export function parseGitHubRepo(repoUrl) {
@@ -68,6 +96,28 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
       opts,
     );
     return data?.check_runs ?? [];
+  }
+
+  /**
+   * The state of one workflow run. `status` is the forge's own word — queued,
+   * in_progress, completed — and only the last of them means the run is over.
+   * A run the forge would not answer for reads as null: a state nobody could
+   * read is not a statement that the run is still going.
+   */
+  async function runState(id) {
+    const result = await gh(
+      ['api', `repos/${repo}/actions/runs/${id}`, '--jq', '{status: .status, conclusion: .conclusion}'],
+      { allowFail: true },
+    );
+    if (result.code !== 0) return null;
+    let data = null;
+    try {
+      data = JSON.parse(result.output);
+    } catch {
+      return null;
+    }
+    if (!data?.status) return null;
+    return { id: String(id), status: data.status, conclusion: data.conclusion ?? null };
   }
 
   return {
@@ -138,7 +188,15 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
         conclusion: run.conclusion ?? null,
         startedAt: run.started_at ?? null,
         completedAt: run.completed_at ?? null,
+        // The workflow run this check is a job of, taken off the check's own
+        // link. A check is terminal when its job is; the run it belongs to can
+        // still be executing, and the watcher reads both.
+        run: JOB_LINK.exec(run.details_url ?? '')?.[1] ?? null,
       }));
+    },
+
+    workflowRun(id) {
+      return runState(id);
     },
 
     async rerunFailed(sha) {
@@ -169,22 +227,35 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
           return `(no failure log for ${name}: ${state})`;
         }
         // The check run of a workflow job links to the job it reports on;
-        // that link carries the job id the log calls answer to. A check from
-        // any other app has no job and no log to read.
-        const job = /\/actions\/runs\/\d+\/job\/(\d+)/.exec(match.details_url ?? '');
-        if (!job) {
+        // that link carries the run id and the job id the log calls answer to.
+        // A check from any other app has no job and no log to read.
+        const link = JOB_LINK.exec(match.details_url ?? '');
+        if (!link) {
           return `(no failure log for ${name}: no workflow job behind the check, at ${match.details_url || 'no url'})`;
         }
-        const failed = await logOfJob(job[1], '--log-failed');
+        const [, runId, jobId] = link;
+        // The completion assert, before a single byte of log is asked for. The
+        // caller decides when a red check is ready to be read; this says what
+        // it costs to be wrong about it.
+        const state = await runState(runId);
+        if (state && state.status !== 'completed') {
+          throw new PartialLogRefusal(
+            `refusing the log of ${name}: its workflow run ${runId} is ${state.status}. ` +
+              'A log read out of a run still executing is a partial log, and it reads ' +
+              'exactly like a whole one.',
+          );
+        }
+        const failed = await logOfJob(jobId, '--log-failed');
         if (failed.code === 0 && failed.output.trim()) return failed.output.slice(-LOG_TAIL);
         // A job killed before a step failed (cancelled, timed out, lost its
         // runner) reports no failed step at all; its whole log is then the
         // only account of what happened.
-        const whole = await logOfJob(job[1], '--log');
+        const whole = await logOfJob(jobId, '--log');
         if (whole.code === 0 && whole.output.trim()) return whole.output.slice(-LOG_TAIL);
         const why = (whole.output || failed.output).trim().slice(-500) || 'it answered with nothing';
-        return `(no failure log for ${name}: the forge would not read job ${job[1]}: ${why})`;
+        return `(no failure log for ${name}: the forge would not read job ${jobId}: ${why})`;
       } catch (error) {
+        if (error instanceof PartialLogRefusal) throw error;
         return `(no failure log for ${name}: ${error.message})`;
       }
     },
