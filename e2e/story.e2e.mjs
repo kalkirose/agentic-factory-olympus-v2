@@ -80,7 +80,7 @@ const SCENARIO = {
   spec: SPEC,
   suiteFiles: { 'tests/feature.test.mjs': SUITE },
   suiteReds: [{ test: 'f doubles its input', class: 'feature-absence' }],
-  // A wrong implementation the frozen suite kills: every wave is a kill.
+  // A wrong implementation the frozen suite kills: the wave is a kill.
   adversaryFiles: { 'src/feature.mjs': 'export const f = (x) => x + x + 1;\n' },
   // The first pass is off by one, so the suite layer is red and the layer that
   // needs it is not runnable. The repair round turns both green.
@@ -177,14 +177,14 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
     'the spec gate did not pass in one clean round',
   );
   const waves = events.filter((e) => e.event === 'adversary-wave');
-  assert.equal(waves.length, 3);
+  assert.equal(waves.length, 1);
   assert.ok(
     waves.every((w) => w.phase === 'initial' && w.result === 'killed'),
     'the frozen suite did not kill every wave',
   );
   assert.equal(events.find((e) => e.event === 'red-state-check').result, 'red');
   const freeze = events.find((e) => e.event === 'freeze');
-  assert.equal(freeze.killCount, 3);
+  assert.equal(freeze.killCount, 1);
   const record = JSON.parse(readFileSync(join(runDir(fx, runId), 'freeze.json'), 'utf8'));
   assert.equal(record.storyKey, 'alpha-1');
   assert.ok(record.suiteFiles.includes('tests/feature.test.mjs'));
@@ -264,10 +264,10 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
   assert.ok(marks.includes('cardlint'), 'the readiness lint command never ran');
   assert.ok(marks.includes('lint'), 'the lint layer never ran');
   assert.ok(marks.includes('smoke'), 'the smoke layer never ran');
-  // Three adversary waves, the red-state check, the first cycle with its flake
+  // The adversary wave, the red-state check, the first cycle with its flake
   // re-run, the targeted cycle: the suite command is the busiest of them.
   assert.ok(
-    marks.filter((m) => m === 'suite').length >= 6,
+    marks.filter((m) => m === 'suite').length >= 4,
     `the suite command ran ${marks.filter((m) => m === 'suite').length} times`,
   );
 

@@ -1,8 +1,9 @@
 // The story-lane pre-freeze chain: readiness (process) → spec birth (seat)
 // → spec gate (seat, cap 2 rounds) → suite authoring (seat) → adversary
-// (3 waves in disposable worktrees) → freeze (process). The freeze record is
-// the completion signal; the stages after freeze land with their milestones
-// and enter through `storyLane({afterFreeze})`.
+// (one wave per round by default, each in a disposable worktree) → freeze
+// (process). The freeze record is the completion signal; the stages after
+// freeze land with their milestones and enter through
+// `storyLane({afterFreeze})`.
 //
 // A launch that names a prior run takes the second route through readiness:
 // it inherits that run's freeze — spec, record and frozen suite — stamps the
@@ -62,7 +63,13 @@ import {
   gist,
 } from './shared.mjs';
 
-const WAVES = 3;
+// Waves per adversary round when the project declares no count. One wave
+// buys the kill/survive signal; every wave past the first buys sample size
+// for the kill rate, at a full seat plus a full suite run each. The count is
+// project config (`lanes.story.adversaryWaves`), and the launch pins the
+// config blob, so a raise takes effect at the next launch and never mid-run
+// (ADR-0006).
+const DEFAULT_ADVERSARY_WAVES = 1;
 
 export const PRE_FREEZE_STAGES = ['readiness', 'spec-birth', 'spec-gate', 'suite', 'adversary', 'freeze'];
 
@@ -856,6 +863,7 @@ async function suiteChecks(base, report) {
 
 async function adversary(ctx) {
   const base = await laneBase(ctx);
+  const perRound = base.adversaryWaves;
   const clone = cloneDir(ctx.paths, ctx.project);
   for (;;) {
     const events = runEvents(ctx);
@@ -865,9 +873,9 @@ async function adversary(ctx) {
       (e) => e.event === 'adversary-wave' && e.phase === 'initial' && e.round === round,
     );
     // 1) Run the round's missing waves; every wave goes to verdict.
-    if (waves.length < WAVES) {
+    if (waves.length < perRound) {
       const done = new Set(waves.map((e) => e.wave));
-      for (let wave = 1; wave <= WAVES; wave++) {
+      for (let wave = 1; wave <= perRound; wave++) {
         if (done.has(wave)) continue;
         const fail = await runWave(ctx, base, clone, { round, wave });
         if (fail) return fail;
@@ -878,7 +886,7 @@ async function adversary(ctx) {
       .filter((e) => e.result === 'survived')
       .map((e) => e.wave)
       .sort((a, b) => a - b);
-    const kills = WAVES - survivors.length;
+    const kills = perRound - survivors.length;
     const lastWaveSeq = Math.max(...waves.map((e) => e.seq));
     // 2) Zero kills: one automatic strengthening round, then every further
     //    zero round escalates.
@@ -892,7 +900,7 @@ async function adversary(ctx) {
       if (!park?.answer || park.answer.seq < lastWaveSeq) {
         return parkDirective('second-zero-kill', {
           question:
-            `Adversary round ${round} scored 0/${WAVES} after a strengthening round. Survivors:\n` +
+            `Adversary round ${round} scored 0/${perRound} after a strengthening round. Survivors:\n` +
             survivorLines(ctx, round, survivors) +
             '\nPick an option.',
           options: ['strengthen-again'],
@@ -1449,7 +1457,7 @@ function strengthenRole(base, evidence, brief) {
   return [
     'The adversary round scored zero kills: every wrong implementation passed the suite.',
     `Strengthen the suite against the spec at: ${base.specPath}`,
-    'Use every survivor below as evidence. Fresh adversary waves follow.',
+    'Use every survivor below as evidence. A fresh adversary round follows.',
     ...suiteReportLines(base),
     'Survivor evidence:',
     evidence,
@@ -1502,6 +1510,7 @@ async function laneBase(ctx) {
     // against the same tiers the candidate capture judges the diff against, so
     // a spec cannot plan a path the capture would refuse.
     tier: laneDiffPolicy(config, 'story'),
+    adversaryWaves: story.adversaryWaves ?? DEFAULT_ADVERSARY_WAVES,
     suiteArgv: config.commands[story.suiteCommand],
     env: runEnv(ctx, config),
     specPath: join(ctx.paths.runs, ctx.runId, 'spec.md'),

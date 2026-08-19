@@ -302,7 +302,7 @@ test('a resume inherits a real freeze and enters the post-freeze stage seatless'
   const firstEvents = await waitClosed(fx.paths, first.runId);
   await waitReleased(fx.paths, first.runId);
   const frozen = firstEvents.find((e) => e.event === 'freeze');
-  assert.equal(frozen.killCount, 3);
+  assert.equal(frozen.killCount, 1);
   // The branch a resume inherits from survives a close that did not ship.
   const clone = cloneDir(fx.paths, 'proj');
   assert.match(gitSync(['branch', '--list', runBranch(first.runId)], clone), /run\//);
@@ -330,7 +330,7 @@ test('a resume inherits a real freeze and enters the post-freeze stage seatless'
   assert.equal(inherited.frozenSha, frozen.sha);
   assert.equal(inherited.sha, frozen.sha); // the base did not move: no merge
   assert.equal(inherited.files, 1);
-  assert.equal(inherited.killCount, 3);
+  assert.equal(inherited.killCount, 1);
   assert.deepEqual(inherited.priorFindings, []);
   assert.deepEqual(inherited.priorLoud, []);
   // The artifacts travelled, and the record still names the run that earned it.

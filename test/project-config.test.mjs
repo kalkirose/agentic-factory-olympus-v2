@@ -263,6 +263,17 @@ test('the story lane names its commands and requires test paths', () => {
   assert.deepEqual(validateProjectConfig(okLint), []);
 });
 
+test('a raised adversary wave count is a positive integer or an error', () => {
+  const raised = valid();
+  raised.lanes.story.adversaryWaves = 3;
+  assert.deepEqual(validateProjectConfig(raised), []);
+  for (const value of [0, -1, 1.5, '3']) {
+    const bad = valid();
+    bad.lanes.story.adversaryWaves = value;
+    assert.deepEqual(errorPaths(bad), ['lanes.story.adversaryWaves'], String(value));
+  }
+});
+
 test('glob test paths validate clean', () => {
   const config = valid();
   config.repo.testPaths = ['test/', 'src/**/*.test.ts', '**/*.spec.ts'];

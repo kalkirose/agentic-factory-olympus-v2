@@ -22,13 +22,13 @@ external tools a build machine cannot hold.
   node script that answers every forge call the ship step makes. Nothing in
   `src/` knows either of them exists.
 - **Everything else is real.** A bare git origin, a bare clone, run worktrees,
-  three disposable adversary worktrees, commits, a push, a merge commit, a
+  a disposable adversary worktree, commits, a push, a merge commit, a
   fetch, the project's four configured commands, and an acceptance suite that
   is red before the implementation and green after it.
 - **Two scenarios.** The story lane carries one intent card from launch to
   `run-closed: shipped`: readiness parks on the card's open decision and the
   console answers it, the spec is born and passes a clean gate round, the suite
-  is authored, three adversary waves are killed, the freeze records the kill
+  is authored, the adversary wave is killed, the freeze records the kill
   count, the dev pass leaves one red layer, triage classes it, one repair round
   clears it, the second cycle is targeted with a confirmation sweep, the Fury
   round and the generalist review come back clean, the PR opens, the checks

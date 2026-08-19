@@ -182,6 +182,14 @@ function validateStoryLane(lane, commands, err) {
       err('lanes.story.lintCommand', 'must name a key in commands');
     }
   }
+  // Adversary waves per round. The lane defaults it, so the entry is only
+  // ever a raise; a zero or a fraction would read as a raise and disarm the
+  // stage instead, which is why the figure is validated rather than clamped.
+  if (lane.adversaryWaves !== undefined) {
+    if (!Number.isInteger(lane.adversaryWaves) || lane.adversaryWaves < 1) {
+      err('lanes.story.adversaryWaves', 'must be a positive integer wave count');
+    }
+  }
 }
 
 function validateStack(stack, err) {

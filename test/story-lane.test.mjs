@@ -212,14 +212,17 @@ function seatFixture(seats) {
   return { commandFor, calls };
 }
 
-function storyFixture(t, { seats, card = DEFAULT_CARD, config, composeRunner, files = {} }) {
+// `waves` raises the adversary wave count for the scenarios whose subject is
+// the multi-wave machinery. Omitted, the fixture takes the harness default,
+// which is the one wave a round runs today.
+function storyFixture(t, { seats, card = DEFAULT_CARD, config, composeRunner, files = {}, waves }) {
   const root = tempDir();
   // `config` may be a function of the fixture root, for absolute probe paths.
   const overrides = typeof config === 'function' ? config(root) : (config ?? {});
   const base = {
     repo: { testPaths: ['tests'] },
     commands: { suite: ['node', '--test', 'tests/*.test.mjs'] },
-    lanes: { story: { suiteCommand: 'suite' } },
+    lanes: { story: { suiteCommand: 'suite', ...(waves ? { adversaryWaves: waves } : {}) } },
     stack: null,
   };
   const origin = initOriginRepo(join(root, 'origin'), {
@@ -354,7 +357,7 @@ test('a fixture story reaches a valid freeze record with kills and dispositions'
     },
   };
   const policy = '# Constitution\n\nA deliverable exists only where the card names it.\n';
-  const fx = storyFixture(t, { seats, files: { '.olympus/constitution.md': policy } });
+  const fx = storyFixture(t, { seats, waves: 3, files: { '.olympus/constitution.md': policy } });
   const runId = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
@@ -420,6 +423,62 @@ test('a fixture story reaches a valid freeze record with kills and dispositions'
   assert.match(birthPrompt, /name each of those files in the block as a dev-owned entry/);
   assert.match(birthPrompt, /A baseline the block does not name is frozen/);
   assert.match(birthPrompt, /costs a verdict round-trip/);
+});
+
+test('the adversary runs one wave a round, and a survivor still hardens the suite', async (t) => {
+  const seats = {
+    'spec-birth': ({ prompt }) => ({
+      files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
+      report: { outcome: 'spec-born', summary: 'born' },
+    }),
+    'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
+    suite: ({ prompt }) =>
+      prompt.includes('scored zero kills')
+        ? {
+            files: { 'tests/feature-kill.test.mjs': STRONG_TEST },
+            report: {
+              suiteFiles: ['tests/feature.test.mjs', 'tests/feature-kill.test.mjs'],
+              reds: [
+                { test: 'feature exists', class: 'feature-absence' },
+                { test: 'f doubles', class: 'feature-absence' },
+              ],
+              summary: 'strengthened',
+            },
+          }
+        : {
+            files: { 'tests/feature.test.mjs': WEAK_TEST },
+            report: {
+              suiteFiles: ['tests/feature.test.mjs'],
+              reds: [{ test: 'feature exists', class: 'feature-absence' }],
+              summary: 'authored',
+            },
+          },
+    adversary: () => ({
+      files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
+      report: { approach: 'stub', wrongness: 'f returns 0' },
+    }),
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!events.some((e) => e.event === 'park'));
+  // One wave a round, and the survivor of round 1 bought a strengthening round
+  // instead of a freeze: the reduction holds only while the suite kills.
+  const waves = events.filter((e) => e.event === 'adversary-wave');
+  assert.deepEqual(
+    waves.map((e) => [e.round, e.wave, e.phase, e.result]),
+    [
+      [1, 1, 'initial', 'survived'],
+      [2, 1, 'initial', 'killed'],
+    ],
+  );
+  assert.deepEqual(
+    events.filter((e) => e.event === 'suite-committed').map((e) => e.phase),
+    ['author', 'strengthening'],
+  );
+  const freeze = events.find((e) => e.event === 'freeze');
+  assert.equal(freeze.killCount, 1);
 });
 
 test('open decisions park readiness; the spec gate caps at two rounds', async (t) => {
@@ -733,20 +792,10 @@ test('blocking findings hold the spec; notes pass it and reach the suite seat', 
         summary: 'authored; both counts asserted',
       },
     }),
-    adversary: ({ label }) => {
-      const wave = Number(/-w(\d+)$/.exec(label)[1]);
-      if (wave === 1) {
-        return {
-          files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
-          report: { approach: 'stub', wrongness: 'f returns 0' },
-        };
-      }
-      if (wave === 2) return { report: { approach: 'absent', wrongness: 'no implementation' } };
-      return {
-        files: { 'src/feature.mjs': 'export const f = (x) => x;\n' },
-        report: { approach: 'identity', wrongness: 'f returns x' },
-      };
-    },
+    adversary: () => ({
+      files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
+      report: { approach: 'stub', wrongness: 'f returns 0' },
+    }),
   };
   const fx = storyFixture(t, { seats });
   const runId = await fx.launch();
@@ -782,7 +831,7 @@ test('blocking findings hold the spec; notes pass it and reach the suite seat', 
   // The suite never sees a blocking finding: that one was fixed in the spec.
   assert.ok(!suite.prompt.includes('criterion 3 is not assertable'));
   const freeze = events.find((e) => e.event === 'freeze');
-  assert.equal(freeze.killCount, 3);
+  assert.equal(freeze.killCount, 1);
 });
 
 test('a grounding conflict parks spec birth; a bad red class takes one corrective round', async (t) => {
@@ -818,20 +867,10 @@ test('a grounding conflict parks spec birth; a bad red class takes one correctiv
               summary: 'corrected',
             },
           },
-    adversary: ({ label }) => {
-      const wave = Number(/-w(\d+)$/.exec(label)[1]);
-      if (wave === 1) {
-        return {
-          files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
-          report: { approach: 'stub', wrongness: 'f returns 0' },
-        };
-      }
-      if (wave === 2) return { report: { approach: 'absent', wrongness: 'no implementation' } };
-      return {
-        files: { 'src/feature.mjs': 'export const f = (x) => x;\n' },
-        report: { approach: 'identity', wrongness: 'f returns x' },
-      };
-    },
+    adversary: () => ({
+      files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
+      report: { approach: 'stub', wrongness: 'f returns 0' },
+    }),
   };
   const fx = storyFixture(t, { seats });
   const runId = await fx.launch();
@@ -847,9 +886,9 @@ test('a grounding conflict parks spec birth; a bad red class takes one correctiv
   const corrective = fx.calls.find((c) => c.label === 'suite-2');
   assert.ok(corrective.prompt.includes('Correction brief'));
   assert.ok(corrective.prompt.includes('fixture-defect'));
-  // A strong suite kills all three waves; freeze needs no amendment.
+  // A strong suite kills the wave; freeze needs no amendment.
   const freeze = events.find((e) => e.event === 'freeze');
-  assert.equal(freeze.killCount, 3);
+  assert.equal(freeze.killCount, 1);
   assert.equal(freeze.amendmentKills, 0);
   assert.equal(freeze.dispositions, 0);
 });
@@ -958,7 +997,7 @@ test('an unkilled gap blocks the freeze until the human accepts it', async (t) =
       return { report: { approach: 'absent', wrongness: 'no implementation' } };
     },
   };
-  const fx = storyFixture(t, { seats });
+  const fx = storyFixture(t, { seats, waves: 3 });
   const runId = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'unkilled-gap-survivor');
   assert.deepEqual(park.answers.options, ['accept-spec-indifferent', 'abandon']);
@@ -1011,7 +1050,7 @@ test('a second zero-kill round escalates with the survivor set', async (t) => {
       report: { approach: 'stub', wrongness: 'f returns 0' },
     }),
   };
-  const fx = storyFixture(t, { seats });
+  const fx = storyFixture(t, { seats, waves: 3 });
   const runId = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'second-zero-kill');
   assert.deepEqual(park.answers.options, ['strengthen-again', 'abandon']);
@@ -1088,7 +1127,7 @@ test('a green red-state check routes one suite fix round before the freeze', asy
       };
     },
   };
-  const fx = storyFixture(t, { seats });
+  const fx = storyFixture(t, { seats, waves: 3 });
   const runId = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
@@ -1209,7 +1248,7 @@ test('the freeze records the test-path files the spec gave the dev pass', async 
   // The adversary's boundary is unchanged: an exclusion belongs to the dev
   // pass, and an adversary that edits a test file is still tampering.
   const adversaries = fx.calls.filter((c) => c.seat === 'adversary');
-  assert.equal(adversaries.length, 3);
+  assert.equal(adversaries.length, 1);
   assert.ok(adversaries.every((c) => c.denyTools.includes('Edit(tests/**)')));
 });
 

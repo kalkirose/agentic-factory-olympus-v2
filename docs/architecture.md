@@ -203,12 +203,15 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   an authority contradiction, which blocks anywhere. A round that does not
   strictly shrink the blocking count parks the run at once
   (`spec-gate-stalled`, same options as the cap park, remaining cap unspent).
-- **Adversary**: fixed 3 waves of throwaway wrong implementations, all
-  evaluated to verdict, in disposable worktrees. A survivor is a demonstrated
-  suite gap: one targeted amendment round (a killing test per survivor), then
-  freeze. A residual survivor gets a disposition: spec-indifferent (recorded)
-  or unkilled gap (blocks; escalates). 0/3 kills: one full strengthening
-  round + 3 fresh waves; a second 0/3 escalates.
+- **Adversary**: throwaway wrong implementations, all evaluated to verdict, in
+  disposable worktrees. One wave a round by default;
+  `lanes.story.adversaryWaves` raises the count, and the launch pins the config
+  blob, so a raise lands at the next launch and never mid-run. A survivor is a
+  demonstrated suite gap: one targeted amendment round (a killing test per
+  survivor), then freeze. A residual survivor gets a disposition:
+  spec-indifferent (recorded) or unkilled gap (blocks; escalates). Zero kills:
+  one full strengthening round + a fresh round of waves; a second zero
+  escalates.
 - **Red-state check** (process): the suite must be red against the
   pre-implementation tree, and the freeze report classes every red as
   feature-absence. Any other cause is a suite defect to fix before freeze.

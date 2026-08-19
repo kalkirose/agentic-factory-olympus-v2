@@ -73,8 +73,11 @@ adversary, freeze — gets these concrete shapes:
   phase — `author`, `amendment`, `strengthening`, or `fix`. It is the
   resume anchor for the adversary stage and the audit trail for every suite
   change between birth and freeze.
-- **Adversary evaluation.** Three waves per round, each in a disposable
-  worktree detached at the current suite sha, each evaluated to verdict.
+- **Adversary evaluation.** One wave a round, each wave in a disposable
+  worktree detached at the current suite sha, each evaluated to verdict. The
+  count is `lanes.story.adversaryWaves` in project config, a positive integer;
+  the lane defaults it to one, so an entry is only ever a raise, and the launch
+  pins the config blob, so a raise lands at the next launch and never mid-run.
   Before the suite runs in a wave tree, the harness restores the test paths
   from the sha (checkout + clean), so a tampered or deleted test is
   structurally void — no detection, no trust. Kill = suite red. Killed
@@ -179,6 +182,34 @@ same logic: the second failure is evidence the seat cannot fix it, and a
 failed run is cheap to relaunch. Deterministic re-runs (the red-state
 command itself) stay unlimited — they judge nothing and cost minutes.
 
+## Why one wave a round
+
+A wave is a full seat pass plus a full suite run in a worktree of its own. The
+first wave answers the question the stage exists to ask: does a plausible wrong
+implementation pass this suite. Every wave after it asks the same question of a
+different wrongness. That is sample size for the kill rate, not a second signal
+about the freeze. On the last three-wave story the round cost about $75 and
+ninety minutes, and scored 3/3.
+
+What the reduction costs is named here rather than discovered later. Two thirds
+of the per-story kill-rate evidence is gone. A round now reports 1/1 or 0/1,
+and the kill-rate tripwire weights each freeze by its wave count (ADR-0010), so
+the eval seat's history thins at the rate it accumulates. A suite the second
+wrongness would have killed and the first does not now freezes green, and
+whatever it lets through is found downstream.
+
+Nothing else about the stage moves. A survivor is still a demonstrated suite
+gap, and it still sends the suite back: zero kills buys the strengthening round
+and a fresh round of waves, exactly as before. The reduction applies only while
+the suite kills.
+
+The count is config rather than a constant so that the raise is one line in the
+project that wants it, and so that it lands where it is safe. The launch pins
+the config blob it read, and every stage resolves its settings from that blob,
+so a raise on the default branch cannot reach a run already under way. A run
+that started at one wave finishes at one wave, and its freeze record reads as
+what the run did.
+
 ## Fallback paths
 
 If the note channel becomes an escape hatch — the gate classes a real spec
@@ -205,6 +236,12 @@ answers `abandon` nearly every time, or the parks queue up unanswered — the
 directive returns to a close. Trigger: three consecutive exhaustion parks
 answered `abandon`. Reversal cost: low — the park directive becomes a close
 directive again, and the catalog entry can stay.
+
+If one wrongness proves too small a sample, `lanes.story.adversaryWaves` goes
+back to three in project config. Trigger: either of two observations — an
+escape that traces to a suite gap, or a survived wave against a suite that had
+already frozen green. Reversal cost: none — one config line, effective at the
+next story launch and at no point inside a run.
 
 If the `--disallowedTools` rule syntax does not hold at the live shakedown,
 the ADR-0005 fallback applies: a deny hook in the seat's settings file. The

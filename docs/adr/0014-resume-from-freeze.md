@@ -92,7 +92,7 @@ So the advance is brought in and the claim is re-derived where re-derivation is
 cheap and deterministic, and refused where it is not:
 
 - **Main edited the frozen suite.** Refuse, naming the files. The suite that
-  was proven against three adversary waves is not the suite that would run, and
+  was proven against the adversary waves is not the suite that would run, and
   no deterministic check recovers that difference.
 - **The merge conflicts.** Refuse, naming the files. Conflict resolution is
   judgment work over two intents, and it belongs to a run that owns its spec,
