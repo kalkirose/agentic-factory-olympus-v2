@@ -28,6 +28,8 @@ import { FrontierLauncher } from '../frontier/autolaunch.mjs';
 import { launchEscape } from '../frontier/repairs.mjs';
 import { readGraphSource } from '../frontier/source.mjs';
 import { TripwireWatcher } from '../tripwires/watcher.mjs';
+import { WorkflowWatcher } from '../ship/workflows.mjs';
+import { projectForge } from '../lanes/assemble.mjs';
 import { EvalScheduler } from '../eval/review.mjs';
 import { Notifier } from './notifier.mjs';
 import { checkSeatEnvironment } from './environment.mjs';
@@ -69,7 +71,8 @@ export class Daemon {
    * @param {string} home
    * @param {{handleSignals?: boolean, lanes?: Record<string, object>,
    *   composeRunner?: Function, evalSeatDefaults?: () => object,
-   *   workspaceSweepMs?: number,
+   *   workspaceSweepMs?: number, workflowWatchMs?: number,
+   *   forgeFor?: (project: string) => object,
    *   notifierTransport?: {fetchImpl?: Function, spawnImpl?: Function}}} opts
    *   lanes: lane name → {stages, handlers}, registered on the run engine at
    *   start; `lanes/assemble.mjs` builds the graph the daemon binary passes,
@@ -77,7 +80,10 @@ export class Daemon {
    *   substitutes the compose child process (tests only); evalSeatDefaults
    *   substitutes the eval seat's dispatch defaults (tests only);
    *   workspaceSweepMs shortens the orphan-sweep period (tests only);
-   *   notifierTransport substitutes the push transport (tests only).
+   *   workflowWatchMs shortens the watched-workflow poll (tests only);
+   *   forgeFor substitutes the forge the workflow watcher reads through
+   *   (tests only); notifierTransport substitutes the push transport
+   *   (tests only).
    */
   constructor(
     home,
@@ -87,6 +93,8 @@ export class Daemon {
       composeRunner,
       evalSeatDefaults,
       workspaceSweepMs = WORKSPACE_SWEEP_MS,
+      workflowWatchMs,
+      forgeFor,
       notifierTransport,
     } = {},
   ) {
@@ -96,6 +104,8 @@ export class Daemon {
     this.composeRunner = composeRunner;
     this.evalSeatDefaults = evalSeatDefaults;
     this.workspaceSweepMs = workspaceSweepMs;
+    this.workflowWatchMs = workflowWatchMs;
+    this.forgeFor = forgeFor ?? ((project) => projectForge(this.config, project));
     this.notifierTransport = notifierTransport;
     this.running = false;
     this.config = null;
@@ -106,6 +116,7 @@ export class Daemon {
     this.isolation = null;
     this.frontier = null;
     this.tripwires = null;
+    this.workflows = null;
     this.evals = null;
     this.notifier = null;
     this.pendingTeardowns = new Set();
@@ -245,6 +256,16 @@ export class Daemon {
         readRegistry: (project) => this.readTripwireRegistry(project),
         readSource: (project) => this.readGraphSourceFor(project),
       });
+      // The workflow runs no request path covers: a job on a schedule of its
+      // own, on the default branch, that nothing in the harness would
+      // otherwise read (ADR-0035).
+      this.workflows = new WorkflowWatcher({
+        ledger: this.ledger,
+        projects: () => this.watchedProjects(),
+        forgeFor: (project) => this.forgeFor(project),
+        readWatched: (project) => this.readWatchedWorkflows(project),
+        ...(this.workflowWatchMs !== undefined && { intervalMs: this.workflowWatchMs }),
+      });
       this.evals = new EvalScheduler({
         paths: this.paths,
         ledger: this.ledger,
@@ -288,6 +309,7 @@ export class Daemon {
       this.watchConfig();
       this.watchControl();
       this.armWorkspaceSweep();
+      this.workflows.start();
       if (this.handleSignals) this.installSignalHandlers();
       this.running = true;
       this.frontier.queueSweepAll();
@@ -675,6 +697,32 @@ export class Daemon {
       const { text } = await readBlobFromBranch(dir, entry.defaultBranch, entry.projectConfigPath);
       const source = `${entry.defaultBranch}:${entry.projectConfigPath}`;
       return parseProjectConfig(text, source).tripwires;
+    });
+  }
+
+  // -- watched-workflow reads ------------------------------------------------
+
+  /** The projects this instance holds, each with the branch a watch reads. */
+  watchedProjects() {
+    return Object.entries(this.config.projects).map(([project, entry]) => ({
+      project,
+      defaultBranch: entry.defaultBranch,
+    }));
+  }
+
+  /**
+   * The project's watched-workflow list, read from the bare clone as it
+   * stands, without fetching — this observer never advances the clone either.
+   * No clone yet = no launch happened = throws, and the next poll asks again.
+   */
+  async readWatchedWorkflows(project) {
+    const entry = this.config.projects[project];
+    if (!entry) return [];
+    return this.isolation.withClone(project, async () => {
+      const dir = cloneDir(this.paths, project);
+      const { text } = await readBlobFromBranch(dir, entry.defaultBranch, entry.projectConfigPath);
+      const source = `${entry.defaultBranch}:${entry.projectConfigPath}`;
+      return parseProjectConfig(text, source).watchedWorkflows;
     });
   }
 
@@ -1089,6 +1137,7 @@ export class Daemon {
       await Promise.allSettled([...this.pendingTeardowns]);
       if (this.frontier) await this.frontier.drain();
       if (this.tripwires) await this.tripwires.stop();
+      if (this.workflows) await this.workflows.stop();
       if (this.evals) await this.evals.stop();
       // Last of the observers: a push in flight may still owe a failure stamp,
       // and the ledger closes right after this.

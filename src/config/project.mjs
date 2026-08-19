@@ -52,6 +52,9 @@ export function defaultProjectConfig() {
     // label rules: one label and the diff path entries that require it; an
     // empty list leaves every request unlabelled
     labels: [],
+    // the workflow files the daemon watches on the default branch — the runs
+    // no request path covers; an empty list watches nothing
+    watchedWorkflows: [],
     // optional close-out extras the project asks for after a shipped story;
     // null = the close-out is exactly what it always was
     closeout: null,
@@ -84,6 +87,7 @@ export function validateProjectConfig(config) {
   validateConstitutionPath(config.constitutionPath, err);
   validateCredentials(config.credentials, config.commands, err);
   validateLabels(config.labels, err);
+  validateWatchedWorkflows(config.watchedWorkflows, err);
   validateCloseout(config.closeout, err);
   if (isPlainObject(config.lanes) && isPlainObject(config.lanes.story)) {
     if (!Array.isArray(config.repo?.testPaths) || config.repo.testPaths.length === 0) {
@@ -540,6 +544,24 @@ function validateLabels(labels, err) {
     if (!isStringList(entry.paths) || entry.paths.length === 0) {
       err(at('paths'), 'must be a non-empty array of path entries');
     }
+  });
+}
+
+// The workflows the daemon watches on the default branch. Each entry is the
+// workflow file, because that is the id the forge lists a workflow's runs
+// under; a display name is not addressable. A duplicate is refused rather than
+// collapsed: two entries for one workflow would read as two things being
+// watched, and only one of them is.
+function validateWatchedWorkflows(workflows, err) {
+  if (workflows === undefined) return;
+  if (!isStringList(workflows)) {
+    err('watchedWorkflows', 'must be an array of workflow file names');
+    return;
+  }
+  const seen = new Set();
+  workflows.forEach((file, i) => {
+    if (seen.has(file)) err(`watchedWorkflows[${i}]`, `duplicate workflow: ${file}`);
+    seen.add(file);
   });
 }
 

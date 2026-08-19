@@ -21,6 +21,12 @@
 //                          produced
 //   workflowRun(id)      → {id, status, conclusion} for one workflow run, or
 //                          null when the forge would not answer
+//   latestCompletedRun(workflow, branch)
+//                        → {id, conclusion, url, headSha, completedAt} for the
+//                          most recent completed run of one workflow file on
+//                          one branch, or null when the forge would not answer
+//                          and when no run of it has completed. A null is
+//                          never a green: it says nobody read a conclusion
 //   rerunFailed(sha)     → re-runs the failed jobs of the sha's runs
 //   checkOutput(sha, name) → failure-log tail for one check, or a parenthetical
 //                          saying why no log is retrievable. It answers every
@@ -224,6 +230,33 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
 
     workflowRun(id) {
       return runState(id);
+    },
+
+    /**
+     * The most recent completed run of one workflow file on one branch. The
+     * workflow file is the id the forge lists runs under; a display name is
+     * not addressable. `status=completed` is the forge's own filter, so the
+     * answer carries a terminal conclusion or there is no answer — nothing
+     * here reads a clock or an elapsed.
+     */
+    async latestCompletedRun(workflow, branch) {
+      const query = `branch=${encodeURIComponent(branch)}&status=completed&per_page=1`;
+      const data = await ghJson(
+        [
+          'api', `repos/${repo}/actions/workflows/${workflow}/runs?${query}`,
+          '-q', '{runs: [.workflow_runs[]]}',
+        ],
+        { allowFail: true }, // an unreadable list is not a run that passed
+      );
+      const run = data?.runs?.[0];
+      if (!run?.id || !run.conclusion) return null;
+      return {
+        id: String(run.id),
+        conclusion: run.conclusion,
+        url: run.html_url ?? null,
+        headSha: run.head_sha ?? null,
+        completedAt: run.updated_at ?? null,
+      };
     },
 
     async rerunFailed(sha) {

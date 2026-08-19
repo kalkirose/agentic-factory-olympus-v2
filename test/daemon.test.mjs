@@ -624,3 +624,37 @@ test('a sweep leaves the workspace of a run that is still provisioning', async (
   assert.ok(!existsSync(root));
   assert.equal(instanceEvents(home).filter((e) => e.event === 'workspace-released').length, 1);
 });
+
+test('the daemon reads its projects watched workflows and stamps a red loud', async (t) => {
+  const home = tempDir();
+  mkdirSync(home, { recursive: true });
+  writeFileSync(
+    join(home, 'instance.json'),
+    JSON.stringify({ version: 1, projects: { alpha: { repoUrl: 'unused' } } }) + '\n',
+  );
+  const forge = {
+    async latestCompletedRun(workflow, branch) {
+      return { id: '77', conclusion: 'failure', url: `https://forge/${workflow}/${branch}` };
+    },
+  };
+  const daemon = new Daemon(home, { forgeFor: () => forge });
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  // The list itself comes from the project's clone, which a fixture with no
+  // launch behind it has none of; everything the wiring owns is what this
+  // states — the ledger, the forge, and the branch off the instance config.
+  daemon.readWatchedWorkflows = async () => ['nightly.yml'];
+  await daemon.workflows.queuePoll();
+  const red = instanceEvents(home).find((e) => e.event === 'workflow-red');
+  assert.equal(red.project, 'alpha');
+  assert.equal(red.workflow, 'nightly.yml');
+  assert.equal(red.run, '77');
+  assert.equal(red.branch, 'main');
+  assert.deepEqual(openLoud(homePaths(home)).map((e) => e.event), ['workflow-red']);
+  // The stop takes the watcher with it: no timer and no poll outlives it.
+  await daemon.stop();
+  assert.equal(daemon.workflows.timer, null);
+});

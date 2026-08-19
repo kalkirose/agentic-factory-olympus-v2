@@ -230,6 +230,17 @@ export const INSTANCE_EVENTS = new Set([
   'stage-overrun',
   'baseline-proposal',
   'eval-review',
+  // A watched workflow's most recent completed run on the default branch came
+  // back red. Loud, because the run is off every request path — no run waits
+  // on it and no check watcher reads it — so this record is the only thing
+  // between that red and nobody noticing. One per red run: the same run,
+  // polled again, is the same piece of news (ADR-0035).
+  'workflow-red',
+  // A watched workflow completed green while a red of the same workflow was
+  // still open. Quiet: the record is the evidence the loud item is answered
+  // with, and it owns that item, so the strip clears where the green landed
+  // rather than where a human got round to it (ADR-0035).
+  'workflow-recovered',
   // Instance-scoped escalations: a park that waits on the human but belongs
   // to no open run (card-invalidated from the ship-time sweep). The paired
   // `answer` clears the park and unblocks the card; runs park and answer
@@ -276,6 +287,7 @@ export const LOUD_EVENTS = new Set([
   'repairs-owed',
   'budget-breach',
   'archive-failed',
+  'workflow-red',
 ]);
 
 // The close-out backstop. A loud record resolves at the event that owns it

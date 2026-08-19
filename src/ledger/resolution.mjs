@@ -84,6 +84,20 @@ export const LOUD_OWNERSHIP = {
       fields: (item) => ({ runId: item.runId }),
     },
   ],
+  // A red the workflow itself answers. The next completed run of the same
+  // workflow, green, is the only evidence anybody could resolve this on, so
+  // the recovery record carrying it is the owner rather than a human who read
+  // one (ADR-0035). A green closes every open red of that workflow: the
+  // workflow is passing or it is not.
+  'workflow-red': [
+    {
+      name: 'watched-red',
+      owner: 'workflow-recovered',
+      owns: (item, recovered) =>
+        recovered.project === item.project && recovered.workflow === item.workflow,
+      fields: (item) => ({ project: item.project, workflow: item.workflow }),
+    },
+  ],
   // Instance-scoped, and both are conditions rather than records: the frontier
   // re-evaluates them on every sweep and pairs the resolution when the
   // condition lifts.

@@ -24,7 +24,9 @@ The ship step — PR open through ledger close — gets these concrete shapes:
 - **The forge interface.** All forge traffic goes through one injected
   object: `preflight`, `openPr` (idempotent per head branch), `applyLabels`,
   `ciSecrets`, `armAutoMerge`, `prState`, `checkRuns`, `workflowRun`,
-  `rerunFailed`, `checkOutput`.
+  `latestCompletedRun`, `rerunFailed`, `checkOutput`. The last of the reads is
+  the one no ship stage calls: the workflow watcher outside the lanes uses the
+  same interface, because a forge is a forge whoever is asking (ADR-0035).
   `ship/forge.mjs`
   implements it over the `gh` CLI with an injectable runner; tests substitute
   a fake with the same shape. A forge for another host is one new module.

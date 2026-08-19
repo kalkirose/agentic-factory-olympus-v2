@@ -22,6 +22,11 @@ Around the daemon:
   tripwires when matching events append, and reads stage duration against the
   duration history when a stage heartbeat appends. It classifies and executes
   nothing, and it holds no run.
+- **Workflow watcher** — an in-daemon poll of the workflow runs no request
+  path covers: the workflows a project names in `watchedWorkflows`, on its
+  default branch. It reads the forge's terminal conclusion on the most recent
+  completed run, never an elapsed. A red opens one loud item per red run; the
+  next green records the recovery that answers it. It holds no run (ADR-0035).
 - **Eval seat** — an instance-scoped judgment seat fired every five story-lane
   ships. Its report lands under `eval/` in the daemon home; the queued
   `eval-review` event points to it. Proposals only; nothing self-executes.
@@ -105,8 +110,9 @@ Two levels; the ownership test decides placement.
   commands, gates, conventions, lane specifics, per-lane budget thresholds,
   the external credentials the work needs with the read-only probe that
   proves each one and the surfaces each must be wired on, the label rules a
-  request's diff is measured against (`labels`), the tripwire registry, and
-  the optional close-out extras (`closeout`).
+  request's diff is measured against (`labels`), the workflow files the daemon
+  watches on the default branch (`watchedWorkflows`), the tripwire registry,
+  and the optional close-out extras (`closeout`).
   The daemon reads it from `main` in its bare clone at each run launch, so
   config changes ship through the same PR path as the code they describe.
 
