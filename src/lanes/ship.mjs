@@ -344,6 +344,8 @@ async function openPr(ctx, base) {
     phase: 'ship',
     cwd: base.worktree,
     env: base.env,
+    forge: base.forge,
+    defaultBranch: base.defaultBranch,
   });
   if (probed) return probed;
   const pf = await base.forge.preflight(base.defaultBranch);

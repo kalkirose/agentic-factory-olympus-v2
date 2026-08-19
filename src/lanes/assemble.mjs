@@ -44,12 +44,13 @@ export function assembleLanes({ instanceConfig, enqueueRepair = null } = {}) {
   if (typeof instanceConfig !== 'function') {
     throw new Error('assembleLanes requires an instanceConfig reader');
   }
-  const ship = shipStep({
-    forgeFor: (ctx) => projectForge(instanceConfig(), ctx.project),
-    enqueueRepair,
-  });
+  // One resolver for both lanes: the ship step opens the request with it, and
+  // story readiness asks it what CI holds, so a credential is proven on every
+  // surface before the first seat spawns (ADR-0027).
+  const forgeFor = (ctx) => projectForge(instanceConfig(), ctx.project);
+  const ship = shipStep({ forgeFor, enqueueRepair });
   return {
-    story: storyLane({ afterFreeze: postFreeze({ afterVerdict: ship }) }),
+    story: storyLane({ afterFreeze: postFreeze({ afterVerdict: ship }), forgeFor }),
     repair: repairLane({ afterVerdict: ship }),
   };
 }

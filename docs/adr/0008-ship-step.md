@@ -23,8 +23,8 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   and the daemon binary registers it on the engine at start.
 - **The forge interface.** All forge traffic goes through one injected
   object: `preflight`, `openPr` (idempotent per head branch), `applyLabels`,
-  `armAutoMerge`, `prState`, `checkRuns`, `workflowRun`, `rerunFailed`,
-  `checkOutput`.
+  `ciSecrets`, `armAutoMerge`, `prState`, `checkRuns`, `workflowRun`,
+  `rerunFailed`, `checkOutput`.
   `ship/forge.mjs`
   implements it over the `gh` CLI with an injectable runner; tests substitute
   a fake with the same shape. A forge for another host is one new module.
@@ -290,6 +290,8 @@ check at cutover, like the claude CLI items in ADR-0005:
 - `gh run rerun --failed` coverage when a commit has several workflow runs.
 - `gh pr edit --add-label` exit behavior on a label the repository does not
   define (the adapter reads the refusal as a reason and parks on it).
+- `repos/{repo}/actions/secrets` scope requirements for the daemon's token
+  (an unreadable list must read as unproven, never as absent).
 - Auto-merge surviving a leased force-push of the head branch.
 
 ## Fallback paths

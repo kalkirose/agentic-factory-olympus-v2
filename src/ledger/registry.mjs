@@ -41,6 +41,12 @@ export const RUN_EVENTS = new Set([
   // a run always says which credentials it proved and when. The probe's own
   // output is never carried — it can hold the credential (ADR-0027).
   'credential-probe',
+  // The parity read of one credential at one gate: every surface the project
+  // declared for it, answered together. `ok` carries the verdict and `missing`
+  // names each surface that is not wired, so the owner wires them in one pass
+  // rather than one gate round per surface. Names only — the secret's value
+  // is never read, on this host or on any other surface (ADR-0027).
+  'credential-surface',
   // spec + suite
   'spec-born',
   'spec-gate-round',

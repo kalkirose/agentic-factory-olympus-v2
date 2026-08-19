@@ -104,9 +104,9 @@ Two levels; the ownership test decides placement.
 - **Project config** — one JSON versioned in the project repo: repo facts,
   commands, gates, conventions, lane specifics, per-lane budget thresholds,
   the external credentials the work needs with the read-only probe that
-  proves each one, the label rules a request's diff is measured against
-  (`labels`), the tripwire registry, and the optional close-out extras
-  (`closeout`).
+  proves each one and the surfaces each must be wired on, the label rules a
+  request's diff is measured against (`labels`), the tripwire registry, and
+  the optional close-out extras (`closeout`).
   The daemon reads it from `main` in its bare clone at each run launch, so
   config changes ship through the same PR path as the code they describe.
 
@@ -172,7 +172,8 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 
 - **Readiness** is mechanical: card on the graph frontier, open decisions
   empty, references lint-green, worktree provisioned, and every external
-  credential the project declares proven by its read-only probe (ADR-0027).
+  credential the project declares wired on every surface it declared and
+  proven by its read-only probe (ADR-0027).
 - **Spec birth** authors the buildable spec from the intent card, grounded
   against the repo as it exists that day. AFK; escalates only on open
   decisions or a grounding conflict with the card's intent. The born spec is
@@ -298,10 +299,11 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   re-derives the same holder and the same order. Only the holder opens or
   merges a request; the slot cap stays the concurrency knob for everything
   before that.
-- **Ship preflight.** Before the PR opens: every declared credential probes
-  again, because a key the launch proved can go stale inside a run and CI is
-  the most expensive way to learn it (ADR-0027); then branch protection and
-  the auto-merge capability. Anything missing parks a provisioning gate.
+- **Ship preflight.** Before the PR opens: every declared credential is read
+  on every surface and probes again, because a key the launch proved can go
+  stale inside a run and CI is the most expensive way to learn it (ADR-0027);
+  then branch protection and the auto-merge capability. Anything missing parks
+  a provisioning gate naming every gap at once.
 - The harness arms auto-merge (squash) at PR open. Branch protection names
   the full required-check set; the flag fires only on full green. No human
   touch on the green path.

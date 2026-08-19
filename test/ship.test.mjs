@@ -104,6 +104,9 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
     labelsAccept: true,
     labels: new Set(),
     labelCalls: [],
+    // The CI secret names the parity read asks for; null is a forge that
+    // would not answer at all.
+    ciSecrets: [],
     checks: new Map(),
     autoChecks: null,
     onRerun: null,
@@ -166,6 +169,10 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
       }
       return { number: state.pr.number, url: `fake://pr/${state.pr.number}` };
     },
+    async ciSecrets() {
+      return state.ciSecrets;
+    },
+
     async applyLabels(number, labels) {
       state.labelCalls.push({ number, labels: [...labels] });
       if (labels.length === 0) return { applied: [] };
@@ -332,6 +339,7 @@ function shipFixture(
     enqueue = false,
     slotCap = 2,
     config = {},
+    files = {},
     // Registers the ship-carrying repair lane under the name the console
     // route requires: `--lane repair` is the only lane a ticket and an escape
     // reach, so a test of that route needs the real close-out behind it.
@@ -350,6 +358,7 @@ function shipFixture(
     }),
     'stories/alpha.md': DEFAULT_CARD,
     'src/base.mjs': 'export const base = 1;\n',
+    ...files,
   });
   // The card sweep pushes straight to main; the fixture origin accepts it.
   gitSync(['config', 'receive.denyCurrentBranch', 'updateInstead'], origin);
@@ -1460,6 +1469,50 @@ test('a credential that went stale in the run parks the ship gate before the PR'
   );
 });
 
+test('the ship gate parks on a CI surface the host surface cannot speak for', async (t) => {
+  // The key works on this host and the workflow reads it. CI holds no secret
+  // of that name, which is what used to surface as a red round on an open
+  // request rather than as a gate in front of it.
+  const secret = 'PAY_CI_KEY';
+  const workflow = '.github/workflows/ci.yml';
+  const previous = process.env[PROBE_VAR];
+  process.env[PROBE_VAR] = 'live';
+  t.after(() => {
+    if (previous === undefined) delete process.env[PROBE_VAR];
+    else process.env[PROBE_VAR] = previous;
+  });
+  const fx = shipFixture(t, {
+    config: {
+      commands: { probe: [process.execPath, '-e', PROBE_SCRIPT] },
+      credentials: [
+        { name: 'payments', env: PROBE_VAR, probe: 'probe', ci: { secret, workflows: [workflow] } },
+      ],
+    },
+    files: { [workflow]: `jobs:\n  suite:\n    env:\n      K: \${{ secrets.${secret} }}\n` },
+  });
+  fx.forge.state.autoChecks = () => [green()];
+  fx.forge.state.ciSecrets = ['UNRELATED_KEY'];
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  assert.match(park.question, new RegExp(`holds no secret named ${secret}`));
+  assert.match(park.question, /at the ship gate/);
+  // The wired surfaces are not named, and no request was opened over the gap.
+  assert.ok(!park.question.includes(workflow));
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  assert.ok(!live.some((e) => e.event === 'pr-opened'));
+  assert.deepEqual(live.find((e) => e.event === 'credential-surface').missing, [
+    { surface: 'ci-secret', name: secret },
+  ]);
+  fx.forge.state.ciSecrets = ['UNRELATED_KEY', secret];
+  fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'secret set on the repository' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.deepEqual(
+    events.filter((e) => e.event === 'credential-surface').map((e) => e.ok),
+    [false, true],
+  );
+});
+
 // -- request labels ----------------------------------------------------------
 
 const LABEL_RULES = [
@@ -1817,6 +1870,21 @@ test('the preflight reads the auto-merge capability over the repository api', as
   // preflight call may name that field or reach for `repo view` again.
   assert.ok(!calls.some((argv) => argv.includes('autoMergeAllowed')));
   assert.ok(!calls.some((argv) => argv[1] === 'repo'));
+});
+
+test('the gh adapter lists CI secret names, and an unreadable list is not an empty one', async () => {
+  const calls = [];
+  const listing = async (argv) => {
+    calls.push(argv);
+    return { code: 0, output: JSON.stringify({ secrets: [{ name: 'PAY_KEY' }, { name: 'CDN' }] }) };
+  };
+  const forge = gitHubForge({ repo: 'acme/widgets', runner: listing });
+  assert.deepEqual(await forge.ciSecrets(), ['PAY_KEY', 'CDN']);
+  // The endpoint serves names; nothing here asks a secret for its value.
+  assert.ok(calls.every((argv) => !argv.some((a) => String(a).includes('value'))));
+  const refusing = async () => ({ code: 1, output: 'gh: Not Found (HTTP 404)' });
+  // A list nobody could read is not a statement that a secret is missing.
+  assert.equal(await gitHubForge({ repo: 'acme/widgets', runner: refusing }).ciSecrets(), null);
 });
 
 test('an unreadable auto-merge capability reads as off, never as a stage failure', async () => {

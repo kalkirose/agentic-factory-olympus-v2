@@ -77,9 +77,14 @@ export const PRE_FREEZE_STAGES = ['readiness', 'spec-birth', 'spec-gate', 'suite
  * Builds the story lane. `afterFreeze` is the post-freeze continuation
  * (implementation → verdict → ship), landing with its own milestones; the
  * freeze stage hands over to its first stage.
- * @param {{afterFreeze: {stages: string[], handlers: object}}} opts
+ * @param {{afterFreeze: {stages: string[], handlers: object},
+ *   forgeFor?: (ctx: object) => object}} opts `forgeFor` resolves the forge of
+ *   one run from the run's project, as it does for the ship step: readiness
+ *   asks it what CI holds, so a credential is proven on every surface before
+ *   the first seat spawns. Unset, a declared CI surface reads as unproven and
+ *   readiness parks rather than passing it.
  */
-export function storyLane({ afterFreeze }) {
+export function storyLane({ afterFreeze, forgeFor = null }) {
   if (!Array.isArray(afterFreeze?.stages) || afterFreeze.stages.length === 0) {
     throw new Error('storyLane requires an afterFreeze continuation');
   }
@@ -87,7 +92,7 @@ export function storyLane({ afterFreeze }) {
   return {
     stages: [...PRE_FREEZE_STAGES, ...afterFreeze.stages],
     handlers: withAbandonGuard({
-      readiness: readinessHandler(postFreeze),
+      readiness: readinessHandler(postFreeze, forgeFor),
       'spec-birth': specBirth,
       'spec-gate': specGate,
       suite: suiteStage,
@@ -245,10 +250,10 @@ export const ADVERSARY_SCHEMA = {
  * carries the artifacts over, hands the tree to `postFreezeStage`, and runs no
  * pre-freeze seat at all.
  */
-function readinessHandler(postFreezeStage) {
+function readinessHandler(postFreezeStage, forgeFor) {
   return async function readiness(ctx) {
     if (typeof ctx.payload.resumeFrom === 'string') {
-      return inheritFreeze(ctx, postFreezeStage);
+      return inheritFreeze(ctx, postFreezeStage, forgeFor);
     }
     const worktree = ctx.payload.worktree;
     if (typeof worktree !== 'string' || !existsSync(worktree)) {
@@ -310,15 +315,33 @@ function readinessHandler(postFreezeStage) {
       }
     }
     // Last, so the credentials are proven as late as readiness can prove them
-    // and the first seat spawns behind a yes (ADR-0027).
+    // and the first seat spawns behind a yes on every surface (ADR-0027).
     const probed = await probeCredentials(ctx, config, {
       phase: 'launch',
       cwd: worktree,
       env: runEnv(ctx, config),
+      forge: resolveForge(ctx, forgeFor),
+      defaultBranch: ctx.payload.defaultBranch ?? 'main',
     });
     if (probed) return probed;
     return { next: 'spec-birth' };
   };
+}
+
+/**
+ * The forge readiness asks about the CI surface, or null. A resolver that
+ * refuses — a project the instance holds no repository for — answers null
+ * rather than failing the stage: the credential gate is what a missing forge
+ * costs, and it says so in the park instead of taking down a launch that
+ * declares no CI surface at all.
+ */
+function resolveForge(ctx, forgeFor) {
+  if (typeof forgeFor !== 'function') return null;
+  try {
+    return forgeFor(ctx);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -343,7 +366,7 @@ function criteriaBlock(ctx, card, cardPath) {
  * this run inherits. The gates that replace them are about the freeze itself,
  * and each one refuses by name rather than guessing.
  */
-async function inheritFreeze(ctx, nextStage) {
+async function inheritFreeze(ctx, nextStage, forgeFor) {
   const events = runEvents(ctx);
   if (events.some((e) => e.event === 'freeze-inherited')) return { next: nextStage };
   const worktree = ctx.payload.worktree;
@@ -362,6 +385,8 @@ async function inheritFreeze(ctx, nextStage) {
     phase: 'launch',
     cwd: worktree,
     env: runEnv(ctx, config),
+    forge: resolveForge(ctx, forgeFor),
+    defaultBranch: ctx.payload.defaultBranch ?? 'main',
   });
   if (probed) return probed;
   let prior;

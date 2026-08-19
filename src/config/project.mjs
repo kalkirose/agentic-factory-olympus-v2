@@ -442,11 +442,13 @@ function validateCloseout(closeout, err) {
 }
 
 // The external credentials the project's work needs, each named with the one
-// environment variable that carries it and the read-only command that proves
-// it works. The probe is required: a declared credential with nothing behind
-// it reads as covered and is not. The variable is one name, never a pattern —
-// the probe answers for exactly the value it was given.
+// environment variable that carries it, the read-only command that proves it
+// works, and the surfaces beyond this host that will also need it. The probe
+// is required: a declared credential with nothing behind it reads as covered
+// and is not. The variable is one name, never a pattern — the probe answers
+// for exactly the value it was given.
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const CREDENTIAL_CI_KEYS = ['secret', 'workflows'];
 
 function validateCredentials(credentials, commands, err) {
   if (credentials === undefined) return;
@@ -474,7 +476,37 @@ function validateCredentials(credentials, commands, err) {
     if (typeof entry.probe !== 'string' || !isPlainObject(commands) || !commands[entry.probe]) {
       err(at('probe'), 'must name a key in commands');
     }
+    if (entry.ci !== undefined) validateCredentialCi(entry.ci, at, err);
   });
+}
+
+// The CI surface of one credential: the name the forge holds the secret
+// under, and every workflow that must reference it. Both are required
+// together, because either one alone still leaves a job running without the
+// value. A credential with no `ci` block declares no CI surface, and nothing
+// is checked for it there — an omission is a statement, never a default.
+function validateCredentialCi(ci, at, err) {
+  if (!isPlainObject(ci)) {
+    err(at('ci'), 'must be an object');
+    return;
+  }
+  for (const key of Object.keys(ci)) {
+    if (!CREDENTIAL_CI_KEYS.includes(key)) {
+      err(at(`ci.${key}`), `unknown key: ${CREDENTIAL_CI_KEYS.join(' | ')}`);
+    }
+  }
+  if (typeof ci.secret !== 'string' || !ENV_NAME.test(ci.secret)) {
+    err(at('ci.secret'), 'must name one CI secret');
+  }
+  if (!isStringList(ci.workflows) || ci.workflows.length === 0) {
+    err(at('ci.workflows'), 'must be a non-empty array of workflow paths');
+  } else {
+    ci.workflows.forEach((path, j) => {
+      if (ABSOLUTE_PATH.test(path)) {
+        err(at(`ci.workflows[${j}]`), 'must be a path relative to the repo root');
+      }
+    });
+  }
 }
 
 // The labels a request must carry, and what makes each one required. A rule

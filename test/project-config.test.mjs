@@ -179,6 +179,43 @@ test('a credential names one variable and a probe command', () => {
   );
 });
 
+test('a credential CI surface names one secret and the workflows that read it', () => {
+  const ci = { secret: 'PAY_SECRET_KEY', workflows: ['.github/workflows/pr.yml'] };
+  const entry = { name: 'payments', env: 'PAY_SECRET_KEY', probe: 'lint' };
+  assert.deepEqual(validateProjectConfig({ ...valid(), credentials: [{ ...entry, ci }] }), []);
+  // No block at all is the statement that the credential has no CI surface.
+  assert.deepEqual(validateProjectConfig({ ...valid(), credentials: [entry] }), []);
+  assert.deepEqual(errorPaths({ ...valid(), credentials: [{ ...entry, ci: 'yes' }] }), [
+    'credentials[0].ci',
+  ]);
+  // Either half alone still leaves a job running without the value.
+  assert.deepEqual(
+    errorPaths({ ...valid(), credentials: [{ ...entry, ci: { secret: 'PAY_SECRET_KEY' } }] }),
+    ['credentials[0].ci.workflows'],
+  );
+  assert.deepEqual(
+    errorPaths({ ...valid(), credentials: [{ ...entry, ci: { workflows: ['pr.yml'] } }] }),
+    ['credentials[0].ci.secret'],
+  );
+  for (const secret of ['PAY_*', '2FA', 'PAY KEY', '', 7]) {
+    assert.deepEqual(
+      errorPaths({ ...valid(), credentials: [{ ...entry, ci: { ...ci, secret } }] }),
+      ['credentials[0].ci.secret'],
+    );
+  }
+  assert.deepEqual(errorPaths({ ...valid(), credentials: [{ ...entry, ci: { ...ci, workflows: [] } }] }), [
+    'credentials[0].ci.workflows',
+  ]);
+  // A workflow is read out of the repository, so the path is repo-relative.
+  assert.deepEqual(
+    errorPaths({ ...valid(), credentials: [{ ...entry, ci: { ...ci, workflows: ['/etc/pr.yml'] } }] }),
+    ['credentials[0].ci.workflows[0]'],
+  );
+  assert.deepEqual(errorPaths({ ...valid(), credentials: [{ ...entry, ci: { ...ci, host: 'x' } }] }), [
+    'credentials[0].ci.host',
+  ]);
+});
+
 test('a label rule names one label and the paths that require it', () => {
   const config = valid();
   config.labels = [

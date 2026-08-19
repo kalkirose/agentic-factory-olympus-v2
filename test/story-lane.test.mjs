@@ -215,7 +215,10 @@ function seatFixture(seats) {
 // `waves` raises the adversary wave count for the scenarios whose subject is
 // the multi-wave machinery. Omitted, the fixture takes the harness default,
 // which is the one wave a round runs today.
-function storyFixture(t, { seats, card = DEFAULT_CARD, config, composeRunner, files = {}, waves }) {
+function storyFixture(
+  t,
+  { seats, card = DEFAULT_CARD, config, composeRunner, files = {}, waves, ciSecrets = null },
+) {
   const root = tempDir();
   // `config` may be a function of the fixture root, for absolute probe paths.
   const overrides = typeof config === 'function' ? config(root) : (config ?? {});
@@ -247,6 +250,9 @@ function storyFixture(t, { seats, card = DEFAULT_CARD, config, composeRunner, fi
         stages: ['done'],
         handlers: { done: async () => ({ close: { state: 'shipped' } }) },
       },
+      // A forge that answers one question: which secrets CI holds. `null`
+      // stands for a forge that would not answer at all.
+      forgeFor: ciSecrets === null ? null : () => ({ ciSecrets: async () => ciSecrets }),
     }),
   };
   const daemon = new Daemon(join(root, 'home'), { lanes, composeRunner });
@@ -611,13 +617,108 @@ test('an absent credential variable parks without running the probe', async (t) 
   const park = await waitParked(fx.paths, runId, 'provisioning-gate');
   assert.match(park.question, /is not on this host/);
   const stamped = readEvents(runLedgerPath(fx.paths, runId)).find(
-    (e) => e.event === 'credential-probe',
+    (e) => e.event === 'credential-surface',
   );
-  assert.equal(stamped.reason, 'absent');
+  assert.equal(stamped.ok, false);
+  assert.deepEqual(stamped.missing, [{ surface: 'host', name: PROBE_VAR }]);
   assert.equal(fx.calls.length, 0);
   setCredential('live');
   fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'variable set' });
   await waitParked(fx.paths, runId, 'spec-gate-stalled');
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
+});
+
+// -- credential parity across surfaces ---------------------------------------
+
+const CI_SECRET = 'PAY_CI_KEY';
+const WORKFLOW = '.github/workflows/ci.yml';
+const WIRED_WORKFLOW = `name: ci
+on: [pull_request]
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node --test
+        env:
+          PAY_CI_KEY: \${{ secrets.${CI_SECRET} }}
+`;
+const UNWIRED_WORKFLOW = `name: ci
+on: [pull_request]
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node --test
+`;
+
+function parityConfig() {
+  return {
+    commands: { probe: [process.execPath, '-e', PROBE_SCRIPT] },
+    credentials: [
+      {
+        name: 'payments',
+        env: PROBE_VAR,
+        probe: 'probe',
+        ci: { secret: CI_SECRET, workflows: [WORKFLOW] },
+      },
+    ],
+  };
+}
+
+test('readiness parks on a missing CI surface and names every one at once', async (t) => {
+  // The key is on this host and works. CI holds no secret of that name, and
+  // the workflow that will need it reads nothing — the two gaps that used to
+  // surface only after a request was open and a round had been paid for.
+  heldCredential(t, 'live');
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
+  const fx = storyFixture(t, {
+    seats,
+    config: parityConfig(),
+    files: { [WORKFLOW]: UNWIRED_WORKFLOW },
+    ciSecrets: [],
+  });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  // One park, both surfaces: the owner wires everything in one pass.
+  assert.match(park.question, new RegExp(`holds no secret named ${CI_SECRET}`));
+  assert.match(park.question, new RegExp(`${WORKFLOW.replaceAll('.', '\\.')} does not reference`));
+  assert.match(park.question, /writes no secret on any surface/);
+  // Nothing was spent past the gate; the working host surface is not a pass.
+  assert.equal(fx.calls.length, 0);
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  const stamped = live.find((e) => e.event === 'credential-surface');
+  assert.equal(stamped.ok, false);
+  assert.equal(stamped.phase, 'launch');
+  assert.deepEqual(stamped.missing, [
+    { surface: 'ci-secret', name: CI_SECRET },
+    { surface: 'workflow', name: WORKFLOW, secret: CI_SECRET },
+  ]);
+  // The probe never ran: an unwired surface is answered before the round trip.
+  assert.ok(!live.some((e) => e.event === 'credential-probe'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
+});
+
+test('every declared surface wired lets readiness through to the first seat', async (t) => {
+  heldCredential(t, 'live');
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
+  const fx = storyFixture(t, {
+    seats,
+    config: parityConfig(),
+    files: { [WORKFLOW]: WIRED_WORKFLOW },
+    ciSecrets: [CI_SECRET, 'UNRELATED_KEY'],
+  });
+  const runId = await fx.launch();
+  const stalled = await waitParked(fx.paths, runId, 'spec-gate-stalled');
+  assert.ok(stalled.question.includes('not converging'));
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  const stamped = live.find((e) => e.event === 'credential-surface');
+  assert.equal(stamped.ok, true);
+  assert.equal(stamped.missing, undefined);
+  // The surfaces pass first, and the value's own probe still answers after.
+  assert.equal(live.find((e) => e.event === 'credential-probe').ok, true);
+  assert.ok(fx.calls.some((c) => c.seat === 'spec-birth'));
   fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   await waitClosed(fx.paths, runId);
 });

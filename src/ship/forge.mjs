@@ -9,6 +9,9 @@
 //                          open PR for the branch is returned, never doubled
 //   applyLabels(n, list) → {applied, reason?}; additive, and never throws on
 //                          a label the repository does not define
+//   ciSecrets()          → the names of the repository's CI secrets, or null
+//                          when the forge would not answer. Names only — the
+//                          host serves no values and none are asked for
 //   armAutoMerge(number) → {armed, reason?}; never throws on refusal
 //   prState(number)      → {state: 'open'|'merged'|'closed', headSha,
 //                          mergeSha?, behindBase, conflicting, autoMergeArmed}
@@ -152,6 +155,18 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
         throw new Error(`no open PR for branch ${head} after create`);
       }
       return { number: view.number, url: view.url };
+    },
+
+    async ciSecrets() {
+      // The Actions secrets endpoint lists names and never values; there is no
+      // route through this API to a secret's content, which is what makes the
+      // parity read safe to run at a gate.
+      const data = await ghJson(
+        ['api', `repos/${repo}/actions/secrets`, '--paginate', '-q', '{secrets: [.secrets[]]}'],
+        { allowFail: true }, // an unreadable list is not an absent secret
+      );
+      const secrets = data?.secrets;
+      return Array.isArray(secrets) ? secrets.map((secret) => secret.name) : null;
     },
 
     async applyLabels(number, labels) {
