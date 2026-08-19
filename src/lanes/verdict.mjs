@@ -86,12 +86,13 @@ import {
 const REPAIR_CAP = 3;
 const TRIAGE_CLASSES = ['code-defect', 'suite-defect', 'env', 'harness'];
 
-// Why an env-only CI verdict goes back to ship without a local cycle. The
-// stamp carries it, because a skipped sweep must read as a decision and not
-// as a step the run forgot.
+// Why a CI verdict whose findings all point outside the tree goes back to
+// ship without a local cycle. The stamp carries it, because a skipped sweep
+// must read as a decision and not as a step the run forgot.
 const SWEEP_SKIP_NOTE =
-  'every open finding is env-class on a CI verdict: no Tier-1 layer of this ' +
-  'tree exercises them, so the CI re-run is the test';
+  'every open finding is env or harness class on a CI verdict: each remedy ' +
+  'lives outside this tree, so no Tier-1 layer of it exercises them and the ' +
+  'CI re-run is the test';
 
 /**
  * The story-lane continuation after the freeze. `afterVerdict` supplies the
@@ -732,15 +733,20 @@ function gateFor(ops, last) {
 
 /**
  * Whether the operational fix this verdict earns needs a local cycle behind
- * it. It does not when every open finding is env-class on a verdict the CI
- * checks rendered: the layers of this tree were green at this sha, the red
- * ones are CI checks the spectrum does not hold, and no local layer can
- * exercise the substrate the findings name. Any other open finding — a
- * harness defect, a code defect, a suite defect — is something the local
- * layers do judge, so the cycle runs (ADR-0022).
+ * it. It does not when every open finding takes the operational route on a
+ * verdict the CI checks rendered: the layers of this tree were green at this
+ * sha, the red ones are CI checks the spectrum does not hold, and the remedy
+ * of an env or a harness finding lands outside the tree — a credential, a
+ * runner, forge metadata — where no local layer reaches it either way. An
+ * open finding of any other class is something the local layers do judge, so
+ * the cycle runs (ADR-0022).
  */
 function skipsSweep(last, open) {
-  return last.source === 'ci' && open.length > 0 && open.every((f) => f.class === 'env');
+  return (
+    last.source === 'ci' &&
+    open.length > 0 &&
+    open.every((f) => f.class === 'env' || f.class === 'harness')
+  );
 }
 
 /**

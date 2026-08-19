@@ -249,9 +249,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   no result reads as a fresh proof. A clean targeted cycle runs every layer it
   has not yet run, at that sha, before the verdict turns green; a red that
   confirmation sweep turns up enters triage like any other. A CI verdict whose
-  open findings are all env-class runs no cycle at all: the operational fix
-  stamps `sweep: 'skipped'` with the findings and the reason, the run goes back
-  to ship, and the CI re-run is the test (ADR-0022).
+  open findings are all env or harness class runs no cycle at all: every one of
+  those remedies lands outside the tree, so the operational fix stamps
+  `sweep: 'skipped'` with the findings and the reason, the run goes back to
+  ship, and the CI re-run is the test (ADR-0022).
 - **Flake filter.** Each red layer re-runs once, red-only, by process policy.
   A green re-run writes a flake event, never a finding. Survivors are
   persistent reds; only these enter triage.
@@ -264,8 +265,9 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   3). Stall or a verified approach-level finding → one fresh pass per run,
   briefed by born spec + frozen suite + stall brief, never the prior tree; a
   second stall escalates. Suite-defect → re-freeze step by the suite seat at
-  a new SHA. Env/harness → operational fix by an orchestrator job; an env-only
-  CI verdict takes no cycle behind its fix. A finding that persists past its
+  a new SHA. Env/harness → operational fix by an orchestrator job; a CI
+  verdict open on nothing but these two classes takes no cycle behind its fix.
+  A finding that persists past its
   fix parks the provisioning gate, unless every one of them is a harness
   defect an operator acknowledged: then the lane answers the gate on that
   authority and stamps both the acknowledgment it used and the fix

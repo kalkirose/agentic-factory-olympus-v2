@@ -825,13 +825,44 @@ test('env-only CI findings skip the local sweep: the fix goes back for the re-ru
   const fix = events.find((e) => e.event === 'operational-fix');
   assert.equal(fix.sweep, 'skipped');
   assert.deepEqual(fix.findings, [finding.id]);
-  assert.match(fix.note, /env-class/);
+  assert.match(fix.note, /env or harness class/);
   // no local cycle behind the fix: the spectrum ran once, for the candidate
   assert.deepEqual(
     [...new Set(events.filter((e) => e.event === 'layer-result').map((e) => e.cycle))],
     [1],
   );
   assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 2);
+  assert.equal(fx.forge.state.reruns.length, 2);
+});
+
+test('an env and harness CI verdict skips the local sweep on both classes', async (t) => {
+  // A harness finding's remedy is forge metadata, which sits outside the tree
+  // exactly like the substrate the env finding names. No local layer tests
+  // either, so the mixed set takes the same route as the env-only one.
+  const fx = shipFixture(t, { seats: { 'verdict-triage': ciTriageSeat(['env', 'harness']) } });
+  fx.forge.state.autoChecks = () => [red()];
+  let reruns = 0;
+  fx.forge.state.onRerun = (sha) => fx.forge.setChecks(sha, [++reruns === 1 ? red() : green()]);
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const findings = events.filter((e) => e.event === 'finding');
+  assert.deepEqual(
+    findings.map((e) => e.class).sort(),
+    ['env', 'harness'],
+  );
+  const fix = events.find((e) => e.event === 'operational-fix');
+  assert.equal(fix.sweep, 'skipped');
+  assert.deepEqual(
+    [...fix.findings].sort(),
+    findings.map((e) => e.id).sort(),
+  );
+  assert.match(fix.note, /env or harness class/);
+  // no local cycle behind the fix: the spectrum ran once, for the candidate
+  assert.deepEqual(
+    [...new Set(events.filter((e) => e.event === 'layer-result').map((e) => e.cycle))],
+    [1],
+  );
   assert.equal(fx.forge.state.reruns.length, 2);
 });
 
