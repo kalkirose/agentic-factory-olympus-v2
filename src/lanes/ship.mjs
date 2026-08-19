@@ -1,8 +1,9 @@
 // The ship step: the run ends at close-out, not at the green verdict.
 // `shipStep({forgeFor})` supplies the three stages after the verdict —
 // `update` (the ship token, then the branch update that precedes the final
-// verdict), `ship` (PR open with auto-merge armed, the check watcher, the CI
-// red route, the competing-merge update, the merge round) and `close-out`
+// verdict), `ship` (PR open with the diff's labels applied and auto-merge
+// armed, the check watcher, the CI red route, the competing-merge update, the
+// merge round) and `close-out`
 // (red-merge breach conversion, merge-commit checks to terminal, the card
 // sweep, the reconciliation judgment, the configured learning artifact, the
 // escape fix-back, ledger close).
@@ -51,10 +52,12 @@ import {
   concludeMerge,
   abortMerge,
   changedFiles,
+  changedAgainstBase,
   commitAll,
   resetHard,
 } from '../isolation/tree.mjs';
 import { testEditDenyRules } from '../seats/boundary.mjs';
+import { derivedLabels } from '../ship/labels.mjs';
 import { takeShipToken } from '../ship/token.mjs';
 import { parseIntentCard } from './card.mjs';
 import { probeCredentials } from './probes.mjs';
@@ -366,6 +369,10 @@ async function openPr(ctx, base) {
     title: base.storyKey ? `${base.storyKey}: ${base.cardTitle ?? 'ship'}` : `repair: ${ctx.runId}`,
     body: [`Olympus run ${ctx.runId}.`, `Spec: ${base.specRef}`, `Head: ${sha}`].join('\n'),
   });
+  // Labels before the arm: a required-label check gates the merge, so the
+  // request carries what its diff asks for before anything can merge it.
+  const labelled = await labelRequest(ctx, base, pr.number);
+  if (labelled) return labelled;
   const arm = await base.forge.armAutoMerge(pr.number);
   if (!arm.armed) {
     return parkDirective('provisioning-gate', {
@@ -384,6 +391,33 @@ async function openPr(ctx, base) {
     autoMerge: 'squash',
   });
   return null;
+}
+
+/**
+ * Applies the labels the request's own diff requires. The derivation reads the
+ * diff against the default branch — the same evidence the project's own label
+ * check reads — so the harness and the check answer one question from one
+ * input, and a label a human used to apply by hand arrives with the request.
+ *
+ * A label the forge will not apply is a repository that does not define it.
+ * That is substrate the daemon never self-clears, so it parks and names the
+ * labels. A label no rule derives is not a park and not a guess: the check
+ * that wants it is the thing that says so.
+ */
+async function labelRequest(ctx, base, pr) {
+  const files = await changedAgainstBase(base.worktree, base.defaultBranch);
+  const labels = derivedLabels(files, base.config.labels);
+  const applied = await base.forge.applyLabels(pr, labels);
+  const ok = applied.applied.length === labels.length;
+  ctx.store.append('pr-labeled', { actor: ACTOR, pr, labels, applied: ok });
+  if (ok) return null;
+  return parkDirective('provisioning-gate', {
+    ...GATE_FORMS,
+    question:
+      `PR #${pr} needs the label${labels.length > 1 ? 's' : ''} ${labels.join(', ')} ` +
+      `and the forge refused: ${applied.reason ?? 'no reason given'}. ` +
+      'Define them on the repository, then answer to open the request again.',
+  });
 }
 
 async function pushBranch(ctx, base, { expected = null } = {}) {

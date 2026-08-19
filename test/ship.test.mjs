@@ -18,6 +18,7 @@ import {
 import { postFreeze, repairLane } from '../src/lanes/verdict.mjs';
 import { shipStep, CHECKLESS_POLLS, UPDATE_CAP } from '../src/lanes/ship.mjs';
 import { gitHubForge, parseGitHubRepo, PartialLogRefusal } from '../src/ship/forge.mjs';
+import { derivedLabels } from '../src/ship/labels.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { openEscapesStore, openRunStore, TelemetryStore } from '../src/telemetry/stores.mjs';
@@ -98,6 +99,11 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
     requiredChecks: required,
     armAccepts: true,
     pr: null,
+    // Labels the forge accepts on a request, and the ones it holds. With
+    // `labelsAccept` off it answers as a repository that defines none.
+    labelsAccept: true,
+    labels: new Set(),
+    labelCalls: [],
     checks: new Map(),
     autoChecks: null,
     onRerun: null,
@@ -160,6 +166,14 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
       }
       return { number: state.pr.number, url: `fake://pr/${state.pr.number}` };
     },
+    async applyLabels(number, labels) {
+      state.labelCalls.push({ number, labels: [...labels] });
+      if (labels.length === 0) return { applied: [] };
+      if (!state.labelsAccept) return { applied: [], reason: 'label not found (fixture)' };
+      for (const label of labels) state.labels.add(label);
+      return { applied: [...labels] };
+    },
+
     async armAutoMerge() {
       if (!state.armAccepts) return { armed: false, reason: 'refused (fixture)' };
       state.pr.armed = true;
@@ -1444,6 +1458,84 @@ test('a credential that went stale in the run parks the ship gate before the PR'
       ['ship', true],
     ],
   );
+});
+
+// -- request labels ----------------------------------------------------------
+
+const LABEL_RULES = [
+  { label: 'migration', paths: ['db/migrations'] },
+  { label: 'ui', paths: ['src/ui/**'] },
+];
+
+/** A dev seat that lands a migration beside the feature. */
+const MIGRATING_DEV = {
+  dev: () => ({
+    files: {
+      'src/feature.mjs': GOOD_FEATURE,
+      'db/migrations/001_add_column.sql': 'ALTER TABLE t ADD COLUMN c INT;\n',
+    },
+    report: { summary: 'implemented with a migration' },
+  }),
+};
+
+test('label derivation answers from the project rules and guesses nothing', () => {
+  assert.deepEqual(derivedLabels(['db/migrations/001.sql', 'src/app.mjs'], LABEL_RULES), [
+    'migration',
+  ]);
+  // Sorted, and one rule fires once however many of its files the diff holds.
+  assert.deepEqual(
+    derivedLabels(['src/ui/page.js', 'db/migrations/1.sql', 'db/migrations/2.sql'], LABEL_RULES),
+    ['migration', 'ui'],
+  );
+  // A diff no rule covers derives nothing; the project's own check owns it.
+  assert.deepEqual(derivedLabels(['README.md'], LABEL_RULES), []);
+  assert.deepEqual(derivedLabels(['db/migrations/1.sql']), []);
+});
+
+test('the request opens carrying the labels its diff requires', async (t) => {
+  const fx = shipFixture(t, { seats: MIGRATING_DEV, config: { labels: LABEL_RULES } });
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const labelled = events.find((e) => e.event === 'pr-labeled');
+  assert.deepEqual(labelled.labels, ['migration']);
+  assert.equal(labelled.applied, true);
+  assert.deepEqual([...fx.forge.state.labels], ['migration']);
+  // The label lands before the request can merge: it is applied between the
+  // open and the arm, so the stamp precedes `pr-opened`.
+  assert.ok(labelled.seq < events.find((e) => e.event === 'pr-opened').seq);
+});
+
+test('a diff no rule covers is stamped as labelled with nothing', async (t) => {
+  const fx = shipFixture(t, { config: { labels: LABEL_RULES } });
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The derivation ran and asked for nothing; a run that never derived would
+  // read the same without this stamp.
+  assert.deepEqual(events.find((e) => e.event === 'pr-labeled').labels, []);
+  assert.deepEqual([...fx.forge.state.labels], []);
+});
+
+test('a label the repository does not define parks the gate and names it', async (t) => {
+  const fx = shipFixture(t, { seats: MIGRATING_DEV, config: { labels: LABEL_RULES } });
+  fx.forge.state.autoChecks = () => [green()];
+  fx.forge.state.labelsAccept = false;
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  assert.match(park.question, /needs the label migration/);
+  assert.match(park.question, /label not found \(fixture\)/);
+  // The request is not armed on a label the check will ask for and not find.
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  assert.ok(!live.some((e) => e.event === 'pr-opened'));
+  assert.equal(live.find((e) => e.event === 'pr-labeled').applied, false);
+  fx.forge.state.labelsAccept = true;
+  fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'label created' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.deepEqual([...fx.forge.state.labels], ['migration']);
 });
 
 test('a failed merge round stalls into the fresh pass born on updated main', async (t) => {

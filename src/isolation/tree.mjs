@@ -123,6 +123,21 @@ export async function changedInRange(tree, from, to) {
 }
 
 /**
+ * File paths the tree's HEAD changes against a base ref, counted from the
+ * commit the two last shared. That is the set the forge shows on a request:
+ * what the base gained after the branch left it belongs to the base, not to
+ * the work under review, so the two-dot range would answer a wider question
+ * than the one a request is judged on.
+ */
+export async function changedAgainstBase(tree, base) {
+  const out = await git(['diff', '--name-only', `${base}...HEAD`], { cwd: tree });
+  return out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+/**
  * Pushes a ref to a remote. `ref` may be `branch` or `HEAD:branch`. `lease`
  * names the sha the remote ref is expected to hold — the push then forces
  * only over that exact value. Never use the bare `--force-with-lease` here:

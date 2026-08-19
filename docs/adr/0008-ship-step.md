@@ -22,8 +22,9 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   `storyLane → postFreeze → shipStep`, repair as `repairLane → shipStep` —
   and the daemon binary registers it on the engine at start.
 - **The forge interface.** All forge traffic goes through one injected
-  object: `preflight`, `openPr` (idempotent per head branch), `armAutoMerge`,
-  `prState`, `checkRuns`, `workflowRun`, `rerunFailed`, `checkOutput`.
+  object: `preflight`, `openPr` (idempotent per head branch), `applyLabels`,
+  `armAutoMerge`, `prState`, `checkRuns`, `workflowRun`, `rerunFailed`,
+  `checkOutput`.
   `ship/forge.mjs`
   implements it over the `gh` CLI with an injectable runner; tests substitute
   a fake with the same shape. A forge for another host is one new module.
@@ -68,12 +69,27 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   for fails on the cheapest fact. The gh argv is instance config
   (`ghCommand`, default `['gh']`): by the ownership test it describes the
   machine, like `composeCommand` and `claudeCommand`.
-- **Preflight, then arm at open.** Before the PR opens, the preflight
-  requires auto-merge allowed and a non-empty required-check set on the base
-  branch. Anything less parks `provisioning-gate` — hands-off ship without
-  branch protection would merge unverified work. Auto-merge (squash) arms at
-  PR open; the `pr-opened` stamp records the pr number, head sha, and the
-  required set, so every later judgment derives from the ledger.
+- **Preflight, then label, then arm at open.** Before the PR opens, the
+  preflight requires auto-merge allowed and a non-empty required-check set on
+  the base branch. Anything less parks `provisioning-gate` — hands-off ship
+  without branch protection would merge unverified work. Auto-merge (squash)
+  arms at PR open; the `pr-opened` stamp records the pr number, head sha, and
+  the required set, so every later judgment derives from the ledger.
+- **The request arrives carrying its labels.** A project whose check requires
+  a label on a request gets that label from the ship step, applied between the
+  open and the arm — a required check only a human can answer is a hands-off
+  ship with a human in it. The rule is project config: `labels` is a list of
+  entries, each one `label` plus the `paths` that require it, in the same path
+  vocabulary as `repo` (a plain prefix, or a glob). The harness holds no label
+  names of its own, because a label vocabulary is a fact about a project.
+  Derivation reads the request's diff against the default branch, from the
+  commit the two last shared — the same evidence the project's own check reads,
+  so both answer one question from one input. `pr-labeled` stamps at every
+  open, the empty set included. A label the forge refuses is a repository that
+  does not define it: substrate the daemon never self-clears, so it parks
+  `provisioning-gate` naming the labels. A label no rule derives is neither a
+  park nor a guess — it stays a red check, which is the one authority that can
+  say a human has to look.
 - **The check watcher is a stamping process.** The ship stage polls the
   forge and stamps `check-transition` on every observed state change —
   normalized status per check, `required` flag, duration from the forge's
@@ -272,6 +288,8 @@ check at cutover, like the claude CLI items in ADR-0005:
 - `repos/{repo}/branches/{base}/protection/required_status_checks` shape for
   rulesets vs classic protection (rulesets may need a different endpoint).
 - `gh run rerun --failed` coverage when a commit has several workflow runs.
+- `gh pr edit --add-label` exit behavior on a label the repository does not
+  define (the adapter reads the refusal as a reason and parks on it).
 - Auto-merge surviving a leased force-push of the head branch.
 
 ## Fallback paths
@@ -309,6 +327,14 @@ branch), route the sweep through a `cards/<runId>` branch with its own
 armed auto-merge. Trigger: `card-sweep` stamps with `pushed: false` on
 protection errors. Reversal cost: moderate — one more watcher pass at
 close-out.
+
+If label derivation from paths proves too coarse — a label a project decides
+on the content of a diff rather than on where it lands — the rule gains a
+second key beside `paths` and the derivation reads both. Trigger: one label
+whose path rule fires on requests that do not need it. Reversal cost: low, one
+config key and one predicate; a project that names no such rule is unaffected.
+Removing the `labels` list entirely returns the ship step to opening
+unlabelled requests, which is what it did before this decision.
 
 If a forge for a non-GitHub host is needed, the interface in `ship/forge.mjs`
 is the contract; the ship step never imports the gh adapter directly.

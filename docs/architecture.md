@@ -104,7 +104,8 @@ Two levels; the ownership test decides placement.
 - **Project config** — one JSON versioned in the project repo: repo facts,
   commands, gates, conventions, lane specifics, per-lane budget thresholds,
   the external credentials the work needs with the read-only probe that
-  proves each one, the tripwire registry, and the optional close-out extras
+  proves each one, the label rules a request's diff is measured against
+  (`labels`), the tripwire registry, and the optional close-out extras
   (`closeout`).
   The daemon reads it from `main` in its bare clone at each run launch, so
   config changes ship through the same PR path as the code they describe.

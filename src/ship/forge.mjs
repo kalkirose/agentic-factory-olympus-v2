@@ -7,6 +7,8 @@
 //   preflight(base)      → {autoMergeAllowed, strict, requiredChecks}
 //   openPr(opts)         → {number, url}; idempotent per head branch — an
 //                          open PR for the branch is returned, never doubled
+//   applyLabels(n, list) → {applied, reason?}; additive, and never throws on
+//                          a label the repository does not define
 //   armAutoMerge(number) → {armed, reason?}; never throws on refusal
 //   prState(number)      → {state: 'open'|'merged'|'closed', headSha,
 //                          mergeSha?, behindBase, conflicting, autoMergeArmed}
@@ -150,6 +152,16 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
         throw new Error(`no open PR for branch ${head} after create`);
       }
       return { number: view.number, url: view.url };
+    },
+
+    async applyLabels(number, labels) {
+      if (labels.length === 0) return { applied: [] };
+      const result = await gh(
+        ['pr', 'edit', String(number), '-R', repo, ...labels.flatMap((l) => ['--add-label', l])],
+        { allowFail: true }, // a label the repository does not define; the ship step parks on it
+      );
+      if (result.code !== 0) return { applied: [], reason: result.output.slice(-300) };
+      return { applied: [...labels] };
     },
 
     async armAutoMerge(number) {

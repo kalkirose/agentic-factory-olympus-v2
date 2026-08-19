@@ -179,6 +179,37 @@ test('a credential names one variable and a probe command', () => {
   );
 });
 
+test('a label rule names one label and the paths that require it', () => {
+  const config = valid();
+  config.labels = [
+    { label: 'migration', paths: ['db/migrations'] },
+    { label: 'ui', paths: ['src/ui/**', 'assets'] },
+  ];
+  assert.deepEqual(validateProjectConfig(config), []);
+  assert.deepEqual(errorPaths({ ...valid(), labels: {} }), ['labels']);
+  assert.deepEqual(errorPaths({ ...valid(), labels: ['migration'] }), ['labels[0]']);
+  // A label with no paths behind it would fire on nothing and read as covered.
+  assert.deepEqual(errorPaths({ ...valid(), labels: [{ label: 'migration' }] }), [
+    'labels[0].paths',
+  ]);
+  assert.deepEqual(errorPaths({ ...valid(), labels: [{ label: 'migration', paths: [] }] }), [
+    'labels[0].paths',
+  ]);
+  assert.deepEqual(errorPaths({ ...valid(), labels: [{ paths: ['db'] }] }), ['labels[0].label']);
+  assert.deepEqual(
+    errorPaths({
+      ...valid(),
+      labels: [
+        { label: 'migration', paths: ['db'] },
+        { label: 'migration', paths: ['sql'] },
+      ],
+    }),
+    ['labels[1].label'],
+  );
+  const parsed = parseProjectConfig(JSON.stringify({ version: 1 }), 'fixture');
+  assert.deepEqual(parsed.labels, []);
+});
+
 test('constitutionPath defaults, and an absolute path is refused', () => {
   assert.deepEqual(validateProjectConfig({ ...valid(), constitutionPath: 'docs/policy.md' }), []);
   assert.deepEqual(errorPaths({ ...valid(), constitutionPath: '/etc/policy.md' }), [

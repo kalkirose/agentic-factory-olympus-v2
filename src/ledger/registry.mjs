@@ -104,6 +104,11 @@ export const RUN_EVENTS = new Set([
   // moving base and left the update to the ship stage (ADR-0033).
   'pre-verdict-update',
   'pr-opened',
+  // The labels the request carries, derived from its own diff by the project's
+  // label rules and applied before auto-merge arms. Stamped at every open, the
+  // empty set included: a request whose diff asked for no label and one whose
+  // derivation never ran read the same otherwise (ADR-0008).
+  'pr-labeled',
   'check-transition',
   'ci-flake',
   'branch-update',

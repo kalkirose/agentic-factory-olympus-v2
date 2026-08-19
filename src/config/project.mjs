@@ -49,6 +49,9 @@ export function defaultProjectConfig() {
     // external credentials the project's work needs, each with the read-only
     // command that proves it; an empty list probes nothing
     credentials: [],
+    // label rules: one label and the diff path entries that require it; an
+    // empty list leaves every request unlabelled
+    labels: [],
     // optional close-out extras the project asks for after a shipped story;
     // null = the close-out is exactly what it always was
     closeout: null,
@@ -80,6 +83,7 @@ export function validateProjectConfig(config) {
   validateBudgets(config.budgets, err);
   validateConstitutionPath(config.constitutionPath, err);
   validateCredentials(config.credentials, config.commands, err);
+  validateLabels(config.labels, err);
   validateCloseout(config.closeout, err);
   if (isPlainObject(config.lanes) && isPlainObject(config.lanes.story)) {
     if (!Array.isArray(config.repo?.testPaths) || config.repo.testPaths.length === 0) {
@@ -461,6 +465,40 @@ function validateCredentials(credentials, commands, err) {
     }
     if (typeof entry.probe !== 'string' || !isPlainObject(commands) || !commands[entry.probe]) {
       err(at('probe'), 'must name a key in commands');
+    }
+  });
+}
+
+// The labels a request must carry, and what makes each one required. A rule
+// names one label and the diff path entries that ask for it, in the same path
+// vocabulary as `repo` — a plain prefix, or a glob. The label vocabulary
+// belongs to the project, so the rule does too: the harness derives, it never
+// holds a list of label names.
+//
+// The rules are the whole derivation. A label nothing here covers is not
+// guessed at ship time; it stays whatever the project's own check makes of it.
+function validateLabels(labels, err) {
+  if (labels === undefined) return;
+  if (!Array.isArray(labels)) {
+    err('labels', 'must be an array');
+    return;
+  }
+  const seen = new Set();
+  labels.forEach((entry, i) => {
+    const at = (key) => `labels[${i}].${key}`;
+    if (!isPlainObject(entry)) {
+      err(`labels[${i}]`, 'must be an object');
+      return;
+    }
+    if (typeof entry.label !== 'string' || entry.label.length === 0) {
+      err(at('label'), 'required string');
+    } else if (seen.has(entry.label)) {
+      err(at('label'), `duplicate label: ${entry.label}`);
+    } else {
+      seen.add(entry.label);
+    }
+    if (!isStringList(entry.paths) || entry.paths.length === 0) {
+      err(at('paths'), 'must be a non-empty array of path entries');
     }
   });
 }
