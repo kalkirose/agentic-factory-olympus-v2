@@ -15,12 +15,12 @@ import {
   reconcileTicketPath,
   runLedgerPath,
 } from '../src/daemon/home.mjs';
-import { postFreeze, repairLane } from '../src/lanes/verdict.mjs';
+import { postFreeze, repairLane, restoreAnchor } from '../src/lanes/verdict.mjs';
 import { shipStep, CHECKLESS_POLLS, UPDATE_CAP } from '../src/lanes/ship.mjs';
 import { RERUN_BUDGET } from '../src/ledger/cycles.mjs';
 import { gitHubForge, noLogReason, parseGitHubRepo, PartialLogRefusal } from '../src/ship/forge.mjs';
 import { derivedLabels } from '../src/ship/labels.mjs';
-import { commitAll } from '../src/isolation/tree.mjs';
+import { commitAll, restorePaths } from '../src/isolation/tree.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { openEscapesStore, openRunStore, TelemetryStore } from '../src/telemetry/stores.mjs';
 import { BEATS_PER_STAMP } from '../src/telemetry/heartbeat.mjs';
@@ -29,7 +29,16 @@ import { RUN_EVENTS } from '../src/ledger/registry.mjs';
 import { recordEscape, ticketEscape, readEscapeSet } from '../src/telemetry/escapes.mjs';
 import { owedRepairs } from '../src/frontier/repairs.mjs';
 import { owedReconciliations, reconciliationLaunch } from '../src/frontier/reconciliations.mjs';
-import { tempDir, removeDir, waitFor, gitSync, initOriginRepo, commitTree, projectConfigJson } from './helpers.mjs';
+import {
+  tempDir,
+  removeDir,
+  waitFor,
+  gitSync,
+  initOriginRepo,
+  commitTree,
+  projectConfigJson,
+  writeTree,
+} from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
 
@@ -2079,6 +2088,158 @@ test('a run waits for the ship token, and its first act under it is the update',
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   // The request opened on the post-merge base: it never went behind.
   assert.ok(!events.some((e) => e.event === 'branch-update'));
+});
+
+// -- the restore anchor after an update --------------------------------------
+
+// A story that shipped while this run was in flight. It moved a source file
+// and the test path that covers it; this run's spec names neither, and its
+// frozen suite holds neither.
+const SHIPPED_SRC = 'export const shipped = () => 1;\n';
+const SHIPPED_SRC_NEXT = 'export const shipped = () => 2;\n';
+const shippedTest = (answer) => `import test from 'node:test';
+import assert from 'node:assert/strict';
+test('shipped answers ${answer}', async () => {
+  const { shipped } = await import('../src/shipped.mjs');
+  assert.equal(shipped(), ${answer});
+});
+`;
+
+/** File content with the line endings a checkout may have normalized. */
+function readAt(dir, path) {
+  return readFileSync(join(dir, path), 'utf8').replace(/\r\n/g, '\n');
+}
+
+test('the verdict behind an update judges main\'s version of a test path the run does not own', async (t) => {
+  const fx = shipFixture(t, {
+    files: { 'src/shipped.mjs': SHIPPED_SRC, 'tests/shipped.test.mjs': shippedTest(1) },
+    // A red second cycle would reach triage; the seat is here so the scenario
+    // renders that red instead of parking on a missing fixture behavior.
+    seats: {
+      'verdict-triage': () => ({
+        report: {
+          findings: [
+            {
+              class: 'harness',
+              layers: ['unit'],
+              summary: 'the suite restore reverted a merged test path',
+              evidence: 'the fixture asserts this never runs',
+            },
+          ],
+          persisting: [],
+          summary: 'one finding',
+        },
+      }),
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'freeze', 'freeze');
+  commitTree(
+    fx.origin,
+    { 'src/shipped.mjs': SHIPPED_SRC_NEXT, 'tests/shipped.test.mjs': shippedTest(2) },
+    'a later story ships',
+  );
+  const update = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'pre-verdict-update' && e.ran,
+    'the pre-verdict update',
+  );
+  // The cycle the update earned. Anchored on the launch base it would restore
+  // the pre-merge test over the merged source and go red on shipped work.
+  const render = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'verdict-rendered' && e.seq > update.seq,
+    'the post-update verdict',
+  );
+  assert.equal(render.verdict, 'green');
+  assert.equal(render.sha, update.toSha);
+  assert.ok(!fx.calls.some((c) => c.seat === 'verdict-triage'));
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(gitSync(['show', 'main:tests/shipped.test.mjs'], fx.origin), shippedTest(2));
+});
+
+test('the restore at the merged anchor keeps main\'s test paths and drops the seat\'s own writes', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const repo = initOriginRepo(join(root, 'repo'), {
+    'src/shipped.mjs': SHIPPED_SRC,
+    'tests/shipped.test.mjs': shippedTest(1),
+  });
+  gitSync(['checkout', '-b', 'run/alpha'], repo);
+  const suiteSha = commitTree(repo, { 'tests/feature.test.mjs': STRONG_TEST }, 'suite: freeze');
+  gitSync(['checkout', 'main'], repo);
+  commitTree(
+    repo,
+    { 'src/shipped.mjs': SHIPPED_SRC_NEXT, 'tests/shipped.test.mjs': shippedTest(2) },
+    'a later story ships',
+  );
+  gitSync(['checkout', 'run/alpha'], repo);
+  gitSync(['-c', 'commit.gpgsign=false', 'merge', '-m', 'merge main', 'main'], repo);
+  const mergedSha = gitSync(['rev-parse', 'HEAD'], repo).trim();
+  const events = [
+    { event: 'freeze', sha: suiteSha },
+    { event: 'pre-verdict-update', ran: true, toSha: mergedSha },
+  ];
+  assert.equal(restoreAnchor(events), mergedSha);
+  // What the seat left in the tree: a write to a frozen test path, a test file
+  // of its own, and the implementation it was asked for.
+  const seatWrites = {
+    'tests/shipped.test.mjs': shippedTest(99),
+    'tests/seat.test.mjs': 'the seat wrote this\n',
+    'src/feature.mjs': GOOD_FEATURE,
+  };
+  writeTree(repo, seatWrites);
+  await restorePaths(repo, restoreAnchor(events), ['tests']);
+  assert.equal(readAt(repo, 'tests/shipped.test.mjs'), shippedTest(2));
+  assert.equal(readAt(repo, 'tests/feature.test.mjs'), STRONG_TEST);
+  assert.ok(!existsSync(join(repo, 'tests/seat.test.mjs')));
+  assert.equal(readAt(repo, 'src/feature.mjs'), GOOD_FEATURE);
+  // The anchor is the whole of the difference: the same restore against the
+  // freeze commit reverts the merged file to the version the run launched on.
+  writeTree(repo, seatWrites);
+  await restorePaths(repo, restoreAnchor(events.slice(0, 1)), ['tests']);
+  assert.equal(readAt(repo, 'tests/shipped.test.mjs'), shippedTest(1));
+});
+
+test('the restore anchor follows the tree: the freeze, then the merge, then the freeze again', () => {
+  const freeze = { event: 'freeze', sha: 'f'.repeat(40) };
+  const merged = { event: 'pre-verdict-update', ran: true, toSha: 'm'.repeat(40) };
+  assert.equal(restoreAnchor([]), null);
+  // A run that never updated restores from exactly what it always restored
+  // from: an update that found the base where the run left it moves nothing,
+  // and neither does a capped one.
+  assert.equal(restoreAnchor([freeze]), freeze.sha);
+  assert.equal(
+    restoreAnchor([freeze, { event: 'pre-verdict-update', ran: false, mainSha: 'a'.repeat(40) }]),
+    freeze.sha,
+  );
+  assert.equal(
+    restoreAnchor([freeze, { event: 'pre-verdict-update', ran: false, capped: true }]),
+    freeze.sha,
+  );
+  assert.equal(restoreAnchor([freeze, merged]), merged.toSha);
+  // The ship-stage update merges the same branch into the same tree.
+  assert.equal(
+    restoreAnchor([freeze, { event: 'branch-update', toSha: 'b'.repeat(40) }]),
+    'b'.repeat(40),
+  );
+  // A re-freeze is authored on the merged tree, so it takes the anchor back.
+  const refreeze = { event: 're-freeze', sha: 'r'.repeat(40) };
+  assert.equal(restoreAnchor([freeze, merged, refreeze]), refreeze.sha);
+  assert.equal(restoreAnchor([freeze, merged, refreeze, merged]), merged.toSha);
+  // A fresh pass resets the tree to the pre-implementation commit and drops
+  // the merge with it; the anchor goes back to the suite it carries forward.
+  assert.equal(restoreAnchor([freeze, merged, { event: 'fresh-pass', pass: 2 }]), freeze.sha);
+  assert.equal(
+    restoreAnchor([freeze, merged, refreeze, { event: 'fresh-pass', pass: 2 }]),
+    refreeze.sha,
+  );
 });
 
 // -- gh adapter units --------------------------------------------------------

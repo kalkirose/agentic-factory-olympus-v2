@@ -256,7 +256,9 @@ async function runCycle(ctx, base, mode, { cycle }) {
   // cycle briefs is reading a tree the take-back already changed.
   const dropped = impl?.dropped ?? [];
   if (mode === 'story') {
-    await restorePaths(base.worktree, suiteSha, base.testPaths, { except: base.frozenExclusions });
+    await restorePaths(base.worktree, restoreAnchor(startEvents), base.testPaths, {
+      except: base.frozenExclusions,
+    });
   }
   const sha = await headSha(base.worktree);
   const gates = {
@@ -889,6 +891,9 @@ export async function freshPass(ctx, base, mode, { newPass, trigger, open, last 
   if (!events.some((e) => e.event === 'fresh-pass' && e.seq > last.seq)) {
     // The fresh pass never sees the prior tree: reset to the pre-
     // implementation state, then carry the current frozen suite forward.
+    // The reset drops any merge the tree held, so the carry reads the suite
+    // commit rather than the restore anchor, and the stamp below takes every
+    // later restore of this pass back to the same commit.
     // The stamp lands last, so a restart before it redoes the (idempotent)
     // reset instead of skipping it.
     await resetHard(base.worktree, base.resetSha);
@@ -1041,7 +1046,7 @@ async function captureDefects(ctx, base, mode, { seat, capture }) {
       ? changed.filter((f) => underAny(f, base.testPaths) && !exempt.includes(f))
       : [];
   if (mode === 'story') {
-    await restorePaths(base.worktree, currentSuiteSha(runEvents(ctx)), base.testPaths, {
+    await restorePaths(base.worktree, restoreAnchor(runEvents(ctx)), base.testPaths, {
       except: exempt,
     });
   }
@@ -1370,6 +1375,45 @@ function currentSuiteSha(events) {
     }
   }
   return null;
+}
+
+/**
+ * The sha every suite restore checks out from.
+ *
+ * The restore covers the whole of the test paths and not the freeze's own file
+ * list, which is what makes it structural: a write to any test-path file is
+ * undone whether or not the freeze authored that file. The anchor therefore
+ * decides the content of every test-path file the run never wrote, and it has
+ * to name the tree the candidate ships onto.
+ *
+ * Before the tree merges the default branch, that tree is the freeze commit.
+ * After it, the merge commit holds the frozen suite and the default branch's
+ * later work in one tree, and the freeze commit describes a tree that stopped
+ * existing: restoring from it reverts every test-path file the default branch
+ * advanced since the run launched, so a candidate that merged a green default
+ * branch turns red against work that shipped before it (ADR-0033).
+ *
+ * A fresh pass resets the tree to the pre-implementation commit and drops the
+ * merge with it, so the anchor goes back to the suite commit; the update stage
+ * merges again on that pass's way to its own verdict.
+ *
+ * @param {object[]} events the run's ledger events, in order
+ * @returns {string|null} the sha, or null when the run holds no freeze
+ */
+export function restoreAnchor(events) {
+  let suite = null;
+  let anchor = null;
+  for (const e of events) {
+    if (e.event === 'freeze' || e.event === 'freeze-inherited' || e.event === 're-freeze') {
+      suite = e.sha;
+      anchor = e.sha;
+    } else if (e.event === 'branch-update' || (e.event === 'pre-verdict-update' && e.ran === true)) {
+      if (typeof e.toSha === 'string') anchor = e.toSha;
+    } else if (e.event === 'fresh-pass') {
+      anchor = suite;
+    }
+  }
+  return anchor;
 }
 
 export function currentPass(events) {

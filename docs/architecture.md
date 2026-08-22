@@ -344,6 +344,12 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   here, before any request, and takes the merge round it always took.
   `UPDATE_CAP` bounds the updates per implementation pass; past it the run
   falls through to the ship-stage update.
+- **The restore anchor** (ADR-0033) is the sha every story-mode restore of the
+  test paths checks out from: the freeze commit until the tree merges the
+  default branch, the merge commit after that, and the freeze commit again
+  after a fresh pass resets the tree. The restore covers the whole of the test
+  paths, so the anchor decides the content of every test-path file the run
+  never wrote, and that content belongs to the tree the request lands on.
 - **The ship token** (ADR-0033) is one per project, derived from the run
   ledgers: a run between its acquire or its `pr-opened` and its `merged` or
   its close holds it, and every other open run that stamped a wait is in the

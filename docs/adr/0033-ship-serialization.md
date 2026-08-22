@@ -76,6 +76,13 @@ One wait stamp per wait, not one per poll. The update stamps whether it ran or
 found the base where the run left it: a run that merges the default branch into
 its own tree on its own authority says so either way.
 
+**The suite restore anchors on the merged tree.** Every story-mode restore of
+the test paths checks out from `restoreAnchor`: the freeze commit until the
+tree merges the default branch, the merge commit after that, and the freeze
+commit again after a fresh pass resets the tree and drops the merge with it. A
+ship-stage `branch-update` re-anchors exactly as the pre-verdict update does,
+and a re-freeze authored on the merged tree takes the anchor back to itself.
+
 **The slot cap is unchanged.** It stays the concurrency knob for everything
 before the ship. The token serializes the last stretch of each run rather than
 the runs, and it holds a slot while it waits, because the run is alive and its
@@ -100,6 +107,37 @@ cycle is the deterministic spectrum and nothing else. A red it turns up enters
 the ladder like any other red, which is the correct answer — the default branch
 broke this candidate, and the run repairs it before the request rather than
 after a CI round.
+
+## Why the restore anchor is the merged tree and not the freeze
+
+The restore that voids test tampering covers the whole of the test paths, not
+the file list the freeze recorded. That is what makes it structural: a write to
+any test-path file is undone whether or not the freeze authored the file, so no
+seat quiets a test by writing one the freeze never named. The price of that
+reach is that the anchor decides the content of every test-path file the run
+never wrote, and those files belong to the default branch.
+
+The freeze commit describes the default branch as it stood when the run
+launched. Once the update merges, that tree no longer exists: the merge commit
+holds the frozen suite and everything the default branch shipped since, and it
+is the tree the request will land. Restoring from the freeze there reverts every
+test-path file the default branch advanced — other stories' shipped tests, their
+recorded fixtures, their registries — over source files the merge left current.
+The result is a deterministic red that belongs to no candidate: the tests are
+weeks old, the code beside them is current, and neither the candidate nor its
+suite is wrong. A run met it as a merge of six such files across three earlier
+merges, and the reds it raised named the two layers those files cover.
+
+The merge commit is the honest anchor for both halves of the same reason. It
+carries the frozen suite, because the branch it merged into carries nothing else
+under the test paths; and it carries the default branch's later work, because
+git merged it in. So the restore against it still voids every seat write to a
+test path and reverts nothing else.
+
+A fresh pass is the one thing that takes the anchor back. It resets the tree to
+the pre-implementation commit, and the merge goes with the reset — restoring
+merged tests over a pre-merge tree would mix two trees that never existed
+together. The pass merges again on its own way to its own verdict.
 
 ## Why the holder keeps the token through a repair
 
@@ -132,6 +170,15 @@ took before, and the `capped` stamp says so. Trigger: two updates in one pass
 in the ledgers. Reversal cost: low — one constant, and the route under it does
 not change. Setting the cap to zero disables the pre-verdict update entirely
 and leaves the token doing its own job.
+
+If a project needs the frozen suite pinned across a merge — a repository whose
+default branch rewrites shared test scaffolding often enough that the merged
+version is the less stable one — the anchor narrows: the merge commit answers
+for the test-path files the freeze did not name, and the freeze commit answers
+for the ones it did, from the file list the freeze already records. Trigger: a
+post-update red whose evidence is a merged test file the freeze authored.
+Reversal cost: low — one derivation and a second restore pass; the stages, the
+stamps and the freeze record do not change.
 
 If the token proves too coarse — a project whose merges are cheap enough that
 serializing them costs more than the concurrent pairs did — the gate moves
