@@ -93,7 +93,16 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
   t.after(() => cleanup(fx));
 
   await startDaemon(fx);
-  assert.match(fx.stdout, /olympusd: started \(pid \d+/);
+  // The stamp and the banner are two independent writes: the start returns on
+  // the ledger stamp, and the line on the child's stdout can still be in
+  // flight. Polling the buffer keeps this an assertion about what the binary
+  // prints rather than about which write lands first.
+  await pollFor('the start banner on stdout', () => /olympusd: started \(pid \d+/.test(fx.stdout), {
+    attempts: 60,
+    intervalMs: 50,
+    abort: () => stalled(fx),
+    diagnose: () => diagnostics(fx),
+  });
 
   ctl(fx, ['launch', '--project', PROJECT, '--card', CARD_PATH]);
   const runId = await pollFor(
