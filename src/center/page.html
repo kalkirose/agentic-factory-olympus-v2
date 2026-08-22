@@ -585,7 +585,9 @@ function renderStats(s) {
   }
   box.appendChild(hero);
   box.appendChild(el("div", "hero-sub",
-    "Median story wall-clock · target ≤ " + st.targetHours + " h · median cost " + fmtCost(st.medianCost)));
+    "Median story active time · target ≤ " + st.targetHours + " h"
+    + (st.medianWallHours !== null ? " · median wall " + st.medianWallHours.toFixed(1) + " h" : "")
+    + " · median cost " + fmtCost(st.medianCost)));
 
   if (st.ships.length > 0) {
     const wrap = el("div", "colwrap");
@@ -605,7 +607,8 @@ function renderStats(s) {
     const cols = el("div", "cols");
     for (const ship of st.ships) {
       const col = el("div", "col");
-      tipped(col, (ship.storyKey ?? ship.runId) + " · " + ship.hours.toFixed(1) + " h" + (ship.hours > st.targetHours ? " — over target" : ""));
+      tipped(col, (ship.storyKey ?? ship.runId) + " · " + ship.hours.toFixed(1) + " h active · "
+        + ship.wallHours.toFixed(1) + " h wall" + (ship.hours > st.targetHours ? " — over target" : ""));
       const bar = el("div", "bar");
       bar.style.height = (ship.hours / MAX * 150) + "px";
       col.appendChild(bar);
@@ -615,18 +618,20 @@ function renderStats(s) {
     chart.appendChild(cols);
     wrap.appendChild(chart);
     box.appendChild(wrap);
-    box.appendChild(el("div", "axis-note", "wall-clock per shipped story, oldest → newest · hover for story + hours"));
+    box.appendChild(el("div", "axis-note", "active time per shipped story, oldest → newest · hover for story, active and wall"));
     const details = el("details", "tbl");
     details.appendChild(el("summary", null, "Data table"));
     const table = el("table");
     const header = el("tr");
     header.appendChild(el("th", null, "Story"));
-    header.appendChild(el("th", null, "Hours"));
+    header.appendChild(el("th", null, "Active h"));
+    header.appendChild(el("th", null, "Wall h"));
     table.appendChild(header);
     for (const ship of st.ships) {
       const row = el("tr");
       row.appendChild(el("td", null, ship.storyKey ?? ship.runId));
       row.appendChild(el("td", null, ship.hours.toFixed(1)));
+      row.appendChild(el("td", null, ship.wallHours.toFixed(1)));
       table.appendChild(row);
     }
     details.appendChild(table);

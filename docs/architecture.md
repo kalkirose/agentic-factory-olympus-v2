@@ -92,6 +92,15 @@ and duration history only; never a trigger), `event` (closed registry),
 `actor`, `stream` (stream-classed events only), `refs`, payload inline. The
 event registry is closed; a new type enters only by a design-level decision.
 
+A run's length derives from its own ledger in two numbers, and the close-out
+record stamps both: wall, from the launch stamp to the close, and active, the
+same stretch minus every span the run spent parked on a human or inert under
+an unresolved liveness violation. Overlapping spans count once, a span still
+open at the end runs to it, and nothing is held between calls, so a restart
+and an archive re-derive the same pair. Every duration read that keys on run
+length — the command-center ship stat and its target, the eval seat's window
+— keys on the active one, with the wall beside it (ADR-0036).
+
 Every loud event and every breach gets a paired `resolved` append in its
 source ledger. The open set is derivable: index entries without a linked
 resolution. Each loud class names the event that owns it in one table, and the

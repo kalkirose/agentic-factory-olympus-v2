@@ -8,6 +8,7 @@ import { existsSync } from 'node:fs';
 import { readEvents } from '../ledger/ledger.mjs';
 import { LOUD_EVENTS, SEAT_TERMINAL_EVENTS } from '../ledger/registry.mjs';
 import { runCost } from '../ledger/cost.mjs';
+import { runDuration } from '../ledger/durations.mjs';
 import { deriveRunState } from '../engine/replay.mjs';
 import { readLock, pidAlive } from '../daemon/lock.mjs';
 import { openLoud, listRunEvents, storyRunsByKey } from '../telemetry/readers.mjs';
@@ -23,7 +24,9 @@ import { cloneDir, readBlobFromBranch } from '../isolation/clones.mjs';
 import { parseProjectConfig } from '../config/project.mjs';
 import { PRE_FREEZE_STAGES } from '../lanes/story.mjs';
 
-// The design-given wall-clock target for one shipped story, in hours.
+// The design-given target for one shipped story, in hours of active time —
+// the run's own hours, with the waiting on a human taken out (ADR-0036). The
+// value is a map-level decision and this line is where it changes.
 export const TARGET_HOURS = 4;
 
 // Stage lists per lane, for the pipeline display. They mirror the lane
@@ -340,6 +343,10 @@ async function readProjectSource(paths, project, entry) {
 
 // -- run-time statistics ------------------------------------------------------
 
+// `hours` is the ship's active time and it is what the target, the chart and
+// the medians key on; `wallHours` is the same stretch on the clock on the
+// wall. A ship reads as slow because the harness was slow, never because a
+// human took a night to answer a park (ADR-0036).
 function shipList(allRuns) {
   const ships = [];
   for (const { runId, project, events } of allRuns.filter((r) => r.lane === 'story')) {
@@ -347,12 +354,17 @@ function shipList(allRuns) {
     if (!merged) continue;
     const launch = events.find((e) => e.event === 'run-launched');
     const prOpened = events.find((e) => e.event === 'pr-opened');
+    // The reading stops at the merge, as it always did: the close-out stage
+    // runs behind it and is not the story's time to ship.
+    const duration = runDuration(events, { end: merged.ts });
+    if (duration === null) continue;
     ships.push({
       runId,
       project,
       storyKey: launch.storyKey ?? null,
       ts: merged.ts,
-      hours: round((Date.parse(merged.ts) - Date.parse(launch.ts)) / 3_600_000),
+      hours: round(duration.activeMs / 3_600_000),
+      wallHours: round(duration.wallMs / 3_600_000),
       cost: runCost(events),
       ...(prOpened && {
         shipMinutes: round((Date.parse(merged.ts) - Date.parse(prOpened.ts)) / 60_000),
@@ -370,6 +382,7 @@ function statsView(allRuns, ships) {
     targetHours: TARGET_HOURS,
     ships: last,
     medianHours: last.length > 0 ? round(median(last.map((s) => s.hours))) : null,
+    medianWallHours: last.length > 0 ? round(median(last.map((s) => s.wallHours))) : null,
     medianCost: last.length > 0 ? round(median(last.map((s) => s.cost))) : null,
     priorMedianHours: prior.length > 0 ? round(median(prior.map((s) => s.hours))) : null,
     greenShipP50Minutes: shipMinutes.length > 0 ? round(median(shipMinutes)) : null,

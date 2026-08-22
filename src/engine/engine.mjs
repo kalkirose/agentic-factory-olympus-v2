@@ -12,6 +12,7 @@ import { readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
 import { runCost } from '../ledger/cost.mjs';
+import { runDuration } from '../ledger/durations.mjs';
 import {
   PARK_TYPES,
   CLOSE_STATES,
@@ -448,10 +449,27 @@ export class RunEngine {
     this.closeRun(run, 'killed', { actor });
   }
 
+  /**
+   * The close-out record. It carries what the run closed on and how long the
+   * run took, in the two numbers that mean different things: `wallMs` from the
+   * launch stamp to this one, and `activeMs` with every parked and inert span
+   * taken out. Both are derived from the ledger under the run and from nothing
+   * the daemon remembers, so a reader of the archived ledger re-derives them
+   * (ADR-0036). The clock read is the close's own, one write ahead of the
+   * stamp's `ts`, because the stamp does not exist to be read yet.
+   */
   closeRun(run, state, { actor = ACTOR, ...extra } = {}) {
     run.closed = true;
     this.resolveLoudAtClose(run, state);
-    run.store.append('run-closed', { actor, state, ...extra });
+    const duration = runDuration(readEvents(runLedgerPath(this.paths, run.runId)), {
+      end: new Date().toISOString(),
+    });
+    run.store.append('run-closed', {
+      actor,
+      state,
+      ...extra,
+      ...(duration && { wallMs: duration.wallMs, activeMs: duration.activeMs }),
+    });
     run.store.close();
     this.runs.delete(run.runId);
     this.archiveClosedRun(run.runId);

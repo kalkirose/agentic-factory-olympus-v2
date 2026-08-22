@@ -39,6 +39,11 @@ export const RUN_EVENTS = new Set([
   // fault — but never silent, because a stage nothing stamps for reads the
   // same at one minute as at three hours (ADR-0034).
   'stage-heartbeat',
+  // The close-out record: the terminal state, whatever the closing stage put
+  // beside it, and the run's two durations — `wallMs` from the launch stamp,
+  // and `activeMs` with the parked and inert spans taken out. Two, because a
+  // run that waited nine hours on a human did not take nine hours of harness
+  // (ADR-0036).
   'run-closed',
   ...SEAT_EVENTS,
   // One read-only probe of one external credential, at the launch gate or at
