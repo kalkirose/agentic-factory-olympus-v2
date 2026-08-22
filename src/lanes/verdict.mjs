@@ -15,7 +15,10 @@
 // Re-freeze steps and operational fixes never consume implementation budget.
 // An operational fix on a CI verdict whose open findings are all env-class
 // takes no cycle at all: it hands the run back to ship, where the CI re-run
-// is the test, and stamps the skip on the ledger. A finding that persists past
+// is the test, and stamps the skip on the ledger. An operational fix that does
+// earn a local cycle probes the substrate before it stamps, because a re-run
+// against a broken host fails again at the price of a full spectrum.
+// A finding that persists past
 // its fix parks the provisioning gate, unless every one of them is a harness
 // defect an operator already acknowledged — then the lane answers the gate on
 // that authority and stamps both the ack it used and the fix (ADR-0032).
@@ -56,6 +59,7 @@ import {
   standingAcksFor,
 } from '../ledger/acks.mjs';
 import { runSpectrum, persistentReds, cyclePlan } from './spectrum.mjs';
+import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview } from './review.mjs';
 import { freezeAnchor } from './resume.mjs';
 import { parseIntentCard } from './card.mjs';
@@ -542,6 +546,14 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
     );
     const unfixed = ops.filter((f) => !fixedIds.has(f.id));
     if (unfixed.length > 0) {
+      // The substrate first, and the layers after it. An env finding says the
+      // failure sits outside the tree, so the fix this route stamps buys a
+      // re-run of layers that a broken host will fail again — for as long as
+      // that spectrum takes. The probe asks the host in seconds, and a host
+      // that answers no parks here with the probe's own evidence, before the
+      // re-run rather than an hour and a half after it (ADR-0022).
+      const gate = await substrateProbeGate(ctx, base, { ops: unfixed, skip });
+      if (gate) return gate;
       ctx.store.append('operational-fix', {
         actor: ACTOR,
         findings: unfixed.map((f) => f.id),
@@ -728,6 +740,23 @@ function gateFor(ops, last) {
       ops.map(line).join('\n') +
       (offered.length > 0 ? `\n${ACK_NOTE}` : ''),
     refs: [last.record],
+  });
+}
+
+/**
+ * The substrate probe in front of an operational fix (ADR-0022). It asks on an
+ * env-class finding, which is the class that names the host this run stands
+ * on, and only where the fix earns a local cycle: a skipped sweep runs no
+ * layer here, and the substrate a CI finding names is not this host's. A probe
+ * that reads nothing parks nothing — the route carries on as it did before the
+ * probe existed.
+ */
+function substrateProbeGate(ctx, base, { ops, skip }) {
+  if (skip || !ops.some((f) => f.class === 'env')) return null;
+  return substrateGate(ctx, {
+    stack: ctx.payload.stack,
+    composeCommand: ctx.composeCommand,
+    cwd: base.worktree,
   });
 }
 

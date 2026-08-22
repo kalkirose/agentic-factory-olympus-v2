@@ -283,6 +283,7 @@ export class Daemon {
         onParked: (info) => this.frontier.queueSweep(info.project),
         semaphores: this.semaphores,
         seatDefaults: () => this.seatDefaults(),
+        composeCommand: () => this.config.composeCommand,
         onEvent: (project, line, ledger) => {
           this.tripwires?.notify(project, line, ledger);
           this.notifier?.notify({ ledger, project, line });

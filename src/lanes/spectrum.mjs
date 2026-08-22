@@ -14,6 +14,13 @@
 // carries the remaining greens forward. A carried result is marked `carried`,
 // so no result of an older sha reads as a fresh proof.
 //
+// Each execution stamps its start as well: a layer is one process that can
+// hold a run for an hour, and before that stamp the ledger said nothing
+// between the route that ordered the cycle and the first result, so a run
+// inside a long layer read exactly like a run that had stopped. The stamp is a
+// record and never state — the resume reads `layer-result` as it always did
+// (ADR-0034).
+//
 // Layer results stamp per layer under the cycle number, so a daemon restart
 // mid-spectrum skips the layers already judged and re-runs only the rest. A
 // layer stamped under this cycle reports `run` whatever the plan says: the
@@ -102,12 +109,16 @@ function carriedResult(layer, run, prior) {
 
 async function runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark }) {
   const argv = commands[layer.command];
+  const started = (attempt) =>
+    ctx.store.append('layer-started', { actor: ACTOR, cycle, layer: layer.name, attempt, sha, ...mark });
+  started(1);
   const first = await runCommand(argv, { cwd, env });
   if (first.code === null) return { error: first.error };
   if (first.code === 0) {
     return { record: stampResult(ctx, { cycle, layer: layer.name, status: 'green', sha, ...mark }) };
   }
   // Flake filter: one red-only re-run by process policy.
+  started(2);
   const rerun = await runCommand(argv, { cwd, env });
   if (rerun.code === null) return { error: rerun.error };
   if (rerun.code === 0) {

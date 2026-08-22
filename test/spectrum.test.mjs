@@ -90,6 +90,67 @@ test('a red that turns green on the re-run stamps a flake, never a finding', asy
   assert.equal(flakes[0].cycle, 1);
 });
 
+test('every layer execution says when it started, the flake re-run included', async (t) => {
+  const { root, ctx } = fixture(t);
+  const marker = join(root, 'started-marker');
+  const flaky = [
+    'node',
+    '-e',
+    `const fs=require('fs');const p=${JSON.stringify(marker)};` +
+      `if(fs.existsSync(p))process.exit(0);fs.writeFileSync(p,'x');process.exit(1);`,
+  ];
+  await runSpectrum(ctx, {
+    layers: [
+      { name: 'flaky', command: 'flaky' },
+      { name: 'green', command: 'green' },
+      { name: 'blocked', command: 'green', needs: ['flaky'] },
+    ],
+    commands: { flaky, green: GREEN },
+    cwd: process.cwd(),
+    cycle: 3,
+    sha: 'sha3',
+  });
+  const started = events(ctx).filter((e) => e.event === 'layer-started');
+  assert.deepEqual(
+    started.map((e) => [e.layer, e.attempt, e.cycle, e.sha]),
+    [
+      ['flaky', 1, 3, 'sha3'],
+      ['flaky', 2, 3, 'sha3'],
+      ['green', 1, 3, 'sha3'],
+      ['blocked', 1, 3, 'sha3'],
+    ],
+  );
+  // The stamp says when, and it lands before the result it belongs to.
+  assert.ok(started.every((e) => typeof e.ts === 'string' && e.ts.endsWith('Z')));
+  const flakyResult = events(ctx).find((e) => e.event === 'layer-result' && e.layer === 'flaky');
+  assert.ok(started[1].seq < flakyResult.seq);
+});
+
+test('a layer nothing executes stamps no start: carried greens and stamped layers', async (t) => {
+  const { ctx } = fixture(t);
+  ctx.store.append('layer-result', { actor: 'daemon', cycle: 1, layer: 'a', status: 'green', sha: 's' });
+  const prior = new Map([['b', { layer: 'b', status: 'green', cycle: 1, sha: 's' }]]);
+  await runSpectrum(ctx, {
+    layers: [
+      { name: 'a', command: 'green' },
+      { name: 'b', command: 'green' },
+      { name: 'c', command: 'green' },
+    ],
+    commands: { green: GREEN },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 's',
+    run: new Set(['c']),
+    prior,
+  });
+  assert.deepEqual(
+    events(ctx)
+      .filter((e) => e.event === 'layer-started')
+      .map((e) => e.layer),
+    ['c'],
+  );
+});
+
 test('a stamped layer is never re-run in the same cycle', async (t) => {
   const { root, ctx } = fixture(t);
   ctx.store.append('layer-result', { actor: 'daemon', cycle: 1, layer: 'a', status: 'green', sha: 's' });

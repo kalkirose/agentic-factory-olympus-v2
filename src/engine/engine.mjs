@@ -37,11 +37,14 @@ export class RunEngine {
    *   onParked?: (info: {runId: string, project: string, lane: string, type: string}) => void,
    *   semaphores?: import('../seats/semaphore.mjs').ModelSemaphores,
    *   seatDefaults?: () => object,
+   *   composeCommand?: () => string[],
    *   archiveIo?: object,
    *   onEvent?: (project: string, line: object, ledger: string) => void}} opts
    *   seatDefaults supplies machine-scoped runSeat options (claudeCommand)
-   *   read fresh per dispatch, so a live config edit applies. onEvent fires
-   *   on every run-store append, project-attributed and carrying its source
+   *   read fresh per dispatch, so a live config edit applies. composeCommand
+   *   is the same machine-scoped read for the stack tool: a handler that asks
+   *   the run's stack a question gets the argv this host runs it with. onEvent
+   *   fires on every run-store append, project-attributed and carrying its source
    *   ledger — the event key every in-daemon observer reads. archiveIo is the
    *   archive's filesystem seam, read at every call.
    */
@@ -54,6 +57,7 @@ export class RunEngine {
       onParked,
       semaphores,
       seatDefaults,
+      composeCommand,
       archiveIo,
       onEvent,
     },
@@ -65,6 +69,7 @@ export class RunEngine {
     this.onParked = onParked ?? null;
     this.semaphores = semaphores ?? null;
     this.seatDefaults = seatDefaults ?? (() => ({}));
+    this.composeCommand = composeCommand ?? (() => ['docker', 'compose']);
     this.archiveIo = archiveIo ?? {};
     this.onEvent = onEvent ?? null;
     this.lanes = new Map();
@@ -188,6 +193,10 @@ export class RunEngine {
       store: run.store,
       instanceStore: this.instanceStore,
       paths: this.paths,
+      // The stack tool of this machine, read per dispatch like the seat
+      // defaults: a handler that asks the run's own stack a question spawns
+      // the argv the host is configured with, never a name it guessed.
+      composeCommand: this.composeCommand(),
       // For stores a handler opens itself (the escapes ledger): the same
       // project-attributed event key the run store carries.
       onAppend: (line, ledger) => this.onEvent?.(run.project, line, ledger),

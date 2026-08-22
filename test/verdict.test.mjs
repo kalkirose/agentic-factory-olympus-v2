@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { basename, dirname, join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
@@ -173,6 +174,8 @@ function verdictFixture(t, opts) {
     diffPolicy = undefined,
     specText = undefined,
     exclusions = [],
+    stack = null,
+    composeCommand = undefined,
   } = opts;
   const root = tempDir();
   const origin = initOriginRepo(join(root, 'origin'), {
@@ -181,7 +184,7 @@ function verdictFixture(t, opts) {
       commands,
       gates: { tier1: gates },
       lanes: { story: { suiteCommand: 'suite' } },
-      stack: null,
+      stack,
       ...(diffPolicy && { diffPolicy }),
     }),
     'src/base.mjs': 'export const base = 1;\n',
@@ -190,7 +193,11 @@ function verdictFixture(t, opts) {
   const paths = scaffoldHome(join(root, 'home'));
   writeFileSync(
     paths.instanceConfig,
-    JSON.stringify({ version: 1, projects: { proj: { repoUrl: origin, slotCap: 2 } } }) + '\n',
+    JSON.stringify({
+      version: 1,
+      projects: { proj: { repoUrl: origin, slotCap: 2 } },
+      ...(composeCommand && { composeCommand }),
+    }) + '\n',
   );
   const done = { stages: ['done'], handlers: { done: async () => ({ close: { state: 'shipped' } }) } };
   const post = postFreeze({ afterVerdict: done });
@@ -803,6 +810,136 @@ test('a persistent env finding parks the provisioning gate after its operational
   assert.equal(fixes[1].source, 'answer');
   assert.ok(!events.some((e) => e.event === 'repair-round'));
   assert.ok(!events.some((e) => e.event === 'gate-integrity'));
+});
+
+// -- the substrate probe (ADR-0022) ------------------------------------------
+
+/** A loopback port with a listener that answers, and one with nothing. */
+function livePort(t) {
+  const server = createServer((socket) => socket.on('data', () => socket.write('ok\n')));
+  return new Promise((resolve, reject) => {
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      t.after(() => new Promise((done) => server.close(done)));
+      resolve(server.address().port);
+    });
+  });
+}
+
+function deadPort() {
+  const server = createServer();
+  return new Promise((resolve, reject) => {
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+/**
+ * The stack tool of a fixture host: it answers `ps` with one published port —
+ * the dead one until the operator's marker appears, the live one after — and
+ * every other compose verb with silence.
+ */
+function composeStub({ marker, dead, live }) {
+  return [
+    'node',
+    '-e',
+    `const fs=require('fs');const port=fs.existsSync(${JSON.stringify(marker)})?${live}:${dead};` +
+      "if(process.argv.includes('ps'))console.log(JSON.stringify([{Service:'app'," +
+      "Publishers:[{PublishedPort:port,Protocol:'tcp'}]}]));",
+    // Everything the harness appends is this script's argument, never node's.
+    '--',
+  ];
+}
+
+test('an env finding probes the substrate before it spends a layer re-run on it', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat(() => ({ class: 'env' })),
+    ...furyClean(),
+  };
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const repaired = join(root, 'substrate-repaired');
+  const ext = ['node', '-e', "process.exit(require('fs').existsSync('../env-broken')?1:0)"];
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'ext', command: 'ext' },
+    ],
+    commands: { suite: SUITE_CMD, ext },
+    stack: { composeFile: 'compose.yml' },
+    composeCommand: composeStub({
+      marker: repaired,
+      dead: await deadPort(),
+      live: await livePort(t),
+    }),
+    seedExtra: async (ctx, worktree) => {
+      writeFileSync(join(worktree, '..', 'env-broken'), 'x');
+    },
+  });
+  const { runId, worktree } = await fx.launch();
+
+  // The gate parks on the probe, and it parks before the fix it guards: no
+  // operational fix is stamped and no second cycle runs a layer.
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  assert.ok(park.question.includes('The substrate probe answered no'));
+  assert.ok(park.question.includes('no loopback family accepted a connection'));
+  let events = readEvents(runLedgerPath(fx.paths, runId));
+  const probe = events.find((e) => e.event === 'substrate-probe');
+  assert.equal(probe.state, 'failed');
+  assert.equal(probe.failures[0].reason, 'unreachable');
+  assert.ok(!events.some((e) => e.event === 'operational-fix'));
+  assert.ok(!events.some((e) => e.event === 'layer-started' && e.cycle === 2));
+
+  // The operator repairs the host and the layer's own defect, then answers.
+  writeFileSync(repaired, 'x');
+  rmSync(join(worktree, '..', 'env-broken'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'restarted the host relay' });
+  events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const probes = events.filter((e) => e.event === 'substrate-probe');
+  assert.deepEqual(probes.map((e) => e.state), ['failed', 'clean']);
+  // The fix, and the cycle behind it, came after the clean probe and only
+  // after it.
+  const fix = events.find((e) => e.event === 'operational-fix');
+  assert.ok(fix.seq > probes[1].seq);
+  const rerun = events.find((e) => e.event === 'layer-started' && e.cycle === 2 && e.layer === 'ext');
+  assert.ok(rerun.seq > fix.seq);
+});
+
+test('a harness finding leaves the substrate alone: the probe asks on env findings', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat(() => ({ class: 'harness' })),
+    ...furyClean(),
+  };
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const hlayer = decayingLayer('hcount-probe', 2);
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'hlayer', command: 'hlayer' },
+    ],
+    commands: { suite: SUITE_CMD, hlayer },
+    stack: { composeFile: 'compose.yml' },
+    composeCommand: composeStub({
+      marker: join(root, 'never-written'),
+      dead: await deadPort(),
+      live: 1,
+    }),
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // A dead port would have parked an env finding; the harness route never asks.
+  assert.ok(!events.some((e) => e.event === 'substrate-probe'));
+  assert.equal(events.filter((e) => e.event === 'operational-fix').length, 1);
 });
 
 test('a harness finding stamps gate-integrity loud and resolves when the layer recovers', async (t) => {

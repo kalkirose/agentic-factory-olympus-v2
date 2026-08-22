@@ -10,7 +10,9 @@ existed, and only for part of the run. A seat stamps its own progress, so a
 stage that supervises one is never silent for long. The stages that run no seat
 — the ones that poll a forge, or another run's ledger — stamped their entry and
 then said nothing until they were done. A stage that sat for hours read exactly
-like a stage that sat for a minute.
+like a stage that sat for a minute. The verdict stage was silent for a third
+reason: it runs no seat and polls nothing while a gate layer runs, and a gate
+layer is one child process that can hold the run for an hour.
 
 Nothing could watch that. The tripwire watcher keys on appends, and a poll loop
 that changes nothing appends nothing, so a stalled stage produced no state
@@ -35,6 +37,21 @@ the stamp, the time in the stage, and the evidence of the wait (the request and
 the head sha, the merge commit). The three poll loops of the ship step beat —
 the ship-token wait, the check watch, the merge-commit check watch — because
 those are the loops that run no seat.
+
+**Every gate-layer execution stamps its start.** `layer-started` carries the
+cycle, the layer, the sha, and the attempt — the flake filter's red-only re-run
+is the second — and it lands before the process does. A layer is one child that
+can hold a run for an hour, and the runner stamped nothing between the route
+that ordered the cycle and the first `layer-result`. One observed run went 70
+minutes with a silent ledger there, and the only way to prove it alive was to
+find the test process by hand. With the stamp, that hour reads as the layer it
+is spending, from the moment it starts.
+
+**The stamp is a record, never state.** The spectrum resumes off `layer-result`
+exactly as it did: a layer already stamped with a result is skipped, and a
+layer caught mid-execution runs again and stamps a second start for the second
+execution. Nothing in the engine reads a start, so a lost one costs a reader a
+line and costs the run nothing.
 
 **The batch is the volume control, and it is a count of poll outcomes.** A
 stage that settles inside its first batch stamps nothing at all, so the ledger
@@ -98,6 +115,17 @@ all — a stage that says what it waits on every few minutes is readable by a
 human tailing the ledger, and the run's own record now shows what the run was
 doing during a wait it used to spend in silence.
 
+## Why a layer says it started rather than beating while it runs
+
+A poll loop has something new to report every few minutes, because each poll is
+an outcome. A gate layer has one thing to say and one moment to say it: this
+layer, at this sha, from now. A beat behind a running child would repeat that
+one fact at a cadence the harness chose, and the duration it would carry is
+already derivable from the start and the result that closes it. The cheap
+record is the one that reads correctly at any length of silence: a ledger whose
+last line is `layer-started <layer> 06:33Z` says what the run is doing at 06:34
+and at 07:33 alike.
+
 ## Fallback paths
 
 If the batch proves too coarse for a stage whose poll cadence is much slower
@@ -113,6 +141,12 @@ the history rather than the maximum. Trigger: an overrun an operator found by
 hand that the band did not open. Reversal cost: low — one function in
 `src/tripwires/duration.mjs`, with the stamped `band` on every past record to
 re-read the decision against.
+
+If a start stamp per layer proves too coarse for a layer that runs for hours,
+the layer runner opens a heartbeat over its child like a poll loop does, and
+beats on the child's own output rather than on a clock. Trigger: an operator
+who cannot tell a running layer from a hung one. Reversal cost: low — the
+heartbeat helper already exists, and the start stamp stays what it is.
 
 If the queued record proves too quiet for a stall that blocks a whole project,
 the class moves from queued to loud, where it joins the liveness violation on

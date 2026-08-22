@@ -37,6 +37,21 @@ Tier-1 spectrum, and no green verdict rests on a result the cycle did not earn.
   suite-defect — puts the cycle back, because those are defects the local
   layers judge. An acknowledgment answers a future gate and never enters this
   computation.
+- **An operational fix on an env finding probes the substrate before it earns
+  a cycle.** The probe reads the run stack's published ports back from the
+  compose project itself and asks every one of them the same question on both
+  loopback families — connect, write a few bytes, read an answer, inside one
+  bounded deadline. A failed probe parks `provisioning-gate` immediately,
+  carrying the probe's own output as the evidence, and no `operational-fix` is
+  stamped and no layer runs. A clean probe stamps the fix and the cycle runs as
+  it always did. Two answers are failures: one family answers while the other
+  accepts the connection and relays nothing, or no family accepts a connection
+  at all. Silence on both families is not one, and neither is a refusal beside
+  an answer. A probe that cannot read the stack, a project with no stack, and a
+  fix on harness-class findings alone all leave the route exactly as it was.
+  The probe stamps `substrate-probe` either way. It does not run where the
+  route skips the sweep: nothing local runs there, and the substrate a CI
+  finding names is not this host's.
 - **Nothing else moves.** The flake filter stays one red-only re-run inside a
   cycle. Green stays zero reds and zero open findings. Triage, the response
   ladder, the repair budget, and the park machinery read the same record they
@@ -47,7 +62,8 @@ is superseded here.**
 
 The plan lives in `cyclePlan()` in `src/lanes/spectrum.mjs`, beside the graph
 walk it shares. The out-of-tree route lives in the response ladder in
-`src/lanes/verdict.mjs`, beside the operational fix it stamps.
+`src/lanes/verdict.mjs`, beside the operational fix it stamps, and the probe
+lives in `src/lanes/substrate.mjs`, in front of it.
 
 ## What this is for
 
@@ -159,6 +175,51 @@ persisting finding raises, one gate at a time and on an operator's authority
 (ADR-0032). It says nothing about which layers could test a fix, so it stays
 out of this computation and the class of the finding decides alone.
 
+## Why the substrate is asked before the layers, and not after them
+
+An env finding says the failure sits outside the tree. The route's answer is to
+record the fix and judge the layers again, and that re-run is the most
+expensive statement the harness can make: on the reference project the two
+integration layers behind one env finding cost 1 h 28 m. The re-run is also the
+one statement the harness already knows the answer to, whenever the host is
+still broken. One observed run paid the full price and then parked with the
+probe evidence a human gathered by hand, ninety minutes after the daemon could
+have gathered it in seconds.
+
+The probe holds no port list, because there is none to hold. The stack
+publishes ephemeral ports so that two runs never collide, and the project
+resolves them from the compose project name. The probe resolves them the same
+way, off the compose document, so it asks about exactly the ports this run's
+tests reach and it needs no new project config.
+
+Both loopback families, because the failure lived in the difference between
+them. A stale host relay held the IPv6-loopback binds of a dead stack: `::1`
+accepted every connection and forwarded nothing while `127.0.0.1` relayed
+fine, and the relay outlived a restart of the container engine. A test client
+that resolves `localhost` reaches the wedged family first and fails; a probe
+that asked one family would have called that host healthy.
+
+The write and the read are what make the answer a fact. A connect alone
+succeeds against a relay that relays nothing, which is the whole shape of this
+failure. So the probe writes a few bytes and waits for bytes back, on the same
+port, with the same payload, on each family. The deadline bounds one socket
+exchange and judges nothing on its own: the verdict is the comparison between
+the two families, never the passage of time, and no route here reads elapsed
+time as evidence of anything (the no-timeout doctrine, ADR-0034).
+
+The comparison is also what keeps the probe from parking a healthy host. No
+payload draws an answer from every protocol — a length-prefixed server waits
+for a complete message and says nothing, honestly — so silence on both
+families proves nothing and is not a failure. A family that refuses while the
+other answers is not one either: a project may publish on one family by design.
+What is left is one family relaying and the other not, and a published port no
+family accepts at all. Both are the host, and a park is the cheapest thing the
+harness can do about either.
+
+The false-negative side is deliberate. A probe that answers clean on a broken
+host costs exactly what the harness costs today, and a probe that parks a
+healthy run costs the owner a night.
+
 ## Replay
 
 The plan reads the ledger and nothing else: the last `verdict-rendered` for
@@ -175,6 +236,12 @@ source, the classes of the findings that render left open, and the
 and the stage transition finds the stamp when it comes back, and the ship
 stage takes the run from there.
 
+The probe holds no position of its own. It runs where the route reaches it,
+which is in front of an operational fix that has not been stamped yet, so a
+daemon that dies between the probe and the stamp asks the host again when it
+comes back — a read-only question with no state behind it. A daemon that dies
+after the stamp finds the fix recorded and never probes for it again.
+
 ## Fallback paths
 
 If targeting ever ships a defect a full cycle would have caught — a red the
@@ -187,6 +254,20 @@ If some projects want targeting and others do not, the same return reads a
 `gates.targetedReruns` flag from project config, defaulting to on. Trigger: a
 project whose layers share state the `needs` graph does not declare. Reversal
 cost: low, one config field and one condition.
+
+If the probe ever parks a healthy host, the two failure rules narrow one at a
+time: the unreachable rule drops first, because a port nothing accepts has
+honest causes the probe cannot see (a service that binds late, a stack the run
+never needed up), and the wedge rule is the one the evidence is about. Trigger:
+one park an operator answered with "nothing was wrong". Reversal cost: none,
+one condition in `probeSubstrate()`.
+
+If the family list proves wrong for a host — a project whose tests reach the
+stack by a name that resolves to neither loopback address — the probe asks the
+resolver instead of the constant, and reads `localhost` for the families the
+tests would get. Trigger: a wedge the probe called clean. Reversal cost: low,
+one function in `src/lanes/substrate.mjs`, with the stamped `addresses` on
+every past probe to re-read the decision against.
 
 If a project's Tier-1 layers do reach what an out-of-tree finding names — a
 smoke layer that calls the same external service the CI check calls, or a

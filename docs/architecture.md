@@ -259,6 +259,11 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   those remedies lands outside the tree, so the operational fix stamps
   `sweep: 'skipped'` with the findings and the reason, the run goes back to
   ship, and the CI re-run is the test (ADR-0022).
+- **Layer starts are visible.** Every gate-layer execution stamps
+  `layer-started` (cycle, layer, sha, attempt) before its process runs, so an
+  hour inside one layer reads as that layer running since a time rather than as
+  a silent ledger. A record, never state: the resume still reads
+  `layer-result` alone (ADR-0034).
 - **Flake filter.** Each red layer re-runs once, red-only, by process policy.
   A green re-run writes a flake event, never a finding. Survivors are
   persistent reds; only these enter triage.
@@ -278,6 +283,12 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   defect an operator acknowledged: then the lane answers the gate on that
   authority and stamps both the acknowledgment it used and the fix
   (ADR-0032). Re-freeze and operational fixes cost no implementation budget.
+- **Substrate probe before the fix.** An env finding sends the route to the
+  host before it spends anything: the run stack's published ports, read off
+  the compose project and asked on both loopback families with a write and a
+  read inside one bounded deadline. A failed probe parks the provisioning gate
+  on its own evidence and no layer re-runs; a clean probe stamps the fix and
+  the cycle runs as it always did (ADR-0022).
 - **Fury round.** Six lenses on five seats (architecture + minimality merge
   into one code-shape seat with per-lens reporting; interface fires only on
   UI diffs). One round per pass, on the candidate tree, before the verdict

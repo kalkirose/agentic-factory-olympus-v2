@@ -47,6 +47,13 @@ export const RUN_EVENTS = new Set([
   // rather than one gate round per surface. Names only — the secret's value
   // is never read, on this host or on any other surface (ADR-0027).
   'credential-surface',
+  // The read-only substrate probe the operational-fix route runs before it
+  // spends a layer re-run on this host: every port the run's stack publishes,
+  // asked on both loopback families, with the answer of each attempt. `state`
+  // is clean, failed, or unread — a probe that could not read the stack judges
+  // nothing and stops nothing, and the route carries on as it did before the
+  // probe existed (ADR-0022).
+  'substrate-probe',
   // spec + suite
   'spec-born',
   'spec-gate-round',
@@ -60,6 +67,14 @@ export const RUN_EVENTS = new Set([
   'freeze-inherited',
   // verdict
   'implementation-committed',
+  // One gate layer, at the moment its process starts: the cycle, the layer,
+  // the sha, and the attempt (the flake filter's re-run is the second). A
+  // layer can hold a run for an hour, and without this the ledger ran silent
+  // from the route that ordered the cycle to the first result — an hour that
+  // read like a stopped run and was provable alive only by hand. A record,
+  // never state: the spectrum resumes off `layer-result` alone, so a restart
+  // mid-layer stamps a fresh start for the execution it begins (ADR-0034).
+  'layer-started',
   'layer-result',
   'flake',
   'finding',
