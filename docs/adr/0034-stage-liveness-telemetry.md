@@ -1,18 +1,20 @@
 # ADR-0034: Stage liveness telemetry
 
 Status: accepted (2026-08-16)
+Extended (2026-08-22): the net covered the polling stages and left the stages
+that hold a seat outside it. The stage beat closes that, and the tripwire fires
+on the shape that got through.
 
 ## The condition
 
 The no-timeout doctrine answers "is this alive?" with two things: telemetry
 stamps, and the duration history to read them against. Only the first half
-existed, and only for part of the run. A seat stamps its own progress, so a
-stage that supervises one is never silent for long. The stages that run no seat
-— the ones that poll a forge, or another run's ledger — stamped their entry and
-then said nothing until they were done. A stage that sat for hours read exactly
-like a stage that sat for a minute. The verdict stage was silent for a third
-reason: it runs no seat and polls nothing while a gate layer runs, and a gate
-layer is one child process that can hold the run for an hour.
+existed, and only for part of the run. The stages that run no seat — the ones
+that poll a forge, or another run's ledger — stamped their entry and then said
+nothing until they were done. A stage that sat for hours read exactly like a
+stage that sat for a minute. The verdict stage was silent for a second reason:
+it runs no seat and polls nothing while a gate layer runs, and a gate layer is
+one child process that can hold the run for an hour.
 
 Nothing could watch that. The tripwire watcher keys on appends, and a poll loop
 that changes nothing appends nothing, so a stalled stage produced no state
@@ -22,10 +24,21 @@ and a stage stuck in its own poll loop holds a running handler and passes. The
 one condition the harness could not see was silence, which is the condition a
 stall produces.
 
-The banned answer is a clock. A stage killed at a threshold is a stage that
-loses a merge to a slow forge, and the threshold becomes the thing the harness
-is tuned around. The doctrine's answer is the one taken here: make the silence
-speak, and read what it says against what the same stage did before.
+The stages that hold a seat were left out of the first cut on the ground that a
+seat stamps its own progress, so a stage supervising one is never silent. That
+ground turned out to be an assumption about the seat rather than a property of
+the stage. A seat went quiet at 13:55Z and stayed alive; its stage went four
+hours with nothing appended to the run at all, and the whole apparatus built
+here — the heartbeat, the band, the queued record — sat unused, because the one
+stage that needed it was the one stage that did not beat. A stage's liveness
+cannot be delegated to what the stage is holding: the thing being watched
+cannot be the thing that reports.
+
+The banned answer is a clock that decides. A stage killed at a threshold is a
+stage that loses a merge to a slow forge, and the threshold becomes the thing
+the harness is tuned around. The doctrine's answer is the one taken here: make
+the silence speak, and read what it says against what the same stage did
+before.
 
 ## Decision
 
@@ -36,7 +49,25 @@ poll outcome that changed nothing. Every twentieth beat becomes a
 the stamp, the time in the stage, and the evidence of the wait (the request and
 the head sha, the merge commit). The three poll loops of the ship step beat —
 the ship-token wait, the check watch, the merge-commit check watch — because
-those are the loops that run no seat.
+those are the loops with an outcome to report.
+
+**The engine opens a stage beat over every handler it runs.** `stagePulse`
+starts where `executeStage` starts and closes where the handler settles, and it
+stamps `stage-heartbeat` on a five-minute interval for as long as the handler
+runs: the stage, what it waits on (`seat`, naming the seats in flight, or
+`handler`), the intervals it has stood for, and the time in the stage. Every
+stage of every lane is covered by this one wiring, because the condition —
+a run whose ledger says nothing for hours — belongs to no particular kind of
+stage, and a list of the stages that need it is a list somebody has to keep
+right.
+
+**The stage beat stands down for any other voice.** It reads the seq of the
+last `stage-heartbeat` the run recorded; a seq that moved since its last tick
+means a polling handler has already said what this beat would say, and the beat
+skips the interval. So a polling stage keeps its own richer record, no stage
+stamps twice for one interval, and the guarantee an operator can rely on is the
+cadence rather than the source: a stage in progress says something at least
+every five minutes.
 
 **Every gate-layer execution stamps its start.** `layer-started` carries the
 cycle, the layer, the sha, and the attempt — the flake filter's red-only re-run
@@ -54,12 +85,14 @@ execution. Nothing in the engine reads a start, so a lost one costs a reader a
 line and costs the run nothing.
 
 **The batch is the volume control, and it is a count of poll outcomes.** A
-stage that settles inside its first batch stamps nothing at all, so the ledger
-of a run that never stalls keeps the shape it always had. At the shipped poll
-cadence a batch is about five minutes, so an hour of waiting costs twelve
-stamps and a stall of any length costs a stamp every few minutes. The cadence
-of the reading stays the project's; the cadence of the record is the harness's,
-and one is not allowed to set the other.
+stage that settles inside its first batch — or, for the stage beat, inside its
+first interval — stamps nothing at all, so the ledger of a run that never
+stalls keeps the shape it always had. At the shipped poll cadence a batch is
+about five minutes, which is the stage beat's interval too, so an hour of
+waiting costs twelve stamps whichever voice makes them and a stall of any
+length costs a stamp every few minutes. The cadence of the reading stays the
+project's; the cadence of the record is the harness's, and one is not allowed
+to set the other.
 
 **The clock starts where the stage starts work.** The handler opens its own
 heartbeat, and a handler runs after the `stage-entered` stamp or after the
@@ -93,7 +126,9 @@ store and returns no directive. It cannot kill a run, move it, or change what
 it waits for, and the run whose stage overran carries on exactly as it would
 have. No span of wall-clock time appears in the condition: the band is the
 history, and the trigger is the heartbeat — a state change, appended by the
-stage itself.
+stage itself. The stage beat does not change that. It writes a record and reads
+nothing; the interval it runs on decides which millisecond the record lands in
+and decides nothing else.
 
 ## Why the record is not written into the run
 
@@ -104,6 +139,31 @@ run. Writing from the watcher into a live run ledger would also put a second
 writer on a file the engine owns, which is the one way an append-only ledger
 loses its ordering. The instance ledger is where cross-run observations already
 live, and the queued stream carries the record to the operator from there.
+
+## Why the stage beat runs on an interval and the poll beat counts outcomes
+
+A poll loop has a natural unit: each poll is an outcome, and a batch of them is
+a quantity of reading the ledger can report. A handler holding a seat has no
+such unit — there is nothing to count, which is exactly why the stage was
+silent. The only honest thing such a beat can say is "this stage is still in
+progress, and it has been for this long", and the only cadence available for
+saying it is one the harness picks. That is a clock in the writer, not a clock
+in the condition: nothing reads the interval, nothing compares against it, and
+a beat that never fires costs a reader a line.
+
+The two cadences are set to the same five minutes on purpose. An operator
+reading a run ledger should not have to know which voice a heartbeat came from
+to know how long a gap between two of them means.
+
+## Why the beat names the seats rather than trusting them
+
+The four silent hours were a seat that was there and doing nothing, so a stage
+that reports "I hold a seat" is reporting the fact that misled everybody. It is
+still the right thing to record, because it is what an operator needs first —
+which child to look at. The difference is who is speaking: the stage says what
+it is holding, and the seat's own silence beside that reads as the evidence it
+is. Two voices that agree on a running seat, and one voice that carries on
+after the other stops.
 
 ## Why a heartbeat rather than a duration metric on the watcher alone
 
@@ -146,7 +206,16 @@ If a start stamp per layer proves too coarse for a layer that runs for hours,
 the layer runner opens a heartbeat over its child like a poll loop does, and
 beats on the child's own output rather than on a clock. Trigger: an operator
 who cannot tell a running layer from a hung one. Reversal cost: low — the
-heartbeat helper already exists, and the start stamp stays what it is.
+heartbeat helper already exists, and the start stamp stays what it is. The
+stage beat covers the stage the layer runs in meanwhile, so the ledger is not
+silent while this stays undone.
+
+If the stage beat proves too loud for long stages — a run whose ledger is more
+heartbeat than run — the interval becomes a per-lane or per-stage number rather
+than one constant, read where the engine opens the beat. Trigger: heartbeat
+stamps outnumbering the run's own events in a shipped ledger. Reversal cost:
+low — one argument at one call site; the stamp, the stand-down rule and the
+tripwire that reads it do not change.
 
 If the queued record proves too quiet for a stall that blocks a whole project,
 the class moves from queued to loud, where it joins the liveness violation on

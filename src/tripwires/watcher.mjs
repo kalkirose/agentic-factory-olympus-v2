@@ -30,9 +30,10 @@ import {
 const ACTOR = 'tripwire-watcher';
 const GIST_MAX = 120;
 
-// The stage-duration key. A heartbeat is the only stamp a polling stage makes
-// while it waits, so it is where the duration is read; the two lifecycle
-// stamps are where an open record stops being a request.
+// The stage-duration key. A heartbeat is what a stage in progress says while
+// it waits — the poll beat of a polling handler, the stage beat the engine
+// runs over every handler — so it is where the duration is read; the two
+// lifecycle stamps are where an open record stops being a request.
 const HEARTBEAT = 'stage-heartbeat';
 const STAGE_EVENTS = new Set([HEARTBEAT, 'stage-entered', 'run-closed']);
 
@@ -235,7 +236,12 @@ export class TripwireWatcher {
       stage: line.stage,
       elapsed: line.elapsed,
       ...(line.waitingOn !== undefined && { waitingOn: line.waitingOn }),
+      // A poll beat counts what it read; a stage beat counts the intervals it
+      // stood for. The record carries whichever the heartbeat brought, so the
+      // operator sees what kind of wait this was.
       ...(line.polls !== undefined && { polls: line.polls }),
+      ...(line.beats !== undefined && { beats: line.beats }),
+      ...(line.detail !== undefined && { detail: line.detail }),
       band,
       gist: gist(
         `${runId} has been in ${line.stage} for ${minutes(line.elapsed)} min; ` +

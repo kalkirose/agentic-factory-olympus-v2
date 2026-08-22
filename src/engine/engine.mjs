@@ -23,6 +23,7 @@ import { OWNER_EVENTS, settleOwnedLoud } from '../ledger/resolution.mjs';
 import { checkAnswer, runParkForms } from '../ledger/parks.mjs';
 import { runLedgerPath, archivedRunLedgerPath } from '../daemon/home.mjs';
 import { openRunStore, archiveRun } from '../telemetry/stores.mjs';
+import { stagePulse, PULSE_INTERVAL_MS } from '../telemetry/heartbeat.mjs';
 import { deriveRunState } from './replay.mjs';
 import { superviseSeat } from './supervise.mjs';
 import { runSeat } from '../seats/runner.mjs';
@@ -40,6 +41,7 @@ export class RunEngine {
    *   seatDefaults?: () => object,
    *   composeCommand?: () => string[],
    *   archiveIo?: object,
+   *   heartbeatMs?: number,
    *   onEvent?: (project: string, line: object, ledger: string) => void}} opts
    *   seatDefaults supplies machine-scoped runSeat options (claudeCommand)
    *   read fresh per dispatch, so a live config edit applies. composeCommand
@@ -47,7 +49,8 @@ export class RunEngine {
    *   the run's stack a question gets the argv this host runs it with. onEvent
    *   fires on every run-store append, project-attributed and carrying its source
    *   ledger — the event key every in-daemon observer reads. archiveIo is the
-   *   archive's filesystem seam, read at every call.
+   *   archive's filesystem seam, read at every call. heartbeatMs is the stage
+   *   beat's interval, the seam the tests drive it at.
    */
   constructor(
     paths,
@@ -60,6 +63,7 @@ export class RunEngine {
       seatDefaults,
       composeCommand,
       archiveIo,
+      heartbeatMs,
       onEvent,
     },
   ) {
@@ -72,6 +76,7 @@ export class RunEngine {
     this.seatDefaults = seatDefaults ?? (() => ({}));
     this.composeCommand = composeCommand ?? (() => ['docker', 'compose']);
     this.archiveIo = archiveIo ?? {};
+    this.heartbeatMs = heartbeatMs ?? PULSE_INTERVAL_MS;
     this.onEvent = onEvent ?? null;
     this.lanes = new Map();
     this.runs = new Map();
@@ -148,9 +153,14 @@ export class RunEngine {
       settling: false,
       seats: new Set(),
       lastAnswer: null,
+      pulse: null,
+      // The last heartbeat this run recorded, from any voice. The stage beat
+      // reads it to know whether a polling handler has already spoken.
+      lastBeatSeq: null,
     };
     run.store = openRunStore(this.paths, runId, {
       onAppend: (line, ledger) => {
+        if (line.event === 'stage-heartbeat') run.lastBeatSeq = line.seq;
         // The watcher's event key first, so it reads the seat's own stamp
         // before it reads anything the budget check appends behind it.
         this.onEvent?.(project, line, ledger);
@@ -175,6 +185,7 @@ export class RunEngine {
     const lane = this.lanes.get(run.lane);
     const handler = lane.handlers[run.stage];
     run.executing = true;
+    this.openPulse(run);
     // A handler may supervise several seats at once (the Fury fan-out); the
     // run tracks the whole in-flight set for liveness, kill, and stop.
     const supervise = (opts) => {
@@ -220,15 +231,55 @@ export class RunEngine {
       .then(
         (directive) => {
           run.executing = false;
+          this.closePulse(run);
           if (this.stopped || run.closed) return;
           this.applyDirective(run, directive);
         },
         (error) => {
           run.executing = false;
+          this.closePulse(run);
           if (this.stopped || run.closed) return;
           this.stampViolation(run, `stage handler failed: ${error.message}`);
         },
       );
+  }
+
+  /**
+   * The stage beat, over the handler the engine is about to run. Every stage
+   * of every lane gets one, because the condition it exists for — a stage
+   * whose ledger says nothing for hours — belongs to no particular kind of
+   * stage. The seat stages looked covered by the seats' own progress stamps
+   * until a seat stopped stamping and its stage went silent for four hours
+   * (ADR-0034).
+   *
+   * It records and it decides nothing. The beat holds no run, ends no run and
+   * returns no directive; a stage that beats for a day carries on exactly as
+   * it would have, and the reading against the duration history happens
+   * outside, in a watcher that cannot touch a run either.
+   */
+  openPulse(run) {
+    this.closePulse(run);
+    run.pulse = stagePulse(
+      { stage: run.stage, store: run.store },
+      {
+        everyMs: this.heartbeatMs,
+        lastBeat: () => run.lastBeatSeq,
+        describe: () => {
+          if (this.stopped || run.closed || run.parked) return null;
+          const seats = [...run.seats].map((s) => s.seat).filter((s) => typeof s === 'string');
+          // What the stage is waiting on, in the terms the stage has: the
+          // seats in flight, or the handler itself when it runs no child.
+          return seats.length > 0
+            ? { waitingOn: 'seat', detail: { seats: seats.sort() } }
+            : { waitingOn: 'handler' };
+        },
+      },
+    );
+  }
+
+  closePulse(run) {
+    run.pulse?.close();
+    run.pulse = null;
   }
 
   applyDirective(run, directive) {
@@ -460,6 +511,9 @@ export class RunEngine {
    */
   closeRun(run, state, { actor = ACTOR, ...extra } = {}) {
     run.closed = true;
+    // A kill closes a run whose handler is still running, and a beat into a
+    // ledger the archive has moved is a late append nobody asked for.
+    this.closePulse(run);
     this.resolveLoudAtClose(run, state);
     const duration = runDuration(readEvents(runLedgerPath(this.paths, run.runId)), {
       end: new Date().toISOString(),
@@ -675,6 +729,7 @@ export class RunEngine {
     this.stopped = true;
     const draining = [];
     for (const run of this.runs.values()) {
+      this.closePulse(run);
       for (const seat of run.seats) {
         seat.terminate('daemon-stopped');
         draining.push(seat.done);

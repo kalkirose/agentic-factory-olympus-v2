@@ -1,13 +1,16 @@
-// Liveness for the stages that run no seat: the heartbeat a polling stage
-// stamps, the duration history the ledgers hold, and the tripwire that reads
-// one against the other. The tripwire tests drive the watcher over fixture
-// ledgers, because what is under test is a reading — no forge, no worktree, no
-// run engine, and by construction nothing the watcher could write to a run.
+// Liveness for a stage in progress: the poll beat a polling handler stamps,
+// the stage beat the engine runs over every handler, the duration history the
+// ledgers hold, and the tripwire that reads one against the other. The
+// tripwire tests drive the watcher over fixture ledgers, because what is under
+// test is a reading — no forge, no worktree, and by construction nothing the
+// watcher could write to a run. The stage-beat tests drive a real engine over
+// a fixture lane, because what is under test is the wiring.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { scaffoldHome, runLedgerPath } from '../src/daemon/home.mjs';
+import { RunEngine } from '../src/engine/engine.mjs';
+import { scaffoldHome, runLedgerPath, archivedRunLedgerPath } from '../src/daemon/home.mjs';
 import { openInstanceStore, openRunStore } from '../src/telemetry/stores.mjs';
 import { openStreamItems } from '../src/telemetry/readers.mjs';
 import { escalationQueue } from '../src/telemetry/queue.mjs';
@@ -21,7 +24,7 @@ import {
   stageVisits,
 } from '../src/tripwires/duration.mjs';
 import { TripwireWatcher } from '../src/tripwires/watcher.mjs';
-import { tempDir, removeDir } from './helpers.mjs';
+import { tempDir, removeDir, waitFor } from './helpers.mjs';
 
 const MINUTE = 60000;
 
@@ -97,6 +100,126 @@ test('a heartbeat carries the evidence of the wait it stands for', (t) => {
   assert.deepEqual(first.detail, { sha: 'abc1234' });
   assert.equal(second.waitingOn, 'ship-token');
   assert.equal(second.detail, undefined);
+});
+
+// -- the stage beat -----------------------------------------------------------
+
+const PULSE = 40;
+
+/** An engine whose stage beat runs fast enough for a test to watch it. */
+function engineOver(t, paths, { instanceStore, onEvent } = {}) {
+  const engine = new RunEngine(paths, {
+    getSlotCap: () => 3,
+    heartbeatMs: PULSE,
+    ...(instanceStore !== undefined && { instanceStore }),
+    ...(onEvent !== undefined && { onEvent }),
+  });
+  t.after(() => engine.stop());
+  return engine;
+}
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function beatsIn(events, stage) {
+  return events.filter((e) => e.event === 'stage-heartbeat' && e.stage === stage);
+}
+
+test('every stage of a run beats, whatever the stage is holding', async (t) => {
+  const paths = home(t);
+  const engine = engineOver(t, paths);
+  engine.registerLane('story', {
+    stages: ['think', 'work', 'wrap'],
+    handlers: {
+      // A handler with no child at all: the stage the invariant sees as a
+      // transition in progress and nothing else.
+      think: async () => {
+        await pause(PULSE * 4);
+        return { next: 'work' };
+      },
+      // A handler holding a seat that says nothing — the shape that went four
+      // hours without a stamp before the stage beat existed.
+      work: async (ctx) => {
+        await ctx.supervise({
+          seat: 'dev',
+          cmd: process.execPath,
+          args: ['-e', `setTimeout(() => process.exit(0), ${PULSE * 4})`],
+        });
+        return { next: 'wrap' };
+      },
+      wrap: async () => {
+        await pause(PULSE * 4);
+        return { close: { state: 'shipped' } };
+      },
+    },
+  });
+  engine.launch({ runId: 'r1', project: 'p', lane: 'story' });
+  await waitFor(
+    () => readEvents(archivedRunLedgerPath(paths, 'r1')).some((e) => e.event === 'run-closed'),
+    { label: 'run closed', attempts: 200, intervalMs: 25 },
+  );
+  const events = readEvents(archivedRunLedgerPath(paths, 'r1'));
+  for (const stage of ['think', 'work', 'wrap']) {
+    assert.ok(beatsIn(events, stage).length >= 1, `${stage} stamped no heartbeat`);
+  }
+  // The beat says what the stage is waiting on in the terms the stage has.
+  const held = beatsIn(events, 'work')[0];
+  assert.equal(held.waitingOn, 'seat');
+  assert.deepEqual(held.detail, { seats: ['dev'] });
+  assert.ok(held.elapsed > 0);
+  assert.equal(held.beats, 1);
+  assert.equal(beatsIn(events, 'think')[0].waitingOn, 'handler');
+  // The beat records and decides nothing: the run walked its stages and closed
+  // exactly as it would have.
+  assert.equal(events.at(-1).state, 'shipped');
+});
+
+test('a stage that settles inside its first interval says nothing at all', async (t) => {
+  const paths = home(t);
+  const engine = engineOver(t, paths);
+  engine.registerLane('story', {
+    stages: ['only'],
+    handlers: { only: () => ({ close: { state: 'shipped' } }) },
+  });
+  engine.launch({ runId: 'r1', project: 'p', lane: 'story' });
+  await waitFor(
+    () => readEvents(archivedRunLedgerPath(paths, 'r1')).some((e) => e.event === 'run-closed'),
+    { label: 'run closed', attempts: 200, intervalMs: 25 },
+  );
+  await pause(PULSE * 3);
+  const events = readEvents(archivedRunLedgerPath(paths, 'r1'));
+  assert.deepEqual(
+    events.map((e) => e.event),
+    ['run-launched', 'stage-entered', 'run-closed'],
+  );
+});
+
+test('the stage beat stands down while a polling handler speaks for the stage', async (t) => {
+  const paths = home(t);
+  const engine = engineOver(t, paths);
+  engine.registerLane('story', {
+    stages: ['poll'],
+    handlers: {
+      poll: async (ctx) => {
+        const heart = stageHeartbeat(ctx, { every: 1 });
+        for (let i = 0; i < 30; i++) {
+          await pause(PULSE / 4);
+          heart.beat('checks', { pr: 7 });
+        }
+        return { close: { state: 'shipped' } };
+      },
+    },
+  });
+  engine.launch({ runId: 'r1', project: 'p', lane: 'story' });
+  await waitFor(
+    () => readEvents(archivedRunLedgerPath(paths, 'r1')).some((e) => e.event === 'run-closed'),
+    { label: 'run closed', attempts: 200, intervalMs: 25 },
+  );
+  const stamps = beatsIn(readEvents(archivedRunLedgerPath(paths, 'r1')), 'poll');
+  assert.equal(stamps.length, 30);
+  // Every one of them is the handler's own, with the evidence of the wait. The
+  // stage beat had nothing to add and added nothing.
+  assert.ok(stamps.every((e) => e.polls !== undefined && e.beats === undefined));
+  assert.deepEqual(stamps[0].detail, { pr: 7 });
 });
 
 // -- duration history ---------------------------------------------------------
@@ -300,6 +423,75 @@ test('the record closes when the stage moves on; a resumed stage keeps it open',
   const resolved = readEvents(paths.instanceLedger).filter((e) => e.event === 'resolved');
   assert.equal(resolved.length, 1);
   assert.equal(resolved[0].resolvedEvent, 'stage-overrun');
+});
+
+/** A shipped run whose visit to `stage` took `ms`. */
+function historyStage(paths, runId, stage, ms, { project = 'p', lane = 'story' } = {}) {
+  const start = Date.parse(at(0));
+  const iso = (offset) => new Date(start + offset).toISOString();
+  writeLedger(runLedgerPath(paths, runId), [
+    { seq: 1, ts: iso(0), event: 'run-launched', actor: 'daemon', project, lane },
+    { seq: 2, ts: iso(0), event: 'stage-entered', actor: 'daemon', stage },
+    { seq: 3, ts: iso(ms), event: 'stage-entered', actor: 'daemon', stage: 'done' },
+    { seq: 4, ts: iso(ms), event: 'run-closed', actor: 'daemon', state: 'shipped' },
+  ]);
+}
+
+// The whole net, over the shape that got through it: a stage holding a seat
+// that says nothing. Before the stage beat, the run appended nothing for four
+// hours, the watcher had no key, and the record was never opened.
+test('a stage holding a silent seat opens the record the silent hours never did', async (t) => {
+  const paths = home(t);
+  for (let i = 0; i < MIN_SAMPLES; i++) historyStage(paths, `past-${i}`, 'work', 0);
+  const ledger = openInstanceStore(paths);
+  t.after(() => ledger.close());
+  const watcher = new TripwireWatcher({ paths, ledger });
+  watcher.setRegistry('p', []);
+  t.after(() => watcher.stop());
+  const engine = engineOver(t, paths, {
+    instanceStore: ledger,
+    onEvent: (project, line, source) => watcher.notify(project, line, source),
+  });
+  engine.registerLane('story', {
+    stages: ['work', 'done'],
+    handlers: {
+      work: async (ctx) => {
+        await ctx.supervise({
+          seat: 'repair-dev',
+          cmd: process.execPath,
+          args: ['-e', `setTimeout(() => process.exit(0), ${PULSE * 10})`],
+        });
+        return { next: 'done' };
+      },
+      done: () => ({ close: { state: 'shipped' } }),
+    },
+  });
+  engine.launch({ runId: 'live', project: 'p', lane: 'story' });
+  const records = await waitFor(
+    () => {
+      const open = overruns(paths);
+      return open.length > 0 ? open : null;
+    },
+    { label: 'the stage overrun', attempts: 200, intervalMs: 25 },
+  );
+  assert.equal(records.length, 1);
+  assert.equal(records[0].runId, 'live');
+  assert.equal(records[0].stage, 'work');
+  // The record names what the stage was holding when it overran, which is the
+  // first thing an operator wants to know.
+  assert.equal(records[0].waitingOn, 'seat');
+  assert.deepEqual(records[0].detail, { seats: ['repair-dev'] });
+  assert.ok(records[0].beats >= 1);
+  assert.equal(records[0].band.upper, 0);
+  assert.match(records[0].gist, /has been in work/);
+  assert.equal(openStreamItems(paths, 'queued').length, 1);
+  // And it stops being a request the moment the stage it named ends.
+  await waitFor(
+    () => readEvents(archivedRunLedgerPath(paths, 'live')).some((e) => e.event === 'run-closed'),
+    { label: 'run closed', attempts: 200, intervalMs: 25 },
+  );
+  assert.deepEqual(openStreamItems(paths, 'queued'), []);
+  assert.equal(overruns(paths).length, 1);
 });
 
 test('an instance-ledger append carries no run, and keys no stage reading', async (t) => {

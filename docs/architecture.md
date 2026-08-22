@@ -519,9 +519,13 @@ Four layers, no timeouts:
    escalation, or a transition in progress. A violation is a harness-class
    red, loud.
 3. Progress telemetry compared against duration history. A seat stamps its own
-   progress. A stage that runs no seat stamps a heartbeat instead — one per
-   batch of poll outcomes, naming what it waits on — and a stage past the
-   duration band of that stage of that lane opens a queued record for the
+   progress. Every stage beats besides: a polling handler stamps one heartbeat
+   per batch of poll outcomes with the evidence of its wait, and the engine
+   runs a stage beat over every handler it dispatches, stamping on a
+   five-minute interval and standing down for the interval whenever another
+   voice has already spoken for the stage. So a stage in progress says
+   something at least every five minutes whatever it holds, and a stage past
+   the duration band of that stage of that lane opens a queued record for the
    operator (ADR-0034).
 4. A breach alerts, never auto-kills; a generous per-seat cost ceiling
    terminates as a guardrail and records a seat-failure event.
@@ -572,11 +576,12 @@ until resolved, re-arms at resolution. Wall-clock as trigger stays banned;
 durations are legal metric data.
 
 One tripwire stands outside the registry, because it watches the harness and
-not a project's quality: stage duration. Its key is the heartbeat a polling
-stage stamps, its band is what the same stage of the same lane did in the
-other runs of the project, and its answer is a queued record naming the stage,
-the elapsed and the band. Under five completed visits there is no band and the
-watcher says nothing (ADR-0034).
+not a project's quality: stage duration. Its key is the heartbeat a stage in
+progress stamps — a poll beat or the engine's stage beat, so every stage keys
+it — its band is what the same stage of the same lane did in the other runs of
+the project, and its answer is a queued record naming the stage, the elapsed,
+what the stage was waiting on and the band. Under five completed visits there
+is no band and the watcher says nothing (ADR-0034).
 
 Two standing tripwires watch the harness's own housekeeping rather than a
 project's quality: failed workspace releases over the last ten releases, and
