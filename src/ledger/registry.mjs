@@ -11,6 +11,11 @@ const SEAT_EVENTS = [
   'seat-terminated',
   'model-substituted',
   'model-degraded',
+  // A prompt too long for a command line, written to a file the spawn points
+  // at instead. Quiet — the seat runs exactly as it would have — but never
+  // silent: the stamp names the file and its size, so a reader can see what
+  // the seat was actually given (ADR-0005).
+  'prompt-spilled',
   'semaphore-wait',
   'semaphore-granted',
 ];

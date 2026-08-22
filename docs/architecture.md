@@ -134,6 +134,10 @@ Two levels; the ownership test decides placement.
   verification scaffolding, no forced progress summaries, no reasoning-echo
   asks. Subagents banned; exception: dev seats may spawn read-only Explore
   subagents, cap 2.
+- **Prompt size.** A prompt over the command-line ceiling (32767, the Windows
+  limit, applied everywhere) is written to a file in the run directory and the
+  spawn carries the path; the substitution stamps `prompt-spilled`. Under the
+  ceiling the prompt rides argv unchanged (ADR-0005).
 - **Constitution.** A project may version a policy file in its own repository
   (`constitutionPath`, default `.olympus/constitution.md`). Its text rides as
   a third block between the core and the role block, for a closed set of

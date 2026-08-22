@@ -1,11 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { runSeat, unavailableMemo } from '../src/seats/runner.mjs';
 import { parseClaudeLine } from '../src/seats/claude.mjs';
 import { ModelSemaphores } from '../src/seats/semaphore.mjs';
 import { DEFAULT_MODEL, CERTIFICATION_MODEL } from '../src/seats/seatmap.mjs';
 import { ONE_TURN_RULE } from '../src/seats/prompt.mjs';
+import { COMMAND_LINE_MAX } from '../src/engine/executable.mjs';
 import { RunEngine } from '../src/engine/engine.mjs';
 import { openRunStore } from '../src/telemetry/stores.mjs';
 import {
@@ -57,6 +59,18 @@ function envDumpCommand({ report, reportPath, dump }) {
     `fs.writeFileSync(${JSON.stringify(reportPath)}, ${JSON.stringify(JSON.stringify(report))});`,
   ].join('\n');
   return { cmd: process.execPath, args: ['-e', script] };
+}
+
+// A fixture seat that records the prompt it was actually spawned with. The
+// prompt is its own trailing argument, so the measured argv holds the prompt
+// exactly as a real seat command does.
+function promptDumpCommand({ report, reportPath, dump, prompt }) {
+  const script = [
+    `const fs = require('fs');`,
+    `fs.writeFileSync(${JSON.stringify(dump)}, process.argv[process.argv.length - 1]);`,
+    `fs.writeFileSync(${JSON.stringify(reportPath)}, ${JSON.stringify(JSON.stringify(report))});`,
+  ].join('\n');
+  return { cmd: process.execPath, args: ['-e', script, prompt] };
 }
 
 function fixtureParse(line) {
@@ -910,4 +924,66 @@ test('a lane handler dispatches through ctx.runSeat; liveness stays clean', asyn
   assert.ok(events.some((e) => e.event === 'semaphore-granted'));
   assert.ok(!events.some((e) => e.event === 'liveness-violation'));
   await engine.stop();
+});
+
+// -- the command-line ceiling ------------------------------------------------
+
+test('a prompt too long for a command line is spilled to a file the spawn points at', async (t) => {
+  const { paths, store } = setup(t, 'spill');
+  const reportPath = runReportPath(paths, 'spill', 'dev-1');
+  const dump = join(dirname(reportPath), 'spawned-prompt.txt');
+  // A role block on its own past the ceiling: this is the shape a correction
+  // brief takes when the capture hands it one line per reverted path.
+  const roleBlock = Array.from({ length: 400 }, (_, i) => `- defect ${i}: ${'p'.repeat(100)}`).join(
+    '\n',
+  );
+  const result = await runSeat(store, {
+    seat: 'dev',
+    roleBlock,
+    reportPath,
+    schema: SCHEMA,
+    commandFor: ({ prompt }) =>
+      promptDumpCommand({ report: { verdict: 'pass' }, reportPath, dump, prompt }),
+  });
+  assert.equal(result.ok, true);
+
+  const events = readEvents(runLedgerPath(paths, 'spill'));
+  const spilled = events.find((e) => e.event === 'prompt-spilled');
+  assert.ok(spilled, 'the substitution stamps');
+  assert.equal(spilled.seat, 'dev');
+  assert.equal(spilled.attempt, 1);
+  // Before the spawn, so a reader never sees a seat start on a prompt whose
+  // provenance the ledger has not yet stated.
+  assert.ok(spilled.seq < events.find((e) => e.event === 'seat-spawned').seq);
+
+  // The file holds the whole prompt; the command line holds the path.
+  const written = readFileSync(spilled.path, 'utf8');
+  assert.equal(written.length, spilled.chars);
+  assert.ok(written.includes(roleBlock));
+  assert.ok(written.includes(ONE_TURN_RULE));
+  const spawned = readFileSync(dump, 'utf8');
+  assert.ok(spawned.includes(spilled.path));
+  assert.ok(!spawned.includes(roleBlock));
+  assert.ok(spawned.length < COMMAND_LINE_MAX);
+});
+
+test('a prompt that fits rides the command line unchanged, and writes no file', async (t) => {
+  const { paths, store } = setup(t, 'fits');
+  const reportPath = runReportPath(paths, 'fits', 'dev-1');
+  const dump = join(dirname(reportPath), 'spawned-prompt.txt');
+  const result = await runSeat(store, {
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: ({ prompt }) =>
+      promptDumpCommand({ report: { verdict: 'pass' }, reportPath, dump, prompt }),
+  });
+  assert.equal(result.ok, true);
+  const events = readEvents(runLedgerPath(paths, 'fits'));
+  assert.ok(!events.some((e) => e.event === 'prompt-spilled'));
+  const spawned = readFileSync(dump, 'utf8');
+  assert.ok(spawned.includes('ROLE'));
+  assert.ok(spawned.includes(ONE_TURN_RULE));
+  assert.ok(!readdirSync(dirname(reportPath)).some((f) => f.includes('.prompt-')));
 });

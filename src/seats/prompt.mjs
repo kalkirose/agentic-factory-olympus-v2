@@ -128,6 +128,27 @@ export function assembleSeatPrompt({ seat, def, reportPath, schema, roleBlock, c
 }
 
 /**
+ * The prompt a seat gets when its own prompt was too long to ride the command
+ * line: a pointer to the file that holds it. The file is written before the
+ * spawn and lives in the run's own directory, so the brief is archived with
+ * the run exactly like the report.
+ *
+ * The wording states the substitution rather than hiding it. A seat that is
+ * told its instructions are in a file reads the file; a seat handed a bare
+ * path has to guess what the path is for.
+ *
+ * @param {string} path absolute path to the file holding the seat's prompt
+ */
+export function promptFileRef(path) {
+  return [
+    'Your brief for this seat was too long to pass on a command line, so it was written to a file.',
+    'That file is the whole of your instructions, and this message adds nothing to it.',
+    'Read it first, then do exactly what it says:',
+    path,
+  ].join('\n');
+}
+
+/**
  * The corrective re-prompt after a failed report validation — the one retry
  * the contract allows. Sent into the same seat session where possible.
  *

@@ -32,12 +32,13 @@
 // buying the same rejection again (ADR-0021). The stamp is the same
 // `model-degraded`, marked `memo` — no degrade is ever silent, and the
 // evidence it stood on is named.
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { superviseSeat } from '../engine/supervise.mjs';
+import { COMMAND_LINE_MAX, commandLineLength } from '../engine/executable.mjs';
 import { seatDef, DEFAULT_MODEL } from './seatmap.mjs';
 import { checkReportSchema, validateReport, readReport } from './contract.mjs';
-import { assembleSeatPrompt, correctivePrompt } from './prompt.mjs';
+import { assembleSeatPrompt, correctivePrompt, promptFileRef } from './prompt.mjs';
 import { claudeSeatCommand } from './claude.mjs';
 
 const ACTOR = 'daemon';
@@ -131,16 +132,39 @@ export async function runSeat(store, opts) {
     // child. `seat-spawned` carries the model actually spawned, so a degraded
     // retry reads as its own spawn on the model that judged the work.
     const dispatch = (attempt, retry = 0) => {
-      const spec = commandFor({
-        claudeCommand,
-        prompt,
-        model,
-        effort: def.effort,
-        def,
-        denyTools,
-        attempt,
-        resume,
-      });
+      const build = (text) =>
+        commandFor({
+          claudeCommand,
+          prompt: text,
+          model,
+          effort: def.effort,
+          def,
+          denyTools,
+          attempt,
+          resume,
+        });
+      let spec = build(prompt);
+      // A prompt is content, and content has no bound the harness controls:
+      // a correction brief carries one line per defect, a constitution grows
+      // with the project, a tool deny list grows with the test tree. Past the
+      // command-line ceiling the spawn dies with `ENAMETOOLONG` — no child,
+      // no transcript, and a stage handler that failed for a reason no ledger
+      // reader can see. So the prompt moves to a file and the command line
+      // carries the path. Below the ceiling nothing changes: the prompt rides
+      // argv byte for byte, as it always has.
+      if (commandLineLength([spec.cmd, ...spec.args]) > COMMAND_LINE_MAX) {
+        const path = promptPath(reportPath, attempt, retry);
+        writeFileSync(path, prompt, 'utf8');
+        store.append('prompt-spilled', {
+          actor: ACTOR,
+          seat,
+          attempt,
+          ...(retry > 0 && { retry }),
+          path,
+          chars: prompt.length,
+        });
+        spec = build(promptFileRef(path));
+      }
       return supervise({
         seat,
         cmd: spec.cmd,
@@ -268,6 +292,22 @@ export async function runSeat(store, opts) {
   } finally {
     release();
   }
+}
+
+/**
+ * Where a spilled prompt is written: beside the report the same dispatch will
+ * write, under the report's own name. Every dispatch of a seat session gets
+ * its own file, because a corrective attempt and a crash retry carry
+ * different prompts and the ledger names the file each spawn actually read.
+ */
+function promptPath(reportPath, attempt, retry) {
+  const name = reportPath.replace(/\.json$/i, '');
+  return join(dirname(reportPath), `${basenameOf(name)}.prompt-${attempt}${retry > 0 ? `-r${retry}` : ''}.txt`);
+}
+
+function basenameOf(path) {
+  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return cut === -1 ? path : path.slice(cut + 1);
 }
 
 /**

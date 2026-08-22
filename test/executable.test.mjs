@@ -2,7 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { resolveArgv, findExecutable, batchCommandLine } from '../src/engine/executable.mjs';
+import {
+  resolveArgv,
+  findExecutable,
+  batchCommandLine,
+  commandLineLength,
+  COMMAND_LINE_MAX,
+} from '../src/engine/executable.mjs';
 import { runCommand } from '../src/lanes/exec.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
@@ -266,4 +272,28 @@ test('runCommand hands the machine environment to a command whole', async () => 
   );
   assert.equal(result.code, 0);
   assert.match(result.output, /sk-test-1/);
+});
+
+// -- the command-line ceiling (any platform) ---------------------------------
+
+test('the command-line bound is counted high, never low', () => {
+  // A separator and a pair of quotes per argument, plus one escape for every
+  // character the quoter has to double.
+  assert.equal(commandLineLength(['ab']), 5);
+  assert.equal(commandLineLength(['ab', 'cd']), 10);
+  assert.equal(commandLineLength(['a"b']), 7);
+  assert.equal(commandLineLength(['a\\b']), 7);
+  assert.equal(commandLineLength([]), 0);
+  assert.equal(commandLineLength(), 0);
+});
+
+test('the bound is never under what Windows will be handed', () => {
+  const args = ['C:\\bin\\claude.exe', '--model', 'm', 'a prompt "with" quotes\nand a line'];
+  // Node quotes and escapes each argument; the bound charges at least that.
+  const quoted = args.map((arg) => `"${arg.replace(/(\\*)"/g, '$1$1\\"')}"`).join(' ');
+  assert.ok(commandLineLength(args) >= quoted.length);
+});
+
+test('the ceiling is the Windows one, on every platform', () => {
+  assert.equal(COMMAND_LINE_MAX, 32767);
 });

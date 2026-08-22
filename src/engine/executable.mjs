@@ -35,6 +35,42 @@ const KNOWN_EXTS = [...DIRECT_EXTS, ...BATCH_EXTS];
 const CMD_META = /([()\][%!^"`<>&|;, *?])/g;
 
 /**
+ * The ceiling on one command line. Windows hands CreateProcess a single
+ * string of at most 32767 UTF-16 units, and libuv refuses a longer one with
+ * `ENAMETOOLONG` before the OS is ever asked — a spawn error with no child,
+ * no transcript and no seat to blame.
+ *
+ * The number is a Windows fact and it is applied on every platform. A
+ * command that cannot spawn on the host the daemon runs on must not pass
+ * quietly on a build machine with a roomier limit; one bound keeps the
+ * refusal reproducible wherever the tests run.
+ */
+export const COMMAND_LINE_MAX = 32767;
+
+/**
+ * An upper bound on the command line an argv spawns as, before the host is
+ * asked to resolve anything. The quoter adds a separator and a pair of quotes
+ * per argument, and doubles each backslash and quote it has to escape; the
+ * bound charges all of that unconditionally, so it is never lower than the
+ * line the OS is handed. A caller under this bound is under the real one.
+ *
+ * A shim route (`cmd.exe`) escapes a second time and can run longer still,
+ * but that route already refuses an argument holding a newline, which every
+ * seat prompt does, so no seat reaches it.
+ *
+ * @param {string[]} argv command and arguments, unresolved
+ * @returns {number} characters, counted high
+ */
+export function commandLineLength(argv) {
+  let total = 0;
+  for (const arg of argv ?? []) {
+    const value = String(arg);
+    total += value.length + 3 + (value.match(/["\\]/g)?.length ?? 0);
+  }
+  return total;
+}
+
+/**
  * Turns a configured argv into a spec the host can spawn.
  * @param {string[]} argv
  * @param {{platform?: string, env?: object}} [opts] injection points for tests

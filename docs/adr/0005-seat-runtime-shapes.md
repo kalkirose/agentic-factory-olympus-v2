@@ -74,6 +74,14 @@ assembly, and the headless runner — gets these concrete shapes:
   prompt is a trailing positional (`-p` is a boolean), so a boolean flag has
   to close the list: `--dangerously-skip-permissions` is emitted last, after
   the tool list and after any `--resume`.
+- **A prompt never rides an unbounded command line.** Before each dispatch
+  the runner measures the argv it built against `COMMAND_LINE_MAX` (32767,
+  the Windows CreateProcess ceiling, applied on every platform). Over the
+  ceiling, the prompt is written to `runs/<runId>/reports/<name>.prompt-<n>.txt`
+  and the command line carries a pointer to that file instead. The
+  substitution stamps `prompt-spilled` (new registry event: seat, attempt,
+  path, characters) before the spawn. Under the ceiling the prompt rides argv
+  byte for byte, unchanged.
 - **Failure evidence.** Every `seat-failure` the supervisor stamps carries a
   bounded tail of what the child emitted: the last 600 characters of stderr
   and the last 3 stdout lines, each clipped to 200 characters. A seat that
@@ -200,6 +208,33 @@ that quietly changes who judged the work. The window stays reconstructable:
 `resetsAt` is on every `model-degraded` stamp, so the evidence for building
 this later is in the ledger if the arithmetic ever changes.
 
+## Why the prompt moves to a file rather than being trimmed
+
+A prompt is content the harness assembles but does not own the size of. The
+correction brief carries one line per defect, and a capture can hold as many
+defects as the tree has files. The constitution is a project document. The
+tool deny list grows with the test tree. Every one of them is legitimate, and
+none of them has a bound the harness can pick.
+
+The command line does have one, and it is hard. A run measured it: a dev seat
+spawned at 23,257 characters and worked; its corrective dispatch, carrying one
+line per reverted path, reached 40,110 and died `spawn ENAMETOOLONG` one
+millisecond after `seat-spawned` stamped. No child ran, so there was no
+transcript, no cost and no seat outcome — only a stage handler that failed,
+and a run left inert holding a finished green pass.
+
+Trimming the prompt to fit would answer the wrong question. What the seat is
+told would then depend on how long the paths in its brief happen to be, and a
+seat silently given less than the lane wrote is worse than a seat that cannot
+start. A file has no such limit, the seat already reads files by path (its
+spec, its report contract), and the run directory already archives everything
+the seat was given. So the content stays whole and the command line stays
+short.
+
+The ceiling is applied on every platform rather than only on Windows. The
+daemon runs on Windows; a bound that relaxes elsewhere would let a prompt pass
+its tests on one host and refuse to spawn on the host that matters.
+
 ## Why the runner refuses a bad schema instead of failing the seat
 
 A schema outside the subset is a harness defect, not a seat outcome. A
@@ -248,6 +283,13 @@ carries the prompt in force. Both paths already handle a missing session id,
 so nothing new has to be written. Trigger: a resumed session fails, or
 answers something other than the work it was resumed into. Reversal cost:
 none — drop the resume argument.
+
+If a seat handles a spilled prompt worse than an inline one — it reads the
+file late, or treats the pointer as the whole brief — put the prompt on the
+child's stdin instead and keep the file as the archived copy. Trigger: a seat
+whose `prompt-spilled` dispatch produces a worse report than its inline
+dispatches. Reversal cost: low — the spill point is one branch in the runner,
+and the file it writes is already the exact prompt text.
 
 If the flat schema subset cannot express a lane's report, widen the subset
 one construct at a time by ADR, keeping the explicit-additionalProperties
