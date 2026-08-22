@@ -16,7 +16,7 @@
 // uncovered survivors) take the contract-loop route: one corrective
 // invocation, then the seat-failure park — no condition the lane meets on its
 // own closes a run (ADR-0015).
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runReportPath } from '../daemon/home.mjs';
 import { textIdentity } from '../ledger/acks.mjs';
@@ -1211,11 +1211,9 @@ function waveTreePath(ctx, round, wave) {
 async function dropWaveTree(ctx, clone, round, wave) {
   const tree = waveTreePath(ctx, round, wave);
   if (!existsSync(tree)) return;
-  try {
-    await removeWorktree(clone, tree);
-  } catch {
-    rmSync(tree, { recursive: true, force: true, maxRetries: 3 });
-  }
+  // The removal falls back to a direct delete of its own; a wave tree that
+  // survives that as well goes to the workspace release at close.
+  await removeWorktree(clone, tree).catch(() => {});
 }
 
 // -- freeze (process) --------------------------------------------------------

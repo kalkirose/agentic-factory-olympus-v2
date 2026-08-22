@@ -584,8 +584,9 @@ function blockedRemove() {
 }
 
 /** Puts a daemon's removals and its process sweep under the test's control. */
-function stageRemovals(daemon, { remove } = {}) {
+function stageRemovals(daemon, { remove, holders = [] } = {}) {
   daemon.isolation.sweepProcesses = async () => ({ count: 0, names: [] });
+  daemon.isolation.listHolders = async () => ({ holders });
   if (remove) daemon.isolation.removalIo = { remove, sleep: async () => {}, attempts: 2 };
 }
 
@@ -623,6 +624,56 @@ test('a workspace nothing will delete is recorded quiet, and the daemon runs on'
   await daemon.releaseWorkspace('r1', {});
   assert.equal(instanceEvents(home).filter((e) => e.event === 'workspace-leftover').length, 1);
   assert.ok(existsSync(root));
+});
+
+test('the record of a workspace nothing will delete names what is holding it', async (t) => {
+  const home = tempDir();
+  const daemon = new Daemon(home);
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  stageRemovals(daemon, {
+    remove: blockedRemove,
+    holders: [{ pid: 4242, name: 'node.exe' }],
+  });
+  stageWorkspace(home, 'r1');
+  await daemon.releaseWorkspace('r1', { project: 'alpha' });
+
+  const released = instanceEvents(home).find((e) => e.event === 'workspace-released');
+  const record = instanceEvents(home).find((e) => e.event === 'workspace-leftover');
+  // An errno says the sweep failed. A pid and an image name say what to end,
+  // which is the whole of what the operator does next (ADR-0016).
+  assert.deepEqual(released.holders, [{ pid: 4242, name: 'node.exe' }]);
+  assert.deepEqual(record.holders, [{ pid: 4242, name: 'node.exe' }]);
+  // Both carry the project, or no tripwire of that project ever counts them.
+  assert.equal(released.project, 'alpha');
+  assert.equal(record.project, 'alpha');
+});
+
+test('a sweep reads the project of a release off the workspace record', async (t) => {
+  const home = tempDir();
+  const daemon = new Daemon(home);
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  stageRemovals(daemon);
+  // A sweep names a run id and nothing else; the record left by the provision
+  // is where the owner comes from.
+  const runDir = join(homePaths(home).runs, 'r1');
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(
+    join(runDir, 'workspace.json'),
+    JSON.stringify({ runId: 'r1', project: 'beta' }) + '\n',
+  );
+  stageWorkspace(home, 'r1');
+  await daemon.sweepOrphanWorkspaces();
+  const released = instanceEvents(home).find((e) => e.event === 'workspace-released');
+  assert.equal(released.project, 'beta');
+  assert.equal(released.ok, true);
 });
 
 test('a start sweeps up a recorded leftover and answers the record', async (t) => {

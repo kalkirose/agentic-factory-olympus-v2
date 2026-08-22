@@ -5,6 +5,7 @@ import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { isGlobEntry, underEntry } from '../config/project.mjs';
 import { git } from './git.mjs';
+import { longPath } from './removal.mjs';
 
 const IDENTITY = [
   '-c',
@@ -91,7 +92,10 @@ export async function restorePaths(tree, sha, entries, { except = [] } = {}) {
     for (const file of others.split('\0')) {
       const path = file.trim();
       if (path.length === 0 || exempt.has(path)) continue;
-      rmSync(join(tree, path), { force: true });
+      // git listed this file and git's own clean would have taken it; the
+      // delete the restore does instead has to reach as far, so it goes in the
+      // extended-length form on Windows exactly as git goes with core.longPaths.
+      rmSync(longPath(join(tree, path)), { force: true });
     }
   }
 }

@@ -21,9 +21,10 @@ proposals get these concrete shapes:
   the answering review), `params` (metric-specific; `fury-lens-yield`
   requires `params.lens`). `standingTripwires()` ships the design-given
   entries — escapes ceiling 0.5 over 10 ships, CI p50 over 25 minutes,
-  frontier width under 2 — seedable at config seeding. Kill-rate and
-  lens-yield bands are self-baselined, so their entries land by PR after the
-  proposal.
+  frontier width under 2, more than 3 failed workspace releases in 10, a
+  workspace leftover older than 4 hours — seedable at config seeding.
+  Kill-rate and lens-yield bands are self-baselined, so their entries land by
+  PR after the proposal.
 - **The event key holds by construction.** `TelemetryStore` takes an
   `onAppend` hook that fires after every append; the hook owns its errors.
   The engine opens every run store with the hook bound to the run's project
@@ -64,6 +65,17 @@ proposals get these concrete shapes:
     whose blockers all shipped and whose phase is open, regardless of run
     history or parks. Eligible only while `unfinished > minUnshipped`
     (default 5).
+  - `workspace-release-failures`: releases of the project that did not clear
+    their workspace, counted over the last N `workspace-released` events. The
+    window unit is the release itself — a close and a sweep tick each make
+    one. The value is a count, so a window that is not full yet can only
+    undercount, and the metric is eligible from the first release. The detail
+    carries the runs and the image names the failures named, which is what the
+    answer is read from.
+  - `workspace-leftover-age`: the oldest open `workspace-leftover` of the
+    project, in hours. Current state, so no window; eligible only while an
+    open record exists. A duration as value, an append as trigger — every
+    sweep that acts on a leftover stamps one.
 - **Baseline proposals.** At the 5th freeze the watcher stamps a kill-rate
   proposal (observed kills, waves, per-freeze rates, and the observed floor
   as the suggested band); at the 5th verdict a per-lens yield proposal,
@@ -88,6 +100,30 @@ In a home running several projects, one project's escape can land in
 another's window. That is the conservative direction (a breach fires early,
 never late), and per-project attribution of escapes would re-introduce the
 attribution dependency the bar deliberately dropped.
+
+## Where the two workspace numbers come from
+
+The instance ledger over five ships: sixteen releases that did not clear their
+workspace, three of five ships blocked on their first release, and one
+directory that took six attempts across some twenty hours. Grouped by window
+of ten releases, the bad stretch ran at eight failures in ten and the healthy
+one at one. More than three in ten sits between them: it does not fire on a
+release that failed and cleared on the next sweep, and it fired throughout the
+stretch nobody noticed at the time.
+
+The leftover records that a sweep did clear were answered in twelve and in
+forty-five minutes — the hold passed, which is what holds do. Four hours is
+sixteen sweeps deep, well past every leftover this harness has ever cleared
+and well short of the twenty-hour one that nothing came back to. So the age
+band separates a hold that is passing from a hold that is permanent, which is
+the only distinction the record cannot make for itself.
+
+Both take the machinery's own escalation semantics and nothing beside it: a
+queued breach that opens once, stays open until a human resolves it, and
+re-arms at the resolution. Neither stops a run, releases a workspace, or
+launches anything. The leftover record underneath stays quiet and stays swept
+— the tripwire is what says the sweeping is not working, which ADR-0004 left
+as a fallback path and this is.
 
 ## Why width counts spent and open cards
 

@@ -4,7 +4,12 @@ import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { seatSpawnOptions, terminateTree, sweepPathHolders } from '../src/engine/processes.mjs';
+import {
+  seatSpawnOptions,
+  terminateTree,
+  sweepPathHolders,
+  pathHolders,
+} from '../src/engine/processes.mjs';
 import { resolveArgv } from '../src/engine/executable.mjs';
 import { tempDir, removeDir, waitFor } from './helpers.mjs';
 
@@ -244,6 +249,61 @@ test('an enumeration that fails reports itself and kills nothing', async () => {
   assert.equal(result.count, 0);
   assert.match(result.error, /CIM is unavailable/);
   assert.equal(run.calls.filter((c) => /taskkill/i.test(c.file)).length, 0);
+});
+
+// -- the holders behind a leftover record ------------------------------------
+// The record of a workspace nothing would delete is written from this, and an
+// errno on its own leaves the operator with no next move.
+
+test('the holder query names pids and image names, and ends nothing', async () => {
+  const run = recorder((file) =>
+    /powershell/i.test(file)
+      ? { code: 0, stdout: '111 node.exe\r\n222 esbuild.exe\r\n', stderr: '' }
+      : { code: 0, stdout: '', stderr: '' },
+  );
+  const result = await pathHolders('C:\\home\\worktrees\\run-1', { platform: 'win32', run });
+  assert.deepEqual(result, {
+    holders: [
+      { pid: 111, name: 'node.exe' },
+      { pid: 222, name: 'esbuild.exe' },
+    ],
+  });
+  // A read, not a sweep: the release already killed what it could, and this
+  // one says who survived it.
+  assert.deepEqual(run.calls.filter((c) => /taskkill/i.test(c.file)), []);
+});
+
+test('the holder query answers, never throws, and refuses an unsafe root', async () => {
+  const failing = recorder((file) =>
+    /powershell/i.test(file)
+      ? { code: 1, stdout: '', stderr: 'CIM is unavailable' }
+      : { code: 0, stdout: '', stderr: '' },
+  );
+  const unreadable = await pathHolders('C:\\home\\worktrees\\run-1', { platform: 'win32', run: failing });
+  assert.deepEqual(unreadable.holders, []);
+  assert.match(unreadable.error, /CIM is unavailable/);
+
+  const run = recorder();
+  const refused = await pathHolders('C:\\', { platform: 'win32', run });
+  assert.deepEqual(refused.holders, []);
+  assert.match(refused.error, /unsafe root/);
+  // Off Windows there is nothing to read and nothing is spawned to find out.
+  assert.deepEqual(await pathHolders('/home/home/worktrees/run-1', { platform: 'linux', run }), {
+    holders: [],
+  });
+  assert.deepEqual(run.calls, []);
+});
+
+test('a record names a handful of holders, not every one of a hundred', async () => {
+  const many = Array.from({ length: 25 }, (_, i) => `${100 + i} node.exe`).join('\r\n');
+  const run = recorder((file) =>
+    /powershell/i.test(file) ? { code: 0, stdout: many, stderr: '' } : { code: 0, stdout: '', stderr: '' },
+  );
+  const { holders } = await pathHolders('C:\\home\\worktrees\\run-1', { platform: 'win32', run });
+  assert.equal(holders.length, 10);
+  // The sweep is not a record and takes them all.
+  const swept = await sweepPathHolders('C:\\home\\worktrees\\run-1', { platform: 'win32', run });
+  assert.equal(swept.count, 25);
 });
 
 // -- the real host (Windows only) --------------------------------------------

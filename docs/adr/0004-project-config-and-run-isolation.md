@@ -76,6 +76,25 @@ The workspace is a checked-out application, so its removal is the step of a
 close most exposed to a file another process is holding. What the release does
 about that is settled here.
 
+- **A removal the operating system can perform is never refused for the shape
+  of its path.** On Windows every delete the harness performs itself goes in
+  the extended-length form (`\\?\C:\…`, `\\?\UNC\…` for a share), which lifts
+  the 260-character ceiling; `rm -r` builds the paths below the root it is
+  given from that root, so one prefixed root removes the whole tree. It is the
+  same statement the harness's git already makes with `core.longPaths` at
+  every invocation (ADR-0016), for the removals git is not doing. A path with
+  no drive and no share on it is handed over unchanged, because the OS
+  resolves it against state this code does not hold. Off Windows every path is
+  the path that came in.
+- **A worktree git will not remove, the harness removes.** git deletes a
+  worktree with its own path handling and its own idea of what is deletable,
+  and it reports conditions the operating system does not have. So a failed
+  `git worktree remove` is followed by a direct delete of the same directory,
+  and the `worktree prune` in the same pass drops the registration the direct
+  delete left behind — which is also what lets the run branch go. One direct
+  attempt: the retry ladder is one level up, and a second ladder nested inside
+  it would multiply the wait a close spends on a hold. Both refusals travel in
+  the error, because they say different things.
 - **Every removal retries.** Five attempts, with a backoff that grows by
   250 ms per attempt: two and a half seconds in all. The ladder wraps the
   `git worktree remove` pass and each directory delete behind it, so one hold
@@ -88,12 +107,23 @@ about that is settled here.
 - **The process sweep still comes first.** It ends what the harness itself
   left standing in the workspace (ADR-0016). The ladder is for the holds no
   sweep can reach: a scanner, an indexer, a watcher outside the run.
-- **A workspace that survives every attempt is named.** The release returns
-  it as `leftover`, and the daemon stamps `workspace-leftover` on the
-  instance ledger with the run id, the directory and what the filesystem
-  said. Quiet, one open record per run, and the daemon carries on: the run
-  closed as it closed, and a directory under the workspace root belongs to no
-  run.
+- **A workspace that survives every attempt is named, and so is what holds
+  it.** The release returns it as `leftover`, and the daemon stamps
+  `workspace-leftover` on the instance ledger with the run id, the directory,
+  what the filesystem said, and the processes standing in the directory — pid
+  and image name, up to ten. The holders are read after every removal has been
+  tried, on the directory that survived: the process sweep already ended what
+  it could find (ADR-0016), so what this query answers is what outlived the
+  sweep, which is the process the operator has to deal with. The query kills
+  nothing and never throws; a release is reported either way. Quiet, one open
+  record per run, and the daemon carries on: the run closed as it closed, and
+  a directory under the workspace root belongs to no run.
+- **A release names the project it belonged to.** `workspace-released` and
+  `workspace-leftover` carry the owner, taken from the workspace record when
+  the caller did not say — a sweep names a run id and nothing else. It is what
+  attributes the event to a project's tripwires; an instance event without a
+  project keys nothing (ADR-0010), and a release the watcher cannot key is one
+  it never counts.
 - **Both sweeps consume the record.** The start sweep and the periodic sweep
   release the union of the workspace directories with no open run and the run
   ids of the open leftover records. A release that leaves nothing behind
@@ -155,6 +185,40 @@ instance lives. Fifteen minutes is low enough that the sweep costs nothing
 next to a run, and short enough that a hold which passed in a minute is
 cleared in the same hour it appeared.
 
+## Why the harness deletes what git would not
+
+Across five ships the instance ledger holds sixteen releases that did not
+clear their workspace. Three of them failed on git's "Filename too long" and
+eight on git's "Directory not empty" — and in every one of those eight the
+harness's own delete of the same tree, moments later in the same release,
+succeeded. The workspace was gone and the release still reported a failure,
+because the tool that had been asked first said no.
+
+Neither answer is a condition of the machine. A run worktree nests a run id, a
+workspace and a project's own tree under the daemon home, and a `node_modules`
+path in it clears 260 characters without trying; the extended-length form
+removes it. "Directory not empty" is git meeting a file that was released a
+moment later. Both are the tool's account of the tree, not the filesystem's,
+and a close should not fail on the difference. So the release asks git first,
+because git also owns the registration, and then deletes the directory itself
+when git will not — and prunes, so the registration does not outlive the run.
+
+## Why the leftover record names a process
+
+Three of five ships were blocked on their first release, and one workspace
+took six attempts across some twenty hours. Every one of those records said
+`EBUSY`, which is the condition the sweep and the ladder exist for: reading it
+tells the operator only that both already failed. The next move is decided by
+which process is sitting in the tree, and on this harness that is usually a
+seat's own descendant — a build watcher, an `esbuild.exe`, a `node.exe` the
+seat spawned and did not outlive (ADR-0016). One release swept four of them
+and was still refused.
+
+So the record names them: pid and image name, read from the directory that
+survived, after everything else has been tried. It costs one enumeration on a
+path that is already an exception, it ends nothing, and it turns a record that
+said "blocked" into one that says which process to end.
+
 ## Fallback paths
 
 If per-launch fetch shows up as a launch-latency or flake sink in the
@@ -184,8 +248,18 @@ rather than the project. Trigger: a host where leftovers routinely outlive an
 hour, or a sweep whose enumeration shows up against a run. Reversal cost: low
 — one constant becomes one validated field.
 
-If a leftover turns out to need a human after all — a workspace no sweep ever
-clears because the hold is permanent — the record gains a loud escalation
-after a counted number of failed sweeps, rather than being loud from the
-first. Trigger: one leftover that survives a day of sweeps. Reversal cost:
-low. One count, at the place that already writes the record.
+A leftover that needs a human — a workspace no sweep ever clears because the
+hold is permanent — reaches one through the tripwire on leftover age, not
+through a louder record: the record stays the note the harness writes to
+itself, and the standing coverage is what says the sweeping is not working
+(ADR-0010). If the age band proves wrong, it is a number in the registry.
+
+If the direct delete behind a refused `git worktree remove` ever removes
+something the run still needed, it narrows to the answers git gives about a
+path rather than about a repository. Trigger: a release that deleted a tree a
+later step wanted. Reversal cost: low — one condition at one call site.
+
+If reading the holders of a leftover costs anything visible, it moves behind
+the second failed release of the same directory: the first is the ordinary
+hold, and only a repeat is worth an enumeration. Trigger: holder-query
+duration against a sweep tick. Reversal cost: low — one guard.

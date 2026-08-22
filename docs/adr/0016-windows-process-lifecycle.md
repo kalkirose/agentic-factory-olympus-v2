@@ -37,6 +37,12 @@ below is byte for byte what shipped before.
   on `workspace-released` as `swept: {count, names}`. A sweep is refused
   outright on a root that is relative or shorter than four characters. What
   the removal does when the sweep is not enough is ADR-0004.
+- **The same enumeration, without the kill, names a holder.** A workspace that
+  survived the whole release is read once more, and the pid and image name of
+  everything standing in it go onto the record of it (ADR-0004). It is the
+  sweep's own query under the same root guard; it ends nothing, it never
+  throws, and it answers what outlived the kill — which on this harness is
+  usually a seat's surviving descendant.
 - **Every exit stamps.** `daemon-stopped` is written by the control stop, by
   SIGINT, SIGTERM, SIGBREAK and SIGHUP, by `process.on('exit')` as the floor
   under all of them, and by a fault handler that stamps and then exits
@@ -189,6 +195,11 @@ character path with the flag explicitly off. This git build reaches long paths
 without help, so the setting is defence for the builds that do not, and the
 release failures that reported "Filename too long" are **not** explained by it.
 The `EBUSY` failures are explained, and are fixed by the sweep.
+
+What did explain them: git refusing a removal the operating system performs.
+The answer is not a git setting at all — the release deletes the tree itself
+when git will not, and every delete the harness performs goes in the
+extended-length path form (ADR-0004).
 
 ## Fallback paths
 

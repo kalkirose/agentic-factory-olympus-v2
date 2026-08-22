@@ -1,9 +1,16 @@
 // The standing tripwire metrics. Every metric evaluates from the ledgers
 // alone (the width metric also reads the story graph through an injected
 // source reader). Each returns `{value, eligible, detail}`; an ineligible
-// evaluation never breaches. Windows count state — ships, freezes, verdicts
-// — never wall-clock.
-import { listShips, listRunEvents, storyRunsByKey } from '../telemetry/readers.mjs';
+// evaluation never breaches. Windows count state — ships, freezes, verdicts,
+// releases — never wall-clock. A duration may be a value (the CI critical
+// path, a leftover's age); it is never what triggers a reading.
+import { readEvents } from '../ledger/ledger.mjs';
+import {
+  listShips,
+  listRunEvents,
+  openWorkspaceLeftovers,
+  storyRunsByKey,
+} from '../telemetry/readers.mjs';
 import { readEscapeSet, escapesWindow } from '../telemetry/escapes.mjs';
 import { computeFrontier } from '../frontier/graph.mjs';
 import { ALL_LENSES } from '../lanes/review.mjs';
@@ -16,7 +23,9 @@ const GREEN_CHECKS = new Set(['success', 'neutral', 'skipped']);
  * Evaluates one metric.
  * @param {string} metric name from the closed set
  * @param {{paths: object, project: string, window?: number, params?: object,
- *   readSource?: (project: string) => Promise<object|null>}} input
+ *   now?: number, readSource?: (project: string) => Promise<object|null>}} input
+ *   `now` is the clock the one duration-valued metric reads; it defaults to
+ *   the wall clock and exists so a test can state an age.
  * @returns {Promise<{value: number|null, eligible: boolean, detail: object}>}
  */
 export async function evaluateMetric(metric, input) {
@@ -85,6 +94,37 @@ const IMPLEMENTATIONS = {
     };
   },
 
+  'workspace-release-failures': async ({ paths, project, window }) => {
+    const releases = workspaceReleases(paths, project).slice(-window);
+    const failed = releases.filter((e) => e.ok === false);
+    return {
+      value: failed.length,
+      eligible: releases.length > 0,
+      detail: {
+        releases: releases.length,
+        runs: [...new Set(failed.map((e) => e.runId))],
+        // The image names across the failures. One name on every one of them
+        // is the answer the tripwire exists to hand over.
+        holders: [...new Set(failed.flatMap((e) => (e.holders ?? []).map((h) => h.name)))].sort(),
+      },
+    };
+  },
+
+  'workspace-leftover-age': async ({ paths, project, now = Date.now() }) => {
+    const open = [...openWorkspaceLeftovers(paths).values()].filter((e) => e.project === project);
+    const aged = open
+      .map((e) => ({ runId: e.runId, hours: (now - Date.parse(e.ts)) / 3600000 }))
+      .filter((e) => Number.isFinite(e.hours));
+    // The oldest, not the count: one directory nothing will ever release is
+    // the condition, and a second one does not make it worse.
+    const oldest = aged.reduce((a, b) => (b.hours > a.hours ? b : a), { hours: -Infinity });
+    return {
+      value: aged.length > 0 ? oldest.hours : null,
+      eligible: aged.length > 0,
+      detail: { open: open.length, ...(aged.length > 0 && { oldest: oldest.runId }) },
+    };
+  },
+
   'frontier-width': async ({ paths, project, params, readSource }) => {
     const source = await readSource(project);
     if (!source) return { value: null, eligible: false, detail: {} };
@@ -146,6 +186,18 @@ export function furyYieldBaseline(paths, project) {
 }
 
 // -- shared collectors --------------------------------------------------------
+
+/**
+ * Workspace releases of one project, in ledger order. A release with no
+ * project on it keys nothing, exactly as every other instance event does — the
+ * daemon reads the owner off the workspace record so a sweep's release carries
+ * one too.
+ */
+function workspaceReleases(paths, project) {
+  return readEvents(paths.instanceLedger).filter(
+    (e) => e.event === 'workspace-released' && e.project === project,
+  );
+}
 
 /** Freeze records in ts order: kills and initial-wave count per freeze. */
 function collectFreezes(paths, project) {

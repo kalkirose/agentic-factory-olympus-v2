@@ -302,6 +302,182 @@ const ESCAPES_TRIPWIRE = {
   answer: 'restore the cut',
 };
 
+// -- the workspace metrics ----------------------------------------------------
+// Measured over five ships: 16 releases that did not clear their workspace,
+// three of five ships blocked on their first release, and one directory that
+// took six attempts across some twenty hours.
+
+/** An instance ledger of releases: `false` for one that left its workspace. */
+function releasesFixture(paths, outcomes, { project = 'p', extra = [] } = {}) {
+  writeLedger(paths.instanceLedger, [
+    ...outcomes.map((ok, i) =>
+      line(i + 1, `2026-08-1${i}T00:00:00Z`, 'workspace-released', {
+        project,
+        runId: `r${i + 1}`,
+        ok,
+        ...(ok ? {} : { holders: [{ pid: 100 + i, name: 'node.exe' }] }),
+      }),
+    ),
+    ...extra.map((e, i) => ({ ...e, seq: outcomes.length + i + 1 })),
+  ]);
+}
+
+test('workspace-release-failures counts the failures in the release window', async (t) => {
+  const paths = home(t);
+  releasesFixture(paths, [false, true, false, false, true, false], {
+    // Another project's failed releases never enter this one's window.
+    extra: [
+      line(0, '2026-08-20T00:00:00Z', 'workspace-released', {
+        project: 'q',
+        runId: 'x',
+        ok: false,
+      }),
+    ],
+  });
+  const all = await evaluateMetric('workspace-release-failures', {
+    paths,
+    project: 'p',
+    window: 10,
+  });
+  assert.equal(all.value, 4);
+  assert.equal(all.eligible, true);
+  assert.deepEqual(all.detail.runs, ['r1', 'r3', 'r4', 'r6']);
+  // The image name on every failure is what the answer is read from.
+  assert.deepEqual(all.detail.holders, ['node.exe']);
+  // The window is the last N releases, not the last N of anything else.
+  const recent = await evaluateMetric('workspace-release-failures', {
+    paths,
+    project: 'p',
+    window: 2,
+  });
+  assert.equal(recent.value, 1);
+  assert.equal(recent.detail.releases, 2);
+  // A home that has released nothing for this project has nothing to say.
+  const quiet = await evaluateMetric('workspace-release-failures', {
+    paths,
+    project: 'never',
+    window: 10,
+  });
+  assert.equal(quiet.eligible, false);
+});
+
+test('workspace-leftover-age reads the oldest directory no release has cleared', async (t) => {
+  const paths = home(t);
+  const now = Date.parse('2026-08-20T12:00:00Z');
+  writeLedger(paths.instanceLedger, [
+    line(1, '2026-08-20T02:00:00Z', 'workspace-leftover', {
+      project: 'p',
+      runId: 'old',
+      path: 'C:\\home\\worktrees\\old',
+      reason: 'EBUSY',
+    }),
+    line(2, '2026-08-20T11:00:00Z', 'workspace-leftover', {
+      project: 'p',
+      runId: 'young',
+      path: 'C:\\home\\worktrees\\young',
+      reason: 'EBUSY',
+    }),
+    line(3, '2026-08-20T03:00:00Z', 'workspace-leftover', {
+      project: 'q',
+      runId: 'other',
+      path: 'C:\\home\\worktrees\\other',
+      reason: 'EBUSY',
+    }),
+  ]);
+  const open = await evaluateMetric('workspace-leftover-age', { paths, project: 'p', now });
+  // Ten hours: the oldest, because one directory nothing will ever release is
+  // the condition and a second does not make it worse.
+  assert.equal(open.value, 10);
+  assert.equal(open.eligible, true);
+  assert.deepEqual(open.detail, { open: 2, oldest: 'old' });
+
+  // A record a sweep answered is not an open leftover any more.
+  const ledger = openInstanceStore(paths);
+  t.after(() => ledger.close());
+  ledger.resolve({ actor: 'daemon', resolves: 1, runId: 'old' });
+  const after = await evaluateMetric('workspace-leftover-age', { paths, project: 'p', now });
+  assert.equal(after.value, 1);
+  assert.deepEqual(after.detail, { open: 1, oldest: 'young' });
+});
+
+test('a home with every workspace released says nothing about leftover age', async (t) => {
+  const paths = home(t);
+  releasesFixture(paths, [true, true]);
+  const result = await evaluateMetric('workspace-leftover-age', { paths, project: 'p' });
+  assert.equal(result.eligible, false);
+  assert.equal(result.value, null);
+});
+
+test('the standing workspace tripwires fire on the evidence that set them', async (t) => {
+  const paths = home(t);
+  // Four failed releases in ten: the shape of the window that ran three of
+  // five ships into a blocked first release.
+  releasesFixture(paths, [false, true, false, false, true, false, true, true, true, true]);
+  const ledger = openInstanceStore(paths);
+  t.after(() => ledger.close());
+  const watcher = new TripwireWatcher({ paths, ledger });
+  const standing = standingTripwires()
+    .filter((entry) => entry.metric.startsWith('workspace-'))
+    .map(withTripwireDefaults);
+  assert.equal(standing.length, 2);
+  watcher.setRegistry('p', standing);
+
+  await watcher.notify('p', { event: 'workspace-released' });
+  const breaches = readEvents(paths.instanceLedger).filter((e) => e.event === 'tripwire-breach');
+  assert.equal(breaches.length, 1);
+  assert.equal(breaches[0].tripwire, 'workspace-release-failures');
+  assert.equal(breaches[0].value, 4);
+  assert.equal(breaches[0].window, 10);
+  assert.match(breaches[0].answer, /holders/);
+  assert.equal(openBreaches(paths).length, 1);
+  // A release event of a project the watcher cannot key is counted by nobody.
+  await watcher.notify(undefined, { event: 'workspace-released' });
+  assert.equal(openBreaches(paths).length, 1);
+});
+
+test('a leftover the sweeps never clear breaches on its age', async (t) => {
+  const hoursAgo = (h) => new Date(Date.now() - h * 3600000).toISOString();
+  const entry = withTripwireDefaults(
+    standingTripwires().find((e) => e.metric === 'workspace-leftover-age'),
+  );
+  // One home per age, because the age of a record is the record's own ts and
+  // nothing later rewrites it.
+  const armed = (hours) => {
+    const paths = home(t);
+    writeLedger(paths.instanceLedger, [
+      line(1, hoursAgo(hours), 'workspace-leftover', {
+        project: 'p',
+        runId: 'r1',
+        path: 'C:\\home\\worktrees\\r1',
+        reason: 'EBUSY',
+        holders: [{ pid: 4242, name: 'node.exe' }],
+      }),
+    ]);
+    const ledger = openInstanceStore(paths);
+    t.after(() => ledger.close());
+    const watcher = new TripwireWatcher({ paths, ledger });
+    watcher.setRegistry('p', [entry]);
+    return { paths, watcher };
+  };
+
+  // Under the band: a hold that passes clears in a sweep or two, and most do.
+  const passing = armed(1);
+  await passing.watcher.notify('p', { event: 'workspace-released' });
+  assert.equal(openBreaches(passing.paths).length, 0);
+
+  // Past it: a directory that outlived most of a day of sweeps is a hold no
+  // sweep will ever reach, and the answer is a person.
+  const stuck = armed(20);
+  await stuck.watcher.notify('p', { event: 'workspace-released' });
+  const breaches = readEvents(stuck.paths.instanceLedger).filter(
+    (e) => e.event === 'tripwire-breach',
+  );
+  assert.equal(breaches.length, 1);
+  assert.equal(breaches[0].tripwire, 'workspace-leftover-age');
+  assert.ok(breaches[0].value > 4);
+  assert.deepEqual(breaches[0].detail, { open: 1, oldest: 'r1' });
+});
+
 test('a breach opens once, stays open, and re-arms at resolution', async (t) => {
   const paths = home(t);
   escapesFixture(paths, { counted: 6 });

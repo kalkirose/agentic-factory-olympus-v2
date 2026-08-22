@@ -24,7 +24,8 @@
 //    run worktree, and Windows refuses to delete a directory anything is
 //    sitting in — the `git worktree remove` that follows fails EBUSY. So the
 //    workspace release enumerates what is still standing in the workspace and
-//    ends it first.
+//    ends it first. The same enumeration, without the kill, is what names the
+//    holder in the record of a workspace that survived the release anyway.
 import { execFile } from 'node:child_process';
 import { win32 } from 'node:path';
 import { resolveArgv } from './executable.mjs';
@@ -33,6 +34,10 @@ import { resolveArgv } from './executable.mjs';
 // match paths outside it, and the sweep kills what it matches — so a root that
 // broad is refused rather than run.
 const MIN_ROOT_LENGTH = 4;
+
+// How many holders a record names. A leftover with more than a handful of
+// processes in it is one story, not ten, and the record is read by a human.
+const HOLDER_LIMIT = 10;
 
 /**
  * Spawn options for a seat child, on top of what the caller sets. One shape for
@@ -86,18 +91,14 @@ export async function sweepPathHolders(
   { platform = process.platform, run = execAsync, self = process.pid } = {},
 ) {
   const empty = { count: 0, names: [] };
-  if (platform !== 'win32') return empty;
-  // The Windows rule, whatever host is asking: the branch is what decides,
-  // never the platform the check happens to run on.
-  if (typeof root !== 'string' || root.length < MIN_ROOT_LENGTH || !win32.isAbsolute(root)) {
-    return { ...empty, error: `refusing to sweep on an unsafe root: ${JSON.stringify(root)}` };
-  }
-  let holders;
-  try {
-    holders = await listPathHolders(root, { run, self });
-  } catch (error) {
-    return { ...empty, error: `could not enumerate: ${error.message}` };
-  }
+  const { holders, error } = await pathHolders(root, {
+    platform,
+    run,
+    self,
+    limit: Infinity,
+    refusal: 'refusing to sweep on an unsafe root',
+  });
+  if (error) return { ...empty, error };
   if (holders.length === 0) return empty;
   for (const holder of holders) {
     // A tree kill of one holder often takes the next one with it; taskkill
@@ -105,6 +106,45 @@ export async function sweepPathHolders(
     await run(...spawnSpec(['taskkill', '/PID', String(holder.pid), '/T', '/F'])).catch(() => {});
   }
   return { count: holders.length, names: [...new Set(holders.map((h) => h.name))].sort() };
+}
+
+/**
+ * The processes standing inside a path, named rather than ended. Same
+ * enumeration the sweep runs on, and it kills nothing: this is what a record
+ * about a directory nothing would delete is written from.
+ *
+ * A leftover workspace is the sweep's own failure, so a bare errno on it says
+ * only that the condition the sweep exists for is still true. What the
+ * operator does next is decided by which process is sitting in the tree — a
+ * seat's surviving child, an editor, a scanner — and that is a pid and an
+ * image name (ADR-0016). Never throws: a record about a directory is not worth
+ * a second failure.
+ * @param {string} root the directory, absolute
+ * @param {{platform?: string, run?: Function, self?: number, limit?: number,
+ *   refusal?: string}} [opts]
+ * @returns {Promise<{holders: Array<{pid: number, name: string}>, error?: string}>}
+ */
+export async function pathHolders(
+  root,
+  {
+    platform = process.platform,
+    run = execAsync,
+    self = process.pid,
+    limit = HOLDER_LIMIT,
+    refusal = 'refusing to read the holders of an unsafe root',
+  } = {},
+) {
+  if (platform !== 'win32') return { holders: [] };
+  // The Windows rule, whatever host is asking: the branch is what decides,
+  // never the platform the check happens to run on.
+  if (typeof root !== 'string' || root.length < MIN_ROOT_LENGTH || !win32.isAbsolute(root)) {
+    return { holders: [], error: `${refusal}: ${JSON.stringify(root)}` };
+  }
+  try {
+    return { holders: (await listPathHolders(root, { run, self })).slice(0, limit) };
+  } catch (error) {
+    return { holders: [], error: `could not enumerate: ${error.message}` };
+  }
 }
 
 /**

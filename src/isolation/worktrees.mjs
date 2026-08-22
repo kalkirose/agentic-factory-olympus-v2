@@ -4,9 +4,9 @@
 //                                detached at a named sha
 // Seats receive absolute paths. The whole <runId> root goes away at run
 // close; a disposable goes away when its wave reaches verdict.
-import { rmSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { git } from './git.mjs';
+import { removeTree } from './removal.mjs';
 
 /** @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths */
 export function workspaceRoot(paths, runId) {
@@ -39,9 +39,38 @@ export async function addDisposableWorktree(clone, paths, runId, tag, sha) {
   return path;
 }
 
-/** Removes one worktree by path. */
-export async function removeWorktree(clone, path) {
-  await git(['worktree', 'remove', '--force', path], { cwd: clone });
+/**
+ * Removes one worktree by path, and then by hand if git will not.
+ *
+ * git deletes the tree with its own path handling, and it reports conditions
+ * the operating system does not have: "Filename too long" on a tree the
+ * extended-length form removes without complaint, "Directory not empty" on a
+ * file that was released a moment later. Measured: three closes failed on the
+ * first and eight on the second, and in every one of the eight the harness's
+ * own delete of the same tree, moments later, succeeded. A removal the OS can
+ * perform must not be refused by the tool that asked for it — so a git that
+ * will not delete the tree is followed by the harness deleting it, and the
+ * `worktree prune` behind the caller drops the registration that leaves.
+ *
+ * One direct attempt: the caller owns the retry ladder, and a second one
+ * nested inside it would multiply the wait a close spends on a hold.
+ * @param {string} clone
+ * @param {string} path
+ * @param {object} [io] the removal seam (see removal.mjs)
+ */
+export async function removeWorktree(clone, path, io = {}) {
+  let refused;
+  try {
+    await git(['worktree', 'remove', '--force', path], { cwd: clone });
+    return;
+  } catch (error) {
+    refused = error;
+  }
+  try {
+    await removeTree(path, { ...io, attempts: 1 });
+  } catch (error) {
+    throw new Error(`${refused.message}; direct removal: ${error.message}`);
+  }
 }
 
 /**
@@ -51,11 +80,19 @@ export async function removeWorktree(clone, path) {
  * other way pushed nothing: its branch holds the only copy of its frozen
  * suite, and a later launch can inherit that freeze.
  */
-export async function removeRunWorktrees(clone, paths, runId, { keepBranch = false } = {}) {
+export async function removeRunWorktrees(
+  clone,
+  paths,
+  runId,
+  { keepBranch = false, io = {} } = {},
+) {
   const root = workspaceRoot(paths, runId);
   for (const path of await listWorktrees(clone)) {
-    if (isUnder(root, path)) await removeWorktree(clone, path);
+    if (isUnder(root, path)) await removeWorktree(clone, path, io);
   }
+  // Runs whether or not a removal above went by hand: a tree git did not take
+  // itself leaves a registration only the prune clears, and the branch delete
+  // below is refused for as long as a registration claims it.
   await git(['worktree', 'prune'], { cwd: clone });
   if (!keepBranch) {
     try {
@@ -64,7 +101,7 @@ export async function removeRunWorktrees(clone, paths, runId, { keepBranch = fal
       // The branch may not exist (disposables only, or a partial provision).
     }
   }
-  rmSync(root, { recursive: true, force: true });
+  await removeTree(root, { ...io, attempts: 1 });
 }
 
 /** Lists registered worktree paths, the bare repo itself included. */

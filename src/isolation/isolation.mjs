@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from 'node:path';
 import { parseProjectConfig } from '../config/project.mjs';
 import { runLedgerPath } from '../daemon/home.mjs';
-import { sweepPathHolders } from '../engine/processes.mjs';
+import { pathHolders, sweepPathHolders } from '../engine/processes.mjs';
 import { git } from './git.mjs';
 import { cloneDir, ensureBareClone, fetchClone, branchSha, readBlobFromBranch } from './clones.mjs';
 import { removeTree, removeWithRetry } from './removal.mjs';
@@ -19,16 +19,21 @@ export class RunIsolation {
   /**
    * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
    * @param {{composeCommand?: () => string[], composeRunner?: Function,
-   *   sweepProcesses?: Function, removalIo?: object}} opts
-   *   sweepProcesses substitutes the process sweep (tests only). removalIo is
-   *   the removal ladder's seam — the delete call and the wait between
+   *   sweepProcesses?: Function, listHolders?: Function, removalIo?: object}} opts
+   *   sweepProcesses substitutes the process sweep and listHolders the
+   *   read-only holder query behind a leftover record (tests only). removalIo
+   *   is the removal ladder's seam — the delete call and the wait between
    *   attempts — read at every call.
    */
-  constructor(paths, { composeCommand, composeRunner, sweepProcesses, removalIo } = {}) {
+  constructor(
+    paths,
+    { composeCommand, composeRunner, sweepProcesses, listHolders, removalIo } = {},
+  ) {
     this.paths = paths;
     this.composeCommand = composeCommand ?? (() => ['docker', 'compose']);
     this.composeRunner = composeRunner;
     this.sweepProcesses = sweepProcesses ?? sweepPathHolders;
+    this.listHolders = listHolders ?? pathHolders;
     this.removalIo = removalIo ?? {};
     this.cloneLocks = new Map();
   }
@@ -133,9 +138,10 @@ export class RunIsolation {
    *
    * Every removal below goes through the retry ladder, because the tree it
    * deletes is a checked-out application and a file in it can still be held
-   * (ADR-0004). `leftover` names the workspace that survived every attempt, so
-   * the caller can record a directory that nothing would find on its own.
-   * Returns { errors, record, swept, leftover }.
+   * (ADR-0004). `leftover` names the workspace that survived every attempt and
+   * `holders` names the processes standing in it, so the caller can record a
+   * directory that nothing would find on its own, and say what is holding it.
+   * Returns { errors, record, swept, leftover, holders }.
    */
   async release(runId, { project, keepBranch = false } = {}) {
     const errors = [];
@@ -166,7 +172,11 @@ export class RunIsolation {
       try {
         await this.withClone(owner, () =>
           removeWithRetry(
-            () => removeRunWorktrees(cloneDir(this.paths, owner), this.paths, runId, { keepBranch }),
+            () =>
+              removeRunWorktrees(cloneDir(this.paths, owner), this.paths, runId, {
+                keepBranch,
+                io: this.removalIo,
+              }),
             this.removalIo,
           ),
         );
@@ -197,7 +207,25 @@ export class RunIsolation {
     // The workspace as it stands after every step has run, rather than what
     // any one step reported: a root that is gone is gone whichever removal
     // took it, and a root that is still there is one nothing took.
-    return { errors, record, swept, leftover: existsSync(root) ? root : null };
+    const leftover = existsSync(root) ? root : null;
+    return { errors, record, swept, leftover, holders: await this.holdersOf(leftover) };
+  }
+
+  /**
+   * Who is standing in a workspace that survived the whole release. Read after
+   * every removal has been tried, not before: the sweep already ended what it
+   * could find, so the answer here is what outlived it — the process the
+   * operator has to deal with. A query that cannot run answers nothing, and
+   * the release is reported either way.
+   */
+  async holdersOf(leftover) {
+    if (leftover === null) return [];
+    try {
+      const { holders } = await this.listHolders(leftover);
+      return holders ?? [];
+    } catch {
+      return [];
+    }
   }
 
   /**

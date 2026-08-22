@@ -770,9 +770,16 @@ export class Daemon {
       this.releasing.delete(runId);
     }
     const swept = released?.swept;
+    const holders = released?.holders ?? [];
+    // The project the workspace belonged to, from the workspace record when the
+    // caller did not say — a sweep names a run id and nothing else. It is what
+    // attributes the release to a project's tripwires, so a release the
+    // watcher cannot key is one it never counts.
+    const owner = released?.record?.project ?? project ?? null;
     this.ledger.append('workspace-released', {
       actor: ACTOR,
       runId,
+      ...(owner && { project: owner }),
       ok: errors.length === 0,
       ...(orphan && { orphan }),
       ...(keepBranch && { keptBranch: true }),
@@ -780,11 +787,15 @@ export class Daemon {
       // when the workspace held nothing, which is the ordinary case.
       ...(swept?.count > 0 && { swept: { count: swept.count, names: swept.names } }),
       ...(released?.leftover && { leftover: released.leftover }),
+      ...(holders.length > 0 && { holders }),
       ...(errors.length > 0 && { errors }),
     });
     if (released === null) return;
-    if (released.leftover !== null) this.recordWorkspaceLeftover(runId, released.leftover, errors);
-    else this.settleWorkspaceLeftover(runId);
+    if (released.leftover !== null) {
+      this.recordWorkspaceLeftover(runId, released.leftover, { errors, holders, project: owner });
+    } else {
+      this.settleWorkspaceLeftover(runId);
+    }
   }
 
   /**
@@ -793,15 +804,21 @@ export class Daemon {
    * would delete is housekeeping the harness owes itself, so the record is
    * quiet and the daemon carries on (ADR-0004). One open record per run: a
    * sweep that tries again and is blocked again reports the same directory.
+   *
+   * The record names the processes standing in the directory, because that is
+   * the operator's next move: an errno says the sweep failed, a pid and an
+   * image name say what to end.
    */
-  recordWorkspaceLeftover(runId, path, errors) {
+  recordWorkspaceLeftover(runId, path, { errors, holders = [], project = null } = {}) {
     try {
       if (openWorkspaceLeftovers(this.paths).has(runId)) return;
       this.ledger.append('workspace-leftover', {
         actor: ACTOR,
         runId,
+        ...(project && { project }),
         path,
         reason: errors.join('; '),
+        ...(holders.length > 0 && { holders }),
       });
     } catch {
       // A record of a directory is never worth a second failure.

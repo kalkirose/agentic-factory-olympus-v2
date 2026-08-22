@@ -410,6 +410,14 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - **Worktrees.** The daemon keeps one bare clone per project; at run launch
   it creates a fresh run worktree, seats receive the absolute path, at close
   it removes the worktree. No shared checkout exists.
+- **Workspace release.** At close the release ends what is standing in the
+  workspace, removes the worktrees, and deletes the tree. It never fails on
+  the shape of a path: every delete the harness performs itself goes in the
+  extended-length Windows form, and a worktree `git worktree remove` refuses
+  is deleted directly and then pruned. A hold is retried on a bounded ladder;
+  a workspace that outlives it is a quiet leftover record naming the directory
+  and the processes standing in it, which the periodic sweep retries
+  (ADR-0004).
 - **Run stacks.** Each run launches its own compose project, named by run id,
   from the project's compose template. No fixed host ports; connection
   strings derive from the run's env. No bus is shared between runs.
@@ -532,6 +540,12 @@ stage stamps, its band is what the same stage of the same lane did in the
 other runs of the project, and its answer is a queued record naming the stage,
 the elapsed and the band. Under five completed visits there is no band and the
 watcher says nothing (ADR-0034).
+
+Two standing tripwires watch the harness's own housekeeping rather than a
+project's quality: failed workspace releases over the last ten releases, and
+the age of the oldest workspace no release has cleared. Both were set from the
+ledgers that showed the condition, and both take the machinery's ordinary
+escalation — a queued breach, open until a human answers it (ADR-0010).
 
 Standing quality bar (written by the runs themselves, never mined from
 outside): escaped defects per story (ceiling 0.5, rolling 10 ships),

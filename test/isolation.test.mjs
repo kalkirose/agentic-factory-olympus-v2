@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homePaths, scaffoldHome } from '../src/daemon/home.mjs';
 import { cloneDir, ensureBareClone, fetchClone, branchSha, readBlobFromBranch } from '../src/isolation/clones.mjs';
@@ -8,10 +8,12 @@ import {
   addRunWorktree,
   addDisposableWorktree,
   removeRunWorktrees,
+  removeWorktree,
   listWorktrees,
   runWorktreePath,
   workspaceRoot,
 } from '../src/isolation/worktrees.mjs';
+import { longPath, removeTree } from '../src/isolation/removal.mjs';
 import { RunIsolation } from '../src/isolation/isolation.mjs';
 import {
   tempDir,
@@ -24,6 +26,7 @@ import {
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
+const WINDOWS_ONLY = process.platform === 'win32' ? false : 'runs on Windows only';
 
 function fixture(t) {
   const root = tempDir();
@@ -376,4 +379,201 @@ test('a sweep that could not run is reported and the release goes on', async (t)
   assert.deepEqual(errors, ['sweep: could not enumerate: no CIM']);
   // Reported, not fatal: everything the release could still do, it did.
   assert.ok(!existsSync(workspaceRoot(paths, 'r11')));
+});
+
+// -- the path a removal is handed --------------------------------------------
+// The platform is the injected branch, never the host the test runs on
+// (ADR-0013), so the Windows form is asserted from Linux and the other way
+// round.
+
+test('on Windows a removal is handed the extended-length path, and nowhere else', () => {
+  const win = (path) => longPath(path, 'win32');
+  const extended = '\\\\?\\C:\\home\\worktrees\\run-1\\tree';
+  assert.equal(win('C:\\home\\worktrees\\run-1\\tree'), extended);
+  // The prefix turns path parsing off, so the path goes in the form the
+  // filesystem takes: separators converted, `.` and `..` already resolved.
+  assert.equal(win('C:/home/worktrees/run-1/./tree'), extended);
+  assert.equal(win('C:\\home\\worktrees\\run-1\\adv\\..\\tree'), extended);
+  assert.equal(win('\\\\srv\\share\\worktrees\\run-1'), '\\\\?\\UNC\\srv\\share\\worktrees\\run-1');
+  // Already extended, or a device path: handed on untouched.
+  assert.equal(win(extended), extended);
+  assert.equal(win('\\\\.\\C:\\home'), '\\\\.\\C:\\home');
+  // A path with no drive and no share on it is resolved by the OS against
+  // state this module does not have; the prefix would make it unresolvable.
+  assert.equal(win('worktrees\\run-1\\tree'), 'worktrees\\run-1\\tree');
+  assert.equal(win('\\worktrees\\run-1'), '\\worktrees\\run-1');
+});
+
+test('off Windows every path a removal is handed is the path that came in', () => {
+  for (const path of [
+    '/home/worktrees/run-1/tree',
+    'C:\\home\\worktrees\\run-1\\tree',
+    '\\\\srv\\share\\worktrees\\run-1',
+    'worktrees/run-1/./tree',
+  ]) {
+    assert.equal(longPath(path, 'linux'), path);
+  }
+});
+
+test('the tree removal takes the platform form, and rm -r carries it down', async (t) => {
+  const paths = stagedWorkspace(t, 'r33');
+  const root = workspaceRoot(paths, 'r33');
+  const seen = [];
+  const remove = (path, options) => {
+    seen.push(path);
+    return rmSync(path, options);
+  };
+  await removeTree(root, { remove, platform: 'linux' });
+  assert.deepEqual(seen, [root]);
+  assert.ok(!existsSync(root));
+
+  // The Windows branch hands the same removal the extended-length root. One
+  // call, because `rm -r` builds every path below the one it is given from it.
+  mkdirSync(join(root, 'tree'), { recursive: true });
+  const winSeen = [];
+  await removeTree(root, {
+    platform: 'win32',
+    remove: (path, options) => {
+      winSeen.push(path);
+      return rmSync(path.replace(/^\\\\\?\\/, ''), options);
+    },
+  });
+  assert.deepEqual(winSeen, [longPath(root, 'win32')]);
+});
+
+test(
+  'a tree past the Windows path ceiling is removed',
+  { skip: WINDOWS_ONLY },
+  async (t) => {
+    const paths = stagedWorkspace(t, 'r34');
+    const root = workspaceRoot(paths, 'r34');
+    // A run worktree nests a project's own tree under the daemon home, and a
+    // node_modules path in it clears 260 characters on its own. The tree is
+    // built through the extended-length form, which every Windows takes; the
+    // removal is asked for in the plain form the harness holds.
+    const segments = Array.from({ length: 12 }, (_, i) => `segment-${i}`.padEnd(24, 'x'));
+    const deep = join(root, 'tree', ...segments);
+    assert.ok(deep.length > 260);
+    mkdirSync(longPath(deep, 'win32'), { recursive: true });
+    writeFileSync(longPath(join(deep, 'held.txt'), 'win32'), 'x');
+    await removeTree(root);
+    assert.ok(!existsSync(root));
+  },
+);
+
+// -- a removal git refuses ----------------------------------------------------
+// Measured over five ships: three releases failed on "Filename too long" and
+// eight on "Directory not empty", both of them git's answer about a tree the
+// operating system deletes without complaint.
+
+test('a worktree git will not remove is removed by hand, and the release lands', async (t) => {
+  const { origin, paths } = fixture(t);
+  const isolation = new RunIsolation(paths, { composeRunner: fakeComposeRunner() });
+  const ws = await isolation.provision({
+    runId: 'r40',
+    project: 'alpha',
+    repoUrl: origin,
+    defaultBranch: 'main',
+    configPath: CONFIG_PATH,
+  });
+  // git's own refusal, on a real registered worktree full of real files: with
+  // its `.git` link gone the tree is no longer one git will delete, exactly as
+  // a tree past the path ceiling is not one git will delete.
+  rmSync(join(ws.worktree, '.git'));
+  await assert.rejects(() =>
+    removeWorktree(cloneDir(paths, 'alpha'), ws.worktree, { attempts: 1, remove: blockedRemove }),
+  );
+  assert.ok(existsSync(ws.worktree));
+
+  const { errors, leftover } = await isolation.release('r40');
+  assert.deepEqual(errors, []);
+  assert.equal(leftover, null);
+  assert.ok(!existsSync(workspaceRoot(paths, 'r40')));
+  // The direct delete leaves a registration behind; the prune in the same pass
+  // is what stops it outliving the run, and the branch delete needs it gone.
+  // One left: the bare clone itself.
+  assert.equal((await listWorktrees(cloneDir(paths, 'alpha'))).length, 1);
+  const branches = gitSync(['branch', '--list', 'run/r40'], cloneDir(paths, 'alpha'));
+  assert.equal(branches.trim(), '');
+});
+
+test('a removal that git and the harness both refuse names both refusals', async (t) => {
+  const { origin, paths } = fixture(t);
+  const isolation = new RunIsolation(paths, { composeRunner: fakeComposeRunner() });
+  const ws = await isolation.provision({
+    runId: 'r41',
+    project: 'alpha',
+    repoUrl: origin,
+    defaultBranch: 'main',
+    configPath: CONFIG_PATH,
+  });
+  rmSync(join(ws.worktree, '.git'));
+  await assert.rejects(
+    () =>
+      removeWorktree(cloneDir(paths, 'alpha'), ws.worktree, {
+        attempts: 1,
+        remove: blockedRemove,
+      }),
+    // Both halves, because the two say different things: git would not, and
+    // then the operating system could not. The wording of git's own half is
+    // git's; the command it failed at is what the harness put in front of it.
+    /git worktree remove[\s\S]*direct removal: EBUSY/,
+  );
+});
+
+/** A delete nothing will let through. */
+function blockedRemove() {
+  throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+}
+
+// -- who is holding a workspace nothing will delete --------------------------
+
+test('a leftover workspace comes back with the processes standing in it', async (t) => {
+  const paths = stagedWorkspace(t, 'r42');
+  const asked = [];
+  const isolation = new RunIsolation(paths, {
+    sweepProcesses: fakeSweep({ count: 1, names: ['node.exe'] }),
+    listHolders: async (path) => {
+      asked.push(path);
+      return { holders: [{ pid: 4242, name: 'node.exe' }] };
+    },
+    removalIo: { remove: blockedRemove, sleep: async () => {}, attempts: 2 },
+  });
+  const { leftover, holders } = await isolation.release('r42');
+  assert.equal(leftover, workspaceRoot(paths, 'r42'));
+  // Read after every removal was tried, on the directory that survived: the
+  // sweep already ended what it could find, so this is what outlived it.
+  assert.deepEqual(asked, [leftover]);
+  assert.deepEqual(holders, [{ pid: 4242, name: 'node.exe' }]);
+});
+
+test('a workspace the release cleared is not asked who holds it', async (t) => {
+  const paths = stagedWorkspace(t, 'r43');
+  const asked = [];
+  const isolation = new RunIsolation(paths, {
+    sweepProcesses: fakeSweep(),
+    listHolders: async (path) => {
+      asked.push(path);
+      return { holders: [] };
+    },
+  });
+  const { leftover, holders } = await isolation.release('r43');
+  assert.equal(leftover, null);
+  assert.deepEqual(holders, []);
+  assert.deepEqual(asked, []);
+});
+
+test('a holder query that cannot run leaves the release reported anyway', async (t) => {
+  const paths = stagedWorkspace(t, 'r44');
+  const isolation = new RunIsolation(paths, {
+    sweepProcesses: fakeSweep(),
+    listHolders: async () => {
+      throw new Error('CIM is unavailable');
+    },
+    removalIo: { remove: blockedRemove, sleep: async () => {}, attempts: 2 },
+  });
+  const { leftover, holders, errors } = await isolation.release('r44');
+  assert.equal(leftover, workspaceRoot(paths, 'r44'));
+  assert.deepEqual(holders, []);
+  assert.match(errors[0], /EBUSY/);
 });

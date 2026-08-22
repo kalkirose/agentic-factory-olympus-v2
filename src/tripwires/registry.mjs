@@ -48,6 +48,23 @@ export const TRIPWIRE_METRICS = {
     defaultWindow: null,
     defaultTriggers: ['merged', 'card-sweep'],
   },
+  // Releases that did not clear their workspace, counted over the last N
+  // release attempts. The unit is the release itself: a close and a sweep tick
+  // each make one, and a release is the state change the metric is about.
+  // The value is a count, so a window that is not full yet can only undercount.
+  'workspace-release-failures': {
+    unit: 'releases',
+    defaultWindow: 10,
+    defaultTriggers: ['workspace-released'],
+  },
+  // The oldest workspace no release has cleared, in hours. Current state, so
+  // no window. The value is a duration, which is legal metric data; the
+  // trigger stays an append — every sweep that acts on a leftover makes one.
+  'workspace-leftover-age': {
+    unit: null,
+    defaultWindow: null,
+    defaultTriggers: ['workspace-released', 'workspace-leftover'],
+  },
 };
 
 export const BREACH_OPS = new Set(['>', '>=', '<', '<=']);
@@ -88,6 +105,21 @@ export function standingTripwires() {
       metric: 'frontier-width',
       breach: { op: '<', value: 2 },
       answer: 'card-edge review; an honest pinch closes the breach with no action',
+    },
+    {
+      id: 'workspace-release-failures',
+      metric: 'workspace-release-failures',
+      window: 10,
+      breach: { op: '>', value: 3 },
+      answer:
+        'read the holders the failed releases name; a repeat holder is a ' +
+        'process the sweep does not match',
+    },
+    {
+      id: 'workspace-leftover-age',
+      metric: 'workspace-leftover-age',
+      breach: { op: '>', value: 4 },
+      answer: 'end the processes the leftover record names, or delete the directory by hand',
     },
   ];
 }
