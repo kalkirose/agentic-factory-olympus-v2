@@ -29,6 +29,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { runReportPath } from '../daemon/home.mjs';
 import {
+  carryPaths,
   changedFiles,
   commitAll,
   headSha,
@@ -889,20 +890,23 @@ async function repairRound(ctx, base, mode, { pass, round, open, record }) {
 export async function freshPass(ctx, base, mode, { newPass, trigger, open, last }) {
   const events = runEvents(ctx);
   if (!events.some((e) => e.event === 'fresh-pass' && e.seq > last.seq)) {
-    // The fresh pass never sees the prior tree: reset to the pre-
-    // implementation state, then carry the current frozen suite forward.
-    // The reset drops any merge the tree held, so the carry reads the suite
-    // commit rather than the restore anchor, and the stamp below takes every
-    // later restore of this pass back to the same commit.
+    // The fresh pass never sees the prior tree: reset to the state the pass is
+    // born on, then carry the current frozen suite forward. A carry and not a
+    // restore, because a merge-born pass is born on the updated default branch
+    // and a restore of the whole test paths would revert everything that
+    // branch advanced under them (ADR-0033).
     // The stamp lands last, so a restart before it redoes the (idempotent)
-    // reset instead of skipping it.
+    // reset instead of skipping it, and it names the tree the pass was born
+    // on, which is where every later restore of this pass answers to.
     await resetHard(base.worktree, base.resetSha);
+    const stamp = { actor: ACTOR, pass: newPass, trigger };
     if (mode === 'story') {
-      const suiteSha = currentSuiteSha(events);
-      await restorePaths(base.worktree, suiteSha, base.testPaths, { except: base.frozenExclusions });
-      await commitAll(base.worktree, `suite carry: ${ctx.runId}`);
+      await carryPaths(base.worktree, currentSuiteSha(events), base.testPaths, {
+        except: base.frozenExclusions,
+      });
+      stamp.sha = await commitAll(base.worktree, `suite carry: ${ctx.runId}`);
     }
-    ctx.store.append('fresh-pass', { actor: ACTOR, pass: newPass, trigger });
+    ctx.store.append('fresh-pass', stamp);
   }
   // The stall brief always rides; a capture correction rides with it.
   const stall = stallBrief(open);
@@ -1393,9 +1397,13 @@ function currentSuiteSha(events) {
  * advanced since the run launched, so a candidate that merged a green default
  * branch turns red against work that shipped before it (ADR-0033).
  *
- * A fresh pass resets the tree to the pre-implementation commit and drops the
- * merge with it, so the anchor goes back to the suite commit; the update stage
- * merges again on that pass's way to its own verdict.
+ * A fresh pass resets the tree and stamps the commit it was born on, which is
+ * the anchor from there: the suite commit for a pass reset to the
+ * pre-implementation tree, and for a merge-born pass the commit that carried
+ * the frozen suite onto the updated default branch — a single sha cannot say
+ * "the default branch plus the freeze", so the pass composes one that can. A
+ * pass from a ledger written before the stamp existed falls back to the suite
+ * commit, which is where its restores went.
  *
  * @param {object[]} events the run's ledger events, in order
  * @returns {string|null} the sha, or null when the run holds no freeze
@@ -1410,7 +1418,7 @@ export function restoreAnchor(events) {
     } else if (e.event === 'branch-update' || (e.event === 'pre-verdict-update' && e.ran === true)) {
       if (typeof e.toSha === 'string') anchor = e.toSha;
     } else if (e.event === 'fresh-pass') {
-      anchor = suite;
+      anchor = typeof e.sha === 'string' ? e.sha : suite;
     }
   }
   return anchor;

@@ -1,10 +1,12 @@
 // Working-tree operations: change detection, daemon-identity commits,
-// restore-from-sha (the tamper-void mechanism), evidence diffs.
+// restore-from-sha (the tamper-void mechanism), the carry that composes a
+// suite onto a tree that moved under it, evidence diffs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  carryPaths,
   changedFiles,
   commitAll,
   headSha,
@@ -12,7 +14,7 @@ import {
   evidenceDiff,
   filesAt,
 } from '../src/isolation/tree.mjs';
-import { tempDir, removeDir, initOriginRepo, writeTree } from './helpers.mjs';
+import { tempDir, removeDir, commitTree, gitSync, initOriginRepo, writeTree } from './helpers.mjs';
 
 function repoFixture(t) {
   const root = tempDir();
@@ -70,6 +72,69 @@ test('filesAt lists the files under the prefixes at a sha', async (t) => {
   const repo = repoFixture(t);
   const sha = await headSha(repo);
   assert.deepEqual(await filesAt(repo, sha, ['tests']), ['tests/a.test.mjs']);
+});
+
+test('carryPaths brings the suite commit\'s own files onto a tree that moved under it', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const repo = initOriginRepo(join(root, 'repo'), {
+    'tests/kept.test.mjs': 'base kept\n',
+    'tests/gone.test.mjs': 'base gone\n',
+    'src/a.mjs': 'base src\n',
+  });
+  // The run's branch: the freeze adds a suite of its own and drops a test the
+  // spec superseded. It never touches the rest of the test paths.
+  gitSync(['checkout', '-b', 'run/alpha'], repo);
+  rmSync(join(repo, 'tests', 'gone.test.mjs'));
+  writeTree(repo, { 'tests/frozen.test.mjs': 'the frozen suite\n' });
+  const suiteSha = await commitAll(repo, 'suite: freeze');
+  // The default branch, meanwhile: a test path this run does not own advances,
+  // another arrives, and the source beside them moves.
+  gitSync(['checkout', 'main'], repo);
+  const mainSha = commitTree(
+    repo,
+    {
+      'tests/kept.test.mjs': 'main advanced this\n',
+      'tests/shipped.test.mjs': 'a later story shipped this\n',
+      'src/a.mjs': 'main advanced src\n',
+    },
+    'later stories ship',
+  );
+  // What a merge-born fresh pass does: reset onto the updated default branch,
+  // then carry the frozen suite forward.
+  gitSync(['checkout', 'run/alpha'], repo);
+  gitSync(['reset', '--hard', mainSha], repo);
+  await carryPaths(repo, suiteSha, ['tests']);
+  const { readFileSync } = await import('node:fs');
+  const content = (file) => readFileSync(join(repo, file), 'utf8').replace(/\r\n/g, '\n');
+  assert.equal(content('tests/frozen.test.mjs'), 'the frozen suite\n');
+  assert.ok(!existsSync(join(repo, 'tests', 'gone.test.mjs')));
+  // The half a restore gets wrong: the branch's own test paths stay where the
+  // branch left them, beside the source they were shipped with.
+  assert.equal(content('tests/kept.test.mjs'), 'main advanced this\n');
+  assert.equal(content('tests/shipped.test.mjs'), 'a later story shipped this\n');
+  assert.equal(content('src/a.mjs'), 'main advanced src\n');
+  // The same paths restored from the same commit is the reverting shape: a
+  // test the branch advanced goes back to the tree the run launched on.
+  await restorePaths(repo, suiteSha, ['tests']);
+  assert.equal(content('tests/kept.test.mjs'), 'base kept\n');
+});
+
+test('carryPaths leaves the freeze exclusions alone', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const repo = initOriginRepo(join(root, 'repo'), { 'tests/a.test.mjs': 'base a\n' });
+  gitSync(['checkout', '-b', 'run/alpha'], repo);
+  writeTree(repo, { 'tests/harness.mjs': 'the freeze wrote this\n' });
+  const suiteSha = await commitAll(repo, 'suite: freeze');
+  gitSync(['checkout', 'main'], repo);
+  const mainSha = commitTree(repo, { 'tests/a.test.mjs': 'main advanced this\n' }, 'main moves');
+  gitSync(['checkout', 'run/alpha'], repo);
+  gitSync(['reset', '--hard', mainSha], repo);
+  await carryPaths(repo, suiteSha, ['tests'], { except: ['tests/harness.mjs'] });
+  // An exclusion is the dev seat's file: the carry does not hand it the
+  // freeze's version any more than a restore does.
+  assert.ok(!existsSync(join(repo, 'tests', 'harness.mjs')));
 });
 
 function globRepoFixture(t) {

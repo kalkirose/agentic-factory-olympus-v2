@@ -78,10 +78,10 @@ its own tree on its own authority says so either way.
 
 **The suite restore anchors on the merged tree.** Every story-mode restore of
 the test paths checks out from `restoreAnchor`: the freeze commit until the
-tree merges the default branch, the merge commit after that, and the freeze
-commit again after a fresh pass resets the tree and drops the merge with it. A
-ship-stage `branch-update` re-anchors exactly as the pre-verdict update does,
-and a re-freeze authored on the merged tree takes the anchor back to itself.
+tree merges the default branch, the merge commit after that, and the commit a
+fresh pass was born on after a reset. A ship-stage `branch-update` re-anchors
+exactly as the pre-verdict update does, and a re-freeze authored on the merged
+tree takes the anchor back to itself.
 
 **The slot cap is unchanged.** It stays the concurrency knob for everything
 before the ship. The token serializes the last stretch of each run rather than
@@ -134,10 +134,23 @@ under the test paths; and it carries the default branch's later work, because
 git merged it in. So the restore against it still voids every seat write to a
 test path and reverts nothing else.
 
-A fresh pass is the one thing that takes the anchor back. It resets the tree to
-the pre-implementation commit, and the merge goes with the reset — restoring
-merged tests over a pre-merge tree would mix two trees that never existed
-together. The pass merges again on its own way to its own verdict.
+A fresh pass resets the tree, and the anchor follows the reset. A pass reset to
+the pre-implementation commit drops the merge with it and anchors on the freeze
+again — restoring merged tests over a pre-merge tree would mix two trees that
+never existed together — and it merges again on its own way to its own verdict.
+
+A merge-born pass is reset onto the updated default branch itself, because that
+is where the conflict it was called for dissolves, and there no sha the run
+holds names the tree it needs: the freeze commit reverts everything the branch
+advanced under the test paths, and the branch carries no frozen suite. So the
+pass composes one. It carries the suite commit's own test-path files onto the
+reset tree — the files the freeze changed since the two trees last shared a
+commit, and not the whole of the test paths — commits that, and stamps the
+commit on its `fresh-pass`. The commit carries both halves for the reason the
+merge commit does, and every restore behind it answers to the tree the
+candidate ships onto. Without it the pass reverts the branch's test paths from
+its own birth to its next update, which is the same silent reversion one stage
+further on.
 
 ## Why the holder keeps the token through a repair
 

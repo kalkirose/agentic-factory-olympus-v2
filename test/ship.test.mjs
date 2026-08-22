@@ -2164,6 +2164,77 @@ test('the verdict behind an update judges main\'s version of a test path the run
   assert.equal(gitSync(['show', 'main:tests/shipped.test.mjs'], fx.origin), shippedTest(2));
 });
 
+test('a merge-born fresh pass carries the frozen suite onto main and reverts nothing', async (t) => {
+  const fx = shipFixture(t, {
+    files: { 'src/shipped.mjs': SHIPPED_SRC, 'tests/shipped.test.mjs': shippedTest(1) },
+    seats: {
+      dev: ({ prompt }) => {
+        if (prompt.includes('textual conflicts')) return { exitCode: 1 }; // the round fails
+        return { files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } };
+      },
+      // The reverting shape renders a red here; the seat is what lets it
+      // render instead of parking on a missing fixture behavior.
+      'verdict-triage': () => ({
+        report: {
+          findings: [
+            {
+              class: 'harness',
+              layers: ['unit'],
+              summary: 'the suite carry reverted a merged test path',
+              evidence: 'the fixture asserts this never runs',
+            },
+          ],
+          persisting: [],
+          summary: 'one finding',
+        },
+      }),
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  fx.forge.state.conflictMode = true;
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  // main moves under the request in two ways at once: a source file this run
+  // is in conflict with, and a test path it neither owns nor names.
+  commitTree(
+    fx.origin,
+    {
+      'src/feature.mjs': ALT_FEATURE,
+      'src/shipped.mjs': SHIPPED_SRC_NEXT,
+      'tests/shipped.test.mjs': shippedTest(2),
+    },
+    'conflicting main work beside a shipped test',
+  );
+  const fresh = await waitEvent(fx.paths, runId, (e) => e.event === 'fresh-pass', 'fresh-pass');
+  assert.equal(fresh.trigger, 'merge-conflict');
+  // The pass is born on updated main, so no sha the run already holds names
+  // its tree: it composes one, and that is the anchor from here.
+  assert.equal(typeof fresh.sha, 'string');
+  const untilFresh = readEvents(runLedgerPath(fx.paths, runId)).filter((e) => e.seq <= fresh.seq);
+  assert.equal(restoreAnchor(untilFresh), fresh.sha);
+  // Carried onto main it is green. Restored onto main it would hold the
+  // launch-base test beside the source main advanced, and go red on work that
+  // shipped before this run.
+  const render = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'verdict-rendered' && e.seq > fresh.seq,
+    'the fresh pass verdict',
+  );
+  assert.equal(render.verdict, 'green');
+  assert.ok(!fx.calls.some((c) => c.seat === 'verdict-triage'));
+  fx.forge.state.autoChecks = () => [green()];
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // Both halves shipped: the conflict dissolved on the new base, the frozen
+  // suite came with it, and the test path the run does not own is still the
+  // version main shipped.
+  assert.equal(gitSync(['show', 'main:src/feature.mjs'], fx.origin), GOOD_FEATURE);
+  assert.equal(gitSync(['show', 'main:tests/feature.test.mjs'], fx.origin), STRONG_TEST);
+  assert.equal(gitSync(['show', 'main:tests/shipped.test.mjs'], fx.origin), shippedTest(2));
+  assert.equal(gitSync(['show', 'main:src/shipped.mjs'], fx.origin), SHIPPED_SRC_NEXT);
+});
+
 test('the restore at the merged anchor keeps main\'s test paths and drops the seat\'s own writes', async (t) => {
   const root = tempDir();
   t.after(() => removeDir(root));
@@ -2233,12 +2304,24 @@ test('the restore anchor follows the tree: the freeze, then the merge, then the 
   const refreeze = { event: 're-freeze', sha: 'r'.repeat(40) };
   assert.equal(restoreAnchor([freeze, merged, refreeze]), refreeze.sha);
   assert.equal(restoreAnchor([freeze, merged, refreeze, merged]), merged.toSha);
-  // A fresh pass resets the tree to the pre-implementation commit and drops
-  // the merge with it; the anchor goes back to the suite it carries forward.
+  // A fresh pass anchors on the tree it was born on. A pass reset to the
+  // pre-implementation commit drops the merge with it, and its stamp names the
+  // suite it carried forward; a pass from a ledger written before the stamp
+  // existed falls back to the same commit, which is where its restores went.
+  const carried = { event: 'fresh-pass', pass: 2, sha: freeze.sha };
+  assert.equal(restoreAnchor([freeze, merged, carried]), freeze.sha);
   assert.equal(restoreAnchor([freeze, merged, { event: 'fresh-pass', pass: 2 }]), freeze.sha);
   assert.equal(
     restoreAnchor([freeze, merged, refreeze, { event: 'fresh-pass', pass: 2 }]),
     refreeze.sha,
+  );
+  // A merge-born pass is born on the updated default branch, and the commit it
+  // composes there carries both halves; nothing the run already held does.
+  const born = { event: 'fresh-pass', pass: 2, sha: 'c'.repeat(40) };
+  assert.equal(restoreAnchor([freeze, born]), born.sha);
+  assert.equal(
+    restoreAnchor([freeze, born, { event: 'branch-update', toSha: 'd'.repeat(40) }]),
+    'd'.repeat(40),
   );
 });
 

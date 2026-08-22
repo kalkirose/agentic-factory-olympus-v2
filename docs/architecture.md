@@ -348,10 +348,13 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   falls through to the ship-stage update.
 - **The restore anchor** (ADR-0033) is the sha every story-mode restore of the
   test paths checks out from: the freeze commit until the tree merges the
-  default branch, the merge commit after that, and the freeze commit again
-  after a fresh pass resets the tree. The restore covers the whole of the test
-  paths, so the anchor decides the content of every test-path file the run
-  never wrote, and that content belongs to the tree the request lands on.
+  default branch, the merge commit after that, and the commit a fresh pass was
+  born on after a reset — the freeze again for a pass reset to the
+  pre-implementation tree, and for a merge-born pass the commit that carried
+  the frozen suite onto the updated default branch. The restore covers the
+  whole of the test paths, so the anchor decides the content of every test-path
+  file the run never wrote, and that content belongs to the tree the request
+  lands on.
 - **The ship token** (ADR-0033) is one per project, derived from the run
   ledgers: a run between its acquire or its `pr-opened` and its `merged` or
   its close holds it, and every other open run that stamped a wait is in the

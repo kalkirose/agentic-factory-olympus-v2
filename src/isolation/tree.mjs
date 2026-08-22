@@ -101,6 +101,51 @@ export async function restorePaths(tree, sha, entries, { except = [] } = {}) {
 }
 
 /**
+ * Carries one commit's version of a path set onto the tree as it stands: the
+ * files `sha` changed since it last shared a commit with HEAD, and only those.
+ *
+ * A restore answers "what did `sha` hold?" for every path under the entries,
+ * so it decides the content of files `sha` never touched. Where the tree is on
+ * `sha`'s own line of history that is the same answer either way. Where it is
+ * not — a tree reset onto a default branch that moved under it — the restore
+ * reverts everything that branch advanced under the entries, silently and over
+ * source files the reset left current (ADR-0033). So this carries the
+ * difference `sha` authored instead of the tree `sha` had: a file `sha` added
+ * or changed takes `sha`'s version, a file `sha` deleted goes, and a file `sha`
+ * never touched keeps the version the tree holds.
+ *
+ * `except` names files the carry leaves alone — the freeze's exclusions
+ * (ADR-0019), exactly as a restore leaves them.
+ *
+ * This composes; it does not void. Untracked files under the entries stay,
+ * because the caller that composes is the one that just reset the tree and has
+ * nothing to void.
+ */
+export async function carryPaths(tree, sha, entries, { except = [] } = {}) {
+  const exempt = new Set((except ?? []).map((file) => file.replaceAll('\\', '/')));
+  const base = (await git(['merge-base', 'HEAD', sha], { cwd: tree })).trim();
+  // `--no-renames` keeps every record two fields wide: a rename reads as the
+  // deletion and the addition it is, and the parse below stays a pair walk.
+  const out = await git(['diff', '--name-status', '--no-renames', '-z', base, sha], { cwd: tree });
+  const fields = out.split('\0').filter((field) => field.length > 0);
+  const take = [];
+  const drop = [];
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    const file = fields[i + 1];
+    if (exempt.has(file)) continue;
+    if (!entries.some((entry) => underEntry(file, entry))) continue;
+    (fields[i] === 'D' ? drop : take).push(file);
+  }
+  if (take.length > 0) {
+    // `:(literal)` for the same reason the exclusions carry it: a bare
+    // pathspec is wildmatched, and a file whose name holds `[` would reach
+    // its siblings.
+    await git(['checkout', sha, '--', ...take.map((file) => `:(literal)${file}`)], { cwd: tree });
+  }
+  for (const file of drop) rmSync(longPath(join(tree, file)), { force: true });
+}
+
+/**
  * The working tree's full divergence from HEAD as a patch, new files
  * included, truncated to `limit` characters. Evidence for suite amendment
  * rounds; the tree is disposable, so staging new files is fine.
