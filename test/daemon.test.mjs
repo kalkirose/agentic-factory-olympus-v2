@@ -326,6 +326,81 @@ test('a command another drain already claimed is not refused', async (t) => {
   assert.equal(daemon.running, true);
 });
 
+// A park is answered once. Two operator sessions answered the same parks on
+// 2026-08-21/22, and the record has to say that one of them decided it and the
+// other arrived late — not that the park was answered twice, and not that a
+// stamp was rewritten on the way through the drain.
+test('a park takes one answer; the second session is refused and named', async (t) => {
+  const home = tempDir();
+  // The park is released and the stage behind it holds, so the run is working
+  // rather than closed when the second answer lands: the refusal is the park's
+  // and not the run's.
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  writeFileSync(
+    join(home, 'instance.json'),
+    JSON.stringify({ version: 1, projects: { proj: { repoUrl: 'unused' } } }) + '\n',
+  );
+  const daemon = new Daemon(home, {
+    lanes: {
+      story: {
+        stages: ['decide', 'finish'],
+        handlers: {
+          decide: (ctx) =>
+            ctx.lastAnswer
+              ? { next: 'finish' }
+              : {
+                  park: {
+                    type: 'provisioning-gate',
+                    question: 'Create the deploy token?',
+                    options: ['created'],
+                  },
+                },
+          finish: async () => {
+            await held;
+            return { close: { state: 'shipped' } };
+          },
+        },
+      },
+    },
+  });
+  t.after(async () => {
+    release();
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  const paths = homePaths(home);
+  daemon.engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+  await waitFor(() => readEvents(runLedgerPath(paths, 'r1')).some((e) => e.event === 'park'), {
+    label: 'the park',
+  });
+
+  const sessions = ['console:op:aaaa1111', 'console:op:bbbb2222'];
+  for (const [index, actor] of sessions.entries()) {
+    writeControl(home, { command: 'answer', actor, runId: 'r1', option: 'created' }, `a${index}`);
+  }
+  await daemon.drainControlInbox();
+
+  const answers = readEvents(runLedgerPath(paths, 'r1')).filter((e) => e.event === 'answer');
+  assert.equal(answers.length, 1);
+  // Whichever session the drain reached first owns the answer, and the ledger
+  // carries its stamp whole — nothing on the way in shortens or rewrites it.
+  assert.ok(sessions.includes(answers[0].actor), answers[0].actor);
+  const late = sessions.find((a) => a !== answers[0].actor);
+  const refusals = rejectionReasons(home);
+  assert.equal(refusals.length, 1);
+  assert.match(refusals[0].reason, /run r1 is not parked/);
+
+  // The late session's command is claimed and answered nothing; the record of
+  // who decided the park names one session, and it is not that one.
+  assert.ok(!readEvents(runLedgerPath(paths, 'r1')).some((e) => e.actor === late));
+  release();
+  await waitFor(() => !daemon.engine.runs.has('r1'), { label: 'the run to close' });
+});
+
 test('control files from before start are archived as stale', async (t) => {
   const home = tempDir();
   t.after(() => removeDir(home));

@@ -88,6 +88,24 @@ shapes:
   the daemon home. The `olympus-console` skill wraps the CLI for a Claude
   session and covers the live instance-config edit (edit `instance.json`,
   verify the `config-changed` stamp).
+- **A console command names its session, not only its login.** The actor
+  stamp is `console:<user>:<session>`. The session half is derived at
+  invocation, in this order: the `OLYMPUS_CONSOLE_ID` label the operator set
+  (used as written, reduced to one short word); the terminal's own session
+  variable (`WT_SESSION`, `TERM_SESSION_ID`), digested to eight hex
+  characters; the parent process id, digested the same way. A host that
+  offers none of them stamps `console:<user>` — the identity is best effort
+  and never a refusal. Every queued command prints the stamp it wrote. The
+  control channel, the drain and the ledgers carry the string through
+  unchanged: the actor is required to be a non-empty string and is validated
+  no further, so a stamp is never shortened or rewritten between the console
+  and the record.
+- **A park takes exactly one answer.** The engine refuses an answer to a run
+  that is not parked, and the daemon refuses a second answer to an instance
+  park by the paired stamp already in the ledger. Both refusals reach the
+  console as the reason file its command earned. Nothing about the identity
+  stamp changes this: a second session can still act, and the record now says
+  which one did.
 - **Control intake: publish by rename, read twice, claim by rename.** A
   command is written under a temporary name in the inbox directory itself and
   renamed to its `.json` name, and the intake lists `.json` names only: the
@@ -126,6 +144,28 @@ the catalog has no park for, and "no default answers" forbids the daemon
 from deciding the failure differently. The console relaunches with one
 command; the frontier render names the card `spent` so the decision is
 visible.
+
+## Why the session id is derived and never configured
+
+One login runs more than one console. On 2026-08-21/22 a second operator
+session answered three parks under the same `console:<user>` stamp as the
+session driving the work; one of those answers decided a park on its own, and
+the ledger held nothing that told the two apart. An identity that needs setup
+is an identity nobody has on the night it is needed, so the console derives
+one from what the environment already carries and takes an explicit label only
+as an override.
+
+The derived id has two failure modes, both cured by the override. An operating
+system reuses process ids, so a shell started after another one exited can
+inherit its id: two sessions, one stamp, separated in time. And where the
+terminal sets no session variable, a wrapper that spawns a fresh process per
+invocation is the parent, so one session stamps a new id per command. Both are
+preferred to the alternatives: a stored id is a file two sessions share, and a
+random id per invocation names no session at all.
+
+The stamp is an attribution and never a permission. Nothing in the harness
+authorises by actor, and nothing should: the record says who acted, and who
+may act is the operator's discipline.
 
 ## Why the intake reads a file twice
 
@@ -174,6 +214,14 @@ intake claims a name only when a rename put it there — which is stricter and
 costs every ad-hoc writer its route in. Trigger: a refusal whose reason is a
 parse failure on a file that parses when it is read again. Cost: low both
 ways.
+
+If the derived session id proves too weak to attribute by (pid reuse, or a
+wrapper on a host with no session variable), the console can write a small id
+file into the daemon home on first use, keyed by the terminal, and read it
+afterwards. Trigger: a ledger where two answers under one stamp turn out to be
+two sessions, or one session spread over several stamps. Cost: low, one file
+and a read; the price is state a console must own, which is what the derived
+id avoids today.
 
 If the `spent` rule starves real throughput (transient failures needing
 routine relaunch), add an explicit console `relaunch` that clears the spent

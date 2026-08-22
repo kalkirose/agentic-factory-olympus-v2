@@ -1,5 +1,6 @@
 // Console surface: the status render (loud first, then queue), the full
-// queue render, and the olympusctl command path into the control inbox.
+// queue render, the session identity every command stamps, and the olympusctl
+// command path into the control inbox.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
@@ -8,6 +9,7 @@ import { join } from 'node:path';
 import { scaffoldHome } from '../src/daemon/home.mjs';
 import { openRunStore, openInstanceStore } from '../src/telemetry/stores.mjs';
 import { renderStatus, renderQueue } from '../src/console/status.mjs';
+import { consoleActor } from '../src/console/identity.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
 function seededHome(t) {
@@ -104,6 +106,53 @@ test('the queue render is answerable from the record alone', (t) => {
   assert.match(rendered, /olympusctl answer --run r1 --option <option> \| --text "<answer>"/);
 });
 
+// -- the session behind a command --------------------------------------------
+//
+// Two operator sessions under one login used to stamp one name, and a ledger
+// that gives both the same name cannot say which of them answered a park.
+
+test('two sessions on one login stamp two names, and one session stamps one', () => {
+  const session = { username: 'op', env: {}, ppid: 4100 };
+  // Same shell, second command: the same stamp, so a reader can follow one
+  // session through the ledger.
+  assert.equal(consoleActor(session), consoleActor(session));
+  assert.notEqual(consoleActor(session), consoleActor({ ...session, ppid: 4200 }));
+  assert.match(consoleActor(session), /^console:op:[0-9a-f]{8}$/);
+
+  // The terminal's own session variable outranks the parent, because every
+  // child of that window inherits it: a wrapper process between the shell and
+  // the console changes the parent and not the session.
+  const window = { username: 'op', env: { WT_SESSION: 'ac3f-1' }, ppid: 4100 };
+  assert.equal(consoleActor(window), consoleActor({ ...window, ppid: 9999 }));
+  assert.notEqual(consoleActor(window), consoleActor({ ...window, env: { WT_SESSION: 'ac3f-2' } }));
+  assert.notEqual(
+    consoleActor(window),
+    consoleActor({ ...window, env: { TERM_SESSION_ID: 'ac3f-1' } }),
+  );
+});
+
+test('an operator names a session, and an unnameable one keeps the old stamp', () => {
+  const base = { username: 'op', env: { WT_SESSION: 'ac3f-1' }, ppid: 4100 };
+  // The override outranks every derivation and reads as written: a stamp an
+  // operator chose is a stamp an operator can recognise.
+  assert.equal(consoleActor({ ...base, env: { ...base.env, OLYMPUS_CONSOLE_ID: 'lane-a' } }),
+    'console:op:lane-a');
+  // A stamp is read by eye and matched by machine, so a label carries a short
+  // word and nothing else; a label with nothing left of it counts as unset.
+  assert.equal(
+    consoleActor({ ...base, env: { ...base.env, OLYMPUS_CONSOLE_ID: 'lane a:2' } }),
+    'console:op:lanea2',
+  );
+  assert.equal(
+    consoleActor({ ...base, env: { ...base.env, OLYMPUS_CONSOLE_ID: '   ' } }),
+    consoleActor(base),
+  );
+
+  // No session variable and no parent to name: the old stamp, never a refusal
+  // and never an invented identity.
+  assert.equal(consoleActor({ username: 'op', env: {}, ppid: 0 }), 'console:op');
+});
+
 test('olympusctl writes control commands and renders status', (t) => {
   const { root, paths } = seededHome(t);
   const bin = join(import.meta.dirname, '..', 'bin', 'olympusctl.mjs');
@@ -133,7 +182,41 @@ test('olympusctl writes control commands and renders status', (t) => {
   );
   assert.equal(pause.command, 'pause');
   assert.equal(pause.project, 'alpha');
-  assert.match(pause.actor, /^console:/);
+  // No --actor: the console derives the session and stamps it whole.
+  assert.match(pause.actor, /^console:.+:.+$/);
+});
+
+test('the console stamps its session, and says which one it stamped', (t) => {
+  const { root, paths } = seededHome(t);
+  const bin = join(import.meta.dirname, '..', 'bin', 'olympusctl.mjs');
+  const home = join(root, 'home');
+  const arm = (env) =>
+    execFileSync(process.execPath, [bin, 'arm', '--home', home, '--project', 'alpha'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      env: { ...process.env, ...env },
+    });
+
+  // One session, two commands, one stamp — with zero setup on the way in.
+  const first = arm({});
+  const second = arm({});
+  const stamps = () =>
+    readdirSync(paths.control)
+      .filter((f) => f.startsWith('arm'))
+      .map((f) => JSON.parse(readFileSync(join(paths.control, f), 'utf8')).actor);
+  const [a, b] = stamps();
+  assert.equal(a, b);
+  assert.match(a, /^console:.+:.+$/);
+  // The stamp is derived, so the console prints the one it wrote: this line is
+  // where an operator reads the id the ledger will carry.
+  assert.ok(first.includes(`as ${a}`), first);
+  assert.ok(second.includes(`as ${a}`), second);
+
+  // A second session on the same login is a different stamp.
+  arm({ OLYMPUS_CONSOLE_ID: 'lane-b' });
+  const all = new Set(stamps());
+  assert.equal(all.size, 2);
+  assert.ok(all.has('console:' + a.split(':')[1] + ':lane-b'));
 });
 
 // The name the daemon claims is created by the rename and never by a write,

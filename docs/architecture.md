@@ -429,6 +429,14 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   which carries the fix it stands on (ADR-0032).
 - **Escalation queue**: always open, answerable from the record alone,
   presented FIFO with roadmap-order tiebreak, answered in any order.
+- **One park, one answer, and the record names the session that gave it.** A
+  console stamps `console:<user>:<session>`, where the session half is derived
+  at invocation (`OLYMPUS_CONSOLE_ID` when the operator set one, else the
+  terminal's session variable, else the parent shell) and falls back to the
+  bare login when a host offers nothing. The channel carries the stamp through
+  unchanged. The first answer to a park wins; a second is refused with the
+  reason file its command earned. The identity attributes an answer, it never
+  authorises one (ADR-0009).
 - **Streams.** Queued: park events, tripwire breaches, stage overruns. Loud: liveness
   violation, gate-integrity defect, diff-policy violation, red-merge breach,
   factory starvation, owed repairs, budget breach. Consoles render loud first,

@@ -18,7 +18,10 @@
 //                       --fix <ref> [--note <text>]
 //   olympusctl fixed    --home <dir> --escape <n> --evidence <text>
 //                       [--note <text>]
-// --home falls back to OLYMPUSD_HOME; --actor defaults to console:<os user>.
+// --home falls back to OLYMPUSD_HOME; --actor defaults to
+// console:<os user>:<session>, where the session half separates two operator
+// sessions on one login (src/console/identity.mjs; OLYMPUS_CONSOLE_ID names
+// one). Every queued command prints the stamp it wrote.
 // Every park states the answer forms it takes, and `queue` prints them per
 // item: the options it offers, the free-text slot it wants, or both. Every
 // park of a run also takes --option abandon, which closes the run on the
@@ -42,9 +45,9 @@
 // --resume-from names a prior story run whose freeze the new run inherits:
 // story lane only, and the prior run supplies the card, so --card is refused
 // beside it.
-import { userInfo } from 'node:os';
 import { homePaths } from '../src/daemon/home.mjs';
 import { writeControlCommand } from '../src/daemon/control.mjs';
+import { consoleActor } from '../src/console/identity.mjs';
 import {
   renderStatus,
   renderQueue,
@@ -106,7 +109,10 @@ function escapeSeq(value) {
 
 function queueCommand(paths, command) {
   const file = writeControlCommand(paths, command);
-  console.log(`queued: ${file}`);
+  // The stamp is printed because it is derived: this is where an operator
+  // reads which session the ledger will name, and it is the id to quote when
+  // two sessions have to be told apart afterwards.
+  console.log(`queued: ${file} as ${command.actor}`);
   console.log(`the daemon claims it into control/done or control/rejected (reason file)`);
 }
 
@@ -131,7 +137,7 @@ if (!command) {
 }
 if (!opts.home) fail('--home (or OLYMPUSD_HOME) is required');
 const paths = homePaths(opts.home);
-const actor = opts.actor ?? `console:${userInfo().username}`;
+const actor = opts.actor ?? consoleActor();
 
 if (command === 'status') {
   console.log(renderStatus(paths));
