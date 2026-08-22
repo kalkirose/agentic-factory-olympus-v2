@@ -3,11 +3,18 @@
 // ceiling is a guardrail, never a liveness detector: a generous limit that
 // terminates the child and records a seat-failure event on breach.
 //
+// The silence deadline is the one thing here that is a liveness detector, and
+// it detects death rather than slowness: a child that has emitted nothing at
+// all for the deadline is killed, and the seat-failure path takes it from
+// there (ADR-0037). Total elapsed runtime stays unbounded — a seat may think
+// for as long as the work takes — but a stream that has stopped has a ceiling.
+//
 // Stamp semantics:
-//   seat-failure    — the seat failed: nonzero exit, spawn error, or a cost
-//                     ceiling breach. Every one carries a bounded tail of what
-//                     the child last emitted, so the cause is readable from the
-//                     run's own evidence without re-running anything by hand.
+//   seat-failure    — the seat failed: nonzero exit, spawn error, a cost
+//                     ceiling breach, or a silence deadline. Every one carries
+//                     a bounded tail of what the child last emitted, so the
+//                     cause is readable from the run's own evidence without
+//                     re-running anything by hand.
 //   seat-terminated — the orchestrator ended the seat deliberately (run kill,
 //                     daemon stop); not a failure of the seat.
 //
@@ -37,6 +44,19 @@ const STDOUT_TAIL_LINES = 3;
 const STDOUT_LINE_CHARS = 200;
 
 /**
+ * How long a seat child may emit nothing at all before it is taken to be dead.
+ *
+ * The number is read from the ledgers, not chosen: across every archived run
+ * of this instance the longest silence a healthy child ever took was 86
+ * minutes — one `dev` seat holding a single suite command open — and four of
+ * 4593 measured gaps passed 45 minutes. Two hours sits far above the longest
+ * thing a working seat has done and far below the four hours the one dead seat
+ * spent alive and idle before a human noticed it. The instance config moves it
+ * (`seatSilenceMs`) for a host whose seats work differently.
+ */
+export const SEAT_SILENCE_MS = 120 * 60 * 1000;
+
+/**
  * Spawns and supervises one seat child.
  *
  * `parseLine` adapts a child's stdout dialect: it maps one line to
@@ -45,12 +65,14 @@ const STDOUT_LINE_CHARS = 200;
  * model, session id). `spawnFields` adds caller fields (model, effort,
  * attempt) to the seat-spawned stamp. `secretEnv` is the instance config's
  * secret name patterns, stripped from every seat that does not execute the
- * suite.
+ * suite. `silenceMs` is the no-output deadline.
  * @param {import('../telemetry/stores.mjs').TelemetryStore} store
  * @param {{seat: string, cmd: string, args?: string[], cwd?: string,
  *   env?: object, secretEnv?: string[], costCeiling?: number,
+ *   silenceMs?: number,
  *   parseLine?: (line: string) => object|null, spawnFields?: object}} opts
- * @returns {{done: Promise<object>, terminate: (reason: string) => void}}
+ * @returns {{done: Promise<object>, terminate: (reason: string) => void,
+ *   seat: string}}
  */
 export function superviseSeat(
   store,
@@ -62,6 +84,7 @@ export function superviseSeat(
     env,
     secretEnv,
     costCeiling,
+    silenceMs = SEAT_SILENCE_MS,
     parseLine = parseProgress,
     spawnFields = {},
   },
@@ -74,6 +97,7 @@ export function superviseSeat(
     actor: 'daemon',
     seat,
     ...(costCeiling != null && { costCeiling }),
+    ...(silenceMs != null && { silenceMs }),
     // The count, never the names: a ledger a reader outside this machine may
     // hold says how much was withheld, not what the machine holds.
     ...(stripped > 0 && { envStripped: stripped }),
@@ -86,7 +110,7 @@ export function superviseSeat(
   } catch (error) {
     const failure = { failed: true, reason: 'spawn', error: error.message, cost: 0, meta: {} };
     store.append('seat-failure', { actor: 'daemon', seat, reason: 'spawn', error: error.message });
-    return { done: Promise.resolve(failure), terminate() {} };
+    return { done: Promise.resolve(failure), terminate() {}, seat };
   }
   const child = spawn(spec.file, spec.args, {
     cwd,
@@ -102,10 +126,32 @@ export function superviseSeat(
   let buffer = '';
   let terminatedReason = null;
   let ceilingHit = false;
+  let silenceHit = false;
   let stderrTail = '';
   const stdoutTail = [];
   const meta = {};
+  // The deadline runs on the raw streams rather than on the progress stamps,
+  // so every frame the child writes counts as a sign of life — a tool call, a
+  // system line, a warning on stderr — and only a child that has written
+  // nothing at all reaches it.
+  let silenceTimer = null;
+  const stopSilence = () => {
+    if (silenceTimer !== null) clearTimeout(silenceTimer);
+    silenceTimer = null;
+  };
+  const armSilence = () => {
+    stopSilence();
+    if (silenceMs == null) return;
+    silenceTimer = setTimeout(() => {
+      if (terminatedReason || ceilingHit || silenceHit) return;
+      silenceHit = true;
+      void terminateTree(child);
+    }, silenceMs);
+    silenceTimer.unref?.();
+  };
+  armSilence();
   child.stdout.on('data', (chunk) => {
+    armSilence();
     buffer += chunk;
     const lines = buffer.split('\n');
     buffer = lines.pop();
@@ -140,6 +186,7 @@ export function superviseSeat(
   // The stream is consumed, not discarded: an unread pipe fills and stalls the
   // child, and the last of it is the evidence a failed seat leaves behind.
   child.stderr.on('data', (chunk) => {
+    armSilence();
     stderrTail = clipHead(stderrTail + chunk, STDERR_TAIL_CHARS);
   });
   let settled = false;
@@ -149,6 +196,7 @@ export function superviseSeat(
     child.on('close', (code, signal) => {
       if (settled) return;
       settled = true;
+      stopSilence();
       const tail = evidence(stderrTail, stdoutTail);
       if (terminatedReason) {
         store.append('seat-terminated', { actor: 'daemon', seat, reason: terminatedReason, cost });
@@ -163,6 +211,19 @@ export function superviseSeat(
           ...tail,
         });
         resolve({ failed: true, reason: 'cost-ceiling', cost, meta, ...tail });
+      } else if (silenceHit) {
+        // A distinct reason, because this is a class of its own and somebody
+        // has to be able to count it: the eval seat reads the ledgers for how
+        // often a seat died rather than finished.
+        store.append('seat-failure', {
+          actor: 'daemon',
+          seat,
+          reason: 'silence',
+          silenceMs,
+          cost,
+          ...tail,
+        });
+        resolve({ failed: true, reason: 'silence', silenceMs, cost, meta, ...tail });
       } else if (meta.unavailable) {
         // The exit code is not consulted. The same rejection was measured
         // exiting 0 and 1 depending on how the CLI was invoked; the stream
@@ -195,6 +256,7 @@ export function superviseSeat(
     child.on('error', (error) => {
       if (settled) return;
       settled = true;
+      stopSilence();
       const tail = evidence(stderrTail, stdoutTail);
       store.append('seat-failure', {
         actor: 'daemon',
@@ -208,9 +270,11 @@ export function superviseSeat(
   });
   return {
     done,
+    seat,
     terminate(reason) {
-      if (terminatedReason || ceilingHit) return;
+      if (terminatedReason || ceilingHit || silenceHit) return;
       terminatedReason = reason;
+      stopSilence();
       // The reason is recorded before the kill lands, so the stamp the child's
       // close writes is the same one whether the tree kill is quick or slow.
       void terminateTree(child);

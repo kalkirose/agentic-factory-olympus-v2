@@ -892,13 +892,15 @@ export class Daemon {
 
   /**
    * The machine-scoped seat options, read fresh per dispatch so a live config
-   * edit reaches the next seat: which tool the seat runs as, and which
-   * environment names hold this host's credentials.
+   * edit reaches the next seat: which tool the seat runs as, which environment
+   * names hold this host's credentials, and how long a child of this host may
+   * say nothing before it is taken to be dead.
    */
   seatDefaults() {
     return {
       claudeCommand: this.config.claudeCommand,
       ...(this.config.secretEnv !== undefined && { secretEnv: this.config.secretEnv }),
+      ...(this.config.seatSilenceMs !== undefined && { silenceMs: this.config.seatSilenceMs }),
     };
   }
 

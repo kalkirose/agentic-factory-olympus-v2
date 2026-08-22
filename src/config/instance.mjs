@@ -3,6 +3,7 @@
 // config when an edit is invalid. Never versioned in a project repo.
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import { SEAT_SILENCE_MS } from '../engine/supervise.mjs';
 
 export const INSTANCE_CONFIG_FILE = 'instance.json';
 
@@ -18,6 +19,8 @@ export function defaultInstanceConfig() {
     claudeCommand: ['claude'],
     // argv that runs the gh CLI on this machine (the forge adapter)
     ghCommand: ['gh'],
+    // how long a seat child may emit nothing before it is taken to be dead
+    seatSilenceMs: SEAT_SILENCE_MS,
     // project name → project entry
     projects: {},
     // notification-stream wiring; consoles read the stream indexes directly
@@ -106,6 +109,14 @@ export function validateInstanceConfig(config) {
           err(`secretEnv.${pattern}`, 'may hold one `*`, at the start or the end');
         }
       }
+    }
+  }
+  // A machine may move the deadline; it may not remove it. An unattended
+  // factory with no silence ceiling is the condition this exists for, so there
+  // is no value that turns it off (ADR-0037).
+  if (config.seatSilenceMs !== undefined) {
+    if (!Number.isInteger(config.seatSilenceMs) || config.seatSilenceMs < 1) {
+      err('seatSilenceMs', 'must be an integer >= 1');
     }
   }
   for (const key of ['composeCommand', 'claudeCommand', 'ghCommand']) {

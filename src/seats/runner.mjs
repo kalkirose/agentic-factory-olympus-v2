@@ -4,17 +4,18 @@
 // then stamp seat-report or seat-failure. The runner never throws on a seat
 // outcome — the lane handler reads the result and decides the route.
 //
-// Crash retries: a child that dies without a verdict — a nonzero exit, which
-// is the transient class (an API drop, a killed connection) — is re-dispatched
-// in place on the prompt in force, up to CRASH_RETRIES children per seat
-// session. A crashed child that named a session id is resumed into that
-// session, so the work it did before the drop is not re-bought; without one
-// there is nothing to resume into and the retry is a fresh dispatch. Every
-// crashed dispatch stamps its own seat-failure with the evidence before the
-// next spawn, and the retry spawn carries `retry` with the shape it took, so
-// the ledger reads spawn → failure → spawn with nothing silent. Deliberate
-// termination, a cost-ceiling breach, and a spawn refusal are never retried:
-// those causes do not change on a second try.
+// Crash retries: a child that dies without a verdict — a nonzero exit or a
+// silence deadline, which is the transient class (an API drop, a killed
+// connection, a stream that stopped) — is re-dispatched in place on the prompt
+// in force, up to CRASH_RETRIES children per seat session. A crashed child
+// that named a session id is resumed into that session, so the work it did
+// before the drop is not re-bought; without one there is nothing to resume
+// into and the retry is a fresh dispatch. Every crashed dispatch stamps its
+// own seat-failure with the evidence before the next spawn, and the retry
+// spawn carries `retry` with the shape it took, so the ledger reads spawn →
+// failure → spawn with nothing silent. Deliberate termination, a cost-ceiling
+// breach, and a spawn refusal are never retried: those causes do not change on
+// a second try.
 //
 // Model integrity: a substitute dispatch stamps `model-substituted` before
 // the spawn; a transcript model that differs from the requested model is a
@@ -50,6 +51,14 @@ const ACTOR = 'daemon';
 export const CRASH_RETRIES = 3;
 
 /**
+ * The failure reasons a fresh child may answer. Both are a child that stopped
+ * without a verdict and neither says anything about the work: an exit code the
+ * CLI never chose, and a stream that went silent long enough to call the child
+ * dead (ADR-0037).
+ */
+const RETRYABLE = new Set(['exit', 'silence']);
+
+/**
  * Runs one seat session end to end.
  * @param {import('../telemetry/stores.mjs').TelemetryStore} store
  * @param {{seat: string, roleBlock: string, reportPath: string, schema: object,
@@ -57,7 +66,7 @@ export const CRASH_RETRIES = 3;
  *   substitute?: {model: string, reason: string},
  *   semaphores?: import('./semaphore.mjs').ModelSemaphores,
  *   cwd?: string, env?: object, secretEnv?: string[], costCeiling?: number,
- *   claudeCommand?: string[], denyTools?: string[],
+ *   silenceMs?: number, claudeCommand?: string[], denyTools?: string[],
  *   commandFor?: (opts: object) => {cmd: string, args: string[], parseLine?: Function},
  *   supervise?: (opts: object) => Promise<object>}} opts
  *   commandFor substitutes the claude argv builder (tests, fixture seats).
@@ -78,6 +87,7 @@ export async function runSeat(store, opts) {
     env,
     secretEnv,
     costCeiling,
+    silenceMs,
     claudeCommand,
     denyTools,
     commandFor = claudeSeatCommand,
@@ -173,6 +183,7 @@ export async function runSeat(store, opts) {
         env,
         secretEnv,
         costCeiling,
+        ...(silenceMs !== undefined && { silenceMs }),
         ...(spec.parseLine && { parseLine: spec.parseLine }),
         spawnFields: {
           model,
@@ -193,13 +204,13 @@ export async function runSeat(store, opts) {
     };
     // The crash-retry loop reads `model` and `prompt` from the enclosing
     // scope, so a retry after a degrade or a corrective runs on whatever is
-    // now in force. Only reason `exit` qualifies: `terminated` is deliberate,
-    // `cost-ceiling` and `spawn` do not change on a second try, and an
-    // unavailable model has its own route below.
+    // now in force. Only `exit` and `silence` qualify: `terminated` is
+    // deliberate, `cost-ceiling` and `spawn` do not change on a second try,
+    // and an unavailable model has its own route below.
     let crashRetries = 0;
     const dispatchWithRetries = async (attempt) => {
       let result = await dispatch(attempt);
-      while (result.failed === true && result.reason === 'exit' && crashRetries < CRASH_RETRIES) {
+      while (result.failed === true && RETRYABLE.has(result.reason) && crashRetries < CRASH_RETRIES) {
         crashRetries++;
         // A session id the dying child named is the work it had already
         // bought: every finding it reached, every file it read. Resuming

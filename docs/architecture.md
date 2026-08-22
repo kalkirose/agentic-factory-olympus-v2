@@ -113,8 +113,10 @@ Two levels; the ownership test decides placement.
 
 - **Instance config** — daemon home, machine-scoped: model semaphores, paths,
   ledger home, notification-stream wiring, the push `notifier` target, slot
-  caps keyed by project, and the name patterns this host holds credentials in
-  (`secretEnv`). The console edits it live; no PR.
+  caps keyed by project, the name patterns this host holds credentials in
+  (`secretEnv`), and how long a seat child of this host may emit nothing
+  before it is taken to be dead (`seatSilenceMs`). The console edits it live;
+  no PR.
 - **Project config** — one JSON versioned in the project repo: repo facts,
   commands, gates, conventions, lane specifics, per-lane budget thresholds,
   the external credentials the work needs with the read-only probe that
@@ -523,6 +525,12 @@ Four layers, no timeouts:
    operator (ADR-0034).
 4. A breach alerts, never auto-kills; a generous per-seat cost ceiling
    terminates as a guardrail and records a seat-failure event.
+5. The silence deadline: a seat child that emits nothing at all — no frame on
+   stdout, none on stderr — for `seatSilenceMs` (two hours by default,
+   instance config) is killed, and the close stamps `seat-failure` on reason
+   `silence` with the deadline in force. The runner treats it as a crash, so
+   the seat re-dispatches into the session the dead child named. Total elapsed
+   runtime stays unbounded: only silence has a ceiling (ADR-0037).
 
 ## Frontier auto-launch
 

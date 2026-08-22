@@ -815,6 +815,77 @@ test('a fourth crash ends the session with the retry budget spent', async (t) =>
   assert.ok(!events.some((e) => e.event === 'seat-report'));
 });
 
+// A seat child that names its session and then says nothing ever again — the
+// shape a repair seat took for four hours before a human killed it by hand.
+function silentCommand({ sessionId } = {}) {
+  const line = JSON.stringify(JSON.stringify({ meta: { sessionId } }) + '\n');
+  const script = [
+    ...(sessionId ? [`require('fs').writeSync(1, ${line});`] : []),
+    'setInterval(() => {}, 1000);',
+  ].join('\n');
+  return { cmd: process.execPath, args: ['-e', script], parseLine: fixtureParse };
+}
+
+test('a seat that goes silent dies at the deadline and the session is re-dispatched', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev');
+  const calls = [];
+  const result = await runSeat(store, {
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    silenceMs: 600,
+    commandFor: (opts) => {
+      calls.push(opts);
+      return calls.length === 1
+        ? silentCommand({ sessionId: 's1' })
+        : fixtureCommand({ report: { verdict: 'pass' }, reportPath });
+    },
+  });
+  // The kill is a crash, and a crash buys a fresh child: the work the silent
+  // one had already bought is resumed rather than paid for twice.
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].resume, 's1');
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  const failure = events.find((e) => e.event === 'seat-failure');
+  assert.equal(failure.reason, 'silence');
+  assert.equal(failure.silenceMs, 600);
+  const spawned = events.filter((e) => e.event === 'seat-spawned');
+  assert.equal(spawned.length, 2);
+  assert.equal(spawned[1].retry, 1);
+  assert.equal(spawned[1].resumed, true);
+  // spawn → failure → spawn, with nothing silent between them.
+  assert.ok(events.indexOf(failure) > events.indexOf(spawned[0]));
+  assert.ok(events.indexOf(failure) < events.indexOf(spawned[1]));
+});
+
+test('a seat silent through its whole retry allowance ends the session', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev');
+  let calls = 0;
+  const result = await runSeat(store, {
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    silenceMs: 400,
+    commandFor: () => {
+      calls++;
+      return silentCommand();
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'silence');
+  assert.equal(calls, 4);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  const failures = events.filter((e) => e.event === 'seat-failure');
+  assert.equal(failures.length, 4);
+  assert.ok(failures.every((e) => e.reason === 'silence'));
+  assert.ok(!events.some((e) => e.event === 'seat-report'));
+});
+
 test('a deliberate termination and a cost ceiling are never retried', async (t) => {
   const { paths, store } = setup(t);
   const reportPath = runReportPath(paths, 'r1', 'dev');

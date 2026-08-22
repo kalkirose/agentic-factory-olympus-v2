@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { superviseSeat } from '../src/engine/supervise.mjs';
+import { superviseSeat, SEAT_SILENCE_MS } from '../src/engine/supervise.mjs';
 import { openRunStore } from '../src/telemetry/stores.mjs';
 import { scaffoldHome, runLedgerPath } from '../src/daemon/home.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
@@ -155,6 +155,82 @@ test('terminate ends the seat with seat-terminated, not seat-failure', async (t)
   const events = readEvents(runLedgerPath(paths, 'r1'));
   assert.equal(events.find((e) => e.event === 'seat-terminated').reason, 'run-killed');
   assert.ok(!events.some((e) => e.event === 'seat-failure'));
+});
+
+// -- the silence deadline -----------------------------------------------------
+
+// A child that emits `every` ms for `total` ms and then exits clean. The
+// stream is what keeps it alive, so the deadline never reaches it however long
+// the whole run takes.
+function talkingSeat(stream, every, total) {
+  return nodeSeat(
+    `const say = () => require('fs').writeSync(${stream === 'stderr' ? 2 : 1}, '{"cost":1}\\n');
+     say();
+     const t = setInterval(say, ${every});
+     setTimeout(() => { clearInterval(t); process.exit(0); }, ${total});`,
+  );
+}
+
+test('a seat that emits nothing at all is killed at the silence deadline', async (t) => {
+  const { paths, store } = setup(t);
+  const seat = superviseSeat(store, {
+    seat: 'dev-1',
+    silenceMs: 600,
+    ...nodeSeat('setInterval(() => {}, 1000)'),
+  });
+  const result = await seat.done;
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'silence');
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  // The deadline in force rides the spawn stamp, so a reader knows what the
+  // kill answered to.
+  assert.equal(events.find((e) => e.event === 'seat-spawned').silenceMs, 600);
+  const failure = events.find((e) => e.event === 'seat-failure');
+  // A reason of its own: the eval seat counts the seats that died apart from
+  // the seats that failed.
+  assert.equal(failure.reason, 'silence');
+  assert.equal(failure.silenceMs, 600);
+  // Nothing deliberate happened here, so nothing reads as deliberate.
+  assert.ok(!events.some((e) => e.event === 'seat-terminated'));
+});
+
+test('a slow seat that is still emitting outlives the deadline', async (t) => {
+  const { paths, store } = setup(t);
+  const started = Date.now();
+  const seat = superviseSeat(store, {
+    seat: 'dev-1',
+    silenceMs: 1500,
+    ...talkingSeat('stdout', 250, 3000),
+  });
+  const result = await seat.done;
+  // Elapsed runtime is unbounded by doctrine: this child lived twice its own
+  // deadline and the deadline never applied to it.
+  assert.ok(Date.now() - started > 1500);
+  assert.equal(result.failed, false);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  assert.ok(!events.some((e) => e.event === 'seat-failure'));
+});
+
+test('a seat heard only on stderr is a seat that is alive', async (t) => {
+  const { paths, store } = setup(t);
+  const seat = superviseSeat(store, {
+    seat: 'dev-1',
+    silenceMs: 900,
+    ...talkingSeat('stderr', 200, 1800),
+  });
+  const result = await seat.done;
+  assert.equal(result.failed, false);
+  // Not one progress stamp: the deadline reads the raw streams, so a frame
+  // that stamps nothing is still a sign of life.
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  assert.ok(!events.some((e) => e.event === 'seat-progress'));
+  assert.ok(!events.some((e) => e.event === 'seat-failure'));
+});
+
+test('the shipped deadline is generous enough to be about death, not slowness', () => {
+  // The longest silence any healthy child took across the archived runs of the
+  // instance was 86 minutes. The default sits well above it.
+  assert.ok(SEAT_SILENCE_MS >= 90 * 60 * 1000);
 });
 
 test('a spawn error stamps seat-failure on the spawn route', async (t) => {

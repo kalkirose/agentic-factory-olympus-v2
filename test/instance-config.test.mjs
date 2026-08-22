@@ -8,6 +8,7 @@ import {
   withDefaults,
   loadInstanceConfig,
 } from '../src/config/instance.mjs';
+import { SEAT_SILENCE_MS } from '../src/engine/supervise.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
 test('the default config is valid', () => {
@@ -96,6 +97,22 @@ test('secretEnv is optional and holds name patterns the matcher can honor', () =
     validateInstanceConfig({ version: 1, secretEnv: ['PAY_*_KEY', '*PAY*'] }).map((e) => e.path),
     ['secretEnv.PAY_*_KEY', 'secretEnv.*PAY*'],
   );
+});
+
+test('the silence deadline has a default, moves, and does not switch off', () => {
+  // Present by default, unlike the optional sections: an unattended factory
+  // with no silence ceiling is the condition the deadline exists for.
+  assert.equal(defaultInstanceConfig().seatSilenceMs, SEAT_SILENCE_MS);
+  assert.equal(withDefaults({ version: 1 }).seatSilenceMs, SEAT_SILENCE_MS);
+  assert.deepEqual(validateInstanceConfig({ version: 1, seatSilenceMs: 45 * 60000 }), []);
+  assert.equal(withDefaults({ version: 1, seatSilenceMs: 45 * 60000 }).seatSilenceMs, 45 * 60000);
+  for (const bad of [0, -1, null, '45m', 1.5]) {
+    assert.deepEqual(
+      validateInstanceConfig({ version: 1, seatSilenceMs: bad }).map((e) => e.path),
+      ['seatSilenceMs'],
+      `expected ${JSON.stringify(bad)} to be rejected`,
+    );
+  }
 });
 
 test('an invalid file throws with detail', (t) => {
