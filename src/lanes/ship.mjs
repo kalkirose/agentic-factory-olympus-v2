@@ -1,7 +1,7 @@
 // The ship step: the run ends at close-out, not at the green verdict.
 // `shipStep({forgeFor})` supplies the three stages after the verdict —
 // `update` (the ship token, then the branch update that precedes the final
-// verdict), `ship` (PR open with the diff's labels applied and auto-merge
+// verdict), `ship` (PR open carrying the diff's labels, with auto-merge
 // armed, the check watcher, the CI red route, the competing-merge update, the
 // merge round) and `close-out`
 // (red-merge breach conversion, merge-commit checks to terminal, the card
@@ -365,15 +365,25 @@ async function openPr(ctx, base) {
   const directive = await pushBranch(ctx, base);
   if (directive) return directive;
   const sha = await headSha(base.worktree);
+  // The labels are derived before the request exists and ride the create
+  // call, because the forge starts the request's checks the moment it opens
+  // one: a label applied after that races the check that reads it, and a
+  // check judging the request as it was created can never see the label at
+  // all. The derivation is the same diff read the apply path always took.
+  const labels = derivedLabels(
+    await changedAgainstBase(base.worktree, base.defaultBranch),
+    base.config.labels,
+  );
   const pr = await base.forge.openPr({
     head: base.branch,
     base: base.defaultBranch,
     title: base.storyKey ? `${base.storyKey}: ${base.cardTitle ?? 'ship'}` : `repair: ${ctx.runId}`,
     body: [`Olympus run ${ctx.runId}.`, `Spec: ${base.specRef}`, `Head: ${sha}`].join('\n'),
+    labels,
   });
   // Labels before the arm: a required-label check gates the merge, so the
   // request carries what its diff asks for before anything can merge it.
-  const labelled = await labelRequest(ctx, base, pr.number);
+  const labelled = await labelRequest(ctx, base, pr.number, labels, pr.labelled === true);
   if (labelled) return labelled;
   const arm = await base.forge.armAutoMerge(pr.number);
   if (!arm.armed) {
@@ -396,22 +406,33 @@ async function openPr(ctx, base) {
 }
 
 /**
- * Applies the labels the request's own diff requires. The derivation reads the
- * diff against the default branch — the same evidence the project's own label
- * check reads — so the harness and the check answer one question from one
- * input, and a label a human used to apply by hand arrives with the request.
+ * Records the labels the request's own diff requires, and applies them when
+ * the create did not. The derivation reads the diff against the default
+ * branch — the same evidence the project's own label check reads — so the
+ * harness and the check answer one question from one input, and a label a
+ * human used to apply by hand arrives with the request.
+ *
+ * `atCreation` is the forge saying the request it just opened already carries
+ * them; the stamp then records one act, not two, and there is no moment in
+ * which the request exists unlabelled. The apply call stays the fallback: a
+ * forge whose create takes no labels, and a create that found the request
+ * already open, both answer false and take it.
  *
  * A label the forge will not apply is a repository that does not define it.
  * That is substrate the daemon never self-clears, so it parks and names the
  * labels. A label no rule derives is not a park and not a guess: the check
  * that wants it is the thing that says so.
  */
-async function labelRequest(ctx, base, pr) {
-  const files = await changedAgainstBase(base.worktree, base.defaultBranch);
-  const labels = derivedLabels(files, base.config.labels);
-  const applied = await base.forge.applyLabels(pr, labels);
+async function labelRequest(ctx, base, pr, labels, atCreation) {
+  const applied = atCreation ? { applied: [...labels] } : await base.forge.applyLabels(pr, labels);
   const ok = applied.applied.length === labels.length;
-  ctx.store.append('pr-labeled', { actor: ACTOR, pr, labels, applied: ok });
+  ctx.store.append('pr-labeled', {
+    actor: ACTOR,
+    pr,
+    labels,
+    applied: ok,
+    at: atCreation ? 'create' : 'open',
+  });
   if (ok) return null;
   return parkDirective('provisioning-gate', {
     ...GATE_FORMS,
@@ -563,6 +584,45 @@ async function checklessSha(ctx, base, opened, sha, polls) {
   });
 }
 
+/**
+ * The automatic re-runs one finding is entitled to. The budget is counted
+ * against the pair of the run and the finding — the failing check's name —
+ * and never against the head sha. A finding does not become a new one because
+ * the head moved: a cancel, a replay, a repair push and a whole verdict cycle
+ * all leave the same required check red, and reading each of them as a fresh
+ * entitlement is how a ship re-runs itself in circles. Past the budget the red
+ * takes the escalation it would take anyway — the CI triage, its ladder and
+ * its own budgets — and never another re-run.
+ */
+export const RERUN_BUDGET = 1;
+
+/**
+ * What one finding has spent of that budget, as ledger seqs in order. A re-run
+ * the stage asked for spends it. So does an attempt a cancel ended: a cancel
+ * is somebody stopping the work, and an automatic re-run is the harness
+ * deciding the opposite — which is exactly the move that outlived an explicit
+ * stop once already.
+ */
+function rerunSpent(events, event, check) {
+  const seqs = [];
+  for (const e of events) {
+    if (e.event !== event || e.check !== check) continue;
+    if (e.status === 'rerun-requested' || e.status === 'cancelled') seqs.push(e.seq);
+  }
+  return seqs;
+}
+
+/**
+ * Whether the budget stands open. A grant stamped after everything the finding
+ * has spent earns the next re-run — an operational fix on the ship path, an
+ * answered gate on the merge commit — because the fix is a deliberate act and
+ * the re-run is the test of it (ADR-0022). Nothing else refreshes it.
+ */
+function budgetOpen(spent, granted) {
+  if (spent.length < RERUN_BUDGET) return true;
+  return granted > spent[spent.length - 1];
+}
+
 function checkMarks(events, sha, name) {
   let lastRerun = 0;
   let lastRed = 0;
@@ -629,12 +689,11 @@ async function handleRed(ctx, base, opened, sha, redNow) {
   if (executing.length > 0) return stampWait(ctx, opened, sha, executing, redNow);
   const events = runEvents(ctx);
   const lastOpFix = findLast(events, 'operational-fix')?.seq ?? 0;
-  // One automatic re-run of the failed jobs per sha; an operational fix
-  // grants the next one.
-  const needRerun = redNow.filter((r) => {
-    const { lastRerun } = checkMarks(events, sha, r.name);
-    return lastRerun === 0 || lastOpFix > lastRerun;
-  });
+  // One automatic re-run of the failed jobs per (run, finding); an operational
+  // fix grants the next one.
+  const needRerun = redNow.filter((r) =>
+    budgetOpen(rerunSpent(events, 'check-transition', r.name), lastOpFix),
+  );
   if (needRerun.length > 0) {
     await base.forge.rerunFailed(sha);
     for (const r of needRerun) {
@@ -1240,10 +1299,12 @@ async function watchMergeCommit(ctx, base, merged, pollMs) {
         .reverse()
         .find((e) => e.event === 'operational-fix' && e.kind === 'merge-commit-rerun')?.seq ?? 0;
     const granted = answeredPark(fresh, 'provisioning-gate');
-    const needRerun = reds.filter((r) => {
-      const { lastRerun } = marks(r.name);
-      return lastRerun === 0 || (granted?.answer && granted.answer.seq > lastRerun);
-    });
+    // The same budget the ship path counts, over the merge commit's own
+    // stamps: one automatic re-run per (run, finding), and an answered gate is
+    // the only thing that grants the next.
+    const needRerun = reds.filter((r) =>
+      budgetOpen(rerunSpent(fresh, 'merge-commit-check', r.name), granted?.answer?.seq ?? 0),
+    );
     if (needRerun.length > 0) {
       ctx.store.append('operational-fix', {
         actor: ACTOR,

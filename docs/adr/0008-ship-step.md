@@ -22,7 +22,8 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   `storyLane → postFreeze → shipStep`, repair as `repairLane → shipStep` —
   and the daemon binary registers it on the engine at start.
 - **The forge interface.** All forge traffic goes through one injected
-  object: `preflight`, `openPr` (idempotent per head branch), `applyLabels`,
+  object: `preflight`, `openPr` (idempotent per head branch, and the carrier
+  of the request's labels), `applyLabels`,
   `ciSecrets`, `armAutoMerge`, `prState`, `checkRuns`, `workflowRun`,
   `latestCompletedRun`, `rerunFailed`, `checkOutput`. The last of the reads is
   the one no ship stage calls: the workflow watcher outside the lanes uses the
@@ -77,21 +78,26 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   without branch protection would merge unverified work. Auto-merge (squash)
   arms at PR open; the `pr-opened` stamp records the pr number, head sha, and
   the required set, so every later judgment derives from the ledger.
-- **The request arrives carrying its labels.** A project whose check requires
-  a label on a request gets that label from the ship step, applied between the
-  open and the arm — a required check only a human can answer is a hands-off
+- **The request is created carrying its labels.** A project whose check
+  requires a label on a request gets that label from the ship step, on the
+  create call itself — a required check only a human can answer is a hands-off
   ship with a human in it. The rule is project config: `labels` is a list of
   entries, each one `label` plus the `paths` that require it, in the same path
   vocabulary as `repo` (a plain prefix, or a glob). The harness holds no label
   names of its own, because a label vocabulary is a fact about a project.
   Derivation reads the request's diff against the default branch, from the
   commit the two last shared — the same evidence the project's own check reads,
-  so both answer one question from one input. `pr-labeled` stamps at every
-  open, the empty set included. A label the forge refuses is a repository that
-  does not define it: substrate the daemon never self-clears, so it parks
-  `provisioning-gate` naming the labels. A label no rule derives is neither a
-  park nor a guess — it stays a red check, which is the one authority that can
-  say a human has to look.
+  so both answer one question from one input, and it runs before the request
+  exists so its answer can ride the open. `openPr` takes the labels and answers
+  `labelled`; the post-open `applyLabels` call is the fallback for a forge
+  whose create cannot carry them and for a create that found the request
+  already open. `pr-labeled` stamps at every open either way, the empty set
+  included, and `at` names which of the two paths applied them. A label the
+  forge refuses is a repository that does not define it: substrate the daemon
+  never self-clears, so the request opens bare and the apply path parks
+  `provisioning-gate` naming the labels and the forge's own reason. A label no
+  rule derives is neither a park nor a guess — it stays a red check, which is
+  the one authority that can say a human has to look.
 - **The check watcher is a stamping process.** The ship stage polls the
   forge and stamps `check-transition` on every observed state change —
   normalized status per check, `required` flag, duration from the forge's
@@ -110,7 +116,17 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   triage (`triageStep`, layers `ci:<check>`) and render a red verdict with
   `source: 'ci'`; the ship stage then re-enters the verdict stage, whose
   ladder applies the same routes and the same budgets as in-run reds. An
-  `operational-fix` stamp grants the next re-run for the same sha.
+  `operational-fix` stamp grants the next re-run.
+- **The re-run budget belongs to the run and the finding.** `RERUN_BUDGET` is
+  counted against the pair of the run and the failing check's name — across
+  head shas, attempts, merge rounds and verdict cycles — and never against the
+  head sha alone. A cancelled attempt spends the budget and never refreshes
+  it. An exhausted budget takes the escalation the red was headed for anyway:
+  the CI triage, its ladder, its own budgets. Only an `operational-fix`
+  stamped after everything the finding spent grants the next re-run, because
+  that fix is a deliberate act and the re-run is the test of it (ADR-0022).
+  The merge-commit re-run counts the same budget over its own stamps, with the
+  answered gate as the grant.
 - **Green but no merge.** Required set green and auto-merge disarmed is a
   harness-class red: `gate-integrity` (loud) once per sha, one re-arm
   attempt (`operational-fix`, kind `auto-merge-rearm`), then
@@ -200,6 +216,49 @@ re-freeze, operational fixes, stall and fresh-pass rules, second-stall —
 with zero duplicated policy. The prior-open handoff keeps finding ids stable
 across the seam, so an env red that survives its fix still converges on
 `provisioning-gate` instead of looping the fix arm.
+
+## Why the labels ride the create call
+
+The forge triggers a request's checks at creation. A label applied a moment
+later therefore races them, and the race is not a coin toss: a check that reads
+the request as the creation event described it can never see the label, however
+long it runs and however many times it is replayed. The cost is not one red
+either — the label check goes red, the red is judged, the ship re-runs, and the
+next attempt sees the label only because the request has since stopped being
+new. Every part of that is avoidable by not creating a state that has to be
+corrected: the labels are derived from the same diff before the request exists,
+and the create carries them.
+
+The apply call stays, because it answers a different question. A forge on
+another host may take no labels at creation, and a create that finds the
+request already open — the idempotent case a resumed run relies on — applied
+nothing. Both say so with `labelled: false` and take the path that always
+existed. The label refusal keeps that path too: on GitHub an undefined label
+fails the create outright, so the adapter opens the request bare and lets the
+apply call produce the forge's own reason for the park. A park that names the
+refusal is worth more than a stage that fails with no request to name.
+
+## Why the re-run budget belongs to the finding and not to the head sha
+
+The budget exists to buy one answer to one question: was that red a flake? The
+head sha is not what makes the question new — the finding is. Keyed on the sha,
+the budget renews every time anything moves the head, and moving the head is
+the cheapest thing in the system: a repair push, a branch update, an empty
+commit, a human cancel that manufactures a fresh failed attempt. Each of those
+handed the same red check a fresh entitlement, and the ship could re-run itself
+in circles over one finding — which it did, past an explicit stop.
+
+A cancel spends the budget rather than earning one for the same reason. A
+cancelled attempt is somebody deciding the work should stop; an automatic
+re-run is the harness deciding the opposite, on no evidence at all. Reading the
+cancel as a red to be re-tried inverts the one instruction in it.
+
+Nothing is lost at exhaustion, because the exhausted path is not a dead end: it
+is the triage the red was headed for anyway, with the four classes, the routes
+and the ladder budgets that already bound it. The operational fix inside that
+ladder is what grants the next re-run, so a substrate repair is still tested by
+CI — the grant is now an act somebody took, never a side effect of the head
+moving.
 
 ## Why the checkless bound counts polls and not minutes
 
@@ -292,6 +351,9 @@ check at cutover, like the claude CLI items in ADR-0005:
 - `gh run rerun --failed` coverage when a commit has several workflow runs.
 - `gh pr edit --add-label` exit behavior on a label the repository does not
   define (the adapter reads the refusal as a reason and parks on it).
+- `gh pr create --label` on a label the repository does not define: the
+  adapter assumes the create opens nothing at all and retries it bare, so that
+  the refusal is read by the apply call that has a request to park about.
 - `repos/{repo}/actions/secrets` scope requirements for the daemon's token
   (an unreadable list must read as unproven, never as absent).
 - Auto-merge surviving a leased force-push of the head branch.
@@ -339,6 +401,21 @@ whose path rule fires on requests that do not need it. Reversal cost: low, one
 config key and one predicate; a project that names no such rule is unaffected.
 Removing the `labels` list entirely returns the ship step to opening
 unlabelled requests, which is what it did before this decision.
+
+If creation-time labels prove unusable on a host — a create that refuses the
+whole request for a reason the labels only hint at, or a forge that applies
+them silently wrong — `openPr` answers `labelled: false` for every call and
+the apply path carries the labels again, which is what it did before this
+decision. Trigger: `pr-labeled` stamps with `at: 'create'` on requests the
+label check then judges bare. Reversal cost: low — one flag out of one forge
+method; the ship step already runs both paths.
+
+If the per-finding re-run budget proves too tight — a project whose CI is
+flaky enough that one automatic re-run per finding per run leaves real work
+parked on infrastructure — `RERUN_BUDGET` rises, or it becomes project config
+beside the gate definitions. Trigger: CI verdicts whose triage classes the
+same check `env` repeatedly inside one run. Reversal cost: low — one constant;
+the key stays the pair, because the pair is what made the count mean anything.
 
 If a forge for a non-GitHub host is needed, the interface in `ship/forge.mjs`
 is the contract; the ship step never imports the gh adapter directly.

@@ -5,10 +5,18 @@
 //
 // Interface contract (any forge implementation):
 //   preflight(base)      → {autoMergeAllowed, strict, requiredChecks}
-//   openPr(opts)         → {number, url}; idempotent per head branch — an
-//                          open PR for the branch is returned, never doubled
+//   openPr(opts)         → {number, url, labelled}; idempotent per head
+//                          branch — an open PR for the branch is returned,
+//                          never doubled. `opts.labels` ride the creation
+//                          call on a forge that takes them, and `labelled`
+//                          says whether the request that came back carries
+//                          them already; a false answer sends the caller to
+//                          `applyLabels`
 //   applyLabels(n, list) → {applied, reason?}; additive, and never throws on
-//                          a label the repository does not define
+//                          a label the repository does not define. The
+//                          fallback path for a forge whose create cannot
+//                          carry labels, and for a request that already
+//                          existed when the create ran
 //   ciSecrets()          → the names of the repository's CI secrets, or null
 //                          when the forge would not answer. Names only — the
 //                          host serves no values and none are asked for
@@ -109,6 +117,14 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
     return data?.check_runs ?? [];
   }
 
+  /** The open request of one head branch, or null when there is none. */
+  async function openRequest(head) {
+    const view = await ghJson(['pr', 'view', head, '-R', repo, '--json', 'number,url,state'], {
+      allowFail: true, // no request for the branch is an answer, not a failure
+    });
+    return view && view.state !== 'CLOSED' ? view : null;
+  }
+
   /**
    * The state of one workflow run. `status` is the forge's own word — queued,
    * in_progress, completed — and only the last of them means the run is over.
@@ -151,16 +167,37 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
       };
     },
 
-    async openPr({ head, base, title, body }) {
-      await gh(
-        ['pr', 'create', '-R', repo, '--head', head, '--base', base, '--title', title, '--body', body],
-        { allowFail: true }, // an existing open PR for the branch is not an error
-      );
-      const view = await ghJson(['pr', 'view', head, '-R', repo, '--json', 'number,url,state']);
-      if (!view || view.state === 'CLOSED') {
-        throw new Error(`no open PR for branch ${head} after create`);
+    /**
+     * Opens the request with its labels on the create call itself. The host
+     * triggers the checks of a request at creation, so a label applied after
+     * the create is a label the check that reads it may never see; passing
+     * them to `pr create` leaves no state between the two.
+     *
+     * Two things refuse this create. An open request for the branch already
+     * exists — the idempotent case, which re-views and reports the labels
+     * unapplied, because this call did not apply them. Or the repository does
+     * not define a label, which opens nothing at all: that one is retried
+     * bare, so the caller holds a request it can park on with the forge's own
+     * reason instead of a run that failed with no request to name.
+     */
+    async openPr({ head, base, title, body, labels = [] }) {
+      const argv = [
+        'pr', 'create', '-R', repo, '--head', head, '--base', base, '--title', title, '--body', body,
+      ];
+      const created = await gh([...argv, ...labels.flatMap((label) => ['--label', label])], {
+        allowFail: true, // an existing open PR for the branch is not an error
+      });
+      let view = await openRequest(head);
+      if (!view && labels.length > 0) {
+        await gh(argv, { allowFail: true });
+        view = await openRequest(head);
       }
-      return { number: view.number, url: view.url };
+      if (!view) throw new Error(`no open PR for branch ${head} after create`);
+      return {
+        number: view.number,
+        url: view.url,
+        labelled: labels.length > 0 && created.code === 0,
+      };
     },
 
     async ciSecrets() {

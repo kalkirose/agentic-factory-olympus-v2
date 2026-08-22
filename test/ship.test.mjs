@@ -16,7 +16,7 @@ import {
   runLedgerPath,
 } from '../src/daemon/home.mjs';
 import { postFreeze, repairLane } from '../src/lanes/verdict.mjs';
-import { shipStep, CHECKLESS_POLLS, UPDATE_CAP } from '../src/lanes/ship.mjs';
+import { shipStep, CHECKLESS_POLLS, RERUN_BUDGET, UPDATE_CAP } from '../src/lanes/ship.mjs';
 import { gitHubForge, parseGitHubRepo, PartialLogRefusal } from '../src/ship/forge.mjs';
 import { derivedLabels } from '../src/ship/labels.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
@@ -87,6 +87,14 @@ const red = (name = 'ci') => ({
   startedAt: '2026-08-10T00:00:00Z',
   completedAt: '2026-08-10T00:02:00Z',
 });
+/** A check a human stopped: terminal, red, and nobody's flake. */
+const cancelled = (name = 'ci') => ({
+  name,
+  status: 'completed',
+  conclusion: 'cancelled',
+  startedAt: '2026-08-10T00:00:00Z',
+  completedAt: '2026-08-10T00:01:00Z',
+});
 const running = (name = 'ci') => ({ name, status: 'in_progress' });
 /** A red check that names the workflow run it is a job of. */
 const redOf = (run, name = 'ci') => ({ ...red(name), run });
@@ -104,6 +112,9 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
     labelsAccept: true,
     labels: new Set(),
     labelCalls: [],
+    // The labels each create call carried, so a test can say which call
+    // labelled the request.
+    createLabels: [],
     // The CI secret names the parity read asks for; null is a forge that
     // would not answer at all.
     ciSecrets: [],
@@ -163,11 +174,21 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
         requiredChecks: state.requiredChecks,
       };
     },
-    async openPr({ head: headBranch, base }) {
-      if (!state.pr || state.pr.state === 'closed') {
+    async openPr({ head: headBranch, base, labels = [] }) {
+      const fresh = !state.pr || state.pr.state === 'closed';
+      if (fresh) {
         state.pr = { number: 7, head: headBranch, base, armed: false, state: 'open', mergeSha: null };
       }
-      return { number: state.pr.number, url: `fake://pr/${state.pr.number}` };
+      // The create carries the labels, the way `gh pr create --label` does. A
+      // repository that defines none refuses that create and the adapter opens
+      // the request bare, which is the state this leaves behind; a create that
+      // found the request already open labelled nothing either.
+      const carried = fresh && labels.length > 0 && state.labelsAccept;
+      if (carried) {
+        state.createLabels.push({ number: state.pr.number, labels: [...labels] });
+        for (const label of labels) state.labels.add(label);
+      }
+      return { number: state.pr.number, url: `fake://pr/${state.pr.number}`, labelled: carried };
     },
     async ciSecrets() {
       return state.ciSecrets;
@@ -977,6 +998,65 @@ test('a red check on a workflow run that finished dispatches with no wait at all
   assert.deepEqual(finding.layers, ['ci:ci']);
 });
 
+// -- the automatic-rerun budget, per (run, finding) --------------------------
+
+test('a cancelled check earns no automatic re-run: the cancel spends the budget', async (t) => {
+  // A cancel is somebody stopping the work. Re-running it is the harness
+  // deciding the opposite, and a fresh red manufactured that way used to read
+  // as a fresh entitlement.
+  const fx = shipFixture(t, { seats: CI_REPAIR_SEATS });
+  let shas = 0;
+  fx.forge.state.autoChecks = () => (++shas === 1 ? [cancelled()] : [green()]);
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(fx.forge.state.reruns.length, 0);
+  assert.ok(!events.some((e) => e.event === 'check-transition' && e.status === 'rerun-requested'));
+  // The red took the escalation instead: the shared triage, at once.
+  assert.equal(
+    events.find((e) => e.event === 'check-transition' && e.status === 'cancelled').required,
+    true,
+  );
+  const ciRender = events.find((e) => e.event === 'verdict-rendered' && e.source === 'ci');
+  assert.equal(ciRender.verdict, 'red');
+  assert.ok(!events.some((e) => e.event === 'ci-flake'));
+});
+
+test('the same finding across CI cycles spends one automatic re-run in all', async (t) => {
+  // The repair moves the head, and the head the repair produced is red on the
+  // same required check. The budget belongs to the run and the finding, so the
+  // new head buys no second re-run.
+  const fx = shipFixture(t, {
+    seats: {
+      ...CI_REPAIR_SEATS,
+      // One file per invocation: two rounds that write the same bytes would
+      // leave the second with nothing to commit.
+      'repair-dev': ({ label }) => ({
+        files: { [`src/fix-${label}.mjs`]: 'export const note = 1;\n' },
+        report: { summary: 'repaired' },
+      }),
+    },
+  });
+  let shas = 0;
+  fx.forge.state.autoChecks = () => (++shas <= 2 ? [red()] : [green()]);
+  fx.forge.state.onRerun = (sha) => fx.forge.setChecks(sha, [red()]);
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // two CI verdicts on the same check, one re-run between them
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered' && e.source === 'ci').length, 2);
+  assert.equal(fx.forge.state.reruns.length, RERUN_BUDGET);
+  assert.equal(
+    events.filter((e) => e.event === 'check-transition' && e.status === 'rerun-requested').length,
+    RERUN_BUDGET,
+  );
+  // The second cycle's reds are on a head the first cycle never saw.
+  const shasSeen = new Set(
+    events.filter((e) => e.event === 'check-transition' && e.check === 'ci').map((e) => e.sha),
+  );
+  assert.ok(shasSeen.size >= 2, `the reds spanned heads: ${shasSeen.size}`);
+});
+
 test('a competing merge updates the branch: merge main in, re-run, auto-merge fires', async (t) => {
   const fx = shipFixture(t);
   fx.forge.state.autoChecks = () => [running()];
@@ -1576,7 +1656,7 @@ test('label derivation answers from the project rules and guesses nothing', () =
   assert.deepEqual(derivedLabels(['db/migrations/1.sql']), []);
 });
 
-test('the request opens carrying the labels its diff requires', async (t) => {
+test('the request is created carrying the labels its diff requires, in one call', async (t) => {
   const fx = shipFixture(t, { seats: MIGRATING_DEV, config: { labels: LABEL_RULES } });
   fx.forge.state.autoChecks = () => [green()];
   const runId = await fx.launch();
@@ -1586,8 +1666,14 @@ test('the request opens carrying the labels its diff requires', async (t) => {
   assert.deepEqual(labelled.labels, ['migration']);
   assert.equal(labelled.applied, true);
   assert.deepEqual([...fx.forge.state.labels], ['migration']);
-  // The label lands before the request can merge: it is applied between the
-  // open and the arm, so the stamp precedes `pr-opened`.
+  // Creation and labelling are one call: the forge opened the request with
+  // the label on it, and nothing applied a label afterwards. The request is
+  // therefore never open unlabelled, so no check of it can read a bare one.
+  assert.equal(labelled.at, 'create');
+  assert.deepEqual(fx.forge.state.createLabels, [{ number: 7, labels: ['migration'] }]);
+  assert.deepEqual(fx.forge.state.labelCalls, []);
+  // The label is on the record before the request can merge: the stamp
+  // precedes `pr-opened`, which precedes the arm.
   assert.ok(labelled.seq < events.find((e) => e.event === 'pr-opened').seq);
 });
 
@@ -1615,6 +1701,10 @@ test('a label the repository does not define parks the gate and names it', async
   const live = readEvents(runLedgerPath(fx.paths, runId));
   assert.ok(!live.some((e) => e.event === 'pr-opened'));
   assert.equal(live.find((e) => e.event === 'pr-labeled').applied, false);
+  // A create the label refused opens the request bare, and the apply path
+  // behind it is what names the refusal.
+  assert.equal(live.find((e) => e.event === 'pr-labeled').at, 'open');
+  assert.deepEqual(fx.forge.state.createLabels, []);
   fx.forge.state.labelsAccept = true;
   fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'label created' });
   const events = await waitClosed(fx.paths, runId);
@@ -1901,6 +1991,61 @@ test('the preflight reads the auto-merge capability over the repository api', as
   // preflight call may name that field or reach for `repo view` again.
   assert.ok(!calls.some((argv) => argv.includes('autoMergeAllowed')));
   assert.ok(!calls.some((argv) => argv[1] === 'repo'));
+});
+
+test('the gh adapter puts the labels on the create call, not on a call after it', async () => {
+  const calls = [];
+  const runner = async (argv) => {
+    calls.push(argv);
+    if (argv[2] === 'create') return { code: 0, output: '' };
+    return { code: 0, output: JSON.stringify({ number: 12, url: 'https://f/12', state: 'OPEN' }) };
+  };
+  const pr = await gitHubForge({ repo: 'acme/widgets', runner }).openPr({
+    head: 'run/x',
+    base: 'main',
+    title: 't',
+    body: 'b',
+    labels: ['migration', 'ui'],
+  });
+  // `labelled` is the forge saying the request never existed unlabelled, so
+  // the ship step spends no second call on it.
+  assert.deepEqual(pr, { number: 12, url: 'https://f/12', labelled: true });
+  const create = calls.find((argv) => argv[2] === 'create');
+  assert.deepEqual(create.slice(-4), ['--label', 'migration', '--label', 'ui']);
+  assert.equal(calls.filter((argv) => argv[2] === 'create').length, 1);
+  assert.ok(!calls.some((argv) => argv[2] === 'edit'));
+});
+
+test('a create the labels refuse opens the request bare and reports it unlabelled', async () => {
+  const calls = [];
+  let opened = false;
+  const runner = async (argv) => {
+    calls.push(argv);
+    if (argv[2] === 'create') {
+      // The host resolves the label names before it opens anything, so an
+      // undefined label leaves no request at all.
+      if (argv.includes('--label')) {
+        return { code: 1, output: "could not add label: 'migration' not found" };
+      }
+      opened = true;
+      return { code: 0, output: '' };
+    }
+    return opened
+      ? { code: 0, output: JSON.stringify({ number: 12, url: 'https://f/12', state: 'OPEN' }) }
+      : { code: 1, output: 'no pull requests found for branch run/x' };
+  };
+  const pr = await gitHubForge({ repo: 'acme/widgets', runner }).openPr({
+    head: 'run/x',
+    base: 'main',
+    title: 't',
+    body: 'b',
+    labels: ['migration'],
+  });
+  // The request exists, and it says it carries nothing: the ship step's apply
+  // path then parks on the forge's own reason, which is where that refusal has
+  // always been read.
+  assert.deepEqual(pr, { number: 12, url: 'https://f/12', labelled: false });
+  assert.equal(calls.filter((argv) => argv[2] === 'create').length, 2);
 });
 
 test('the gh adapter lists CI secret names, and an unreadable list is not an empty one', async () => {
