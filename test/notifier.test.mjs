@@ -9,7 +9,7 @@ import { Daemon } from '../src/daemon/daemon.mjs';
 import { Notifier, NOTIFIED_EVENTS } from '../src/daemon/notifier.mjs';
 import { homePaths, scaffoldHome } from '../src/daemon/home.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
-import { INSTANCE_EVENTS } from '../src/ledger/registry.mjs';
+import { INSTANCE_EVENTS, LOUD_EVENTS } from '../src/ledger/registry.mjs';
 import { validateInstanceConfig } from '../src/config/instance.mjs';
 import { openInstanceStore } from '../src/telemetry/stores.mjs';
 import { tempDir, removeDir, waitFor } from './helpers.mjs';
@@ -88,8 +88,39 @@ test('a notifier target is an http url or a real argv', () => {
 
 // -- what goes out ------------------------------------------------------------
 
-test('the notified set is the three events an idle factory turns on', () => {
-  assert.deepEqual([...NOTIFIED_EVENTS].sort(), ['budget-breach', 'park', 'run-closed']);
+test('the notified set is a park, a close, and every loud record', () => {
+  assert.deepEqual([...NOTIFIED_EVENTS].sort(), ['park', 'run-closed', ...LOUD_EVENTS].sort());
+  // Not a copy of the loud set: a loud event added to the registry is pushed
+  // without a second edit here.
+  for (const event of LOUD_EVENTS) assert.ok(NOTIFIED_EVENTS.has(event), event);
+});
+
+test('a loud record pushes with the gist the strip would have shown', async (t) => {
+  const { ledger } = store(t);
+  const hook = await target(t);
+  const notifier = new Notifier({ ledger, config: () => ({ url: hook.url }) });
+  await notifier.notify({
+    ledger: 'run:alpha-9',
+    project: 'alpha',
+    line: {
+      seq: 61,
+      ts: parkLine.ts,
+      event: 'gate-integrity',
+      stream: 'loud',
+      gist: 'PR 147 opened without the migration label',
+      detail: { pr: 147 },
+    },
+  });
+  await notifier.drain();
+  assert.deepEqual(hook.posts[0].body, {
+    event: 'gate-integrity',
+    ts: parkLine.ts,
+    seq: 61,
+    ledger: 'run:alpha-9',
+    runId: 'alpha-9',
+    gist: 'PR 147 opened without the migration label',
+    project: 'alpha',
+  });
 });
 
 test('the failure stamp is a known instance event', () => {
@@ -188,28 +219,94 @@ test('every other event passes without a push', async (t) => {
 
 // -- the command form ---------------------------------------------------------
 
-test('a command target reads the payload on stdin', async (t) => {
-  const { ledger } = store(t);
+/** A notify command that appends whatever it is given to one file. */
+function sinkCommand(t) {
   const dir = tempDir();
   t.after(() => removeDir(dir));
   const script = join(dir, 'sink.mjs');
-  const sink = join(dir, 'received.json');
+  const sink = join(dir, 'received.jsonl');
   writeFileSync(
     script,
     [
-      "import { readFileSync, writeFileSync } from 'node:fs';",
-      `writeFileSync(${JSON.stringify(sink)}, readFileSync(0, 'utf8'));`,
+      "import { appendFileSync, readFileSync } from 'node:fs';",
+      `appendFileSync(${JSON.stringify(sink)}, readFileSync(0, 'utf8'));`,
       '',
     ].join('\n'),
   );
-  const notifier = new Notifier({
-    ledger,
-    config: () => ({ command: [process.execPath, script] }),
-  });
+  return {
+    command: [process.execPath, script],
+    received: () =>
+      existsSync(sink)
+        ? readFileSync(sink, 'utf8')
+            .split('\n')
+            .filter(Boolean)
+            .map((line) => JSON.parse(line))
+        : [],
+  };
+}
+
+test('a command target reads the payload on stdin, for a park and for a loud item', async (t) => {
+  const { ledger } = store(t);
+  const fake = sinkCommand(t);
+  const notifier = new Notifier({ ledger, config: () => ({ command: fake.command }) });
   await notifier.notify({ ledger: 'run:alpha-9', project: 'alpha', line: parkLine });
   await notifier.drain();
-  assert.equal(JSON.parse(readFileSync(sink, 'utf8')).type, 'provisioning-gate');
+  await notifier.notify({
+    ledger: 'run:alpha-9',
+    project: 'alpha',
+    line: {
+      seq: 77,
+      ts: parkLine.ts,
+      event: 'liveness-violation',
+      stream: 'loud',
+      gist: 'alpha-9 holds no child, no park and no transition',
+    },
+  });
+  await notifier.drain();
+  const received = fake.received();
+  assert.equal(received.length, 2);
+  assert.deepEqual(
+    received.map((p) => [p.event, p.runId, p.seq]),
+    [
+      ['park', 'alpha-9', 12],
+      ['liveness-violation', 'alpha-9', 77],
+    ],
+  );
+  assert.equal(received[0].type, 'provisioning-gate');
+  assert.equal(received[1].gist, 'alpha-9 holds no child, no park and no transition');
   assert.equal(readEvents(ledger.ledger.path).length, 0);
+});
+
+test('the command spawns through the executable resolver, so a shim runs', async (t) => {
+  const { ledger } = store(t);
+  const spawned = [];
+  // What `resolveArgv` answers for a `.cmd` shim on Windows: cmd.exe, an
+  // escaped command line, and verbatim arguments (ADR-0013). The resolver is
+  // injected because no test on another platform can stage that host.
+  const shim = {
+    file: 'C:\\Windows\\system32\\cmd.exe',
+    args: ['/d', '/s', '/c', '"C:\\tools\\notify.cmd olympus"'],
+    windowsVerbatimArguments: true,
+  };
+  const notifier = new Notifier({
+    ledger,
+    config: () => ({ command: ['notify', 'olympus'] }),
+    resolveImpl: (argv) => {
+      spawned.push({ argv });
+      return shim;
+    },
+    spawnImpl: (file, args, opts) => {
+      spawned.push({ file, args, opts });
+      throw new Error('spawned');
+    },
+  });
+  await notifier.notify({ ledger: 'run:alpha-9', line: parkLine });
+  await notifier.drain();
+  assert.deepEqual(spawned[0].argv, ['notify', 'olympus']);
+  assert.equal(spawned[1].file, shim.file);
+  assert.deepEqual(spawned[1].args, shim.args);
+  assert.equal(spawned[1].opts.windowsVerbatimArguments, true);
+  assert.equal(spawned[1].opts.windowsHide, true);
 });
 
 // -- failure ------------------------------------------------------------------
@@ -392,6 +489,34 @@ test('a broken notifier neither blocks the lane nor fails the daemon', async (t)
   const instance = readEvents(fx.paths.instanceLedger);
   assert.ok(instance.filter((e) => e.event === 'notify-failed').length >= 3);
   assert.equal(instance.at(-1).event, 'daemon-stopped');
+});
+
+test('a notify command that fails leaves the park standing, quietly', async (t) => {
+  const fx = await daemonWith(t, { command: [process.execPath, '-e', 'process.exit(3)'] });
+  fx.daemon.engine.launch({ runId: 'r1', project: 'proj', lane: 'story', budget: 100 });
+  await waitFor(
+    () =>
+      readEvents(fx.paths.instanceLedger).some(
+        (e) => e.event === 'notify-failed' && e.notifiedEvent === 'park',
+      ),
+    { label: 'the park notification failed' },
+  );
+  const failures = readEvents(fx.paths.instanceLedger).filter((e) => e.event === 'notify-failed');
+  assert.ok(failures.every((e) => e.target === 'command' && e.reason === 'exit 3'));
+  // Quiet: the pull surfaces are the authority a broken push falls back to.
+  assert.ok(failures.every((e) => e.stream === undefined));
+  // The park is untouched by the failed push — still there, still answerable,
+  // and the run closes on the answer as it would with no notifier at all.
+  const parked = readEvents(join(fx.paths.runs, 'r1', 'ledger.jsonl')).filter(
+    (e) => e.event === 'park',
+  );
+  assert.equal(parked.length, 1);
+  assert.equal(parked[0].type, 'provisioning-gate');
+  fx.daemon.engine.answer({ runId: 'r1', actor: 'human', option: 'yes' });
+  await waitFor(() => existsSync(join(fx.paths.archivedRuns, 'r1', 'ledger.jsonl')), {
+    label: 'run closed',
+  });
+  assert.equal(readEvents(join(fx.paths.archivedRuns, 'r1', 'ledger.jsonl')).at(-1).state, 'shipped');
 });
 
 test('an unconfigured daemon stamps nothing about notifications', async (t) => {

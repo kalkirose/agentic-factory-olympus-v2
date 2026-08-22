@@ -33,10 +33,12 @@ export function defaultInstanceConfig() {
     // not execute the project's suite (ADR-0023). Absent, no seat's
     // environment differs from the daemon's own.
     //
-    // And absent by default: `notifier`, one push target for the three events
-    // an idle factory turns on — `{url}` for a webhook or `{command}` for an
-    // argv, with an optional `timeoutMs` (ADR-0028). Absent, the daemon pushes
-    // nothing and behaves exactly as it did before the field existed.
+    // And absent by default: `notifier`, one push target for the events an
+    // idle factory turns on — `{url}` for a webhook or `{command}` for an
+    // argv, with an optional `timeoutMs` (ADR-0028). The argv names the
+    // machine's own binary, like `claudeCommand` and `ghCommand` do, and is
+    // resolved the same way. Absent, the daemon pushes nothing and behaves
+    // exactly as it did before the field existed.
   };
 }
 

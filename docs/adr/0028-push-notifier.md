@@ -4,8 +4,8 @@ Status: accepted (2026-08-15)
 
 ## Decision
 
-The daemon pushes three events to one target the instance config names. Every
-other notification surface stays pull.
+The daemon pushes the events that wait on a human to one target the instance
+config names. Every other notification surface stays pull.
 
 - **One optional target, machine-scoped.** `notifier` in `instance.json`:
   `{"url": "https://…"}` for a webhook, or `{"command": ["…", "…"]}` for an
@@ -13,18 +13,30 @@ other notification surface stays pull.
   a config that names both, or neither, is refused with the rest of the
   config's errors and the old config stays live. Absent, the daemon pushes
   nothing and behaves as it did before the field existed.
-- **Three events.** `park`, `budget-breach`, `run-closed`. A park is the
-  factory asking for a decision and holding a slot until it gets one; a breach
-  is money crossing a line the owner drew; a close is the answer to the only
-  question an absent owner has. Nothing else is pushed.
+- **A park, a close, and the loud set entire.** `park`, `run-closed`, and
+  every event in `LOUD_EVENTS`. A park is the factory asking for a decision
+  and holding a slot until it gets one; a close is the answer to the only
+  question an absent owner has; a loud record is, by its own definition, the
+  strip an owner is meant to read before anything else. The notified set is
+  derived from the loud registry rather than listed beside it, so a loud
+  record the harness learns to raise is pushed the day it is raised. Nothing
+  quiet is pushed.
 - **A fixed projection, never the ledger line.** The payload carries the
   envelope (`event`, `ts`, `seq`, `ledger`, `runId`, `project`) plus a short
   allowlist per event: `type` and `gist` for a park, `threshold`, `cost`,
-  `stage` and `gist` for a breach, `state` for a close. A field a later stamp
-  site adds does not travel until the allowlist names it.
+  `stage` and `gist` for a breach, `state` for a close, and the `gist` alone
+  for every other loud record — which every one of them has, because the store
+  refuses a stream-classed append without one. A field a later stamp site adds
+  does not travel until the allowlist names it.
 - **The webhook is a POST of that JSON**; the command reads the same JSON on
   stdin, one line. A non-2xx status, a non-zero exit, a spawn error and a
   timeout are all failures.
+- **The command argv is resolved like every other one.** It names the
+  machine's own binary, as `claudeCommand` and `ghCommand` do, and goes through
+  the same executable resolver (ADR-0013). A notify tool on a Windows host is
+  typically a `.cmd` shim that CreateProcess cannot run: spawning the bare name
+  would answer ENOENT at the first park and stamp a failure against a target
+  that is installed and working.
 - **Fire and forget.** Delivery is never awaited by an append, a stage, or a
   handler. The daemon's stop drains what is in flight, so a late failure stamp
   lands before the instance ledger closes.
@@ -45,6 +57,15 @@ A factory built to run at any hour was, in practice, idle from the moment its
 owner stopped looking, and the gap was bridged by an external watcher polling
 the ledger from outside the harness — which is the harness admitting the
 notification is owed and declining to send it.
+
+The overnight run of 2026-08-20/21 priced it. Two parks — a dead credential at
+22:45Z and a wedged host substrate at 07:28Z — each held a slot until a
+sleeping human happened to look, and each was answered in minutes once he did.
+Under unattended running the park latency is not a component of the wall
+clock; over a night it is the wall clock. The same night is why the loud set
+travels too: the record that says a watched workflow went red, or that a gate
+was judged on a request it should not have been, reaches a reader through the
+same silence a park does.
 
 So the daemon sends it. Push does not replace the pull surfaces and is not
 allowed to become authoritative: the ledger is the record, the strip and the
@@ -90,11 +111,10 @@ operator wiring a second script only to fan out to a third. Reversal cost:
 low — the config validator loops, and the delivery already returns a per-call
 failure reason.
 
-If the three events prove too few or too many, the notified set changes by an
-edit to `NOTIFIED_EVENTS` and its allowlist entry. Trigger: an owner who
-answers a park from a notification but still has to run status to know what
-happened afterwards, or one who mutes the target. Reversal cost: low — one set
-and one table.
+If the notified set proves too wide, it narrows back to a list beside the loud
+registry rather than a derivation from it. Trigger: a target an owner mutes,
+or a loud class that fires often enough to be noise on a phone. Reversal cost:
+low — one set and one table. The same edit is how the set widens.
 
 If fire-and-forget proves too weak for a transport that drops under load, the
 notifier gains a bounded retry with a recorded attempt count on the failure

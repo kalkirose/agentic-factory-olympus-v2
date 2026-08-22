@@ -31,8 +31,8 @@ Around the daemon:
   ships. Its report lands under `eval/` in the daemon home; the queued
   `eval-review` event points to it. Proposals only; nothing self-executes.
 - **Notifier** — one optional push target (webhook or command argv) the
-  instance config names. It sends parks, budget breaches and run closes out of
-  the daemon and does nothing else. Unconfigured, it is not there.
+  instance config names. It sends parks, run closes and every loud record out
+  of the daemon and does nothing else. Unconfigured, it is not there.
 
 ```mermaid
 flowchart LR
@@ -315,6 +315,13 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - The harness arms auto-merge (squash) at PR open. Branch protection names
   the full required-check set; the flag fires only on full green. No human
   touch on the green path.
+- **The request is created carrying its labels** (ADR-0008). The labels the
+  diff derives ride the create call itself: the forge starts a request's
+  checks the moment it opens one, so a label applied after that races the
+  check that reads it, and a check judging the request as created can never
+  see the label at all. The apply call stays behind it as the fallback — a
+  forge whose create takes no labels, and a create that found the request
+  already open.
 - The **check watcher** polls check runs and stamps every state transition to
   the run ledger: per-check, PR merged/closed, merge-commit checks, and
   "green but auto-merge did not fire" (harness-class red). Pending is a
@@ -335,6 +342,12 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - **One red regime.** CI reds get one automatic re-run of failed jobs, then
   the same four-class triage and the same routes as in-run reds. Budgets are
   shared.
+- **The re-run budget is the finding's, not the head sha's** (ADR-0008). One
+  automatic re-run per (run, finding), counted across head shas, attempts and
+  verdict cycles. A cancelled attempt spends the budget and never refreshes
+  it — a cancel is somebody stopping the work — and only an operational fix
+  grants the next re-run. An exhausted budget routes the red to the triage
+  that was going to judge it anyway, never to another re-run.
 - **The harness never merges red.** A human admin-merge over persistent reds
   is a red-merge breach: recorded loud, open findings convert to
   escapes-ledger entries, each gets a self-contained repair ticket in the
@@ -410,9 +423,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   factory starvation, owed repairs, budget breach. Consoles render loud first,
   then queue depth, and a loud item leaves the strip as soon as the event that
   owns it lands.
-- **Reading is pull; three events also push.** A park, a budget breach and a
-  run close go to the instance's notifier target when one is configured. Every
-  console surface stays a read of the ledgers.
+- **Reading is pull; what waits on a human also pushes.** A park, a run close
+  and every loud record go to the instance's notifier target when one is
+  configured — a webhook, or an argv resolved like every other configured
+  command. Every console surface stays a read of the ledgers.
 
 ## Liveness
 

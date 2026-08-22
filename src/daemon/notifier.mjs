@@ -1,8 +1,8 @@
 // The push edge of the notification streams. Every console surface is pull:
 // a park nobody reads is a slot standing idle for as long as nobody runs
-// status. The notifier pushes three events out of the daemon — a park, a
-// budget breach, and a run close — to one target the instance config names,
-// and does nothing else (ADR-0028).
+// status. The notifier pushes the events that wait on a human — a park, every
+// loud record, and a run close — out of the daemon to one target the instance
+// config names, and does nothing else (ADR-0028).
 //
 // Three rules hold this module small. It carries a fixed projection of each
 // event, never the ledger line, so no field the harness later adds can leak
@@ -11,13 +11,21 @@
 // anywhere a lane can see it. And it is off unless configured, in which case
 // nothing in the daemon behaves differently at all.
 import { spawn } from 'node:child_process';
+import { LOUD_EVENTS } from '../ledger/registry.mjs';
+import { resolveArgv } from '../engine/executable.mjs';
 
 const ACTOR = 'notifier';
 const DEFAULT_TIMEOUT_MS = 5000;
 const REASON_MAX = 200;
 
-/** The events a target is told about. */
-export const NOTIFIED_EVENTS = new Set(['park', 'budget-breach', 'run-closed']);
+/**
+ * The events a target is told about: the park that holds a slot until a human
+ * answers, the close that answers the only question an absent owner has, and
+ * the loud set entire. Derived from the loud registry rather than listed
+ * beside it, so a loud record the harness learns to raise is pushed the day it
+ * is raised — a strip nobody is looking at is the case push exists for.
+ */
+export const NOTIFIED_EVENTS = new Set(['park', 'run-closed', ...LOUD_EVENTS]);
 
 // The payload, per event, beyond the envelope below. An allowlist rather than
 // a spread: the ledger line is the harness's own record and holds whatever a
@@ -28,19 +36,32 @@ const CARRIED_FIELDS = {
   'run-closed': ['state'],
 };
 
+// The fallback for a loud record the table does not name. Every stream-classed
+// append carries a gist by construction — the store refuses one without it —
+// so a loud event says what it is about without an entry of its own, and a
+// loud event that needs more than a gist earns one.
+const LOUD_FIELDS = ['gist'];
+
+function carriedFields(event) {
+  return CARRIED_FIELDS[event] ?? (LOUD_EVENTS.has(event) ? LOUD_FIELDS : []);
+}
+
 export class Notifier {
   /**
    * @param {{ledger: import('../telemetry/stores.mjs').TelemetryStore,
    *   config: () => object|undefined, fetchImpl?: Function,
-   *   spawnImpl?: Function}} opts
+   *   spawnImpl?: Function, resolveImpl?: Function}} opts
    *   ledger: the instance store a failure stamps to. config: reads the live
    *   `notifier` section, so a config edit reaches the next event.
+   *   resolveImpl: the executable resolver. Injected because a Windows shim is
+   *   a host condition no test on another platform can stage.
    */
-  constructor({ ledger, config, fetchImpl, spawnImpl }) {
+  constructor({ ledger, config, fetchImpl, spawnImpl, resolveImpl }) {
     this.ledger = ledger;
     this.readConfig = config ?? (() => undefined);
     this.fetchImpl = fetchImpl ?? globalThis.fetch;
     this.spawnImpl = spawnImpl ?? spawn;
+    this.resolveImpl = resolveImpl ?? resolveArgv;
     this.inflight = new Set();
     this.stopped = false;
   }
@@ -69,7 +90,7 @@ export class Notifier {
   payloadOf(ledger, line) {
     const payload = { event: line.event, ts: line.ts, seq: line.seq, ledger };
     if (ledger?.startsWith('run:')) payload.runId = ledger.slice('run:'.length);
-    for (const key of CARRIED_FIELDS[line.event] ?? []) {
+    for (const key of carriedFields(line.event)) {
       if (line[key] !== undefined) payload[key] = line[key];
     }
     return payload;
@@ -114,14 +135,24 @@ export class Notifier {
    * The command form. The payload arrives on stdin as one JSON line: an argv
    * the operator writes stays an argv, and nothing about the event has to
    * survive a shell's quoting rules.
+   *
+   * The argv goes through the executable resolver, like every other command
+   * the instance config names. The notify tool on a Windows host is typically
+   * a `.cmd` shim, which CreateProcess cannot run: a bare spawn of the name
+   * the operator wired would answer ENOENT at the first park and stamp a
+   * failure for a target that is installed and working (ADR-0013).
    * @returns {Promise<string|null>}
    */
   run(config, payload, timeoutMs) {
     return new Promise((resolve) => {
-      const [file, ...args] = config.command;
       let child;
       try {
-        child = this.spawnImpl(file, args, { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
+        const spec = this.resolveImpl(config.command);
+        child = this.spawnImpl(spec.file, spec.args, {
+          windowsHide: true,
+          stdio: ['pipe', 'ignore', 'ignore'],
+          ...(spec.windowsVerbatimArguments && { windowsVerbatimArguments: true }),
+        });
       } catch (error) {
         resolve(String(error?.message ?? error));
         return;
