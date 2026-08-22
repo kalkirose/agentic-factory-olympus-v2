@@ -103,8 +103,15 @@ export function cycleRepeat(events, renders, last) {
   };
 }
 
-/** The open findings of a render, by identity, in a stable order. */
-function openIdentities(events, render) {
+/**
+ * The open findings of a render, by identity, in a stable order. One
+ * derivation serves both progress guards: this file asks whether two cycles
+ * carry the same set, and the repair ladder asks whether a round closed
+ * anything in it (ADR-0022). Neither invents a second identity.
+ * @param {Array<object>} events the run ledger, in order
+ * @param {object} render a `verdict-rendered` line
+ */
+export function openIdentities(events, render) {
   const open = new Set(render.open ?? []);
   const identities = [];
   for (const e of events) {

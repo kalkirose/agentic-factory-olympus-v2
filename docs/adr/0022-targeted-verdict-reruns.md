@@ -85,13 +85,25 @@ Tier-1 spectrum, and no green verdict rests on a result the cycle did not earn.
   the first is a stall when it closes none of the blocking findings the round
   before it raised, by identity, rather than when its count fails to shrink
   (ADR-0020).
+- **The repair ladder's progress rule takes it too.** A repair round is a stall
+  when it closes none of the findings the render before it left open, rather
+  than when the size of the open set fails to shrink (ADR-0007). One closed
+  finding is progress however many the review surfaces beside it: the round did
+  what it was given, and the run keeps its fresh pass for a round that did not.
+  Both renders resolve their open sets through the same derivation the
+  fingerprint reads, so the harness holds one answer to "is this the same
+  finding" and not three. The comparison is over occurrences of an identity and
+  not membership of it: the identity normalizes numerals away, so two findings
+  can reach one, and an identity that comes back fewer times than it went in is
+  a closed finding.
 - **Nothing else moves.** The flake filter stays one red-only re-run inside a
   cycle. Green stays zero reds and zero open findings. Triage, the response
   ladder, the repair budget, and the park machinery read the same record they
   always read.
 
-**ADR-0007 had every Tier-1 layer run to completion per cycle. That part of it
-is superseded here.**
+**ADR-0007 had every Tier-1 layer run to completion per cycle, and it measured
+repair progress as the size of the open set. Both parts of it are superseded
+here.**
 
 The plan lives in `cyclePlan()` in `src/lanes/spectrum.mjs`, beside the graph
 walk it shares. The out-of-tree route lives in the response ladder in
@@ -99,7 +111,9 @@ walk it shares. The out-of-tree route lives in the response ladder in
 lives in `src/lanes/substrate.mjs`, in front of it. The fingerprint and the
 budget it spends live in `src/ledger/cycles.mjs`, which is ledger derivation
 and holds no lane; the ladder reads it at its own first line, so a CI verdict
-and a local one meet the same guard on the way to the same routes.
+and a local one meet the same guard on the way to the same routes. The open
+set of a render is one exported derivation in that file, and `repairStalled()`
+in `src/lanes/verdict.mjs` reads it for the round comparison.
 
 ## What this is for
 
@@ -315,6 +329,51 @@ still open comes back in the words that raised it. Normalizing those words
 would be wrong here — "claim 1" and "claim 2" are two findings, and the
 digit is the difference.
 
+## Why two guards read one identity set, and where the line runs
+
+The repair rule and the cycle fingerprint ask different questions of the same
+findings. The repair rule asks about one round: did it close anything? A round
+that closed nothing says the tree, or the plan behind it, is the suspect, and
+the ladder's answer is the fresh pass — throw the tree away and implement it
+again. The fingerprint asks about a whole cycle: were the inputs identical?
+Identical inputs say every component that could change the outcome is where it
+was, and the ladder's answer is a park, because nothing left in the harness
+moves it and the owner is the one who can.
+
+The ladder reads the fingerprint first, so where both would fire the park wins:
+a question costs the owner a minute and a fresh pass costs the run an
+implementation. The two rarely meet, because a fresh pass moves the pass
+component and rebuilds the tree, so the cycle after a stall carries a new
+fingerprint by construction. What is left for the fingerprint is the loop the
+repair rule cannot see — cycles the ladder reaches by the operational and gate
+routes, which commit nothing and re-run the same layers on purpose.
+
+The false-stall case is the one both let through. A repair round that closes
+the defect it was given while the review names the next one holds the open
+count and moves every identity in it: progress to the repair rule, a new
+fingerprint to the cycle guard, and under the count rule a stall that spent the
+run's one fresh pass on a tree that was working.
+
+The comparison counts occurrences because the identity is deliberately coarse.
+It normalizes the
+numerals out of a summary so that a line number or a run id cannot make one
+defect look like two, and the price is that two defects can look like one: four
+gate layers failing as `m1` through `m4` reach a single identity between them.
+A membership test over that set reads a round that closed three of them as a
+round that closed nothing, and takes the fresh pass away from a run that was
+converging. Counting the occurrences of each identity keeps the rule honest at
+both ends, and it is not the count rule returning: the open set may grow all it
+likes as long as something in it closed.
+
+The count rule was not wrong about the case it was written for. ADR-0007 chose
+cardinality against a proper-subset rule, which would have called a round that
+fixed everything and surfaced one new finding a stall. One closed finding is
+the rule both of them miss: it passes the round that trades up and fails the
+round that reports its input back. The one live stall this rule was read
+against was true under either key — the open count grew and not one identity
+closed — so the re-key changes what the harness does with the other shape and
+nothing about that one.
+
 ## Why the second repeat parks, and never kills
 
 A run that meets this guard is not a failed run. It holds a candidate tree, a
@@ -352,6 +411,13 @@ re-entering on that render reads a decision rather than a question. A daemon
 that dies at the park re-derives the same fingerprint and asks the same
 question, and the answer to it is keyed on the fingerprint the park record
 carries.
+
+The repair rule holds no position either, and reads no more than the guard
+above it: the last two `verdict-rendered` lines, the `finding` lines their open
+sets name, and the `repair-round` stamps between them. A daemon that dies
+between a repair round and the render that judges it comes back to a window
+with no render to compare, and the cycle that follows makes the comparison the
+ladder would have made.
 
 The probe holds no position of its own. It runs where the route reaches it,
 which is in front of an operational fix that has not been stamped yet, so a
@@ -392,6 +458,13 @@ component it was missing rather than the budget: the fingerprint is a
 statement about what settles an outcome, and a wrong statement is corrected,
 not compensated for. Trigger: two such parks. Reversal cost: none, one line in
 `cycleFingerprint()`.
+
+If one closed identity per round proves too lenient — rounds that trade one
+finding for another until the cap is the only thing that stops them — the rule
+asks for both halves and a round must close more than it raises. The cap is the
+backstop meanwhile, and it is unchanged. Trigger: two runs whose cap exhaustion
+followed rounds that each closed one and raised one. Reversal cost: none, one
+comparison in `repairStalled()`.
 
 If one retry proves too tight for a CI that flakes twice on the same head,
 `RERUN_BUDGET` is the number that moves, and both subjects move with it: the

@@ -299,6 +299,14 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   defect an operator acknowledged: then the lane answers the gate on that
   authority and stamps both the acknowledgment it used and the fix
   (ADR-0032). Re-freeze and operational fixes cost no implementation budget.
+- **Repair progress is a closed finding, never a smaller open set.** A repair
+  round is a stall when it closed none of the findings the render before it
+  left open; a round that closes one while the review surfaces another is
+  progress, and the run keeps its fresh pass. The key is the identity the cycle
+  fingerprint and a standing acknowledgment read, compared by occurrences
+  because that identity normalizes numerals away and two findings can reach
+  one. The shrink rule the ladder entry above describes is retired with it; the
+  cap is unchanged (ADR-0022).
 - **Substrate probe before the fix.** An env finding sends the route to the
   host before it spends anything: the run stack's published ports, read off
   the compose project and asked on both loopback families with a write and a

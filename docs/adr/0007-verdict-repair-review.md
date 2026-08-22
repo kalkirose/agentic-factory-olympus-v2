@@ -6,6 +6,11 @@ error park the run instead of closing it.
 Superseded in part by ADR-0022: only the first cycle of an implementation
 pass runs the full spectrum; later cycles run the targeted set and carry the
 greens no red reaches.
+Superseded in part by ADR-0022: the repair progress rule keys on finding
+identities — a round is a stall when it closes none of the findings the render
+before it left open — and not on the size of the open set, so the sections
+below that measure progress as cardinality state a rule the harness no longer
+runs.
 
 ## Decision
 

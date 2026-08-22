@@ -1,11 +1,14 @@
 // Progress-keyed cycling over synthetic ledgers: what a cycle fingerprint is
 // made of, which changes make a cycle a new one, and where a repeat spends its
-// retry and where it parks. The lane wiring has its own suites; this one pins
-// the derivation, which is pure over the ledger and therefore restart-safe by
-// construction.
+// retry and where it parks. The repair ladder's progress rule reads the same
+// identity set and asks a different question, so its cases and the boundary
+// between the two guards are pinned here beside it. The lane wiring has its
+// own suites; this one pins the derivation, which is pure over the ledger and
+// therefore restart-safe by construction.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { cycleFingerprint, cycleRepeat, RERUN_BUDGET } from '../src/ledger/cycles.mjs';
+import { repairStalled } from '../src/lanes/verdict.mjs';
 
 const SHA = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2';
 const NEXT_SHA = '9988776655443322119988776655443322119988';
@@ -240,6 +243,133 @@ test('an answer older than the retry it would refresh grants nothing', () => {
   grant(log, decide(log));
   ciCycle(log, { id: 'F3' });
   assert.equal(decide(log).action, 'park');
+});
+
+// -- the repair ladder's progress rule ---------------------------------------
+
+/** A triage finding on the candidate tree. */
+function finding(log, id, summary) {
+  log.append('finding', { id, source: 'triage', class: 'code-defect', summary, evidence: 'unit' });
+}
+
+/** The round a repair-dev seat committed, and the render that judges it. */
+function repairCycle(log, { open, pass = 1, sha = SHA }) {
+  log.append('repair-round', { pass, round: renders(log).length, sha, openBefore: open });
+  return localRender(log, { open, pass, sha });
+}
+
+function localRender(log, { open, pass = 1, sha = SHA }) {
+  const cycle = renders(log).length + 1;
+  return log.append('verdict-rendered', {
+    cycle,
+    pass,
+    sha,
+    suiteSha: 'suite-1',
+    verdict: 'red',
+    open,
+    record: `verdict-${cycle}.json`,
+  });
+}
+
+/** The call the ladder makes on the last render. */
+function stalled(log) {
+  const all = renders(log);
+  return repairStalled(log.events, all, all[all.length - 1]);
+}
+
+test('a repair round that closes one finding and surfaces another is progress', () => {
+  const log = ledger();
+  finding(log, 'F1', 'the paginator is off by one');
+  localRender(log, { open: ['F1'] });
+  // The round fixed what it was given; the review named the next thing. One
+  // against one on the count, and the run is moving.
+  finding(log, 'F2', 'the sort key ignores case');
+  repairCycle(log, { open: ['F2'] });
+  assert.equal(stalled(log), false);
+  // A round that closes nothing and raises one more: the count grew, and so
+  // did the evidence that the tree is not moving.
+  finding(log, 'F3', 'the empty page renders a null row');
+  repairCycle(log, { open: ['F2', 'F3'] });
+  assert.equal(stalled(log), true);
+  // Two open again, one of them closed: enough, whatever came in beside it.
+  finding(log, 'F4', 'the cursor skips the last item');
+  repairCycle(log, { open: ['F3', 'F4'] });
+  assert.equal(stalled(log), false);
+});
+
+test('a repair round that closes nothing is a stall, whatever the ids and the count say', () => {
+  const log = ledger();
+  finding(log, 'F1', 'the paginator is off by one');
+  localRender(log, { open: ['F1'] });
+  // Triage raises the same defect under a fresh id, exactly as it does every
+  // cycle. The count held and the id moved; the defect did neither.
+  finding(log, 'F2', 'the paginator is off by one');
+  repairCycle(log, { open: ['F2'] });
+  assert.equal(stalled(log), true);
+  // The shape of the one live stall on the record: the count grew and nothing
+  // closed. True under the old key and true under this one — the rule change
+  // is about the other case.
+  finding(log, 'F3', 'the sort key ignores case');
+  repairCycle(log, { open: ['F2', 'F3'] });
+  assert.equal(stalled(log), true);
+});
+
+test('two findings that reach one identity are two findings to the progress rule', () => {
+  // The digest normalizes the numerals out, so four layers failing as m1 to m4
+  // carry one identity between them. Closing three of them is three closed
+  // findings, and a membership test would read it as none.
+  const log = ledger();
+  for (const n of [1, 2, 3, 4]) finding(log, `F${n}`, `layer m${n} is red`);
+  localRender(log, { open: ['F1', 'F2', 'F3', 'F4'] });
+  repairCycle(log, { open: ['F2', 'F3', 'F4'] });
+  assert.equal(stalled(log), false);
+  // The same set back again, under the same one identity, closed nothing.
+  repairCycle(log, { open: ['F2', 'F3', 'F4'] });
+  assert.equal(stalled(log), true);
+});
+
+test('a render with no repair round behind it, or a fresh pass, is never a stall', () => {
+  const log = ledger();
+  finding(log, 'F1', 'the paginator is off by one');
+  localRender(log, { open: ['F1'] });
+  // A cycle the ladder reached by another route — a re-freeze, an operational
+  // fix — judges no repair round and spends nothing.
+  localRender(log, { open: ['F1'] });
+  assert.equal(stalled(log), false);
+  // The first cycle of a fresh pass judges a tree the previous render never
+  // saw, so the comparison does not apply.
+  log.append('fresh-pass', { pass: 2, trigger: 'no-progress' });
+  repairCycle(log, { open: ['F1'], pass: 2 });
+  assert.equal(stalled(log), false);
+});
+
+test('the two guards divide the failure shapes: no progress takes the pass, repeated inputs park', () => {
+  // A repair round that closes one and surfaces another is progress to the
+  // ladder and a new fingerprint to the cycle guard: neither fires.
+  const moving = ledger();
+  finding(moving, 'F1', 'the paginator is off by one');
+  localRender(moving, { open: ['F1'] });
+  finding(moving, 'F2', 'the sort key ignores case');
+  repairCycle(moving, { open: ['F2'] });
+  assert.equal(stalled(moving), false);
+  assert.equal(decide(moving).action, 'proceed');
+
+  // A round that commits nothing leaves the tree, the suite and the findings
+  // where they were. The ladder calls it a stall and takes the fresh pass; the
+  // cycle guard sees identical inputs and buys one retry, then parks.
+  const stuck = ledger();
+  finding(stuck, 'F1', 'the paginator is off by one');
+  localRender(stuck, { open: ['F1'] });
+  finding(stuck, 'F2', 'the paginator is off by one');
+  repairCycle(stuck, { open: ['F2'] });
+  assert.equal(stalled(stuck), true);
+  const repeat = decide(stuck);
+  assert.equal(repeat.action, 'retry');
+  grant(stuck, repeat);
+  finding(stuck, 'F3', 'the paginator is off by one');
+  repairCycle(stuck, { open: ['F3'] });
+  assert.equal(stalled(stuck), true);
+  assert.equal(decide(stuck).action, 'park');
 });
 
 test('a local verdict rests on no check state, so the checks never reach it', () => {

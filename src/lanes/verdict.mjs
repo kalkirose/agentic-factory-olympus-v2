@@ -58,7 +58,7 @@ import {
   isAckable,
   standingAcksFor,
 } from '../ledger/acks.mjs';
-import { cycleRepeat } from '../ledger/cycles.mjs';
+import { cycleRepeat, openIdentities } from '../ledger/cycles.mjs';
 import { runSpectrum, persistentReds, cyclePlan } from './spectrum.mjs';
 import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview } from './review.mjs';
@@ -826,13 +826,44 @@ export function sweepSkippedAfter(events, seq) {
   return events.some((e) => e.event === 'operational-fix' && e.sweep === 'skipped' && e.seq > seq);
 }
 
-/** The progress rule: a repair round must strictly shrink the open set. */
-function repairStalled(events, renders, last) {
+/**
+ * The progress rule: a repair round is a stall when it closed none of the
+ * findings the render before it left open (ADR-0022). A count of the open set
+ * says two against two and cannot say whether they are the same two, so the
+ * round that fixes the defect it was given while the review names the next one
+ * reads as a stall and costs the run its fresh pass. The key is the identity a
+ * standing acknowledgment and the cycle fingerprint already read, so the
+ * harness holds one answer to "is this the same finding".
+ *
+ * The comparison is over occurrences, not membership. That identity normalizes
+ * away the numerals a defect carries, so four layers failing as `m1` to `m4`
+ * reach one identity between them, and a membership test would read three of
+ * them closed as nothing closed. An identity that comes back fewer times than
+ * it went in is a closed finding.
+ *
+ * The two guards own different failure shapes. This one asks whether the
+ * repair round moved the findings, and a round that moved none takes the fresh
+ * pass — the tree is the suspect. The cycle fingerprint asks whether the whole
+ * cycle repeated its inputs, and a second repeat parks — nothing left in the
+ * harness can move it. A repair round that closes one finding and surfaces
+ * another passes both: it is progress here, and a new fingerprint there.
+ */
+export function repairStalled(events, renders, last) {
   const prevRender = renders[renders.length - 2];
   if (!prevRender || prevRender.pass !== last.pass) return false;
   const window = eventsAfter(events, prevRender.seq).filter((e) => e.seq < last.seq);
   if (!window.some((e) => e.event === 'repair-round')) return false;
-  return last.open.length >= prevRender.open.length;
+  const prior = tally(openIdentities(events, prevRender));
+  if (prior.size === 0) return false;
+  const open = tally(openIdentities(events, last));
+  return [...prior].every(([identity, count]) => (open.get(identity) ?? 0) >= count);
+}
+
+/** How many times each identity of a set occurs in it. */
+function tally(identities) {
+  const counts = new Map();
+  for (const identity of identities) counts.set(identity, (counts.get(identity) ?? 0) + 1);
+  return counts;
 }
 
 // -- ladder arms -------------------------------------------------------------
