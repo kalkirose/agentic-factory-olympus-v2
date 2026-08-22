@@ -79,7 +79,7 @@ export class RunIsolation {
         await fetchClone(dir);
         const source = `${project} ${defaultBranch}:${configPath}`;
         const { blob, text } = await readBlobFromBranch(dir, defaultBranch, configPath);
-        const config = parseProjectConfig(text, source);
+        const config = parseProjectConfig(text, source, { launch: true });
         const sha = await branchSha(dir, defaultBranch);
         const added = await addRunWorktree(dir, this.paths, runId, baseCommit ?? defaultBranch);
         return {

@@ -300,6 +300,29 @@ test('the story lane names its commands and requires test paths', () => {
   assert.deepEqual(validateProjectConfig(okLint), []);
 });
 
+test('the story suite command must be carried by a Tier-1 layer at launch', () => {
+  // The verdict runs the Tier-1 layers alone, so a suite no layer runs is a
+  // suite that never meets the implemented tree.
+  const ungated = valid();
+  ungated.gates.tier1 = [{ name: 'lint', command: 'lint' }];
+  assert.deepEqual(
+    validateProjectConfig(ungated, { launch: true }).map((e) => e.path),
+    ['lanes.story.suiteCommand'],
+  );
+  // The rule binds launches only: a live run re-parses the blob it pinned at
+  // launch, and a rule born after that pin must not fault it mid-flight.
+  assert.deepEqual(validateProjectConfig(ungated), []);
+  // The layer may name the suite anything; the command is what runs.
+  const renamed = valid();
+  renamed.gates.tier1 = [{ name: 'acceptance', command: 'test' }];
+  assert.deepEqual(validateProjectConfig(renamed, { launch: true }), []);
+  // An empty gate list is a project that declares no Tier-1 layer at all, and
+  // the run refuses on that ground; this rule adds nothing to it.
+  const noGates = valid();
+  noGates.gates.tier1 = [];
+  assert.deepEqual(validateProjectConfig(noGates, { launch: true }), []);
+});
+
 test('a raised adversary wave count is a positive integer or an error', () => {
   const raised = valid();
   raised.lanes.story.adversaryWaves = 3;

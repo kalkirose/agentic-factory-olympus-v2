@@ -166,6 +166,32 @@ test('an invalid config on main fails the provision before any worktree', async 
   assert.ok(!existsSync(workspaceRoot(paths, 'r5')));
 });
 
+test('a launch-only rule arms at provision: an ungated suite refuses to launch', async (t) => {
+  const { origin, paths } = fixture(t);
+  // Permissively valid — a live run's re-parse accepts it — but no Tier-1
+  // layer carries the suite command, so the launch is where it must fail.
+  const ungated = projectConfigJson({
+    repo: { testPaths: ['test/'] },
+    commands: { test: ['node', '--test'], lint: ['run-lint'] },
+    gates: { tier1: [{ name: 'lint', command: 'lint' }] },
+    lanes: { story: { suiteCommand: 'test' } },
+  });
+  commitTree(origin, { [CONFIG_PATH]: ungated }, 'ungate the suite');
+  const isolation = new RunIsolation(paths, { composeRunner: fakeComposeRunner() });
+  await assert.rejects(
+    () =>
+      isolation.provision({
+        runId: 'r6',
+        project: 'alpha',
+        repoUrl: origin,
+        defaultBranch: 'main',
+        configPath: CONFIG_PATH,
+      }),
+    /lanes\.story\.suiteCommand/,
+  );
+  assert.ok(!existsSync(workspaceRoot(paths, 'r6')));
+});
+
 test('orphan run ids: workspace dirs without an open run', (t) => {
   const root = tempDir();
   t.after(() => removeDir(root));

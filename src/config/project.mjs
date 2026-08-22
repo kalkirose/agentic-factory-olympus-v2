@@ -64,8 +64,13 @@ export function defaultProjectConfig() {
 /**
  * Validates a parsed project config. Returns a list of errors, each with a
  * `path` and a `message`. An empty list means valid.
+ *
+ * `launch` arms the rules that bind only where a run is created. A live run
+ * re-parses the blob it pinned at launch at every lane stage, and a rule born
+ * after that pin would fault the run mid-flight — so a strict launch rule
+ * stays out of the permissive default.
  */
-export function validateProjectConfig(config) {
+export function validateProjectConfig(config, { launch = false } = {}) {
   const errors = [];
   const err = (path, message) => errors.push({ path, message });
 
@@ -93,8 +98,33 @@ export function validateProjectConfig(config) {
     if (!Array.isArray(config.repo?.testPaths) || config.repo.testPaths.length === 0) {
       err('repo.testPaths', 'the story lane requires at least one test path');
     }
+    if (launch) validateSuiteIsGated(config.gates, config.lanes.story, err);
   }
   return errors;
+}
+
+/**
+ * The frozen suite has to be a Tier-1 layer. A verdict runs `gates.tier1` and
+ * nothing else, while the lane's `suiteCommand` runs only before an
+ * implementation exists: the freeze red-state check, the inherited-base
+ * red-state check, and the adversary waves in their disposable trees. So a
+ * suite command no layer carries runs against the pre-implementation tree and
+ * never against the candidate, and the green verdict is silent about the one
+ * suite the run was created to satisfy. The match is on the command, not the
+ * layer name: a layer may call the suite whatever the project's gate
+ * vocabulary calls it. Launch-only: see `validateProjectConfig`.
+ */
+function validateSuiteIsGated(gates, story, err) {
+  const suite = story.suiteCommand;
+  const tier1 = isPlainObject(gates) ? gates.tier1 : undefined;
+  // Both shapes are reported by their own rules; this one needs them sound.
+  if (typeof suite !== 'string' || !Array.isArray(tier1) || tier1.length === 0) return;
+  if (tier1.some((layer) => isPlainObject(layer) && layer.command === suite)) return;
+  err(
+    'lanes.story.suiteCommand',
+    `no gates.tier1 layer runs it (${suite}); the verdict runs the Tier-1 layers alone, ` +
+      'so the frozen suite would never run against the implemented tree',
+  );
 }
 
 function validateRepo(repo, err) {
@@ -586,16 +616,18 @@ export function withProjectDefaults(config) {
 
 /**
  * Parses and validates project config text (as read from the bare clone).
- * Throws with every validation error; the launch that read it fails.
+ * Throws with every validation error; the launch that read it fails. `opts`
+ * passes through to `validateProjectConfig` — only the run launch parses
+ * with `{launch: true}`.
  */
-export function parseProjectConfig(text, source) {
+export function parseProjectConfig(text, source, opts) {
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch (cause) {
     throw new Error(`project config is not valid JSON: ${source}`, { cause });
   }
-  const errors = validateProjectConfig(parsed);
+  const errors = validateProjectConfig(parsed, opts);
   if (errors.length > 0) {
     const detail = errors.map((e) => `${e.path}: ${e.message}`).join('; ');
     throw new Error(`project config invalid (${source}): ${detail}`);
