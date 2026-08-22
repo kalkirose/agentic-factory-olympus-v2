@@ -40,10 +40,18 @@ export function budgetOpen(spent, granted) {
 }
 
 /**
- * The fingerprint of one rendered verdict: the candidate sha, the suite sha,
- * the open findings by identity, and — on a verdict the CI checks rendered —
- * the conclusion of every check on that head sha. Derived from the ledger
- * alone, so a restart re-reads the same fingerprint for the same render.
+ * The fingerprint of one rendered verdict: the implementation pass, the
+ * candidate sha, the suite sha, the open findings by identity, and — on a
+ * verdict the CI checks rendered — the conclusion of every check on that head
+ * sha. Derived from the ledger alone, so a restart re-reads the same
+ * fingerprint for the same render.
+ *
+ * The pass is in there because a fresh pass can rebuild a tree byte for byte
+ * and, committed in the same second onto the same parent, reach the same sha.
+ * That run has not looped: it has spent a bounded resource the response ladder
+ * grants once and a human grants after that, and the ladder's own ceiling —
+ * the second stall — is the better question to put to the owner. Every other
+ * route holds the pass still, so a loop cannot buy a new fingerprint with it.
  * @param {Array<object>} events the run ledger, in order
  * @param {object} render a `verdict-rendered` line
  */
@@ -51,6 +59,7 @@ export function cycleFingerprint(events, render) {
   return createHash('sha256')
     .update(
       [
+        `pass ${render.pass ?? ''}`,
         `sha ${render.sha ?? ''}`,
         `suite ${render.suiteSha ?? ''}`,
         `open ${openIdentities(events, render).join(',')}`,

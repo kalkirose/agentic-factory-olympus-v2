@@ -266,9 +266,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   `sweep: 'skipped'` with the findings and the reason, the run goes back to
   ship, and the CI re-run is the test (ADR-0022).
 - **Progress-keyed cycling.** Every verdict cycle carries a fingerprint over
-  what settles its outcome: the candidate sha, the suite sha, the open findings
-  by identity, and, on a CI verdict, the head sha with the last conclusion of
-  every check on it. The response ladder reads it before it acts. A first
+  what settles its outcome: the implementation pass, the candidate sha, the
+  suite sha, the open findings by identity, and, on a CI verdict, the head sha
+  with the last conclusion of every check on it. The response ladder reads it
+  before it acts. A first
   repeat stamps `cycle-retry` and spends the automatic-retry budget the CI
   re-run spends; a second repeat parks `cycle-repeat` with every occurrence as
   evidence, options `retry` and `abandon`. Productive cycles are unlimited —

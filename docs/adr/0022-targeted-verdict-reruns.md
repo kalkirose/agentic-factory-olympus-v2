@@ -54,9 +54,12 @@ Tier-1 spectrum, and no green verdict rests on a result the cycle did not earn.
   finding names is not this host's.
 - **A cycle that repeats a fingerprint buys one retry, then the owner
   decides.** Every verdict cycle is fingerprinted on what settles its outcome
-  and on nothing else: the candidate sha, the suite sha, the open findings by
-  identity, and — where the CI checks rendered the verdict — the head sha and
-  the last conclusion of every check on it. The response ladder reads the
+  and on nothing else: the implementation pass, the candidate sha, the suite
+  sha, the open findings by identity, and — where the CI checks rendered the
+  verdict — the head sha and the last conclusion of every check on it. The
+  pass is a component because a fresh pass can rebuild a tree byte for byte
+  and land on the same sha, and that run has spent a bounded resource rather
+  than looped; the second stall is the ceiling that owns it. The response ladder reads the
   fingerprint of the render it is about to act on before it acts. A first
   repeat stamps `cycle-retry` and carries on: it spends the same
   one-per-subject budget an automatic CI re-run spends (`RERUN_BUDGET`,

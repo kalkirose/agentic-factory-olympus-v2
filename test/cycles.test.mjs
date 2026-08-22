@@ -81,6 +81,20 @@ test('a cycle fingerprint is the sha, the suite, the open identities and the che
   assert.equal(one, cycleFingerprint(log.events, { seq: 99, ...base, cycle: 7, record: 'r7' }));
 });
 
+test('a fresh pass that rebuilds the same tree at the same sha is a new cycle', () => {
+  // Two implementation passes can commit a byte-identical tree onto the same
+  // parent inside one second and reach one sha. The run has spent its fresh
+  // pass, not looped, and the ladder's second stall is the ceiling that owns
+  // the case — so the guard must leave it alone.
+  const log = ledger();
+  log.append('finding', { id: 'F1', class: 'code-defect', summary: 'wrong', evidence: 'unit' });
+  const render = { seq: 30, cycle: 2, sha: SHA, open: ['F1'] };
+  assert.notEqual(
+    cycleFingerprint(log.events, { ...render, pass: 1 }),
+    cycleFingerprint(log.events, { ...render, pass: 2 }),
+  );
+});
+
 test('the open set enters by identity, not by id or by order', () => {
   const log = ledger();
   log.append('finding', { id: 'F1', class: 'env', summary: 'stale key', evidence: 'ci log' });
