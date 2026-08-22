@@ -365,3 +365,29 @@ export const PARK_TYPES = new Set([
 // park with its abandon option — never through a condition the run met on
 // its own (ADR-0015).
 export const CLOSE_STATES = new Set(['shipped', 'failed', 'killed']);
+
+// Closed defect kinds. A `gate-integrity` record and an `escape-recorded` both
+// classify a defect, and both carried the recurring ones as prose: one defect
+// described in two sentences across two runs counts as nothing, and the reader
+// of those ledgers has to decide the sentences mean the same thing. A kind is
+// what makes a recurrence a number. The set is closed and grows the way every
+// registry above does — by a decision recorded in an ADR, never ad hoc from a
+// call site (ADR-0008, ADR-0024).
+export const DEFECT_KINDS = new Set([
+  // The required checks are green and auto-merge did not fire.
+  'auto-merge',
+  // A request that existed without the labels its own diff asks for. The
+  // forge starts a request's checks at creation, so a label that lands after
+  // that is a label the check reading the request may never see.
+  'pr-label-missing',
+  // A CI failure log the forge would not hand over to the triage that needed
+  // it. The triage still runs — a red check is a red check — but it judges the
+  // red on the reason the log is absent rather than on the log.
+  'triage-log-missing',
+]);
+
+/** The kind, or a throw naming it. The only way a kind reaches a stamp. */
+export function assertDefectKind(kind) {
+  if (!DEFECT_KINDS.has(kind)) throw new Error(`unknown defect kind: ${kind}`);
+  return kind;
+}

@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Ledger, readEvents, tailEvents } from '../src/ledger/ledger.mjs';
-import { RUN_EVENTS, INSTANCE_EVENTS } from '../src/ledger/registry.mjs';
+import {
+  DEFECT_KINDS,
+  RUN_EVENTS,
+  INSTANCE_EVENTS,
+  assertDefectKind,
+} from '../src/ledger/registry.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
 function runLedger(dir) {
@@ -45,6 +50,16 @@ test('events outside the closed registry are refused', (t) => {
   assert.throws(() => ledger.append('made-up-event', { actor: 'daemon' }), /not in registry/);
   assert.throws(() => ledger.append('daemon-started', { actor: 'daemon' }), /not in registry/);
   ledger.close();
+});
+
+test('the defect vocabulary is closed, and holds the kinds that recur', () => {
+  // Two defects the ledgers carried twice each as free text. A word is what
+  // makes the third occurrence a number instead of a reading job.
+  assert.ok(DEFECT_KINDS.has('pr-label-missing'));
+  assert.ok(DEFECT_KINDS.has('triage-log-missing'));
+  for (const kind of DEFECT_KINDS) assert.equal(assertDefectKind(kind), kind);
+  assert.throws(() => assertDefectKind('no-failure-log-found'), /unknown defect kind/);
+  assert.throws(() => assertDefectKind(undefined), /unknown defect kind/);
 });
 
 test('payload keys cannot shadow the envelope', (t) => {

@@ -13,6 +13,7 @@ import {
   escapesWindow,
 } from '../src/telemetry/escapes.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
+import { DEFECT_KINDS } from '../src/ledger/registry.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
 function escapesStore(t) {
@@ -133,7 +134,40 @@ test('vocabulary violations are refused', (t) => {
     () => recordEscape(store, { actor: 'daemon', category: 'chore', detectionSource: 'tripwire' }),
     /requires a defect line/,
   );
+  // The defect kind is closed for the same reason the category is: a word a
+  // call site invents counts with nothing.
+  assert.throws(
+    () => recordEscape(store, { ...base, category: 'harness', kind: 'labels-were-late' }),
+    /unknown defect kind/,
+  );
   store.close();
+});
+
+test('a defect the harness has a word for is recorded under it, and read back', (t) => {
+  const { paths, store } = escapesStore(t);
+  for (const kind of DEFECT_KINDS) {
+    recordEscape(store, {
+      actor: 'daemon',
+      category: 'harness',
+      defectLine: `the harness defect named ${kind}`,
+      detectionSource: 'harness-self',
+      kind,
+    });
+  }
+  // A defect nobody has a vocabulary for is the ordinary case, and it stays
+  // one: the field is optional, and its absence reads as an absence.
+  recordEscape(store, {
+    actor: 'daemon',
+    category: 'product-escape',
+    defectLine: 'the settings page loses the second address',
+    detectionSource: 'human-report',
+  });
+  store.close();
+  const set = readEscapeSet(paths.escapesLedger);
+  assert.deepEqual(
+    set.map((e) => e.kind),
+    [...DEFECT_KINDS, null],
+  );
 });
 
 test('a fix must point at a recorded escape, once, with a fix ref', (t) => {

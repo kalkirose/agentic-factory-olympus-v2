@@ -18,7 +18,7 @@ import {
 import { postFreeze, repairLane } from '../src/lanes/verdict.mjs';
 import { shipStep, CHECKLESS_POLLS, UPDATE_CAP } from '../src/lanes/ship.mjs';
 import { RERUN_BUDGET } from '../src/ledger/cycles.mjs';
-import { gitHubForge, parseGitHubRepo, PartialLogRefusal } from '../src/ship/forge.mjs';
+import { gitHubForge, noLogReason, parseGitHubRepo, PartialLogRefusal } from '../src/ship/forge.mjs';
 import { derivedLabels } from '../src/ship/labels.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
@@ -1038,6 +1038,80 @@ test('a red check on a workflow run that finished dispatches with no wait at all
   assert.deepEqual(finding.layers, ['ci:ci']);
 });
 
+test('a workflow run the forge will not answer for holds the dispatch too', async (t) => {
+  // The bar is the run's own report of a completed status. A read nobody
+  // could make is not that report, and the log behind it is exactly as
+  // partial as the log of a run that said it was still executing.
+  const fx = shipFixture(t, { pollMs: 5, seats: CI_REPAIR_SEATS });
+  fx.forge.state.autoChecks = () => [redOf('900')];
+  fx.forge.workflowRun = async () => null;
+  const runId = await fx.launch();
+  const wait = await waitEvent(fx.paths, runId, (e) => e.event === 'triage-wait', 'triage-wait');
+  assert.equal(wait.run, '900');
+  assert.equal(wait.status, 'unreadable');
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  assert.ok(!live.some((e) => e.event === 'verdict-rendered' && e.source === 'ci'));
+  assert.equal(fx.forge.state.reruns.length, 0);
+});
+
+test('the dispatch reads the run state itself, right before it asks for a log', async (t) => {
+  // The watcher's hold keeps an ordinary CI race cheap, and it is one caller
+  // up from the call that can produce the wrong answer. This pins the gate at
+  // the dispatch: the run state is read again immediately before the first log
+  // the triage asks for, so no route in here can judge a partial log.
+  const fx = shipFixture(t, { seats: CI_REPAIR_SEATS });
+  let shas = 0;
+  fx.forge.state.autoChecks = () => (++shas === 1 ? [redOf('900')] : [green()]);
+  fx.forge.state.onRerun = (sha) => fx.forge.setChecks(sha, [redOf('900')]);
+  const calls = [];
+  const { workflowRun, checkOutput } = fx.forge;
+  fx.forge.workflowRun = async (id) => {
+    calls.push(`workflowRun:${id}`);
+    return workflowRun(id);
+  };
+  fx.forge.checkOutput = async (sha, name) => {
+    calls.push(`checkOutput:${name}`);
+    return checkOutput(sha, name);
+  };
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const first = calls.findIndex((c) => c.startsWith('checkOutput'));
+  assert.ok(first > 0, 'the triage asked for a log');
+  assert.equal(calls[first], 'checkOutput:ci');
+  assert.equal(calls[first - 1], 'workflowRun:900');
+});
+
+// -- the log the forge would not serve ---------------------------------------
+
+test('a triage the forge served no log to stamps the closed kind, once', async (t) => {
+  const fx = shipFixture(t, { seats: CI_REPAIR_SEATS });
+  let shas = 0;
+  fx.forge.state.autoChecks = () => (++shas === 1 ? [redOf('900')] : [green()]);
+  fx.forge.state.onRerun = (sha) => fx.forge.setChecks(sha, [redOf('900')]);
+  // The forge's own shape for an answer that is a reason and not a log.
+  const absence = '(no failure log for ci: the forge would not read job 42: it answered with nothing)';
+  fx.forge.checkOutput = async () => absence;
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const missing = events.filter(
+    (e) => e.event === 'gate-integrity' && e.kind === 'triage-log-missing',
+  );
+  // One record per check on one sha, whatever the poll count behind it.
+  assert.equal(missing.length, 1);
+  assert.equal(missing[0].check, 'ci');
+  assert.equal(missing[0].detail, 'the forge would not read job 42: it answered with nothing');
+  assert.equal(missing[0].sha, events.find((e) => e.event === 'pr-opened').sha);
+  // The reason still travels to the seat: a triage told why the evidence is
+  // absent judges the red better than one told nothing at all.
+  const prompt = fx.calls.find((c) => c.seat === 'verdict-triage')?.prompt;
+  assert.ok(prompt?.includes(absence), 'the reason reached the triage seat');
+  // Nothing in a ledger answers a log that is gone: the record stays open.
+  assert.ok(!events.some((e) => e.event === 'resolved' && e.resolves === missing[0].seq));
+  assert.match(readFileSync(fx.paths.loudStream, 'utf8'), /no CI failure log for ci/);
+});
+
 // -- the automatic-rerun budget, per (run, finding) --------------------------
 
 test('a cancelled check earns no automatic re-run: the cancel spends the budget', async (t) => {
@@ -1715,6 +1789,39 @@ test('the request is created carrying the labels its diff requires, in one call'
   // The label is on the record before the request can merge: the stamp
   // precedes `pr-opened`, which precedes the arm.
   assert.ok(labelled.seq < events.find((e) => e.event === 'pr-opened').seq);
+  // The defect this fix removed has a name, and a healthy ship stamps none of
+  // it: that is what makes a recurrence a number rather than a reading job.
+  assert.ok(!events.some((e) => e.event === 'gate-integrity' && e.kind === 'pr-label-missing'));
+});
+
+test('a request that did not carry its labels at creation is the named defect', async (t) => {
+  // The forge refuses a create carrying a label the repository does not
+  // define, so the request opens bare and the apply call puts the label on
+  // afterwards. Between the two the request existed unlabelled, which is the
+  // one moment a label check reads.
+  const fx = shipFixture(t, { seats: MIGRATING_DEV, config: { labels: LABEL_RULES } });
+  fx.forge.state.autoChecks = () => [green()];
+  fx.forge.state.labelsAccept = false;
+  const runId = await fx.launch();
+  await waitParked(fx.paths, runId, 'provisioning-gate');
+  fx.forge.state.labelsAccept = true;
+  fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'label created' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const named = events.filter(
+    (e) => e.event === 'gate-integrity' && e.kind === 'pr-label-missing',
+  );
+  // One record per request, however many opens the park costs.
+  assert.equal(named.length, 1);
+  assert.equal(named[0].pr, 7);
+  assert.deepEqual(named[0].labels, ['migration']);
+  assert.equal(named[0].applied, false);
+  assert.match(named[0].detail, /the apply call was refused/);
+  // The record reports a window that closed. The merge of the request is what
+  // says the window cost that request nothing.
+  const resolved = events.find((e) => e.event === 'resolved' && e.resolves === named[0].seq);
+  assert.equal(resolved.owner, 'merged');
+  assert.equal(resolved.pr, 7);
 });
 
 test('a diff no rule covers is stamped as labelled with nothing', async (t) => {
@@ -1750,6 +1857,31 @@ test('a label the repository does not define parks the gate and names it', async
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   assert.deepEqual([...fx.forge.state.labels], ['migration']);
+});
+
+test('an escape from a merge the harness already named takes that word for it', async (t) => {
+  // The defect was stamped where it was observed, hours before the merge that
+  // carried it into the product. The escape is the same defect arriving, so it
+  // is recorded under the same closed kind instead of described a second time.
+  const fx = shipFixture(t, { seats: MIGRATING_DEV, config: { labels: LABEL_RULES } });
+  fx.forge.state.autoChecks = () => [running()];
+  fx.forge.state.onRerun = () => {};
+  fx.forge.state.labelsAccept = false;
+  const runId = await fx.launch();
+  await waitParked(fx.paths, runId, 'provisioning-gate');
+  fx.forge.state.labelsAccept = true;
+  fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'label created' });
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [red()]);
+  fx.forge.adminMerge();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const escapes = readEscapeSet(fx.paths.escapesLedger);
+  assert.equal(escapes.length, 1);
+  assert.equal(escapes[0].kind, 'pr-label-missing');
+  // The repair seat reads the ticket in a fresh worktree and nothing else, so
+  // the word travels there too.
+  assert.match(readFileSync(escapes[0].ticket, 'utf8'), /kind .*: pr-label-missing/);
 });
 
 test('a failed merge round stalls into the fresh pass born on updated main', async (t) => {
@@ -2233,6 +2365,28 @@ test('a forge that cannot run at all still answers the triage input with a reaso
   const runner = async () => ({ code: null, output: '', error: 'spawn gh ENOENT' });
   const out = await gitHubForge({ repo: 'acme/widgets', runner }).checkOutput('sha1', 'build-api');
   assert.match(out, /ENOENT/);
+});
+
+test('a log and the reason there is none are the same type, and told apart here', async () => {
+  // The caller counts the absences, so it must not be the one recognizing
+  // prose it did not write: the module that authors the sentence reads it.
+  const { runner } = checkOutputRunner({ logCode: 1, log: 'gh: Not Found (HTTP 404)' });
+  const forge = gitHubForge({ repo: 'acme/widgets', runner });
+  assert.equal(
+    noLogReason(await forge.checkOutput('sha1', 'nothing-of-that-name')),
+    'the commit carries no check of that name',
+  );
+  assert.match(noLogReason(await forge.checkOutput('sha1', 'build-api')), /HTTP 404/);
+  const { runner: whole } = checkOutputRunner({ log: 'assertion failed at line 4\n' });
+  const output = await gitHubForge({ repo: 'acme/widgets', runner: whole }).checkOutput(
+    'sha1',
+    'build-api',
+  );
+  assert.match(output, /assertion failed/);
+  assert.equal(noLogReason(output), null);
+  // A log that merely reads like one is still a log: nothing else answers.
+  assert.equal(noLogReason('(no failure log for ci: it is queued) and then more'), null);
+  assert.equal(noLogReason(undefined), null);
 });
 
 test('every check the adapter reports names the workflow run it is a job of', async () => {

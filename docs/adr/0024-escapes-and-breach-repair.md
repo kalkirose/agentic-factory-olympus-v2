@@ -13,6 +13,17 @@ work is derived from ledgers rather than held by whoever noticed it.
   history keeps it. An empty ledger is a measured zero; a missing file is an
   unmeasurable hole, and the escapes-per-story metric reads the two the same
   way — healthy — while one of them is measuring nothing.
+- **A defect the harness already named keeps that name.** `escape-recorded`
+  takes an optional `kind` from `DEFECT_KINDS` (ADR-0008), checked at the
+  append and refused when it is a word the registry does not hold. The
+  category stays what it always was — a routing hint, seven broad classes —
+  and the defect line stays the prose account. The kind is neither: it is the
+  same word the `gate-integrity` record used hours earlier, so a defect the
+  harness observed and then merged reads as one thing in two ledgers rather
+  than two sentences a human has to recognize as the same. The breach
+  conversion carries it over from the request's own record, `readEscapeSet`
+  surfaces it, and the repair ticket prints it. Most escapes carry none, which
+  is the honest answer for a defect in a product nobody has a vocabulary for.
 - **The ticket is an event of its own.** `escape-ticketed` joins
   `escape-recorded` and the fix events in `ESCAPES_EVENTS`, linked by the
   recorded seq. It carries the absolute path of the repair ticket the harness
@@ -99,6 +110,23 @@ work is derived from ledgers rather than held by whoever noticed it.
   was killed is not owed again, for the same reason a spent card never
   auto-relaunches (ADR-0009): relaunching a failure burns compute in a loop
   no park covers. The console relaunches it with one command.
+
+## Why a kind sits beside the category and does not replace it
+
+They answer different questions. The category routes: seven broad classes, one
+of which decides whether the escape counts against the quality bar, and a
+vocabulary that small has to stay small or it stops being a routing decision.
+The defect line is the account a repair seat reads, and prose is the right
+shape for it — a defect explained in one sentence is a defect somebody can fix.
+
+What neither gives is a count. Two runs recorded the same label defect in two
+different sentences and nothing tied them together; the category said `harness`
+for both, which is true of most things the harness does wrong. The kind is the
+narrow third field: present only where the harness recognized one of its own
+known defects, closed so a call site cannot mint a synonym, and identical to
+the word the observing record used. That is what makes a recurrence a number.
+An escape without one is not a gap — most product defects have no name yet, and
+inventing one per escape would be prose with extra steps.
 
 ## Why the owed set is derived and never stored
 
@@ -198,6 +226,19 @@ If the ticket derivation ever picks the wrong escape — two open escapes
 sharing one ticket file, which nothing in the harness writes — the operator
 names the seq with `--escape` and the derivation is skipped. The explicit
 option is checked first for that reason.
+
+If the defect kind proves useless on escapes — the breach conversion almost
+never has a word to carry over, so the field reads null on everything — it
+costs one optional field and one line of the ticket, and the vocabulary keeps
+earning its place on the `gate-integrity` side where the harness observes the
+defect directly (ADR-0008). Trigger: an eval window in which no escape carries
+a kind. Reversal cost: low, and the field can stay unread rather than be
+removed: an escape that does carry a word is worth more than the field costs.
+
+If the kind ever wants to decide routing — a repair lane picking its seats off
+the word — that is a change to this decision and not a use of it. The category
+routes; the kind counts. Merging the two would make the count follow whatever
+routing needs next, which is how the categories stopped being countable.
 
 If `repairs-owed` proves noisy on a project that is paused for long stretches
 by design, the stamp is one call site in the repair pass and its dedupe is by

@@ -44,9 +44,10 @@ export const LOUD_OWNERSHIP = {
       owner: 're-freeze',
     },
   ],
-  // Two classes, two owners. A green-but-no-merge alert is answered by the
-  // merge landing. A harness finding is answered by the first verdict whose
-  // open set no longer holds it.
+  // Four classes: one per closed defect kind the ship step stamps, plus the
+  // seat's own harness finding, which names a finding instead of a kind. A
+  // green-but-no-merge alert is answered by the merge landing. A harness
+  // finding is answered by the first verdict whose open set no longer holds it.
   'gate-integrity': [
     {
       name: 'auto-merge',
@@ -59,6 +60,27 @@ export const LOUD_OWNERSHIP = {
       owner: 'verdict-rendered',
       owns: (item, render) => !(render.open ?? []).includes(item.findingId),
       fields: (item) => ({ findingId: item.findingId }),
+    },
+    // The request was open without the labels its diff asked for. The record
+    // reports a window, and a window that has closed cannot be reopened by
+    // anything: what it costs is a label check judging a bare request, so the
+    // merge of that request is the evidence it cost nothing here. The count
+    // stays in the ledger either way — that is what the record is for.
+    {
+      name: 'pr-label-missing',
+      match: (item) => item.kind === 'pr-label-missing',
+      owner: 'merged',
+      owns: (item, merged) => merged.pr === item.pr,
+      fields: (item) => ({ pr: item.pr }),
+    },
+    // A log the forge did not serve is evidence that is gone. No later stamp
+    // brings it back and no route repairs it, so nothing in a ledger can
+    // answer this record: the gate judged a red on the reason its log was
+    // absent, and a human is the only reader who can decide what that cost.
+    {
+      name: 'triage-log-missing',
+      match: (item) => item.kind === 'triage-log-missing',
+      by: 'the human, from a console',
     },
   ],
   // A red merge stays loud while the defect is still in the product. The

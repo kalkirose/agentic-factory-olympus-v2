@@ -37,8 +37,9 @@
 //                          never a green: it says nobody read a conclusion
 //   rerunFailed(sha)     → re-runs the failed jobs of the sha's runs
 //   checkOutput(sha, name) → failure-log tail for one check, or a parenthetical
-//                          saying why no log is retrievable. It answers every
-//                          forge condition with a reason and throws on none of
+//                          saying why no log is retrievable — `noLogReason`
+//                          tells the two apart. It answers every forge
+//                          condition with a reason and throws on none of
 //                          them; the one thing it refuses is a log asked for
 //                          before its workflow run finished, which is a defect
 //                          of the caller and throws `PartialLogRefusal`
@@ -64,6 +65,25 @@ export class PartialLogRefusal extends Error {
     super(message);
     this.name = 'PartialLogRefusal';
   }
+}
+
+/**
+ * The one shape of a no-log answer, and the one reader of it. `checkOutput`
+ * hands its caller either a log or a sentence saying why there is none, and
+ * the two are the same type — so a caller that wants to count the absences
+ * would otherwise have to recognize prose it did not write. The builder and
+ * the reader sit together here, where the sentence is authored, and nothing
+ * outside this module knows what a no-log answer looks like.
+ */
+function noLog(name, reason) {
+  return `(no failure log for ${name}: ${reason})`;
+}
+
+const NO_LOG = /^\(no failure log for .+?: ([\s\S]*)\)$/;
+
+/** The reason a check output carries no log, or null when it is a log. */
+export function noLogReason(output) {
+  return typeof output === 'string' ? (NO_LOG.exec(output)?.[1] ?? null) : null;
 }
 
 /** Extracts `owner/name` from the common GitHub remote URL shapes. */
@@ -321,14 +341,17 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
           const state = named[0]
             ? `it is ${named[0].status}${named[0].conclusion ? `/${named[0].conclusion}` : ''}`
             : 'the commit carries no check of that name';
-          return `(no failure log for ${name}: ${state})`;
+          return noLog(name, state);
         }
         // The check run of a workflow job links to the job it reports on;
         // that link carries the run id and the job id the log calls answer to.
         // A check from any other app has no job and no log to read.
         const link = JOB_LINK.exec(match.details_url ?? '');
         if (!link) {
-          return `(no failure log for ${name}: no workflow job behind the check, at ${match.details_url || 'no url'})`;
+          return noLog(
+            name,
+            `no workflow job behind the check, at ${match.details_url || 'no url'}`,
+          );
         }
         const [, runId, jobId] = link;
         // The completion assert, before a single byte of log is asked for. The
@@ -350,10 +373,10 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
         const whole = await logOfJob(jobId, '--log');
         if (whole.code === 0 && whole.output.trim()) return whole.output.slice(-LOG_TAIL);
         const why = (whole.output || failed.output).trim().slice(-500) || 'it answered with nothing';
-        return `(no failure log for ${name}: the forge would not read job ${jobId}: ${why})`;
+        return noLog(name, `the forge would not read job ${jobId}: ${why}`);
       } catch (error) {
         if (error instanceof PartialLogRefusal) throw error;
-        return `(no failure log for ${name}: ${error.message})`;
+        return noLog(name, error.message);
       }
     },
   };

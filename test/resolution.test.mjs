@@ -6,7 +6,12 @@ import assert from 'node:assert/strict';
 import { RunEngine } from '../src/engine/engine.mjs';
 import { scaffoldHome, runLedgerPath, archivedRunLedgerPath } from '../src/daemon/home.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
-import { LOUD_EVENTS, RUN_EVENTS, INSTANCE_EVENTS } from '../src/ledger/registry.mjs';
+import {
+  DEFECT_KINDS,
+  LOUD_EVENTS,
+  RUN_EVENTS,
+  INSTANCE_EVENTS,
+} from '../src/ledger/registry.mjs';
 import {
   LOUD_OWNERSHIP,
   OWNER_EVENTS,
@@ -52,6 +57,33 @@ test('an owning event is an event some ledger can actually stamp', () => {
 
 test('the table covers no event that is not loud', () => {
   for (const event of Object.keys(LOUD_OWNERSHIP)) assert.ok(LOUD_EVENTS.has(event));
+});
+
+test('every closed defect kind that reaches a loud record has a rule of its own', () => {
+  // A gate-integrity record is classified by kind. A kind with no rule is a
+  // record the sweep walks past for ever, which is the state the vocabulary
+  // exists to end.
+  const rules = LOUD_OWNERSHIP['gate-integrity'];
+  for (const kind of DEFECT_KINDS) {
+    const rule = rules.find((r) => r.match?.({ kind }));
+    assert.ok(rule, `no gate-integrity rule for kind ${kind}`);
+    assert.equal(rule.name, kind);
+  }
+});
+
+test('the merge of a request answers the labels it was opened without', () => {
+  const missing = line('gate-integrity', { kind: 'pr-label-missing', pr: 7 });
+  const other = line('merged', { pr: 9 });
+  const own = line('merged', { pr: 7 });
+  assert.deepEqual(ownedResolutions([missing, other, own]), [
+    { resolves: missing.seq, owner: 'merged', pr: 7 },
+  ]);
+});
+
+test('a log that is gone is answered by nobody a ledger can name', () => {
+  const gone = line('gate-integrity', { kind: 'triage-log-missing', sha: 'abc', check: 'ci' });
+  const events = [gone, line('merged', { pr: 7 }), line('verdict-rendered', { open: [] })];
+  assert.deepEqual(ownedResolutions(events), []);
 });
 
 // -- what a ledger's own events owe -------------------------------------------

@@ -38,6 +38,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { repairTicketPath, reconcileTicketPath, runReportPath } from '../daemon/home.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
+import { assertDefectKind } from '../ledger/registry.mjs';
 import { budgetOpen } from '../ledger/cycles.mjs';
 import { instanceParkForms } from '../ledger/parks.mjs';
 import { openEscapesStore } from '../telemetry/stores.mjs';
@@ -58,6 +59,7 @@ import {
   resetHard,
 } from '../isolation/tree.mjs';
 import { testEditDenyRules } from '../seats/boundary.mjs';
+import { noLogReason } from '../ship/forge.mjs';
 import { derivedLabels } from '../ship/labels.mjs';
 import { takeShipToken } from '../ship/token.mjs';
 import { parseIntentCard } from './card.mjs';
@@ -115,6 +117,37 @@ export const CHECKLESS_POLLS = 20;
  * takes the update, exactly as it did before the pre-verdict one existed.
  */
 export const UPDATE_CAP = 2;
+
+/**
+ * Stamps one gate-integrity record under a closed defect kind. Every stamp on
+ * this path goes through here, so the kind is checked against the registry at
+ * the one moment it could still be a new word — a defect the harness names in
+ * a sentence is a defect nobody counts, which is the whole reason the
+ * vocabulary is closed (ADR-0008).
+ * @param {object} ctx the run context
+ * @param {{kind: string} & Record<string, unknown>} fields
+ */
+function gateIntegrity(ctx, { kind, ...fields }) {
+  return ctx.store.append('gate-integrity', {
+    actor: ACTOR,
+    kind: assertDefectKind(kind),
+    ...fields,
+  });
+}
+
+/**
+ * The defect kind this run named for one request, or undefined. A gate the
+ * harness itself failed is stamped where it is observed, long before the merge
+ * that carries it into the product; when that merge is red, the escape the
+ * breach records is that same defect and takes the same word for it. A record
+ * naming a finding is a seat's judgment about the tree, not the harness naming
+ * its own defect, so it is not one of these.
+ */
+function namedDefect(events, pr) {
+  return [...events]
+    .reverse()
+    .find((e) => e.event === 'gate-integrity' && e.pr === pr && e.kind && !e.findingId)?.kind;
+}
 
 export const CARD_SWEEP_SCHEMA = {
   type: 'object',
@@ -423,6 +456,14 @@ async function openPr(ctx, base) {
  * That is substrate the daemon never self-clears, so it parks and names the
  * labels. A label no rule derives is not a park and not a guess: the check
  * that wants it is the thing that says so.
+ *
+ * A request that did not carry its labels out of the create is the
+ * `pr-label-missing` defect, whether the apply call rescued it or not: the
+ * forge starts the checks at creation, so a request labelled a moment later
+ * existed unlabelled for the one moment that decides the label check. The
+ * defect has a fix (the labels ride the create) and this is the count that
+ * says whether the fix is holding — one record per request, loud, and answered
+ * by that request merging, which is the evidence the window cost it nothing.
  */
 async function labelRequest(ctx, base, pr, labels, atCreation) {
   const applied = atCreation ? { applied: [...labels] } : await base.forge.applyLabels(pr, labels);
@@ -434,6 +475,23 @@ async function labelRequest(ctx, base, pr, labels, atCreation) {
     applied: ok,
     at: atCreation ? 'create' : 'open',
   });
+  const events = runEvents(ctx);
+  if (
+    labels.length > 0 &&
+    !atCreation &&
+    !events.some((e) => e.event === 'gate-integrity' && e.kind === 'pr-label-missing' && e.pr === pr)
+  ) {
+    gateIntegrity(ctx, {
+      kind: 'pr-label-missing',
+      pr,
+      labels,
+      applied: ok,
+      detail: ok
+        ? 'the create did not carry the labels; the apply call put them on afterwards'
+        : `the create did not carry the labels and the apply call was refused: ${applied.reason ?? 'no reason given'}`,
+      gist: `PR #${pr} opened without the label${labels.length > 1 ? 's' : ''} its diff asks for`,
+    });
+  }
   if (ok) return null;
   return parkDirective('provisioning-gate', {
     ...GATE_FORMS,
@@ -621,20 +679,27 @@ function checkMarks(events, sha, name) {
 }
 
 /**
- * The workflow runs behind the red checks that are still executing. A check is
- * one job of a workflow run: a job that fails early turns its check red and
- * leaves the rest of the run going, so a terminal check is no statement at all
- * about the run it belongs to. A check with no workflow run behind it — any
- * other app's check — has nothing to wait for.
+ * The workflow runs behind the red checks that have not reported themselves
+ * complete. A check is one job of a workflow run: a job that fails early turns
+ * its check red and leaves the rest of the run going, so a terminal check is
+ * no statement at all about the run it belongs to. A check with no workflow run
+ * behind it — any other app's check — has nothing to wait for.
+ *
+ * The bar is the run's own report of a completed status, so a run the forge
+ * would not answer for holds the dispatch too. The answer that matters here is
+ * not "is it still going" but "did it say it was done", and those differ on
+ * exactly the read that costs the most: a triage handed the first half of a
+ * run's log reads the steps that passed and concludes about the ones it cannot
+ * see. Holding costs a poll, and the poll asks again.
  */
-async function executingRuns(base, redChecks) {
+async function runsNotDone(base, redChecks) {
   const ids = [...new Set(redChecks.map((r) => r.run).filter((id) => id != null).map(String))];
-  const executing = [];
+  const waiting = [];
   for (const id of ids) {
     const state = await base.forge.workflowRun(id);
-    if (state && state.status !== 'completed') executing.push({ run: id, status: state.status });
+    if (state?.status !== 'completed') waiting.push({ run: id, status: state?.status ?? 'unreadable' });
   }
-  return executing;
+  return waiting;
 }
 
 /**
@@ -671,7 +736,7 @@ async function handleRed(ctx, base, opened, sha, redNow) {
   // them, and triage judged on a run that is still writing its log judges half
   // the evidence — so a red on an executing run is not yet a red the watcher
   // acts on, and the poll after the run ends is where it acts.
-  const executing = await executingRuns(base, redNow);
+  const executing = await runsNotDone(base, redNow);
   if (executing.length > 0) return stampWait(ctx, opened, sha, executing, redNow);
   const events = runEvents(ctx);
   const lastOpFix = findLast(events, 'operational-fix')?.seq ?? 0;
@@ -699,18 +764,27 @@ async function handleRed(ctx, base, opened, sha, redNow) {
     return lastRed > lastRerun;
   });
   if (!persistent) return null; // the re-run is still in flight
-  return ciTriage(ctx, base, sha, redNow, waitedFor(events, sha));
+  return ciTriage(ctx, base, opened, sha, redNow, waitedFor(events, sha));
 }
 
 /**
  * Persistent CI reds enter the shared four-class triage and render a red
  * verdict (`source: 'ci'`); the verdict stage routes it — same ladders, same
- * budgets as in-run reds. Every red here is a red of a workflow run that has
- * finished, so the logs the triage reads are whole. `waited` is the span the
- * watcher held the dispatch back for, and it is on the verdict because that is
- * the moment the span is known.
+ * budgets as in-run reds. `waited` is the span the watcher held the dispatch
+ * back for, and it is on the verdict because that is the moment the span is
+ * known.
+ *
+ * The dispatch reads the workflow runs itself, immediately before it asks for
+ * a single log. The watcher upstream already holds a red whose run has not
+ * reported complete, and that hold is what keeps an ordinary CI race cheap —
+ * but a rule that lives one caller up is a rule the next caller does not know
+ * about, and the cost of not knowing it is a gate judged on half a log. Here
+ * the condition is checked where the consequence is, so no route into this
+ * function can produce a triage over a run that never said it was done.
  */
-async function ciTriage(ctx, base, sha, redChecks, waited = null) {
+async function ciTriage(ctx, base, opened, sha, redChecks, waited = null) {
+  const notDone = await runsNotDone(base, redChecks);
+  if (notDone.length > 0) return stampWait(ctx, opened, sha, notDone, redChecks);
   const events = runEvents(ctx);
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   const cycle = renders.length + 1;
@@ -723,7 +797,35 @@ async function ciTriage(ctx, base, sha, redChecks, waited = null) {
     .filter((f) => f.source === 'triage');
   const reds = [];
   for (const r of redChecks) {
-    reds.push({ layer: `ci:${r.name}`, output: await base.forge.checkOutput(sha, r.name) });
+    const output = await base.forge.checkOutput(sha, r.name);
+    // The forge answers a log it cannot serve with a reason, and the reason
+    // travels to the seat as it always has: a red check is a red check, and a
+    // triage told why the evidence is absent judges better than one told
+    // nothing. What it stops doing is passing quietly — the absence is a
+    // defect of the gate, so it is stamped under its own name and counted,
+    // once per check on this sha (ADR-0008).
+    const absent = noLogReason(output);
+    if (
+      absent != null &&
+      !events.some(
+        (e) =>
+          e.event === 'gate-integrity' &&
+          e.kind === 'triage-log-missing' &&
+          e.sha === sha &&
+          e.check === r.name,
+      )
+    ) {
+      gateIntegrity(ctx, {
+        kind: 'triage-log-missing',
+        pr: opened.pr,
+        sha,
+        check: r.name,
+        cycle,
+        detail: absent,
+        gist: `no CI failure log for ${r.name} on ${sha.slice(0, 7)}: ${absent}`,
+      });
+    }
+    reds.push({ layer: `ci:${r.name}`, output });
   }
   const triaged = await triageStep(ctx, base, { cycle, reds, priorOpen });
   if (triaged.fail) return triaged.fail;
@@ -762,8 +864,7 @@ async function greenNoMerge(ctx, base, opened, sha) {
   // The required set is green and auto-merge is disarmed: a harness-class
   // red. Loud once per sha; one re-arm attempt, then the human.
   if (!events.some((e) => e.event === 'gate-integrity' && e.kind === 'auto-merge' && e.sha === sha)) {
-    ctx.store.append('gate-integrity', {
-      actor: ACTOR,
+    gateIntegrity(ctx, {
       kind: 'auto-merge',
       pr: opened.pr,
       sha,
@@ -1084,6 +1185,11 @@ async function breachFlow(ctx, base, merged, enqueueRepair) {
       .map((e) => e.seq);
     if (entries.length === 0) {
       const attribution = base.storyKey ?? ctx.runId;
+      // The word this run already used for its own defect, where it named one.
+      // The escape is that same defect arriving in the product, so it is
+      // recorded under the same closed kind rather than described again in a
+      // second sentence nobody can count with the first (ADR-0024).
+      const kind = namedDefect(events, merged.pr);
       const lines =
         open.length > 0
           ? open.map((f) => ({
@@ -1106,6 +1212,7 @@ async function breachFlow(ctx, base, merged, enqueueRepair) {
             defectLine: line.defectLine,
             detectionSource: 'harness-self',
             attribution,
+            ...(kind && { kind }),
             refs: {
               runId: ctx.runId,
               // The project the repair launches into. The escapes ledger is
@@ -1204,6 +1311,7 @@ function breachTicket({ ctx, base, merged, escape, tails }) {
     '',
     `- escape: seq ${escape.seq} in the escapes ledger`,
     `- category (a routing hint, not a verdict): ${escape.category}`,
+    ...(escape.kind ? [`- kind (the harness already named this defect): ${escape.kind}`] : []),
     `- attributed to: ${escape.attribution}`,
     `- merged PR: #${merged.pr}${opened?.url ? ` (${opened.url})` : ''}`,
     `- branch: ${base.branch}`,

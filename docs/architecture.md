@@ -374,6 +374,20 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   holds such a red until the run ends — one `triage-wait` stamp per wait, and
   the CI verdict carries how long it waited — and the log fetch asserts the
   same fact before it downloads a byte.
+- **The bar is the run's own report of completion** (ADR-0008). A workflow run
+  the forge would not answer for holds the dispatch exactly as one that said
+  `in_progress` does: the question is not whether the run is still going but
+  whether it said it was done, and an unreadable run said nothing. The triage
+  dispatch takes that read for itself, right before the first log it asks for,
+  so the rule belongs to the thing it protects rather than to whoever calls in.
+- **A defect the harness recognizes has a name** (ADR-0008, ADR-0024). Every
+  `gate-integrity` record carries a `kind` from the closed `DEFECT_KINDS` set,
+  and `escape-recorded` takes the same word where the harness already used it.
+  Three kinds today: `auto-merge`, `pr-label-missing` (a request that did not
+  carry its labels out of the create, answered by that request's merge) and
+  `triage-log-missing` (a CI failure log the forge answered with a reason
+  instead of the log, answered by nobody — the reason still reaches the triage
+  seat, and the absence is now counted rather than absorbed).
 - **One red regime.** CI reds get one automatic re-run of failed jobs, then
   the same four-class triage and the same routes as in-run reds. Budgets are
   shared.

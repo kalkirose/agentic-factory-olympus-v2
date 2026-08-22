@@ -8,6 +8,7 @@
 // repair-lane fix carries the final category and attribution.
 import { isAbsolute } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
+import { assertDefectKind } from '../ledger/registry.mjs';
 
 export const ESCAPE_CATEGORIES = new Set([
   'product-escape',
@@ -40,12 +41,19 @@ function assertCategory(category) {
 
 /**
  * Appends an `escape-recorded` event.
+ *
+ * `kind` is the closed name of a defect the harness recognizes as one of its
+ * own (`DEFECT_KINDS`). It is optional, because most escapes are defects in a
+ * product nobody has a vocabulary for; where the harness does have the word,
+ * the defect line stops being the only record of what happened and the same
+ * defect recurring is a count. An unknown kind throws rather than passing
+ * through as a new one — a vocabulary that grows at a call site is prose again.
  * @param {import('./stores.mjs').TelemetryStore} store the escapes store
  * @param {{actor: string, category: string, defectLine: string,
- *   detectionSource: string, attribution?: string, note?: string,
- *   refs?: object}} fields
+ *   detectionSource: string, attribution?: string, kind?: string,
+ *   note?: string, refs?: object}} fields
  */
-export function recordEscape(store, { actor, category, defectLine, detectionSource, attribution = 'unattributed', note, refs }) {
+export function recordEscape(store, { actor, category, defectLine, detectionSource, attribution = 'unattributed', kind, note, refs }) {
   assertCategory(category);
   if (!DETECTION_SOURCES.has(detectionSource)) {
     throw new Error(`unknown detection source: ${detectionSource}`);
@@ -56,7 +64,9 @@ export function recordEscape(store, { actor, category, defectLine, detectionSour
   if (typeof defectLine !== 'string' || defectLine.length === 0) {
     throw new Error('escape-recorded requires a defect line');
   }
+  if (kind !== undefined) assertDefectKind(kind);
   const fields = { actor, category, defectLine, detectionSource, attribution };
+  if (kind !== undefined) fields.kind = kind;
   if (note) fields.note = note;
   if (refs) fields.refs = refs;
   return store.append('escape-recorded', fields);
@@ -171,7 +181,9 @@ export function markEscapeFixed(store, { actor, fixes, evidence, note }) {
  * `attribution` are final values (from the fix when it carries them, else
  * from the record); `ticket` is the repair ticket's absolute path, or null.
  * `fixed` is true for either end, and `fixedBy` says which: `repair` for a
- * repair run's close-out, `operator` for a mark.
+ * repair run's close-out, `operator` for a mark. `kind` is the closed defect
+ * name where the record carried one, and null where it did not — a fix never
+ * renames a defect, so this value is the record's own.
  */
 export function readEscapeSet(path) {
   const events = readEvents(path);
@@ -189,6 +201,7 @@ export function readEscapeSet(path) {
       seq: e.seq,
       recordedTs: e.ts,
       defectLine: e.defectLine,
+      kind: e.kind ?? null,
       detectionSource: e.detectionSource,
       // An operator mark carries no classification: the record's own category
       // and attribution stand, so the quality-bar window counts the escape as

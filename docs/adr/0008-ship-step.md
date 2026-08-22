@@ -57,7 +57,12 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   the run ends is where the red is acted on, exactly as a red on a finished
   run always was. The hold stamps `triage-wait` once per head sha and workflow
   run, never once per poll; the CI verdict that ends the wait carries `waited`,
-  which is the one moment the span of the wait is known. Underneath, the log
+  which is the one moment the span of the wait is known. The bar is the run's
+  own report of a `completed` status: a run the forge would not answer for is
+  held on the same terms, because a read nobody could make is not a report that
+  the run is over. The dispatch takes the same read for itself, immediately
+  before the first log it asks for, so the guarantee holds for every route into
+  it and not only for the watcher above it. Underneath, the log
   fetch asserts the same fact for itself and throws `PartialLogRefusal` when it
   is reached anyway: the assert is on the read that would produce the wrong
   evidence, so no future caller can reintroduce the defect by taking a
@@ -134,6 +139,17 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   harness-class red: `gate-integrity` (loud) once per sha, one re-arm
   attempt (`operational-fix`, kind `auto-merge-rearm`), then
   `provisioning-gate`. The merge landing appends the paired `resolved`.
+- **A defect the harness recognizes has a name, not a sentence.** Every
+  `gate-integrity` record the ship step stamps carries a `kind` from
+  `DEFECT_KINDS` in the ledger registry, checked at the stamp. Three kinds:
+  `auto-merge` above; `pr-label-missing`, stamped once per request that did not
+  carry its labels out of the create, whether the apply call rescued it or not,
+  and answered by the merge of that request; and `triage-log-missing`, stamped
+  once per check on one head sha when the forge answers a log with a reason
+  instead of the log, and answered by nobody. The escapes ledger takes the same
+  closed word on `escape-recorded`, so a defect the harness named before the
+  merge is recorded under that name when the merge carries it into the product
+  (ADR-0024). The set grows only here, in an ADR.
 - **Competing merges ride the update path.** A PR behind its base and a PR
   the forge calls conflicting get the same daemon-driven update: fetch, merge
   the default branch into the run branch (never a rebase, never a
@@ -310,6 +326,63 @@ wrong answer. Neither is sufficient alone: a hold with no assert is a rule the
 next caller does not know about, and an assert with no hold turns an ordinary
 CI race into a stopped run.
 
+## Why the dispatch checks the run state a third time
+
+The hold sits in the watcher, one caller above the triage. That is where the
+behavior belongs — it is a poll outcome, and holding is what a poll outcome
+does — but it leaves the property stated about a caller rather than about the
+thing being protected. A property held by whoever calls in is a property the
+next caller has to be told about, and the cost of not telling them is the same
+gate judged on the same half a log. So the dispatch reads the run states of its
+own reds immediately before it asks for the first byte of any log, and holds on
+the same terms. In the ordinary path the read is redundant and costs one API
+call per triage. That is the price of the rule being about the triage.
+
+The bar moved with it. A run the forge would not answer for used to read as a
+run that was over, on the reasoning that a state nobody could read is not a
+statement that the run is still going. True, and the wrong question: what the
+dispatch needs is not "is it still going" but "did it say it was done". An
+unreadable run said nothing, and the log behind it is exactly as partial as the
+log of a run that reported `in_progress`. Holding costs a poll, and the poll
+asks again — the stage heartbeat says what the stage waits on throughout, and a
+stage that waits past its band is already an overrun the watcher reports
+(ADR-0034).
+
+## Why a log the forge will not serve is a counted defect
+
+The fetch is total: every absence it cannot fill comes back as a sentence, and
+that sentence is genuinely useful to the triage seat — a red check told why its
+log is missing judges better than one told nothing. What it was not is
+countable. Two triages in one window ran on `(no failure log ...)` while the
+logs were retrievable, and nothing in any ledger said so, because a sentence
+that varies with the reason reads as two unrelated events. The gate judged a
+red on the absence of the evidence for it, twice, invisibly.
+
+So the reason still travels to the seat, unchanged, and the absence is stamped
+under `triage-log-missing` beside it. Loud, because a gate that judged without
+its evidence is a gate-integrity defect and those are zero-tolerance here.
+Owned by nobody, because nothing in a ledger brings back a log the forge did
+not serve: no route repairs it, no later stamp is evidence about it, and the
+only reader who can decide what the missing evidence cost is the human the
+record was raised for.
+
+## Why the label defect is counted where its fix already landed
+
+The labels ride the create call now, which is the fix; a request that opens
+carrying them stamps nothing. `pr-label-missing` is not that defect being
+tolerated again — it is the instrument that says whether the fix is holding.
+The condition is narrow and unambiguous: the create did not carry the labels,
+so the request existed bare for the one moment that decides a label check. On a
+forge whose create takes no labels that condition is permanent and the record
+says so every ship, which is correct — that forge has the race the fix removed
+here, and the operator should be able to read it as a number rather than infer
+it from a check that goes red sometimes.
+
+The merge of the request answers it. The record reports a window that has
+closed and cannot reopen; what it costs is a label check judging a bare
+request, and the request landing is the evidence it cost nothing this time. The
+count stays in the ledger, which is the whole point of a kind.
+
 ## Why the wait is one quiet stamp and not a heartbeat
 
 The stage heartbeat already says the ship stage is alive and what it waits on
@@ -382,14 +455,25 @@ share no logs worth reading together — the wait narrows from the run to the
 job: `workflowRun` gives way to a per-job state read, and the fetch asks for
 one job's log rather than a slice of the run's archive. Trigger: `triage-wait`
 stamps whose `waited` on the CI verdict is a large part of the ship stage.
-Reversal cost: low — one forge method and the predicate in `executingRuns`;
-the stamp, the hold and the assert all stay where they are.
+Reversal cost: low — one forge method and the predicate in `runsNotDone`; the
+stamp, the hold and the assert all stay where they are.
 
-If a forge answers no run state at all (a host with no workflow concept), the
-hold never fires and the fetch never refuses, which is the behavior the ship
-step had before this. That is the deliberate posture for an unreadable state
-too: an unanswered read is not a statement that a run is executing, and
-treating it as one would stop runs over a single refused call.
+A forge with no workflow concept is untouched by the hold: its checks name no
+run, so there is nothing to read and nothing to wait for. The hold bites only
+where a check names a run and that run's state cannot be read, and there it
+holds. If that proves to cost real time — a host whose run endpoint fails often
+enough that ships wait on nothing — the predicate takes a bounded number of
+unreadable answers before it treats the run as done, which is the old posture
+with a ceiling on it. Trigger: `triage-wait` stamps carrying
+`status: 'unreadable'` that clear on a later poll with no other change.
+Reversal cost: low — one counter in `runsNotDone`, and the dispatch's own read
+already takes the same predicate.
+
+If the dispatch's own read proves redundant in practice — no route into the
+triage ever arrives without the watcher's hold behind it — it is one call per
+triage to keep, and keeping it is what makes the property belong to the
+dispatch. Removing it returns the guarantee to the fetch's assert, which stops
+the run instead of holding it.
 
 If direct card pushes prove unlandable (org-wide protection on the default
 branch), route the sweep through a `cards/<runId>` branch with its own
@@ -420,8 +504,25 @@ beside the gate definitions. Trigger: CI verdicts whose triage classes the
 same check `env` repeatedly inside one run. Reversal cost: low — one constant;
 the key stays the pair, because the pair is what made the count mean anything.
 
+If a defect kind proves noisy rather than countable — `pr-label-missing`
+stamping every ship on a forge whose create genuinely cannot carry labels, or
+`triage-log-missing` stamping for a class of absence nobody would act on — the
+kind narrows at its stamp site rather than leaving the set: a vocabulary that
+loses words stops being comparable across windows. Trigger: one kind
+dominating the loud strip with records that resolve to the same known cause.
+Reversal cost: low — one predicate at one call site; the word, the tests and
+the ownership rule stay.
+
+If a kind wants to be quiet rather than loud, that is a move out of
+`gate-integrity` and not a flag on it: every record of that event is loud by
+the decision this ADR records, and a quiet gate-integrity record would say the
+gate failed and ask nobody to look.
+
 If a forge for a non-GitHub host is needed, the interface in `ship/forge.mjs`
-is the contract; the ship step never imports the gh adapter directly.
+is the contract; the ship step never imports the gh adapter directly. A forge
+whose check output cannot be told apart from its reasons breaks
+`triage-log-missing` and nothing else: `noLogReason` is the one reader of that
+shape, and it lives beside the one writer of it.
 
 If per-run forge resolution proves too costly (a forge that must authenticate
 or cache per repository), the resolver memoizes per project inside
