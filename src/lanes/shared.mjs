@@ -142,9 +142,11 @@ export function freezeExclusions(paths, runId) {
  * `acks` names the findings an `ack` answer records a standing acknowledgment
  * for. It rides the record because the record is what the daemon writes those
  * acks from: the stage that raised the park is long gone by the time the
- * answer lands (ADR-0032).
+ * answer lands (ADR-0032). `detail` is the condition the park raised on, in
+ * the form a reader can match against the ledger; the abandon route closes the
+ * run on it, so a park that names its condition names it once.
  */
-export function parkDirective(type, { question, options, text, refs, acks }) {
+export function parkDirective(type, { question, options, text, refs, acks, detail }) {
   return {
     park: {
       type,
@@ -153,6 +155,7 @@ export function parkDirective(type, { question, options, text, refs, acks }) {
       ...(text && { text }),
       ...(refs && { refs }),
       ...(acks && { acks }),
+      ...(detail && { detail }),
     },
   };
 }

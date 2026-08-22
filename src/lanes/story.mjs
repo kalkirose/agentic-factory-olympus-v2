@@ -19,6 +19,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { runReportPath } from '../daemon/home.mjs';
+import { textIdentity } from '../ledger/acks.mjs';
 import { cloneDir } from '../isolation/clones.mjs';
 import { addDisposableWorktree, removeWorktree, workspaceRoot } from '../isolation/worktrees.mjs';
 import {
@@ -602,6 +603,23 @@ function blockingFindings(findings) {
   return (findings ?? []).filter((f) => f.severity !== 'note');
 }
 
+/**
+ * Whether a counted round closed none of the blocking findings the round
+ * before it raised — the gate's progress rule, keyed on identity rather than
+ * on a count (ADR-0020). A count says three against three and cannot say
+ * whether they are the same three: a round that closes two and opens two is
+ * converging on a document that is moving, and a round that reports the same
+ * three again is a round nobody needed. A round stamped before the identities
+ * were recorded judges nothing here, and the gate spends its cap as it always
+ * did.
+ */
+function closedNothing(previous, last) {
+  const prior = new Set(previous.blocking ?? []);
+  if (prior.size === 0) return false;
+  const open = new Set(last.blocking ?? []);
+  return [...prior].every((identity) => open.has(identity));
+}
+
 /** Every note the gate raised across its rounds, in the order it raised them. */
 function gateNotes(events) {
   const notes = [];
@@ -699,20 +717,22 @@ async function specGate(ctx) {
       if (r.directive) return r.directive;
       continue;
     }
-    // Convergence. Every counted round past the first must strictly shrink the
-    // blocking set, exactly as a repair round must. A round that does not is
-    // the gate oscillating — each amendment rewrites spec text, and the next
-    // full re-check reads the new text as new surface — so the run hands the
-    // decision over at once and leaves the rest of the cap unspent.
+    // Convergence. Every counted round past the first must close something the
+    // round before it raised, exactly as a repair round must. A round that
+    // closes nothing is the gate oscillating — each amendment rewrites spec
+    // text, and the next full re-check reads the new text as new surface — so
+    // the run hands the decision over at once and leaves the rest of the cap
+    // unspent.
     const previous = rounds[rounds.length - 2];
-    if (previous && last.findings >= previous.findings) {
+    if (previous && closedNothing(previous, last)) {
       const asked = gatePark(events, 'spec-gate-stalled', last.seq);
       if (!asked) {
         return parkDirective('spec-gate-stalled', {
           question:
             `The spec gate is not converging. Round ${last.round} ended with ` +
             `${last.findings} blocking findings against ${previous.findings} in round ` +
-            `${previous.round}, so the open set did not shrink; notes: ${last.notes ?? 0}. ` +
+            `${previous.round}, and closed none of them — every finding that round raised is ` +
+            `open again, by identity; notes: ${last.notes ?? 0}. ` +
             'Notes do not hold the spec; they travel to the suite seat as proof obligations. ' +
             'The gate stops here rather than spend a counted round on a document ' +
             `that is not getting closer. The spec stands at ${base.specPath}. ` +
@@ -804,6 +824,10 @@ async function gateRound(ctx, base, { round }) {
     round,
     verdict: blocking.length > 0 ? 'findings' : 'pass',
     findings: blocking.length,
+    // The blocking set by identity, not by count alone: the next round's
+    // progress rule reads which findings are still open, and a count cannot
+    // tell three closed and three opened from three untouched (ADR-0020).
+    blocking: blocking.map((f) => textIdentity(f.section, f.finding)),
     notes,
   });
   return { directive: null };

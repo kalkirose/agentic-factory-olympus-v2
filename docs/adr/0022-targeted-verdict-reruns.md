@@ -1,4 +1,4 @@
-# ADR-0022: Targeted verdict re-runs, carried greens, and the confirmation sweep
+# ADR-0022: Targeted verdict re-runs, carried greens, the confirmation sweep, and progress-keyed cycling
 
 Status: accepted (2026-08-15)
 
@@ -52,6 +52,36 @@ Tier-1 spectrum, and no green verdict rests on a result the cycle did not earn.
   The probe stamps `substrate-probe` either way. It does not run where the
   route skips the sweep: nothing local runs there, and the substrate a CI
   finding names is not this host's.
+- **A cycle that repeats a fingerprint buys one retry, then the owner
+  decides.** Every verdict cycle is fingerprinted on what settles its outcome
+  and on nothing else: the candidate sha, the suite sha, the open findings by
+  identity, and — where the CI checks rendered the verdict — the head sha and
+  the last conclusion of every check on it. The response ladder reads the
+  fingerprint of the render it is about to act on before it acts. A first
+  repeat stamps `cycle-retry` and carries on: it spends the same
+  one-per-subject budget an automatic CI re-run spends (`RERUN_BUDGET`,
+  ADR-0008). An answered park grants the next one, exactly as an operational
+  fix grants the next check re-run — any answer, because a human who answers
+  has changed something the ledger cannot see, and the gate routes re-run the
+  same layers against the same tree on purpose. An answer older than the retry
+  it would refresh grants nothing. A second repeat parks `cycle-repeat`, which the
+  notifier pushes to the owner like every other park (ADR-0028), carrying every
+  occurrence of the fingerprint as its evidence and offering `retry` and
+  `abandon`. Never a kill: the run holds a candidate, a suite and a verdict
+  history, and a park holds all of it at zero cost.
+- **Counts are not the key, anywhere in this rule.** A cycle that moves any
+  component of its fingerprint is a new cycle, and a run may spend as many of
+  those as its story needs. A cap prices repetition and persistence the same
+  way, so the run that keeps moving pays for the run that does not.
+- **The open findings enter by identity.** Class, summary and evidence,
+  normalized and digested — the identity a standing acknowledgment already keys
+  on (ADR-0032) — never the finding id and never the count. Triage raises the
+  same defect under a fresh id in every cycle that finds it, so an id-keyed
+  set reads a stuck run as a moving one.
+- **The spec gate's progress rule takes the same keying.** A counted round past
+  the first is a stall when it closes none of the blocking findings the round
+  before it raised, by identity, rather than when its count fails to shrink
+  (ADR-0020).
 - **Nothing else moves.** The flake filter stays one red-only re-run inside a
   cycle. Green stays zero reds and zero open findings. Triage, the response
   ladder, the repair budget, and the park machinery read the same record they
@@ -63,7 +93,10 @@ is superseded here.**
 The plan lives in `cyclePlan()` in `src/lanes/spectrum.mjs`, beside the graph
 walk it shares. The out-of-tree route lives in the response ladder in
 `src/lanes/verdict.mjs`, beside the operational fix it stamps, and the probe
-lives in `src/lanes/substrate.mjs`, in front of it.
+lives in `src/lanes/substrate.mjs`, in front of it. The fingerprint and the
+budget it spends live in `src/ledger/cycles.mjs`, which is ledger derivation
+and holds no lane; the ladder reads it at its own first line, so a CI verdict
+and a local one meet the same guard on the way to the same routes.
 
 ## What this is for
 
@@ -220,6 +253,76 @@ The false-negative side is deliberate. A probe that answers clean on a broken
 host costs exactly what the harness costs today, and a probe that parks a
 healthy run costs the owner a night.
 
+## Why a fingerprint, and not a cycle cap
+
+One run rendered six verdicts in a row. Every one of them judged the same
+candidate sha, carried the same defect, and read the same replayed check state.
+The run ended when a human pushed an empty commit. Nothing in the harness was
+going to end it: each cycle stamped an operational fix, each fix granted the
+next CI re-run, and each re-run came back the way the one before it did.
+
+A cap is the obvious answer and the wrong one. A cap counts cycles, and the
+count is not what is going wrong. A hard story that moves something every cycle
+— a finding closed here, a repair sha there, a check that flipped — is doing
+what the harness exists to do, and a cap stops it at the same number that stops
+a loop. The number would be tuned against the loop, so the working run would
+pay for it.
+
+The fingerprint prices repetition instead of persistence. Four things settle
+what a cycle concludes: the tree it judges, the suite it judges against, the
+findings it carries in, and the external checks, where those rendered the
+verdict. Move any of them and the next cycle can end differently, so it costs
+nothing to allow. Move none of them and the next cycle cannot end differently,
+so it is worth one retry — a check that flakes is the one honest reason the
+same inputs get a second look — and after that it is worth a question.
+
+The retry is the allowance that already exists, not a second one. `RERUN_BUDGET`
+is one automatic retry per subject, and only a deliberate act refreshes it: an
+operational fix for a red check, a human's answer for a repeated cycle. Two
+independent allowances for one flake are how the loop kept its fuel — every
+cycle's operational fix handed the same red check a fresh re-run, and nothing
+counted the cycle around it at all.
+
+The answer has to count as the grant, and the daemon's own fix must not. Two
+routes deliberately re-run identical inputs: the provisioning gate, where a
+human repairs a substrate the ledger cannot see and answers, and the standing
+acknowledgment that answers such a gate on an operator's earlier authority.
+Both produce a cycle the fingerprint reads as a repeat, because the thing that
+changed is outside every component of it. An answer is the record of that
+change, so it grants the cycle that tests it. The automatic fix the daemon
+stamps for itself is not a change at all, and granting on that is precisely the
+loop.
+
+## Why identity, and not the finding id
+
+Those six cycles carried six different open sets by id and one open set by
+identity. A finding id is per-run bookkeeping, minted by the triage that raises
+the finding: the same seat, shown the same red one cycle later, raises the same
+defect and numbers it one higher. A guard keyed on the id would be blind to
+exactly the case it exists for. The identity is the one standing
+acknowledgments already key on — class, summary and evidence, normalized
+against the paths, shas and line numbers that change while the defect does not
+— so the harness holds one answer to "is this the same finding" rather than
+two.
+
+A spec-gate finding carries no class and no id at all. Its identity is the
+section it sits in and the defect it states, digested as written, because the
+gate hands each round the previous round's findings verbatim: a defect that is
+still open comes back in the words that raised it. Normalizing those words
+would be wrong here — "claim 1" and "claim 2" are two findings, and the
+digit is the difference.
+
+## Why the second repeat parks, and never kills
+
+A run that meets this guard is not a failed run. It holds a candidate tree, a
+frozen suite, a verdict history and, in the observed case, a green
+implementation pass. It has also proven one thing worth knowing: more of the
+same will not settle it. Ending the run throws the work away to save nothing,
+and a run may not reach a terminal state on a condition it met by itself
+(ADR-0015). A park costs nothing to hold — it frees the run's slot, so the
+factory schedules around it — and the notifier puts the question in front of
+the owner at the second repeat rather than after a night of cycles.
+
 ## Replay
 
 The plan reads the ledger and nothing else: the last `verdict-rendered` for
@@ -235,6 +338,17 @@ source, the classes of the findings that render left open, and the
 `operational-fix` stamp that follows it. A daemon that dies between the stamp
 and the stage transition finds the stamp when it comes back, and the ship
 stage takes the run from there.
+
+The cycle guard holds no position either. Its inputs are the
+`verdict-rendered` lines, the `finding` lines their open sets name, the
+`check-transition` lines of the head sha, and its own `cycle-retry` stamps —
+ledger, all of it, and all in order. A daemon that dies between the retry stamp
+and the cycle it bought finds the stamp when it comes back and does not buy a
+second one; the stamp names the render it was granted for, so the ladder
+re-entering on that render reads a decision rather than a question. A daemon
+that dies at the park re-derives the same fingerprint and asks the same
+question, and the answer to it is keyed on the fingerprint the park record
+carries.
 
 The probe holds no position of its own. It runs where the route reaches it,
 which is in front of an operational fix that has not been stamped yet, so a
@@ -268,6 +382,20 @@ resolver instead of the constant, and reads `localhost` for the families the
 tests would get. Trigger: a wedge the probe called clean. Reversal cost: low,
 one function in `src/lanes/substrate.mjs`, with the stamped `addresses` on
 every past probe to re-read the decision against.
+
+If the cycle fingerprint proves too coarse — a park an owner answers `retry`
+whose bought cycle then ends differently, twice — the composition grows the
+component it was missing rather than the budget: the fingerprint is a
+statement about what settles an outcome, and a wrong statement is corrected,
+not compensated for. Trigger: two such parks. Reversal cost: none, one line in
+`cycleFingerprint()`.
+
+If one retry proves too tight for a CI that flakes twice on the same head,
+`RERUN_BUDGET` is the number that moves, and both subjects move with it: the
+automatic check re-run and the repeated cycle share the allowance by design.
+Trigger: two runs whose bought retry then went green. Reversal cost: none, one
+constant — but it doubles the ceiling on a futile loop as well, which is the
+trade the constant is there to make visible.
 
 If a project's Tier-1 layers do reach what an out-of-tree finding names — a
 smoke layer that calls the same external service the CI check calls, or a

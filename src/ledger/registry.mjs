@@ -84,6 +84,13 @@ export const RUN_EVENTS = new Set([
   'flake',
   'finding',
   'verdict-rendered',
+  // The one retry a repeated cycle fingerprint is worth, spent. The stamp
+  // names the fingerprint, the render it was granted for and the cycles that
+  // share it, so the park behind a second repeat reads off the ledger rather
+  // than off a count nobody kept. Quiet — a repeat may be a flake, and one
+  // more cycle is the cheapest way to find out — but never silent, because a
+  // cycle the harness granted itself is a cycle somebody paid for (ADR-0022).
+  'cycle-retry',
   'repair-round',
   'stall',
   'fresh-pass',
@@ -338,6 +345,12 @@ export const PARK_TYPES = new Set([
   'unkilled-gap-survivor', // adversary survivor without a killing test
   'second-zero-kill', // second 0/N adversary round
   'second-stall', // response ladder
+  // A verdict cycle that judged what an earlier cycle of the same run already
+  // judged — same candidate sha, same suite, same open findings by identity,
+  // same check state — after the one retry the repetition was worth. A
+  // decision park: it names its condition in the type, and the run holds
+  // every result it earned while it waits (ADR-0022).
+  'cycle-repeat',
   'card-invalidated', // ship-time card sweep
   'provisioning-gate',
   // Terminal-state discipline (ADR-0015): a recoverable failure parks with

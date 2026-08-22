@@ -58,6 +58,7 @@ import {
   isAckable,
   standingAcksFor,
 } from '../ledger/acks.mjs';
+import { cycleRepeat } from '../ledger/cycles.mjs';
 import { runSpectrum, persistentReds, cyclePlan } from './spectrum.mjs';
 import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview } from './review.mjs';
@@ -503,6 +504,20 @@ function triageChecks(report, { redLayers, priorOpen }) {
 // -- the response ladder -----------------------------------------------------
 
 async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
+  // Progress before anything else. A cycle whose fingerprint the run has
+  // already judged cannot end differently, so the first repeat buys one retry
+  // out of the same budget an automatic re-run comes from, and the second
+  // hands the decision to the owner (ADR-0022).
+  const repeat = cycleRepeat(events, renders, last);
+  if (repeat.action === 'park') return cycleRepeatPark(repeat, last);
+  if (repeat.action === 'retry') {
+    ctx.store.append('cycle-retry', {
+      actor: ACTOR,
+      fingerprint: repeat.fingerprint,
+      render: last.seq,
+      cycles: repeat.occurrences.map((o) => o.cycle),
+    });
+  }
   const index = findingIndex(events);
   const open = last.open.map((id) => index.get(id)).filter(Boolean);
   const suiteDefects = mode === 'story' ? open.filter((f) => f.class === 'suite-defect') : [];
@@ -703,6 +718,30 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
 
   if (!acted) throw new Error('verdict ladder found no route for the open findings');
   return null;
+}
+
+/**
+ * The park a repeated cycle fingerprint raises. It carries every occurrence of
+ * the fingerprint, so the owner reads the repetition off the question instead
+ * of diffing verdict records, and it carries the fingerprint itself, so the
+ * `retry` it takes back grants exactly the cycle it was asked about.
+ */
+function cycleRepeatPark({ fingerprint, occurrences }, last) {
+  const line = (o) => `- cycle ${o.cycle} (seq ${o.seq})` + (o.record ? `: ${o.record}` : '');
+  return parkDirective('cycle-repeat', {
+    question:
+      `Cycle ${last.cycle} judged what an earlier cycle of this run judged: the same candidate ` +
+      `sha (${last.sha}), the same suite, the same open findings by identity, and the same ` +
+      'check state. One retry has already been spent on the repetition and it moved nothing, ' +
+      `so the next cycle would spend the same work on the same inputs. Fingerprint ` +
+      `${fingerprint}:\n` +
+      occurrences.map(line).join('\n') +
+      '\nThe run holds every result it has earned and costs nothing while it waits. ' +
+      'Answer "retry" for one more cycle, or "abandon" to close the run.',
+    options: ['retry'],
+    refs: [last.record],
+    detail: { fingerprint, occurrences },
+  });
 }
 
 // What an `ack` answer at the gate is worth, said at the gate. The operator

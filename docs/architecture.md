@@ -211,9 +211,11 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   Its scope is computed, not declared — the round's spec copy diffed against
   the spec as it stands, part by part — and it carries the previous round's
   findings verbatim. A new defect in an unamended section is a note, except
-  an authority contradiction, which blocks anywhere. A round that does not
-  strictly shrink the blocking count parks the run at once
-  (`spec-gate-stalled`, same options as the cap park, remaining cap unspent).
+  an authority contradiction, which blocks anywhere. A round that closes none
+  of the blocking findings the round before it raised — by identity, the
+  section and the defect it states, so equal counts with moved identities are
+  progress — parks the run at once (`spec-gate-stalled`, same options as the
+  cap park, remaining cap unspent). The round stamp carries the identities.
 - **Adversary**: throwaway wrong implementations, all evaluated to verdict, in
   disposable worktrees. One wave a round by default;
   `lanes.story.adversaryWaves` raises the count, and the launch pins the config
@@ -263,6 +265,15 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   those remedies lands outside the tree, so the operational fix stamps
   `sweep: 'skipped'` with the findings and the reason, the run goes back to
   ship, and the CI re-run is the test (ADR-0022).
+- **Progress-keyed cycling.** Every verdict cycle carries a fingerprint over
+  what settles its outcome: the candidate sha, the suite sha, the open findings
+  by identity, and, on a CI verdict, the head sha with the last conclusion of
+  every check on it. The response ladder reads it before it acts. A first
+  repeat stamps `cycle-retry` and spends the automatic-retry budget the CI
+  re-run spends; a second repeat parks `cycle-repeat` with every occurrence as
+  evidence, options `retry` and `abandon`. Productive cycles are unlimited —
+  any component that moves is a new fingerprint — and no count is consulted
+  anywhere (ADR-0022).
 - **Layer starts are visible.** Every gate-layer execution stamps
   `layer-started` (cycle, layer, sha, attempt) before its process runs, so an
   hour inside one layer reads as that layer running since a time rather than as

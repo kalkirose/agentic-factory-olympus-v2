@@ -43,7 +43,10 @@ adversary, freeze — gets these concrete shapes:
   next cap parks again; `abandon` closes the run `failed` with the same
   reason. The park question carries the round count, the blocking count and
   the note count as separate numbers, and the spec path, so the answer needs
-  nothing else.
+  nothing else. The cap is not what usually stops the gate: a round that closes
+  none of the blocking findings the round before it raised parks first, on
+  identity rather than on either count, and leaves the rest of the cap unspent
+  (ADR-0020).
 - **Two finding channels at the gate.** Every gate finding carries a
   `severity`. `blocking` means the spec is wrong, a clause is not assertable,
   or the shape it states would force a defective implementation; it holds the

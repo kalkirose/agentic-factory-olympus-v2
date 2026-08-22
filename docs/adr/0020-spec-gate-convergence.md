@@ -1,4 +1,4 @@
-# ADR-0020: Spec-gate convergence — a scoped re-check and a strict-shrink rule
+# ADR-0020: Spec-gate convergence — a scoped re-check and an identity-keyed progress rule
 
 Status: accepted (2026-08-14)
 
@@ -29,12 +29,20 @@ holds itself to progress the way the repair ladder does.
   blocking wherever it is found — a clause that contradicts a higher authority
   (the constitution, then the intent card, ADR-0018), with the contradicted
   document named in the evidence.
-- **Every counted round past the first must strictly shrink the blocking
-  set.** The round's blocking count is compared against the previous round's.
-  Not strictly smaller — equal or larger — parks the run at once, before the
-  cap is consulted and without spending what the cap has left. Zero blocking
-  findings passes the gate exactly as before.
-- **The comparison counts blocking gate findings and nothing else.** Notes are
+- **Every counted round past the first must close a blocking finding the round
+  before it raised.** The comparison is between the two rounds' blocking sets
+  by identity, and a round that closes none of the previous round's findings
+  parks the run at once, before the cap is consulted and without spending what
+  the cap has left. Zero blocking findings passes the gate exactly as before.
+- **A gate finding's identity is its section and the defect it states,
+  digested as written.** The round stamp carries the set, so the next round's
+  rule reads the ledger and a restart mid-gate reaches the same verdict. Only
+  case and whitespace are normalized away: the previous round's findings travel
+  verbatim, so a defect that is still open comes back in the text that raised
+  it, and two defects that differ by a numeral are two defects. A round stamped
+  before the identities were recorded judges nothing, and the gate spends its
+  cap as it did before the rule existed.
+- **The comparison reads blocking gate findings and nothing else.** Notes are
   outside it: they do not hold the spec, and they travel to the suite seat as
   proof obligations. Spec-lint failures are outside it: a template defect
   routes through the lane's contract loop and never stamps a round
@@ -85,14 +93,25 @@ exception is the one case worth re-opening settled text for: a clause that
 contradicts the constitution or the card is not a matter of gate opinion, and
 the run must not ship it whatever round found it.
 
-The shrink rule is what makes the failure visible instead of expensive. The
-repair ladder has held the same rule since ADR-0007: a round that does not
-strictly shrink the open set is not progress, and more rounds of the same
-thing are not the answer. The spec gate had a cap but no progress rule, so it
-could only fail by running out — and the owner, seeing a park that said
-nothing except "the rounds are spent", bought more rounds. A park that says
-the set did not shrink is a different question, and it is the question the
-owner was never asked.
+The progress rule is what makes the failure visible instead of expensive. The
+repair ladder has held the same rule since ADR-0007: a round that closes
+nothing is not progress, and more rounds of the same thing are not the answer.
+The spec gate had a cap but no progress rule, so it could only fail by running
+out — and the owner, seeing a park that said nothing except "the rounds are
+spent", bought more rounds. A park that says the amendment closed nothing is a
+different question, and it is the question the owner was never asked.
+
+What the rule may not do is park a gate that is working, and the count did
+exactly that. A count cannot tell three findings closed and three found from
+three findings reported twice; it calls both of them a stall. Two runs in one
+week were parked while converging on a document that was moving under them,
+argued past by hand, and passed the round the argument bought. So the
+comparison reads identities. Three against three with one survivor is a round
+that closed two, and the gate carries on to its cap. Three against the same
+three is a round nobody needed, and it parks with the cap unspent. The same
+keying answers the same question one stage later, where a verdict cycle that
+repeats itself parks a run (ADR-0022): one harness, one answer to "has
+anything moved".
 
 Stopping short of the cap is deliberate. A cap answers "how much is this worth
 spending"; a progress rule answers "is spending it going to work". When the
@@ -108,12 +127,20 @@ it. Trigger: one run where a blocking defect reached the suite in a section
 the gate had scoped out, traceable to a change elsewhere. Reversal cost: low,
 the diff already parses the structured entries the rule would key on.
 
-If the strict-shrink rule parks runs that were about to converge — a round
-that closes two findings and legitimately opens one — the rule relaxes to a
-weighted comparison, where a finding closed counts against a finding opened
-and only a net non-improvement parks. Trigger: two parks a human answers
-"round" and the bought round then passes. Reversal cost: low, one comparison
-changes and the park question follows it.
+If the identity rule still parks runs that were about to converge — a round
+that closes nothing while the amendment moved real text — the comparison
+relaxes to a weighted one, where a finding closed counts against a finding
+opened and only a net non-improvement parks. Trigger: two parks a human
+answers "round" where the bought round then passes. Reversal cost: low, one
+comparison changes and the park question follows it.
+
+If the identity proves too easy to slip — a gate that re-words a finding it
+never closed, so a stuck round reads as progress — the identity drops the
+prose for the section and the structured entry the finding names, and the
+words become evidence rather than identity. Trigger: one park the cap raised
+where the rounds behind it reported the same defect in different words.
+Reversal cost: low, one function in `src/ledger/acks.mjs` and the round stamp
+that carries what it returns.
 
 If the note channel becomes the route around the gate — unamended-section
 defects piling into notes the suite cannot prove — the note severity for an

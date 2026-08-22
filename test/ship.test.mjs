@@ -16,7 +16,8 @@ import {
   runLedgerPath,
 } from '../src/daemon/home.mjs';
 import { postFreeze, repairLane } from '../src/lanes/verdict.mjs';
-import { shipStep, CHECKLESS_POLLS, RERUN_BUDGET, UPDATE_CAP } from '../src/lanes/ship.mjs';
+import { shipStep, CHECKLESS_POLLS, UPDATE_CAP } from '../src/lanes/ship.mjs';
+import { RERUN_BUDGET } from '../src/ledger/cycles.mjs';
 import { gitHubForge, parseGitHubRepo, PartialLogRefusal } from '../src/ship/forge.mjs';
 import { derivedLabels } from '../src/ship/labels.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
@@ -885,6 +886,45 @@ test('an env and harness CI verdict skips the local sweep on both classes', asyn
     [1],
   );
   assert.equal(fx.forge.state.reruns.length, 2);
+});
+
+test('a CI cycle that repeats itself parks after one retry, never a seventh time', async (t) => {
+  // The observed loop: the fix is stamped, the re-run it grants comes back red
+  // on the same head, triage raises the same defect under a fresh id, and the
+  // ladder stamps the fix again. Nothing in that sequence ends it — six cycles
+  // ran and a human's empty commit stopped them. The fingerprint ends it here.
+  const fx = shipFixture(t, { seats: { 'verdict-triage': ciTriageSeat(['env']) } });
+  fx.forge.state.autoChecks = () => [red()];
+  fx.forge.state.onRerun = (sha) => fx.forge.setChecks(sha, [red()]);
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'cycle-repeat');
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  const ci = live.filter((e) => e.event === 'verdict-rendered' && e.source === 'ci');
+  // Three CI cycles: the first, the repeat that spent the retry, and the one
+  // the retry did not move.
+  assert.equal(ci.length, 3);
+  // Every one of them judged the same head sha and the same defect, under a
+  // fresh finding id each time — which is why the identity, and not the id, is
+  // what the fingerprint holds.
+  assert.equal(new Set(ci.map((e) => e.sha)).size, 1);
+  assert.equal(new Set(ci.flatMap((e) => e.open)).size, 3);
+  const retries = live.filter((e) => e.event === 'cycle-retry');
+  assert.equal(retries.length, 1);
+  assert.equal(retries[0].render, ci[1].seq);
+  assert.equal(park.detail.fingerprint, retries[0].fingerprint);
+  // The evidence the owner reads: both earlier occurrences, beside this one.
+  assert.deepEqual(
+    park.detail.occurrences.map((o) => o.seq),
+    ci.map((e) => e.seq),
+  );
+  assert.ok(park.question.includes(park.detail.fingerprint));
+  assert.deepEqual(park.answers.options, ['retry', 'abandon']);
+  // A park, never a kill: the run holds its work until the owner answers.
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const events = await waitClosed(fx.paths, runId);
+  const closed = events.find((e) => e.event === 'run-closed');
+  assert.equal(closed.state, 'failed');
+  assert.equal(closed.reason, 'cycle-repeat');
 });
 
 test('a mixed CI verdict keeps the local sweep: the repair round is judged', async (t) => {

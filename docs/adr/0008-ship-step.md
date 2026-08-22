@@ -126,7 +126,10 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   stamped after everything the finding spent grants the next re-run, because
   that fix is a deliberate act and the re-run is the test of it (ADR-0022).
   The merge-commit re-run counts the same budget over its own stamps, with the
-  answered gate as the grant.
+  answered gate as the grant. The constant and the rule that reads it live in
+  `src/ledger/cycles.mjs`: a repeated verdict cycle spends the same one
+  automatic retry, on the same terms, and two allowances for one flake is the
+  shape this budget exists to refuse.
 - **Green but no merge.** Required set green and auto-merge disarmed is a
   harness-class red: `gate-integrity` (loud) once per sha, one re-arm
   attempt (`operational-fix`, kind `auto-merge-rearm`), then

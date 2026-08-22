@@ -38,6 +38,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { repairTicketPath, reconcileTicketPath, runReportPath } from '../daemon/home.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
+import { budgetOpen } from '../ledger/cycles.mjs';
 import { instanceParkForms } from '../ledger/parks.mjs';
 import { openEscapesStore } from '../telemetry/stores.mjs';
 import { stageHeartbeat } from '../telemetry/heartbeat.mjs';
@@ -585,21 +586,17 @@ async function checklessSha(ctx, base, opened, sha, polls) {
 }
 
 /**
- * The automatic re-runs one finding is entitled to. The budget is counted
- * against the pair of the run and the finding — the failing check's name —
- * and never against the head sha. A finding does not become a new one because
- * the head moved: a cancel, a replay, a repair push and a whole verdict cycle
- * all leave the same required check red, and reading each of them as a fresh
- * entitlement is how a ship re-runs itself in circles. Past the budget the red
- * takes the escalation it would take anyway — the CI triage, its ladder and
- * its own budgets — and never another re-run.
- */
-export const RERUN_BUDGET = 1;
-
-/**
- * What one finding has spent of that budget, as ledger seqs in order. A re-run
- * the stage asked for spends it. So does an attempt a cancel ended: a cancel
- * is somebody stopping the work, and an automatic re-run is the harness
+ * What one finding has spent of the automatic re-run budget, as ledger seqs in
+ * order. The budget is counted against the pair of the run and the finding —
+ * the failing check's name — and never against the head sha. A finding does
+ * not become a new one because the head moved: a cancel, a replay, a repair
+ * push and a whole verdict cycle all leave the same required check red, and
+ * reading each of them as a fresh entitlement is how a ship re-runs itself in
+ * circles. Past the budget the red takes the escalation it would take anyway —
+ * the CI triage, its ladder and its own budgets — and never another re-run.
+ *
+ * A re-run the stage asked for spends it. So does an attempt a cancel ended: a
+ * cancel is somebody stopping the work, and an automatic re-run is the harness
  * deciding the opposite — which is exactly the move that outlived an explicit
  * stop once already.
  */
@@ -610,17 +607,6 @@ function rerunSpent(events, event, check) {
     if (e.status === 'rerun-requested' || e.status === 'cancelled') seqs.push(e.seq);
   }
   return seqs;
-}
-
-/**
- * Whether the budget stands open. A grant stamped after everything the finding
- * has spent earns the next re-run — an operational fix on the ship path, an
- * answered gate on the merge commit — because the fix is a deliberate act and
- * the re-run is the test of it (ADR-0022). Nothing else refreshes it.
- */
-function budgetOpen(spent, granted) {
-  if (spent.length < RERUN_BUDGET) return true;
-  return granted > spent[spent.length - 1];
 }
 
 function checkMarks(events, sha, name) {

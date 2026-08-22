@@ -46,11 +46,30 @@ export function isAckable(finding) {
  */
 export function findingFingerprint(finding) {
   const cls = typeof finding?.class === 'string' ? finding.class : 'unclassed';
-  const digest = createHash('sha256')
-    .update([cls, normalize(finding?.summary), normalize(finding?.evidence)].join('\n'))
-    .digest('hex')
-    .slice(0, FINGERPRINT_HEX);
-  return `${cls}:${digest}`;
+  return `${cls}:${digest([cls, normalize(finding?.summary), normalize(finding?.evidence)])}`;
+}
+
+/**
+ * The identity of a finding record that carries no class and no id of its own
+ * — a spec-gate finding, named by the section it sits in and the defect it
+ * states. Its words are the identity as written, and only case and whitespace
+ * are normalized away: a gate round carries the previous round's findings
+ * verbatim (ADR-0020), so a defect that is still open comes back in the text
+ * that raised it, and one stated differently is a different statement. The
+ * incidentals a triage fingerprint normalizes out are the identity here —
+ * "claim 1" and "claim 2" are two findings, not one raised twice.
+ * @param {...string} parts
+ */
+export function textIdentity(...parts) {
+  return digest(parts.map(flatten));
+}
+
+function flatten(text) {
+  return typeof text === 'string' ? text.toLowerCase().replace(/\s+/g, ' ').trim() : '';
+}
+
+function digest(parts) {
+  return createHash('sha256').update(parts.join('\n')).digest('hex').slice(0, FINGERPRINT_HEX);
 }
 
 // What a second run says differently about the same defect: another run id in

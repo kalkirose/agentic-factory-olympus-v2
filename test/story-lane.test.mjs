@@ -150,6 +150,28 @@ function gateFindings(counts) {
   };
 }
 
+/**
+ * A gate behavior whose rounds report the defects they are given, one blocking
+ * finding each. A gate finding is identified by its section and the defect it
+ * states, so two rounds that name different defects report different findings
+ * however many each of them holds.
+ */
+function gateDefects(rounds) {
+  return ({ label }) => {
+    const defects = rounds[Number(/-(\d+)$/.exec(label)[1]) - 1] ?? [];
+    return {
+      report: {
+        findings: defects.map((defect) => ({
+          section: 'AC-1',
+          finding: defect,
+          evidence: 'src/base.mjs',
+        })),
+        summary: `${defects.length} blocking`,
+      },
+    };
+  };
+}
+
 function fixtureParse(line) {
   if (!line.trim()) return null;
   try {
@@ -792,14 +814,16 @@ test('a shrinking blocking set runs to zero and passes the gate', async (t) => {
 });
 
 test('a blocking set that does not shrink parks at once, cap unspent', async (t) => {
-  // 3 → 3. The cap allows two counted rounds and both ran, but the park that
-  // stops the gate is the convergence one: the set never shrank.
+  // 3 → 3, the same three by identity. The cap allows two counted rounds and
+  // both ran, but the park that stops the gate is the convergence one: the
+  // amendment closed nothing.
   const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
   const fx = storyFixture(t, { seats });
   const runId = await fx.launch();
   const stalled = await waitParked(fx.paths, runId, 'spec-gate-stalled');
   assert.ok(stalled.question.includes('not converging'));
   assert.ok(stalled.question.includes('3 blocking findings against 3 in round 1'));
+  assert.ok(stalled.question.includes('closed none of them'));
   assert.deepEqual(stalled.answers.options, ['round', 'abandon']);
   fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   const events = await waitClosed(fx.paths, runId);
@@ -811,7 +835,42 @@ test('a blocking set that does not shrink parks at once, cap unspent', async (t)
     events.filter((e) => e.event === 'park').map((e) => e.type),
     ['spec-gate-stalled'],
   );
-  assert.equal(events.filter((e) => e.event === 'spec-gate-round').length, 2);
+  const rounds = events.filter((e) => e.event === 'spec-gate-round');
+  assert.equal(rounds.length, 2);
+  // The record the rule reads: the blocking set by identity, round by round.
+  assert.equal(rounds[0].blocking.length, 3);
+  assert.deepEqual(rounds[0].blocking, rounds[1].blocking);
+});
+
+test('a blocking count that holds while the identities move is converging', async (t) => {
+  // 3 → 3 again, and two of the three are different defects: the amendment
+  // closed two findings and the re-check found two more. A count cannot tell
+  // that from a round that reported the same three, and the count rule parked
+  // two runs that were converging (2026-08-21). The identity rule reads the
+  // round as progress, so the gate spends its cap and the cap is what parks.
+  const seats = {
+    'spec-birth': amendingBirth(),
+    'spec-gate': gateDefects([
+      ['ungrounded claim 1', 'ungrounded claim 2', 'ungrounded claim 3'],
+      ['ungrounded claim 1', 'unassertable threshold', 'scope beyond the card'],
+    ]),
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const capped = await waitParked(fx.paths, runId, 'spec-gate-exhausted');
+  assert.ok(capped.question.includes('spent 2 rounds'));
+  assert.ok(capped.question.includes('blocking findings: 3'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').reason, 'spec-gate-exhausted');
+  assert.ok(!events.some((e) => e.event === 'park' && e.type === 'spec-gate-stalled'));
+  const rounds = events.filter((e) => e.event === 'spec-gate-round');
+  assert.deepEqual(
+    rounds.map((e) => e.findings),
+    [3, 3],
+  );
+  // Equal counts, moved identities: one finding survived the amendment.
+  assert.equal(rounds[0].blocking.filter((id) => rounds[1].blocking.includes(id)).length, 1);
 });
 
 test('a growing blocking set parks before the cap, and one bought round runs', async (t) => {
