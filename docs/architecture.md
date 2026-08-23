@@ -85,7 +85,9 @@ Three stores plus two indexes, all append-only, all under the daemon home:
   counted source for quality metrics.
 - **Stream indexes** — two central files (queued, loud). The daemon appends a
   pointer (ledger + seq) plus a one-line gist when it stamps a stream-classed
-  event. The full event lives only in its source ledger.
+  event, and it appends the pointer before the event itself, so nothing is
+  readable in a ledger before it is findable on its stream (ADR-0002). The
+  full event lives only in its source ledger.
 
 Every line carries the envelope: `seq` (monotonic per ledger), `ts` (recording
 and duration history only; never a trigger), `event` (closed registry),

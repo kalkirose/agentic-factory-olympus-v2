@@ -43,6 +43,24 @@ test('stream-classed events carry their stream; others carry none', (t) => {
   assert.equal(plain.stream, undefined);
 });
 
+test('a composed line is invisible until it commits, and holds no seq meanwhile', (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const path = join(dir, 'ledger.jsonl');
+  const ledger = runLedger(dir);
+  const composed = ledger.compose('park', { actor: 'daemon', reason: 'open-decisions' });
+  assert.equal(composed.seq, 1);
+  assert.equal(composed.stream, 'queued');
+  assert.deepEqual(readEvents(path), []);
+  // The seq the compose named is still the next one to be written, so a caller
+  // that drops a composed line leaves no gap behind it.
+  const written = ledger.append('run-launched', { actor: 'daemon' });
+  assert.equal(written.seq, 1);
+  assert.throws(() => ledger.commit(composed), /out-of-order commit/);
+  ledger.close();
+  assert.deepEqual(readEvents(path).map((e) => e.event), ['run-launched']);
+});
+
 test('events outside the closed registry are refused', (t) => {
   const dir = tempDir();
   t.after(() => removeDir(dir));

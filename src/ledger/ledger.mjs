@@ -38,6 +38,19 @@ export class Ledger {
    * @param {{actor: string, refs?: object, [k: string]: unknown}} fields
    */
   append(event, fields) {
+    return this.commit(this.compose(event, fields));
+  }
+
+  /**
+   * Stamps the line an append would write, with every check that append makes
+   * and the seq it would take — and writes nothing. The pair exists so a
+   * caller with work to do between the stamp and the write can do it while the
+   * record is still invisible. A composed line the caller drops costs nothing:
+   * the seq belongs to the next commit until a commit takes it.
+   * @param {string} event
+   * @param {{actor: string, refs?: object, [k: string]: unknown}} fields
+   */
+  compose(event, fields) {
     if (this.fd === null) throw new Error(`ledger closed: ${this.path}`);
     if (!this.allowedEvents.has(event)) {
       throw new Error(`event not in registry: ${event}`);
@@ -50,7 +63,7 @@ export class Ledger {
       }
     }
     const line = {
-      seq: ++this.lastSeq,
+      seq: this.lastSeq + 1,
       ts: new Date().toISOString(),
       event,
       actor,
@@ -59,8 +72,18 @@ export class Ledger {
     if (stream) line.stream = stream;
     if (refs) line.refs = refs;
     Object.assign(line, payload);
+    return line;
+  }
+
+  /** Writes a composed line and fsyncs it. The line becomes readable here. */
+  commit(line) {
+    if (this.fd === null) throw new Error(`ledger closed: ${this.path}`);
+    if (line.seq !== this.lastSeq + 1) {
+      throw new Error(`out-of-order commit in ${this.path}: seq ${line.seq} after ${this.lastSeq}`);
+    }
     writeSync(this.fd, JSON.stringify(line) + '\n');
     fsyncSync(this.fd);
+    this.lastSeq = line.seq;
     return line;
   }
 

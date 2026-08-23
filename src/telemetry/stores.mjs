@@ -2,6 +2,13 @@
 // A stream-classed append lands in its source ledger and, in the same call,
 // as a pointer entry in the matching index — indexing holds by construction,
 // never by call-site discipline.
+//
+// The index is written first, and the ledger line second. The order is the
+// guarantee a reader depends on: nothing is readable in a ledger before it is
+// findable on its stream, so a park a reader can see is a park the queue can
+// answer for. The other direction is the harmless one — a pointer whose record
+// is not written yet names nothing, and every reader of an index joins to the
+// source record and skips a pointer that finds none.
 import { cpSync, existsSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { Ledger, readEvents } from '../ledger/ledger.mjs';
@@ -69,7 +76,7 @@ export class TelemetryStore {
       throw new Error(`stream-classed event ${event} requires a one-line gist`);
     }
     if (this.closed) return this.dropLate(event, fields);
-    const line = this.ledger.append(event, fields);
+    const line = this.ledger.compose(event, fields);
     if (line.stream) {
       appendStreamEntry(this.paths, line.stream, {
         ledger: this.id,
@@ -79,6 +86,7 @@ export class TelemetryStore {
         gist: fields.gist,
       });
     }
+    this.ledger.commit(line);
     if (this.onAppend) {
       try {
         this.onAppend(line, this.id);

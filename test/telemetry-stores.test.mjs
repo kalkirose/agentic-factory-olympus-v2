@@ -12,6 +12,7 @@ import {
 } from '../src/ledger/registry.mjs';
 import { scaffoldHome, runLedgerPath, archivedRunLedgerPath } from '../src/daemon/home.mjs';
 import {
+  TelemetryStore,
   openInstanceStore,
   openRunStore,
   openEscapesStore,
@@ -66,6 +67,30 @@ test('stream-classed appends index with pointer and gist; plain appends do not',
   const loudIndex = readStreamIndex(paths.loudStream);
   assert.deepEqual(loudIndex, [
     { ledger: 'run:r1', seq: loud.seq, ts: loud.ts, event: 'gate-integrity', gist: 'suite wired to no runner' },
+  ]);
+});
+
+test('a park reaches its stream before it reaches its ledger', (t) => {
+  const paths = home(t);
+  // A reader that finds a park in a run ledger and then reads the queue must
+  // not be told the queue is empty. The window is between two fsyncs and no
+  // portable test can read inside it; what a test can stage is an index write
+  // that never lands. If the ledger line goes second, the park is in neither
+  // file, and no reader ever saw a park the queue could not answer for.
+  const blind = { ...paths, queuedStream: join(paths.runs, 'no-such-dir', 'queued.jsonl') };
+  const store = new TelemetryStore(blind, 'run:r1', runLedgerPath(paths, 'r1'), RUN_EVENTS);
+  store.append('run-launched', { actor: 'daemon', lane: 'story' });
+  assert.throws(
+    () => store.append('park', { actor: 'daemon', type: 'open-decisions', gist: 'decide s1' }),
+    /ENOENT/,
+  );
+  // The seq the refused park composed is unspent: the next append takes it.
+  const next = store.append('stage-entered', { actor: 'daemon', stage: 'spec-birth' });
+  store.close();
+  assert.equal(next.seq, 2);
+  assert.deepEqual(readEvents(runLedgerPath(paths, 'r1')).map((e) => e.event), [
+    'run-launched',
+    'stage-entered',
   ]);
 });
 

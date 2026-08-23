@@ -10,6 +10,7 @@ import { Daemon } from '../src/daemon/daemon.mjs';
 import { writeControlCommand } from '../src/daemon/control.mjs';
 import { openRunStore, openInstanceStore, resolveClosedRun, archiveRun } from '../src/telemetry/stores.mjs';
 import { escalationQueue, openCardParks, sortQueue } from '../src/telemetry/queue.mjs';
+import { appendStreamEntry } from '../src/telemetry/streams.mjs';
 import { openLoud } from '../src/telemetry/readers.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { tempDir, removeDir, waitFor, initOriginRepo, projectConfigJson, fakeComposeRunner } from './helpers.mjs';
@@ -80,6 +81,33 @@ test('parks and breaches join the queue and leave on answer / resolve', (t) => {
   run.close();
   killed.close();
   instance.close();
+});
+
+test('a pointer ahead of its record is nothing, and the queue answers the rest', (t) => {
+  const paths = home(t);
+  const run = openRunStore(paths, 'r1');
+  run.append('run-launched', { actor: 'daemon', project: 'p', lane: 'story', storyKey: 's1' });
+  run.append('park', {
+    actor: 'daemon',
+    type: 'open-decisions',
+    question: 'Decide the scope of s1.',
+    gist: 'open-decisions: s1',
+  });
+  // The index leads the ledger, so a reader can catch a pointer whose record
+  // is not written yet. It names nothing until the record lands, and the queue
+  // it sits in the middle of still answers.
+  appendStreamEntry(paths, 'queued', {
+    ledger: 'run:r1',
+    seq: 99,
+    ts: '2026-08-23T00:00:00.000Z',
+    event: 'park',
+    gist: 'open-decisions: not yet',
+  });
+  assert.deepEqual(
+    escalationQueue(paths).map((e) => e.gist),
+    ['open-decisions: s1'],
+  );
+  run.close();
 });
 
 test('presentation is FIFO with a roadmap-order tiebreak', () => {

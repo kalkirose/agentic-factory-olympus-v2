@@ -15,6 +15,14 @@ shapes:
   source event, so indexing holds by construction. A stream-classed append
   must carry a one-line `gist`; the append is refused before the ledger
   write when it does not.
+- **Index first, ledger second.** Within that call the index entry is
+  written and synced before the source line is. A reader outside the daemon
+  reads the two files at two moments, so one of the two orders is a lie it
+  can catch: a park readable in a run ledger while the queue that indexes it
+  still answers empty. The other order tells no lie — a pointer whose record
+  is not written yet names nothing, and every index reader joins to the
+  source record and skips a pointer that finds none. A stream-classed line
+  is therefore never readable before it is findable.
 - **Resolution pairing.** A `resolved` event in the source ledger carries
   `resolves` (the target seq). Loud events take a resolution, as do the quiet
   records that name a job the harness owes itself; the store refuses unknown
