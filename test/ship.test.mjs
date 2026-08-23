@@ -486,13 +486,20 @@ async function waitClosed(paths, runId, attempts = 600) {
   return readEvents(archivedRunLedgerPath(paths, runId));
 }
 
-function waitEvent(paths, runId, predicate, label) {
+function waitEvent(paths, runId, predicate, label, attempts = 600) {
   return waitFor(() => readEvents(runLedgerPath(paths, runId)).find(predicate), {
     label,
-    attempts: 600,
+    attempts,
     intervalMs: 100,
   });
 }
+
+// The budget the longest journey in this file waits on, at every one of its
+// waits. The default holds that run on an idle machine and not on a shared
+// runner with the rest of the suite beside it, where each poll also re-reads
+// the ledger it grew: the observed timeout was one of these waits at 184
+// seconds of wall clock, on a run that was still heartbeating.
+const LONGEST_JOURNEY_ATTEMPTS = 1800;
 
 function waitParked(paths, runId, type) {
   return waitEvent(paths, runId, (e) => e.event === 'park' && e.type === type, `park ${type}`);
@@ -2215,7 +2222,13 @@ test('a merge-born fresh pass carries the frozen suite onto main and reverts not
   fx.forge.state.autoChecks = () => [running()];
   fx.forge.state.conflictMode = true;
   const runId = await fx.launch();
-  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'pr-opened',
+    'pr-opened',
+    LONGEST_JOURNEY_ATTEMPTS,
+  );
   // main moves under the request in two ways at once: a source file this run
   // is in conflict with, and a test path it neither owns nor names.
   commitTree(
@@ -2227,7 +2240,13 @@ test('a merge-born fresh pass carries the frozen suite onto main and reverts not
     },
     'conflicting main work beside a shipped test',
   );
-  const fresh = await waitEvent(fx.paths, runId, (e) => e.event === 'fresh-pass', 'fresh-pass');
+  const fresh = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'fresh-pass',
+    'fresh-pass',
+    LONGEST_JOURNEY_ATTEMPTS,
+  );
   assert.equal(fresh.trigger, 'merge-conflict');
   // The pass is born on updated main, so no sha the run already holds names
   // its tree: it composes one, and that is the anchor from here.
@@ -2242,15 +2261,14 @@ test('a merge-born fresh pass carries the frozen suite onto main and reverts not
     runId,
     (e) => e.event === 'verdict-rendered' && e.seq > fresh.seq,
     'the fresh pass verdict',
+    LONGEST_JOURNEY_ATTEMPTS,
   );
   assert.equal(render.verdict, 'green');
   assert.ok(!fx.calls.some((c) => c.seat === 'verdict-triage'));
   fx.forge.state.autoChecks = () => [green()];
   // The longest journey in this file: a conflicted request, a fresh pass born
-  // on the moved branch, a second spectrum, then the ship. The default budget
-  // holds it on an idle machine and not on a shared runner, where the rest of
-  // the suite is running beside it.
-  const events = await waitClosed(fx.paths, runId, 1800);
+  // on the moved branch, a second spectrum, then the ship.
+  const events = await waitClosed(fx.paths, runId, LONGEST_JOURNEY_ATTEMPTS);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   // Both halves shipped: the conflict dissolved on the new base, the frozen
   // suite came with it, and the test path the run does not own is still the
