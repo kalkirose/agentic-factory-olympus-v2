@@ -13,7 +13,7 @@ import { postFreeze, repairLane } from '../src/lanes/verdict.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
 import { Ledger, readEvents } from '../src/ledger/ledger.mjs';
 import { INSTANCE_EVENTS } from '../src/ledger/registry.mjs';
-import { findingFingerprint, standingAcksFor } from '../src/ledger/acks.mjs';
+import { ackFingerprint, findingFingerprint, standingAcksFor } from '../src/ledger/acks.mjs';
 import { writeControlCommand } from '../src/daemon/control.mjs';
 import { openLoud } from '../src/telemetry/readers.mjs';
 import { tempDir, removeDir, waitFor, initOriginRepo, projectConfigJson } from './helpers.mjs';
@@ -995,13 +995,19 @@ function decayingLayer(marker, redRuns) {
   ];
 }
 
-/** The fingerprint the triage fixture's finding for a layer reaches. */
-function layerFingerprint(cls, layer) {
-  return findingFingerprint({
+/** The triage fixture's finding for one layer, as the ledger rebuilds it. */
+function layerFinding(cls, layer) {
+  return {
     class: cls,
+    layers: [layer],
     summary: `broken ${layer}`,
     evidence: `red output of ${layer}`,
-  });
+  };
+}
+
+/** The identity the gate offers for that finding, and keys its ack on. */
+function layerFingerprint(cls, layer) {
+  return ackFingerprint(layerFinding(cls, layer));
 }
 
 /** Records one standing ack, as a prior run's answered gate left it. */
@@ -1120,6 +1126,69 @@ test('an ack from an earlier run answers this run\'s gate, and a revoke parks it
   revoked.daemon.engine.answer({ runId: second.runId, actor: 'operator', option: 'retry' });
   events = await waitClosed(revoked.paths, second.runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+});
+
+test('an ack of one wording answers the same defect described differently', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat(() => ({ class: 'harness' })),
+    ...furyClean(),
+  };
+  // The acknowledgment was earned by a sentence no seat in this run will
+  // write: another operator, another run, another half of the explanation.
+  // The defect is the machinery behind one gate layer, and that is the key.
+  const fingerprint = ackFingerprint({
+    class: 'harness',
+    layers: ['hlayer'],
+    summary: 'the hlayer gate command reads a marker the host rotates under it',
+    evidence: 'seq 118 of a run on another host, months ago',
+  });
+  assert.equal(fingerprint, layerFingerprint('harness', 'hlayer'));
+  assert.notEqual(fingerprint, findingFingerprint(layerFinding('harness', 'hlayer')));
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'hlayer', command: 'hlayer' },
+    ],
+    commands: { suite: SUITE_CMD, hlayer: decayingLayer('hcount', 4) },
+  });
+  seedAck(fx.paths, { project: 'proj', fingerprint });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // No gate reached the human, and the record says whose authority answered it.
+  assert.ok(!events.some((e) => e.event === 'park'));
+  assert.equal(events.find((e) => e.event === 'finding-ack-used').acks[0].fingerprint, fingerprint);
+});
+
+test('an ack recorded under a prose fingerprint still answers its gate', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat(() => ({ class: 'harness' })),
+    ...furyClean(),
+  };
+  // What every acknowledgment on an instance was keyed on before the identity
+  // existed. The harness learned a better key; it did not learn that the
+  // defect behind this one was fixed.
+  const words = findingFingerprint(layerFinding('harness', 'hlayer'));
+  assert.notEqual(words, layerFingerprint('harness', 'hlayer'));
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'hlayer', command: 'hlayer' },
+    ],
+    commands: { suite: SUITE_CMD, hlayer: decayingLayer('hcount', 4) },
+  });
+  seedAck(fx.paths, { project: 'proj', fingerprint: words });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!events.some((e) => e.event === 'park'));
+  // The fingerprint it was recorded under is the one the record names, which
+  // is the one a revoke will have to name.
+  assert.equal(events.find((e) => e.event === 'finding-ack-used').acks[0].fingerprint, words);
 });
 
 test('a gate mixing an acked harness finding with an env one parks all the same', async (t) => {
@@ -1810,6 +1879,115 @@ test('the class quiets only what it names: an undeclared frozen path stays loud'
     'tests/visual/__screenshots__/checkout.png',
   ]);
   assert.deepEqual(readRecord(fx.paths, runId, 1).dropped, commit.dropped);
+});
+
+/**
+ * A triage behavior that reads every persistent red as one harness defect,
+ * and writes about the take-backs under one path. The live shape of the
+ * finding this pair is about: the seat is told a surface left the tree, and it
+ * reports what it was told.
+ */
+function triageAbout(surface) {
+  return ({ prompt }) => ({
+    report: {
+      findings: [
+        {
+          class: 'harness',
+          layers: [...prompt.matchAll(/^- layer (\S+):$/gm)].map((m) => m[1]),
+          summary: `The capture take-backs under ${surface} are debris of a red cycle.`,
+          evidence: `Nothing under ${surface} is tracked, and it ships from nowhere.`,
+        },
+      ],
+      persisting: [],
+      summary: 'triaged',
+    },
+  });
+}
+
+test('a harness finding about a re-capturable take-back stamps no gate-integrity defect', async (t) => {
+  // The capture classed these paths at the revert: a record, not an open item.
+  // A later step that meets the same paths in a sentence and stamps a
+  // zero-tolerance defect for them contradicts the capture, and the owner
+  // reads an alert about an artifact the re-freeze already owns.
+  const seats = {
+    dev: () => ({
+      files: {
+        'src/feature.mjs': GOOD_FEATURE,
+        'tests/visual/__screenshots__/checkout.png': 'baseline-bytes\n',
+      },
+      report: { summary: 'implemented, and the surface re-rendered' },
+    }),
+    'verdict-triage': triageAbout('tests/visual/__screenshots__'),
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    diffPolicy: RECAPTURE_POLICY,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'rlayer', command: 'rlayer' },
+    ],
+    commands: { suite: SUITE_CMD, rlayer: decayingLayer('rcount', 2) },
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.deepEqual(
+    events.find((e) => e.event === 'diff-policy-recapture').recaptured.map((r) => r.path),
+    ['tests/visual/__screenshots__/checkout.png'],
+  );
+  // The finding stands, and says on itself why no defect record stands beside
+  // it. Nothing loud was stamped and the loud strip carries nothing.
+  const finding = events.find((e) => e.event === 'finding' && e.class === 'harness');
+  assert.equal(finding.recapturable, true);
+  assert.match(finding.note, /honored here/);
+  assert.ok(!events.some((e) => e.event === 'gate-integrity'));
+  assert.equal(openLoud(fx.paths).filter((i) => i.ledger === `run:${runId}`).length, 0);
+  // The route the finding takes is untouched: it is still a harness finding,
+  // and it still earns the operational fix that re-runs the layer.
+  assert.equal(events.filter((e) => e.event === 'operational-fix').length, 1);
+  // The brief the seat read stated the class, in the words the class is worth.
+  const triage = fx.calls.find((c) => c.seat === 'verdict-triage');
+  assert.match(triage.prompt, /Taken back at capture, re-capturable:/);
+  assert.match(triage.prompt, /a re-capturable frozen path/);
+  assert.doesNotMatch(triage.prompt, /Taken back at capture:/);
+});
+
+test('a harness finding about a held take-back keeps its gate-integrity defect', async (t) => {
+  // The same route, the same seat, one path out of the quiet class. A frozen
+  // test is authored work, and a write to it is worth the owner's attention.
+  const seats = {
+    dev: () => ({
+      files: { 'src/feature.mjs': GOOD_FEATURE, 'tests/feature.test.mjs': WRONG_TEST },
+      report: { summary: 'implemented, and I relaxed the test' },
+    }),
+    'verdict-triage': triageAbout('tests/feature.test.mjs'),
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    diffPolicy: RECAPTURE_POLICY,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'rlayer', command: 'rlayer' },
+    ],
+    commands: { suite: SUITE_CMD, rlayer: decayingLayer('rcount', 2) },
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.deepEqual(events.find((e) => e.event === 'diff-policy-violation').dropped, [
+    'tests/feature.test.mjs',
+  ]);
+  assert.ok(!events.some((e) => e.event === 'diff-policy-recapture'));
+  const finding = events.find((e) => e.event === 'finding' && e.class === 'harness');
+  assert.equal(finding.recapturable, undefined);
+  const loud = events.find((e) => e.event === 'gate-integrity');
+  assert.equal(loud.findingId, finding.id);
+  assert.match(loud.gist, /harness defect/);
+  const triage = fx.calls.find((c) => c.seat === 'verdict-triage');
+  assert.match(triage.prompt, /Taken back at capture:/);
+  assert.doesNotMatch(triage.prompt, /re-capturable/);
 });
 
 test('the take-back message names the freeze and the re-freeze route, never a fix', async (t) => {

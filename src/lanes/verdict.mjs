@@ -47,6 +47,7 @@ import {
   diffPolicyViolations,
   dropLine,
   laneDiffPolicy,
+  namesOnlyRecapturable,
   parseTouchedPaths,
   recaptureGist,
   recaptureLine,
@@ -54,8 +55,8 @@ import {
 } from '../seats/diffpolicy.mjs';
 import {
   ACK_OPTION,
+  ackFingerprint,
   coveringAck,
-  findingFingerprint,
   isAckable,
   standingAcksFor,
 } from '../ledger/acks.mjs';
@@ -426,6 +427,7 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
     };
   }
   const redLayers = reds.map((r) => r.layer);
+  const takeBacks = recordedTakeBacks(events);
   const { report, fail } = await seatWithChecks(ctx, {
     seat: 'verdict-triage',
     label: `verdict-triage-c${cycle}`,
@@ -433,7 +435,7 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
-    buildRole: (brief) => triageRole(base, reds, priorOpen, brief, dropped),
+    buildRole: (brief) => triageRole(base, reds, priorOpen, brief, dropped, takeBacks.recaptured),
     checks: (r) => triageChecks(r, { redLayers, priorOpen }),
   });
   if (fail) return { fail };
@@ -449,14 +451,21 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
       summary: f.summary,
       evidence: f.evidence,
     };
+    // A finding about the artifacts the capture classed re-capturable is a
+    // finding about a handled case. The capture made that call at the revert,
+    // and this step honors it rather than re-judging the same paths.
+    const recapturable =
+      f.class === 'harness' &&
+      namesOnlyRecapturable(`${f.summary}\n${f.evidence}`, takeBacks);
     ctx.store.append('finding', {
       actor: ACTOR,
       cycle,
       ...finding,
       summary: gist(finding.summary),
       evidence: gist(finding.evidence),
+      ...(recapturable && { recapturable: true, note: RECAPTURE_FINDING_NOTE }),
     });
-    if (f.class === 'harness') {
+    if (f.class === 'harness' && !recapturable) {
       // A harness finding is a gate-integrity defect: zero-tolerance, loud.
       ctx.store.append('gate-integrity', {
         actor: ACTOR,
@@ -476,6 +485,38 @@ function triageReportedFor(ctx, cycle) {
   return runEvents(ctx).some(
     (e) => e.event === 'seat-report' && e.seat === 'verdict-triage' && e.path === path,
   );
+}
+
+// Why a finding about a re-capturable artifact carries no loud stamp, said on
+// the finding, so a reader who goes looking for the gate-integrity record that
+// every other harness finding has finds the reason there is none.
+const RECAPTURE_FINDING_NOTE =
+  'This finding names only paths the capture classed re-capturable, which the ' +
+  "verdict's re-freeze re-takes. The class was decided at the revert and is " +
+  'honored here: the take-back is a record and not an open item, so no ' +
+  'gate-integrity defect is stamped for it.';
+
+/**
+ * What this run's captures took back, in the two classes they were recorded
+ * under. Read from the run's own ledger rather than carried in an argument, so
+ * a step that resumed mid-cycle reads what the capture decided instead of what
+ * its caller happened to still hold.
+ *
+ * A ledger written before the quiet class existed carries every take-back in
+ * `diff-policy-violation`, and this reads all of them as held — which is the
+ * loud answer, and the safe direction for an old record to fall.
+ */
+function recordedTakeBacks(events) {
+  const recaptured = [];
+  const held = [];
+  for (const e of events ?? []) {
+    if (e.event === 'diff-policy-recapture') {
+      for (const r of e.recaptured ?? []) if (typeof r?.path === 'string') recaptured.push(r);
+    } else if (e.event === 'diff-policy-violation') {
+      for (const path of e.dropped ?? []) if (typeof path === 'string') held.push(path);
+    }
+  }
+  return { recaptured, held };
 }
 
 function triageChecks(report, { redLayers, priorOpen }) {
@@ -764,13 +805,13 @@ const ACK_NOTE =
  */
 function gateFor(ops, last) {
   const offered = ops.filter(isAckable).map((f) => ({
-    fingerprint: findingFingerprint(f),
+    fingerprint: ackFingerprint(f),
     class: f.class,
     summary: gist(f.summary),
   }));
   const line = (f) =>
     `- [${f.class}] ${f.summary} (evidence: ${f.evidence})` +
-    (isAckable(f) ? ` · ${findingFingerprint(f)}` : '');
+    (isAckable(f) ? ` · ${ackFingerprint(f)}` : '');
   return parkDirective('provisioning-gate', {
     ...GATE_FORMS,
     ...(offered.length > 0 && {
@@ -872,9 +913,10 @@ function tally(identities) {
 // -- ladder arms -------------------------------------------------------------
 
 async function repairRound(ctx, base, mode, { pass, round, open, record }) {
+  const { recaptured } = recordedTakeBacks(runEvents(ctx));
   const result = await runDevSeat(ctx, base, mode, {
     seat: 'repair-dev',
-    buildRole: (brief) => repairRole(base, open, record, brief),
+    buildRole: (brief) => repairRole(base, open, record, brief, recaptured),
   });
   if (result.fail) return result;
   ctx.store.append('repair-round', {
@@ -1178,7 +1220,7 @@ function fixRole(base, brief = null) {
   ].join('\n');
 }
 
-function repairRole(base, open, record, brief = null) {
+function repairRole(base, open, record, brief = null, recaptured = []) {
   return [
     'Repair the candidate tree in place. Fix every open finding below; change nothing else.',
     `The spec: ${base.specRef}`,
@@ -1187,7 +1229,7 @@ function repairRole(base, open, record, brief = null) {
     ...open.map((f) => `- ${findingLine(f)}`),
     'Tier-1 verdict:',
     ...(record?.spectrum ?? []).map((r) => `- ${r.layer}: ${r.status}${layerNote(r)}`),
-    ...takenBackLines(record?.dropped),
+    ...takenBackLines(record?.dropped, recaptured),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
   ].join('\n');
@@ -1198,13 +1240,36 @@ function repairRole(base, open, record, brief = null) {
  * the take-back already changed. The seat that wrote the file is gone; this
  * seat must not repeat the write, and the lines say why and where the route
  * is instead.
+ *
+ * The two classes are stated apart. A seat told that a machine-rendered
+ * artifact was frozen out of its tree, in the words that describe authored
+ * work leaving it, reads a handled case as a loss worth reporting — and it
+ * reports it, and the report is a defect record nobody owes an answer for.
+ * The re-capturable line says what the class is worth in the same breath.
  */
-function takenBackLines(dropped) {
+function takenBackLines(dropped, recaptured = []) {
   if (!dropped?.length) return [];
-  return ['Taken back at capture:', ...dropped.map((p) => `- ${dropLine(p)}`)];
+  const quiet = new Map(recaptured.map((r) => [r.path.replaceAll('\\', '/'), r.pattern]));
+  const held = [];
+  const taken = [];
+  for (const raw of dropped) {
+    const path = raw.replaceAll('\\', '/');
+    if (quiet.has(path)) taken.push({ path, pattern: quiet.get(path) });
+    else held.push(raw);
+  }
+  return [
+    ...(held.length > 0 ? ['Taken back at capture:', ...held.map((p) => `- ${dropLine(p)}`)] : []),
+    ...(taken.length > 0
+      ? [
+          'Taken back at capture, re-capturable:',
+          ...taken.map((r) => `- ${recaptureLine(r)}`),
+          RECAPTURE_NOTE,
+        ]
+      : []),
+  ];
 }
 
-function triageRole(base, reds, priorOpen, brief, dropped = []) {
+function triageRole(base, reds, priorOpen, brief, dropped = [], recaptured = []) {
   const lines = [
     'Classify the persistent red Tier-1 layers below into findings. Cluster reds that share one root cause into one finding.',
     'Class each finding — code-defect | suite-defect | env | harness — and cite evidence for every class.',
@@ -1216,7 +1281,7 @@ function triageRole(base, reds, priorOpen, brief, dropped = []) {
     lines.push('Prior open findings — list the ids that persist in "persisting"; report only new findings in "findings":');
     for (const f of priorOpen) lines.push(`- [${f.id}] ${findingLine(f)}`);
   }
-  lines.push(...takenBackLines(dropped));
+  lines.push(...takenBackLines(dropped, recaptured));
   lines.push('Persistent reds:');
   for (const r of reds) {
     lines.push(`- layer ${r.layer}:`, r.output ?? '(no output)');

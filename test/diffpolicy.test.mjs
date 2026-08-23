@@ -10,7 +10,9 @@ import {
   diffPolicyViolations,
   dropLine,
   laneDiffPolicy,
+  namesOnlyRecapturable,
   parseTouchedPaths,
+  pathTokens,
   recaptureGist,
   recaptureLine,
   violationLine,
@@ -294,6 +296,59 @@ test('the re-capturable line names the class, the revert, and the re-freeze', ()
   assert.doesNotMatch(line, /Restore it/);
   assert.match(RECAPTURE_NOTE, /a record and not an open item/);
   assert.match(recaptureGist([{ path: SHOT }]), /1 re-capturable frozen path\(s\) the capture reverted/);
+});
+
+// -- reading the class back out of prose -------------------------------------
+
+const SHOT_DIR = 'apps/web/tests/visual/__screenshots__';
+const TAKEN = {
+  recaptured: [
+    { path: `${SHOT_DIR}/checkout-1.png`, pattern: '**/__screenshots__/**' },
+    { path: `${SHOT_DIR}/checkout-2.png`, pattern: '**/__screenshots__/**' },
+  ],
+  held: [],
+};
+
+test('a sentence names the paths it is about, and nothing that only looks like one', () => {
+  assert.deepEqual(pathTokens(`the write to ${SHOT}, reverted`), [SHOT]);
+  assert.deepEqual(pathTokens(`windows wrote apps\\web\\shot.png`), ['apps/web/shot.png']);
+  // A rule name and a fraction have a separator in them and no path around it;
+  // a bare separator between two words is not a path at all.
+  assert.deepEqual(pathTokens('constitution 5 / ADR-041 asks for 2 / 3 of it'), []);
+  assert.deepEqual(pathTokens('@typescript-eslint/no-unused-vars fired'), [
+    '@typescript-eslint/no-unused-vars',
+  ]);
+  assert.deepEqual(pathTokens(undefined), []);
+});
+
+test('a finding about the quiet class reads as the quiet class, named whole or by folder', () => {
+  // The seat names the directory the files sit in far more often than it names
+  // the files, and both readings answer to the same surface.
+  assert.equal(namesOnlyRecapturable(`stale PNGs under ${SHOT_DIR} churn the capture`, TAKEN), true);
+  assert.equal(namesOnlyRecapturable(`the write to ${TAKEN.recaptured[0].path} came back`, TAKEN), true);
+  // A path beside the recaptured ones, in a directory of its own, is nobody's
+  // take-back and settles nothing on its own.
+  assert.equal(namesOnlyRecapturable(`${SHOT_DIR} and apps/web/src/checkout.ts`, TAKEN), true);
+});
+
+test('a held take-back in the same sentence keeps the loud reading', () => {
+  const mixed = { ...TAKEN, held: ['tests/cart.test.mjs'] };
+  assert.equal(
+    namesOnlyRecapturable(`${SHOT_DIR} churned, and tests/cart.test.mjs was relaxed`, mixed),
+    false,
+  );
+  assert.equal(namesOnlyRecapturable(`${SHOT_DIR} churned`, mixed), true);
+});
+
+test('prose that names no take-back of this run is not about a take-back', () => {
+  assert.equal(namesOnlyRecapturable('the PR misses its migration label', TAKEN), false);
+  assert.equal(namesOnlyRecapturable(`stale PNGs under ${SHOT_DIR}`, { recaptured: [], held: [] }), false);
+  assert.equal(namesOnlyRecapturable(`stale PNGs under ${SHOT_DIR}`), false);
+  // A near-miss is a miss: the surface is a sibling directory, not this one.
+  assert.equal(
+    namesOnlyRecapturable('apps/web/tests/visual/__snapshots__ churned', TAKEN),
+    false,
+  );
 });
 
 // -- the project-config block ------------------------------------------------

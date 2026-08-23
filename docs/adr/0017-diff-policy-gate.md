@@ -62,7 +62,18 @@ allowed set.
   it. Every statement says the same three things and asks for nothing: the
   path is frozen for this lane, the write is reverted and ships from no
   implementation seat, and a change the surface genuinely needs is routed by
-  the verdict through a re-freeze.
+  the verdict through a re-freeze. A statement about the quiet class says one
+  thing more: that the re-freeze re-takes this artifact, so the take-back is a
+  record and not an open item.
+- **The classification is made once, and honored downstream.** The capture
+  decides the class of a take-back at the moment it reverts the write, and no
+  later step judges the same paths again. Verdict triage's harness-class
+  finding stamps a `gate-integrity` defect, except where the finding names
+  paths this run's capture classed re-capturable and no path it held: then the
+  finding stands, says on itself why no defect record stands beside it, and
+  takes the route every harness finding takes. A held take-back named anywhere
+  in the same finding settles it the other way, exactly as the hard tiers
+  outrank the quiet class at the capture.
 - **A capture holding both blocks.** The violation decides. The corrective
   brief still states the take-backs, because the seat is about to re-read a
   tree that no longer holds its write.
@@ -166,9 +177,34 @@ already handled. The class exists so that the loud strip keeps meaning what it
 says.
 
 Quiet is a record class and nothing else. The revert is unchanged, the ledger
-event is unchanged in content, and every downstream brief states the take-back
-in the same words. The only difference is that the owner is not asked to read
-it.
+event is unchanged in content, and every downstream brief states the take-back.
+The only difference is that the owner is not asked to read it.
+
+## Why the class survives past the capture
+
+The class was decided at the capture and then contradicted twice, one step
+later, in the same run.
+
+A run took fifteen browser-mode failure screenshots back, under a glob the
+project had declared re-capturable. The capture classed all fifteen quietly,
+per the paragraphs above. The triage brief then stated them in the words that
+describe authored work leaving a tree, the seat read that and reported the loss
+as a defect of the machinery, and the verdict stamped a zero-tolerance
+`gate-integrity` record for the same fifteen paths — once per cycle. The
+finding was correct in every particular, including its own conclusion that no
+re-freeze was owed. It cost an alert anyway.
+
+Both halves are the same mistake: a step downstream of the capture judging
+paths the capture already judged, without reading what the capture decided. So
+the brief states the class in the words the class is worth, and the stamp reads
+the run's own records before it fires. A finding that names only re-capturable
+take-backs is a finding about a handled case, and a handled case is not a
+zero-tolerance defect.
+
+The finding itself is untouched. It is still recorded, still a harness finding,
+and still takes the operational route with every other one — because a seat
+that reports what it was told is not wrong, and a run that hides the report
+would be worse than one that over-reports it. What changes is the alert.
 
 The class is a per-lane list of path globs in project config, next to the
 tiers, for the same reason the tiers live there: which frozen paths hold
@@ -246,3 +282,12 @@ stamps loud and the repeats stamp quiet, so a novel loss is still announced
 and a re-rendered surface is announced once. Trigger: one run that ships a
 wrong artifact whose only trace was a quiet record. Reversal cost: low, one
 count over the run's own events at the record site.
+
+If reading the class back out of a finding's prose proves too loose — a
+sentence that mentions a re-capturable directory in passing quieting a defect
+about something else entirely — the read narrows to the paths a finding cites
+as its evidence rather than every path it names, and narrows again to exact
+paths if a folder reading is what leaks. Trigger: one harness defect whose
+`gate-integrity` record went missing and whose finding was not about the
+take-backs. Reversal cost: low, one predicate at one call site; a held
+take-back in the same finding already forces the loud reading either way.

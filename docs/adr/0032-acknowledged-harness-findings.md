@@ -13,13 +13,29 @@ two cycles, and the answer does not change while the fix is being written.
 A harness finding can be acknowledged once. While the acknowledgment stands,
 a gate whose findings are all acknowledged answers itself.
 
-- **A finding has a fingerprint.** Its class, its summary and its evidence,
-  normalized and digested: `harness:<12 hex>`. Normalization drops what the
-  run contributed and keeps what the finding said. A path falls to its last
-  segment, so the home, the worktree and the run id go. Digit runs and long
-  hex runs become one character, so line numbers, exit codes, cycle numbers
-  and shas go. Punctuation and case go. The per-run id (`F1`) names one run's
-  bookkeeping; the fingerprint names the defect.
+- **A finding has an identity.** Its class and its subject, digested:
+  `harness:<12 hex>`. The subject of a triage finding is the gate layer it
+  names, de-duplicated and sorted, because a harness finding says the
+  machinery that judges one layer is broken and that is the thing an operator
+  answers for. The per-run id (`F1`) names one run's bookkeeping; the identity
+  names the defect. A finding that names no layer has no subject to key on and
+  falls back to the words below.
+- **A finding also has a fingerprint of its words.** Its class, its summary
+  and its evidence, normalized and digested into the same shape.
+  Normalization drops what the run contributed and keeps what the finding
+  said. A path falls to its last segment, so the home, the worktree and the
+  run id go. Digit runs and long hex runs become one character, so line
+  numbers, exit codes, cycle numbers and shas go. Punctuation and case go.
+  This is the identity of a statement rather than of a defect, and two things
+  still use it: the progress guards, which ask whether a repair round closed
+  anything and must read two differently worded findings as two, and an
+  acknowledgment recorded before the identity form existed.
+- **Coverage answers to either form.** A gate asks the standing set for the
+  identity first and for the words after it. A gate that parks offers the
+  identity, so what an operator records from here on covers the defect however
+  the next seat words it. An acknowledgment already recorded keeps answering
+  the gate it was recorded at, and the fingerprint a revoke has to name is
+  always the one the record carries.
 - **Only a harness finding may be acknowledged.** One function holds the
   class rule, and coverage is asked for through it, so no call site can reach
   coverage for a class an ack may not cover.
@@ -47,23 +63,42 @@ a gate whose findings are all acknowledged answers itself.
   form clears a set. `olympusctl status` lists every acknowledgment the
   factory is currently allowed to walk past.
 
-## Why the fingerprint is the finding's words
+## Why the identity is the defect's subject
 
 A finding id belongs to the run that raised it. Triage numbers its findings
 from one, and the same defect is `F1` in one run and `F3` in the next. An
 acknowledgment keyed on the id would cover the second gate of one run and
 nothing after it, which is half of the problem.
 
-What survives a run is what the finding says. Two triage seats looking at one
-defect write the same sentence about it, in different words at the edges: a
-different report path, a different cycle number, a different line. The
-normalization strips the edges and digests the rest.
+This decision first keyed on the finding's words instead, on the reasoning
+that two triage seats looking at one defect write the same sentence about it
+and differ only at the edges. Its own fallback path named the risk in that,
+and the risk arrived: a request opening without the label its diff asks for
+was acknowledged in one run, met in the next, and re-gated under a new
+fingerprint because the second seat had written a second sentence about it.
+Same class, same layer, same defect, same fix pending. The standing answer
+went silent and the gate cost the owner a touch — which is the one thing an
+acknowledgment exists to prevent.
 
-This is honest about its own limit. A triage seat that describes the defect in
-genuinely different words reaches a different fingerprint, and the operator
-meets the gate one more time. That is the safe direction for the error to
-fall: an acknowledgment that fails to match costs a question, and one that
-matches too eagerly costs a defect nobody looked at.
+The words were never the defect. They are one seat's account of it, and every
+run gives that account new edges to differ at: another check name in the
+evidence, another file the failure landed on, another half of the same
+explanation. The thing that does not drift is what the finding is about. A
+harness finding says the machinery behind one gate layer is broken, and the
+layer is a name the harness assigned, not prose a seat composed.
+
+So the identity is the class and the layer set. It is coarser than the words
+on purpose. Two genuinely different harness defects on one layer reach one
+identity, and an acknowledgment of the first covers the second — the cost of
+this decision, paid in exchange for never asking twice about one defect. The
+record is unchanged by it: `finding-ack-used` names the finding, the
+fingerprint, the ack event and the operator behind it, so a gate answered this
+way is still answered on the record.
+
+A finding that names no layer keeps the older key. It has no subject the
+harness assigned, so its words are the best identity available, and an
+identity of class alone would cover every layerless harness finding an
+instance ever raised.
 
 ## Why only a harness finding
 
@@ -120,13 +155,25 @@ the acknowledgment existed. Nothing waits for a run to end, and no other
 acknowledgment is touched. The feature as a whole is off in a factory where
 nobody has answered a gate with `ack`, because the set starts empty.
 
-If a triage seat's re-wording defeats the fingerprint, and one operator ends
-up acknowledging one defect under two of them, the ack answer gains an
-operator-supplied fingerprint: the console takes `--fingerprint` beside
-`--option ack` and records that instead of the derived one. Trigger: two
-standing acknowledgments whose summaries an operator reads as one defect.
+A triage seat's re-wording defeated the words-keyed fingerprint on 2026-08-23,
+which is why the identity above exists. The fallback this paragraph used to
+name — an operator-supplied fingerprint on the ack answer — is still available
+and still cheap, and it is now the second line rather than the first: the
+console takes `--fingerprint` beside `--option ack` and records that instead of
+the derived one. Trigger: two standing acknowledgments whose summaries an
+operator reads as one defect, where the two findings named different layers.
 Reversal cost: low. One optional field on one command, and the fold does not
 change.
+
+If the identity proves too coarse — one acknowledgment walking past a second
+harness defect on a layer the first one named — the subject narrows by adding
+a component the harness assigns rather than a seat composes. The seat's own
+report has none today, so the cheap version is the layer plus the stage the
+finding was raised in, and the honest version is a closed kind on the finding,
+the way `gate-integrity` already carries one. Trigger: one harness defect that
+reached no gate because an acknowledgment on its layer stood. Reversal cost:
+low for the first, medium for the second, which touches the triage report
+schema and the seat prompt.
 
 If an acknowledged gate spins, the brake is gone with the human. The gate is
 reached once per verdict cycle, and each cycle costs a spectrum run and a

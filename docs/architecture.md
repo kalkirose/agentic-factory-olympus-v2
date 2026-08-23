@@ -258,8 +258,9 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   paths, and every later brief states the freeze and the re-freeze route.
   A take-back from a path the lane declared `recapturablePaths` — a baseline
   or fixture a re-freeze re-takes — stamps the quiet `diff-policy-recapture`
-  instead, and the hard tiers outrank the class. Nothing is ever discarded
-  without a record (ADR-0017).
+  instead, and the hard tiers outrank the class. The class is decided once,
+  here, and honored by every later step that meets the same paths. Nothing is
+  ever discarded without a record (ADR-0017).
 - **Deterministic core.** Every Tier-1 check (per-layer suites, lint, types,
   build) runs as a process. Unlimited rounds; a rerun judges nothing.
 - **Spectrum verdict.** Every runnable Tier-1 layer the cycle runs runs to
@@ -297,7 +298,9 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - **Verdict triage** (judgment, fires only on persistent reds): clusters reds
   into findings by root cause; classes each as code-defect, suite-defect,
   env, or harness, with cited evidence. A harness finding also writes a
-  gate-integrity line. Triage classifies, never executes.
+  gate-integrity line, unless it names only take-backs the capture classed
+  re-capturable: that class was settled at the capture and is not re-judged
+  here. Triage classifies, never executes.
 - **Response ladder.** Code-defect → repair round on the candidate tree
   (progress-gated: each round must strictly shrink the open finding set; cap
   3). Stall or a verified approach-level finding → one fresh pass per run,
@@ -314,10 +317,12 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   round is a stall when it closed none of the findings the render before it
   left open; a round that closes one while the review surfaces another is
   progress, and the run keeps its fresh pass. The key is the identity the cycle
-  fingerprint and a standing acknowledgment read, compared by occurrences
-  because that identity normalizes numerals away and two findings can reach
-  one. The shrink rule the ladder entry above describes is retired with it; the
-  cap is unchanged (ADR-0022).
+  fingerprint reads — what the finding says, normalized — compared by
+  occurrences because that identity normalizes numerals away and two findings
+  can reach one. A guard asking whether a round closed anything reads two
+  differently worded findings as two, which is why it keeps this key and not
+  the coarser one a gate keys an acknowledgment on. The shrink rule the ladder
+  entry above describes is retired with it; the cap is unchanged (ADR-0022).
 - **Substrate probe before the fix.** An env finding sends the route to the
   host before it spends anything: the run stack's published ports, read off
   the compose project and asked on both loopback families with a write and a
@@ -486,9 +491,12 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   the forms, and the queue renders the answer line off the same declaration.
 - **A known harness defect is answered once.** A provisioning gate that names
   a harness finding also offers `ack`, which answers the gate and records that
-  finding as known and deferred, by a fingerprint derived from what the
-  finding says rather than from the run that raised it. A later gate whose
-  findings are all acknowledged answers itself and stamps what it stood on.
+  finding as known and deferred, by an identity derived from the defect — its
+  class and the gate layer it names — rather than from the run that raised it
+  or the sentence a seat wrote about it. A later gate whose findings are all
+  acknowledged answers itself and stamps what it stood on, however the seat
+  that raised them worded them. An acknowledgment recorded under the older
+  words-derived fingerprint still answers the gate it was recorded at.
   Acknowledgments never cover an env or product finding, are folded from
   `finding-ack` / `finding-ack-revoked` pairs in the instance ledger so a
   restart clears none, and end one at a time through `olympusctl revoke`,

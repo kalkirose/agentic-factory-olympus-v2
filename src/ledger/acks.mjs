@@ -2,11 +2,21 @@
 // known, is held elsewhere, and does not block a run.
 //
 // A finding has no identity past the run that raised it — the id is per-run
-// bookkeeping — so an ack keys on a fingerprint derived from what the finding
-// says: its class, its summary and the source its evidence cites, all
-// normalized. The same defect, raised again by a fresh triage seat in another
-// run, reaches the same fingerprint. That is the whole point: the operator
-// answered the question once, and the second gate is the same question.
+// bookkeeping — so an ack keys on a fingerprint. There are two of them here,
+// for two readers.
+//
+// `ackFingerprint` is the identity a gate keys on: the defect's class and its
+// subject, where the subject of a triage finding is the gate layer whose
+// machinery holds the defect. A second triage seat writing a second sentence
+// about the same layer reaches the same fingerprint, so a reworded recurrence
+// of an acknowledged defect answers itself instead of costing the operator the
+// question they already answered.
+//
+// `findingFingerprint` is what the finding says: its class, its summary and
+// its evidence, normalized. It is the identity of a statement rather than of a
+// defect, so the progress guards keep it — two findings that differ in words
+// are two findings to a guard asking whether a repair round closed anything —
+// and an ack recorded before the identity form existed still stands under it.
 //
 // Acks are derived, never stored. The instance ledger's `finding-ack` and
 // `finding-ack-revoked` events are the record, and a standing ack is an ack
@@ -32,6 +42,12 @@ export const ACKABLE_CLASSES = new Set(['harness']);
 
 const FINGERPRINT_HEX = 12;
 
+// What keeps an identity digest apart from a prose digest of the same class.
+// Both are `<class>:<12 hex>` on the record, and a reader that meets one has
+// no way to ask which it is; the tag makes the two spaces disjoint, so no
+// identity can be mistaken for the words of some other finding.
+const SUBJECT_TAG = 'subject';
+
 /** True when a finding's class may be covered by an ack at all. */
 export function isAckable(finding) {
   return ACKABLE_CLASSES.has(finding?.class);
@@ -45,8 +61,60 @@ export function isAckable(finding) {
  *   and in a revoke command
  */
 export function findingFingerprint(finding) {
-  const cls = typeof finding?.class === 'string' ? finding.class : 'unclassed';
-  return `${cls}:${digest([cls, normalize(finding?.summary), normalize(finding?.evidence)])}`;
+  return `${classOf(finding)}:${digest([
+    classOf(finding),
+    normalize(finding?.summary),
+    normalize(finding?.evidence),
+  ])}`;
+}
+
+/**
+ * The identity a gate keys an ack on: the defect's class and its subject.
+ *
+ * The subject is the gate layer the finding names. A harness finding says the
+ * machinery that judges one layer is broken, and that is the thing an operator
+ * answers for — not the sentence a seat wrote about it. Two triage seats
+ * describing one broken layer write two sentences and mean one defect, and the
+ * words drift with every run: a different check name in the evidence, a
+ * different file the failure landed on, a different half of the same
+ * explanation. Hashing the words made every drift a new question at the gate.
+ *
+ * A finding that names no layer has no subject to key on, so its words stay
+ * its identity and it falls back to `findingFingerprint`.
+ *
+ * The layer set is sorted and de-duplicated, so an ack does not turn on the
+ * order a seat listed a cluster in.
+ *
+ * @param {{class?: string, layers?: string[], summary?: string, evidence?: string}} finding
+ * @returns {string} `<class>:<hex>`, the same shape a prose fingerprint carries
+ */
+export function ackFingerprint(finding) {
+  const layers = [
+    ...new Set(
+      (Array.isArray(finding?.layers) ? finding.layers : [])
+        .filter((l) => typeof l === 'string' && l.trim().length > 0)
+        .map((l) => l.trim().toLowerCase()),
+    ),
+  ].sort();
+  if (layers.length === 0) return findingFingerprint(finding);
+  return `${classOf(finding)}:${digest([SUBJECT_TAG, classOf(finding), layers.join(' ')])}`;
+}
+
+/**
+ * Every fingerprint an ack of this finding may stand under, most stable first:
+ * the identity, then the words. The second form is what an ack recorded before
+ * the identity existed was keyed on, and a defect nobody fixed is not answered
+ * differently because the harness learned a better key for it. A finding whose
+ * two forms agree — one that names no layer — offers the one.
+ */
+export function ackForms(finding) {
+  const identity = ackFingerprint(finding);
+  const words = findingFingerprint(finding);
+  return identity === words ? [identity] : [identity, words];
+}
+
+function classOf(finding) {
+  return typeof finding?.class === 'string' ? finding.class : 'unclassed';
 }
 
 /**
@@ -117,12 +185,21 @@ export function standingAcksFor(paths, project) {
  * The ack that covers a finding, or null. The class rule is enforced here
  * rather than at the recording sites, so no caller can reach coverage for a
  * class an ack may not cover.
+ *
+ * Coverage is asked of every form the finding answers to, so an ack recorded
+ * under the words a run wrote months ago still answers the gate it was
+ * recorded at. The ack that is found is returned whole, with the fingerprint
+ * it was recorded under, because that is the fingerprint a revoke will name.
  * @param {Map<string, object>} standing
  * @param {object} finding
  */
 export function coveringAck(standing, finding) {
   if (!isAckable(finding)) return null;
-  return standing.get(findingFingerprint(finding)) ?? null;
+  for (const form of ackForms(finding)) {
+    const ack = standing.get(form);
+    if (ack) return ack;
+  }
+  return null;
 }
 
 function fold(events) {

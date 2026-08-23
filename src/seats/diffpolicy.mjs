@@ -11,7 +11,10 @@
 //
 // The same block carries one class that blocks nothing: `recapturablePaths`
 // names the frozen artifacts a re-freeze re-takes, and a write the capture
-// takes back from one of them is recorded quietly instead of loudly.
+// takes back from one of them is recorded quietly instead of loudly. The
+// classification is made once, here, at the moment of the revert; every later
+// step that meets those paths reads it off the record rather than judging the
+// same paths again and reaching a louder answer.
 import { underEntry } from '../config/project.mjs';
 
 // The declaration contract: a fenced block the spec author writes, one
@@ -194,6 +197,69 @@ export function classifyTakeBacks(dropped, tier) {
     else held.push(raw);
   }
   return { recaptured, held };
+}
+
+// A path as a reader writes one: it has a separator in it, and it stops at
+// whitespace or at the punctuation a sentence wraps it in.
+const PATH_TOKEN = /[^\s"'`()[\]<>{},;]*\/[^\s"'`()[\]<>{},;]*/g;
+const TRAILING = /[.,;:!?]+$/;
+const LEADING = /^[./]+/;
+
+/**
+ * The repo-relative-looking paths a piece of prose names. A sentence about a
+ * defect names the files it is about, and this is the only handle a reader
+ * outside the capture has on which files those are.
+ * @param {string} text
+ * @returns {string[]} slash-normalized, in the order they were written
+ */
+export function pathTokens(text) {
+  if (typeof text !== 'string') return [];
+  const tokens = [];
+  for (const raw of text.replaceAll('\\', '/').match(PATH_TOKEN) ?? []) {
+    const token = raw.replace(TRAILING, '').replace(LEADING, '');
+    if (token.includes('/')) tokens.push(token);
+  }
+  return tokens;
+}
+
+/**
+ * Whether a piece of prose is about take-backs the capture classed
+ * re-capturable, and about no take-back it held.
+ *
+ * The capture already made this judgment, path by path, at the moment it
+ * reverted the writes. A later reader that meets the same paths in a sentence
+ * has no standing to make it a second time and reach a different answer: an
+ * artifact the lane declared re-capturable is a record and not an open item,
+ * whichever step is looking at it.
+ *
+ * A sentence names the directory the fifteen files sit in more often than it
+ * names the fifteen files, so a token and a path answer to each other when
+ * either contains the other on a segment boundary. A held take-back named
+ * anywhere in the prose settles it the other way: the loud class outranks the
+ * quiet one, exactly as the hard tiers outrank it at the capture.
+ *
+ * @param {string} text the prose to read
+ * @param {{recaptured?: {path: string}[], held?: string[]}} takeBacks what this
+ *   run's captures reverted, in the shape `classifyTakeBacks` returns and the
+ *   ledger records
+ */
+export function namesOnlyRecapturable(text, { recaptured = [], held = [] } = {}) {
+  if (recaptured.length === 0) return false;
+  const tokens = pathTokens(text);
+  if (tokens.length === 0) return false;
+  let named = false;
+  for (const token of tokens) {
+    if (held.some((path) => sameSurface(token, path))) return false;
+    if (recaptured.some((r) => sameSurface(token, r.path))) named = true;
+  }
+  return named;
+}
+
+/** Whether two written paths name one surface: equal, or one inside the other. */
+function sameSurface(a, b) {
+  const one = `/${a.replaceAll('\\', '/')}/`;
+  const other = `/${b.replaceAll('\\', '/')}/`;
+  return one.includes(other) || other.includes(one);
 }
 
 /** The record's line for one re-capturable take-back. */

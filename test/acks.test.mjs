@@ -13,6 +13,8 @@ import { writeControlCommand } from '../src/daemon/control.mjs';
 import { readEvents, Ledger } from '../src/ledger/ledger.mjs';
 import { INSTANCE_EVENTS } from '../src/ledger/registry.mjs';
 import {
+  ackFingerprint,
+  ackForms,
   coveringAck,
   findingFingerprint,
   isAckable,
@@ -27,6 +29,22 @@ const DEFECT = {
   class: 'harness',
   summary: 'The triage seat captures none of the layer log',
   evidence: 'reports/verdict-triage-c2.json holds an empty output field',
+};
+
+// One defect, two triage seats, two sentences. The label a request opens
+// without is a defect of the step that opens requests, and both seats say so
+// about the same gate layer, in words that share four of them.
+const LABELLED = {
+  class: 'harness',
+  layers: ['ci:migration-label'],
+  summary: 'PR opened without the "migration" label the constitution requires',
+  evidence: 'Diff 3f3c398..63a49c3 holds one migration under apps/api/migrations/M1.ts',
+};
+const RELABELLED = {
+  class: 'harness',
+  layers: ['ci:migration-label'],
+  summary: "PR misses the 'migration' label. The label is request metadata, set at creation.",
+  evidence: 'CI: check-migration-label FAIL names apps/api/modules/billing/migrations/M2.ts',
 };
 
 function instanceEvents(paths) {
@@ -68,6 +86,53 @@ test('the class and the words are both part of the identity', () => {
     harness,
     findingFingerprint({ ...DEFECT, evidence: 'the layer output reached the record whole' }),
   );
+});
+
+// -- the identity a gate keys on ---------------------------------------------
+
+test('the identity is the class and the subject, so a rewording reaches it too', () => {
+  // The words are two statements; the defect is one, and the gate keys on the
+  // defect. Nothing else about the two findings agrees: not a sentence, not a
+  // file, not a check name.
+  assert.equal(ackFingerprint(LABELLED), ackFingerprint(RELABELLED));
+  assert.notEqual(findingFingerprint(LABELLED), findingFingerprint(RELABELLED));
+  assert.match(ackFingerprint(LABELLED), /^harness:[0-9a-f]{12}$/);
+  // A defect in the machinery of another layer is another defect, and an
+  // identity is never mistaken for the words of some other finding.
+  assert.notEqual(ackFingerprint(LABELLED), ackFingerprint({ ...LABELLED, layers: ['acceptance'] }));
+  assert.notEqual(ackFingerprint(LABELLED), ackFingerprint({ ...LABELLED, class: 'env' }));
+  assert.notEqual(ackFingerprint(LABELLED), findingFingerprint(LABELLED));
+});
+
+test('the layer set is a set: order, case and repetition are not the subject', () => {
+  const clustered = { ...LABELLED, layers: ['acceptance', 'ci:migration-label'] };
+  assert.equal(
+    ackFingerprint(clustered),
+    ackFingerprint({ ...RELABELLED, layers: ['CI:Migration-Label', 'acceptance', 'acceptance'] }),
+  );
+  assert.notEqual(ackFingerprint(clustered), ackFingerprint(LABELLED));
+});
+
+test('a finding that names no layer has no subject, so its words stay its identity', () => {
+  for (const layerless of [DEFECT, { ...DEFECT, layers: [] }, { ...DEFECT, layers: ['  '] }]) {
+    assert.equal(ackFingerprint(layerless), findingFingerprint(layerless));
+    // One form, so a gate that offers it offers nothing twice.
+    assert.deepEqual(ackForms(layerless), [findingFingerprint(layerless)]);
+  }
+});
+
+test('an ack recorded under the words a run wrote is still honored', () => {
+  // The identity is a better key than the words, and a defect nobody fixed is
+  // not answered differently because the harness learned one.
+  assert.deepEqual(ackForms(LABELLED), [ackFingerprint(LABELLED), findingFingerprint(LABELLED)]);
+  const words = new Map([[findingFingerprint(LABELLED), { seq: 1, actor: 'operator' }]]);
+  assert.equal(coveringAck(words, LABELLED).seq, 1);
+  // Honest about the limit it was recorded with: a fingerprint of one sentence
+  // covers that sentence, and the rewording is what the identity form is for.
+  assert.equal(coveringAck(words, RELABELLED), null);
+  const identity = new Map([[ackFingerprint(LABELLED), { seq: 2, actor: 'operator' }]]);
+  assert.equal(coveringAck(identity, LABELLED).seq, 2);
+  assert.equal(coveringAck(identity, RELABELLED).seq, 2);
 });
 
 test('an ack covers a harness finding and nothing else', () => {
