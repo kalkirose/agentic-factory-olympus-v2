@@ -467,8 +467,12 @@ async function waitClosed(paths, runId, attempts = 600) {
     });
   } catch (error) {
     const live = runLedgerPath(paths, runId);
+    // The heartbeat is the pulse, not the state. A stage that is alive and
+    // waiting stamps one every few seconds, so an unfiltered tail is fourteen
+    // heartbeats and no answer to what the run is waiting on.
     const tail = existsSync(live)
       ? readEvents(live)
+          .filter((e) => e.event !== 'stage-heartbeat')
           .slice(-14)
           .map(
             (e) =>
@@ -2224,7 +2228,11 @@ test('a merge-born fresh pass carries the frozen suite onto main and reverts not
   assert.equal(render.verdict, 'green');
   assert.ok(!fx.calls.some((c) => c.seat === 'verdict-triage'));
   fx.forge.state.autoChecks = () => [green()];
-  const events = await waitClosed(fx.paths, runId);
+  // The longest journey in this file: a conflicted request, a fresh pass born
+  // on the moved branch, a second spectrum, then the ship. The default budget
+  // holds it on an idle machine and not on a shared runner, where the rest of
+  // the suite is running beside it.
+  const events = await waitClosed(fx.paths, runId, 1800);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   // Both halves shipped: the conflict dissolved on the new base, the frozen
   // suite came with it, and the test path the run does not own is still the
