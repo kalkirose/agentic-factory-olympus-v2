@@ -30,6 +30,15 @@ import { runCommand } from './exec.mjs';
 import { runEvents, ACTOR } from './shared.mjs';
 
 const OUTPUT_TAIL = 1500;
+// What a red layer that ran in parts records beyond that tail. A layer command
+// is often a sequence — a suite runner with steps — and the tail of one long
+// stream is whatever ran last, so a red in the middle of the sequence reaches
+// triage as the green minutes that followed it. A command that says where its
+// parts begin (`::olympus part`, see exec.mjs) gets the failing part recorded
+// under its own name. The budget is the whole record's, shared between the
+// parts kept, and never cut below the floor.
+const PART_TAIL = 6000;
+const PART_FLOOR = 500;
 
 /**
  * Runs one verdict cycle's Tier-1 spectrum.
@@ -41,7 +50,8 @@ const OUTPUT_TAIL = 1500;
  *   `run` names the layers this cycle executes; every other layer carries its
  *   `prior` green forward. Both absent means the full spectrum.
  * @returns {Promise<{results?: Array<{layer: string, status: string,
- *   mode: string, attributedTo?: string, output?: string}>, error?: string}>}
+ *   mode: string, attributedTo?: string, output?: string,
+ *   parts?: Array<{name: string, output: string}>}>, error?: string}>}
  *   `error` is set when a layer command could not run at all — an
  *   environment defect, never a verdict about the tree.
  */
@@ -91,6 +101,7 @@ export async function runSpectrum(
       mode,
       ...(record.attributedTo && { attributedTo: record.attributedTo }),
       ...(record.output && { output: record.output }),
+      ...(record.parts?.length > 0 && { parts: record.parts }),
     });
   }
   return { results };
@@ -125,6 +136,7 @@ async function runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark }) {
     ctx.store.append('flake', { actor: ACTOR, cycle, layer: layer.name, sha });
     return { record: stampResult(ctx, { cycle, layer: layer.name, status: 'green', sha, ...mark }) };
   }
+  const parts = recordedParts(rerun.parts);
   return {
     record: stampResult(ctx, {
       cycle,
@@ -132,9 +144,28 @@ async function runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark }) {
       status: 'red',
       sha,
       output: rerun.output.slice(-OUTPUT_TAIL),
+      ...(parts.length > 0 && { parts }),
       ...mark,
     }),
   };
+}
+
+/**
+ * The parts of a red layer's run the record keeps, each with a bounded tail of
+ * its own. A command that named the parts that failed gets those; a command
+ * that only said where its parts begin gets all of them, because the red is in
+ * one of them and the stream does not say which; a command that surfaced no
+ * parts at all gets none, and the record keeps the tail alone as it always did.
+ * @param {Array<{name: string, failed: boolean, output: string}>} [parts]
+ */
+function recordedParts(parts = []) {
+  if (parts.length === 0) return [];
+  const failed = parts.filter((p) => p.failed);
+  let kept = failed.length > 0 ? failed : parts;
+  const room = Math.floor(PART_TAIL / PART_FLOOR);
+  if (kept.length > room) kept = kept.slice(-room);
+  const each = Math.max(PART_FLOOR, Math.floor(PART_TAIL / kept.length));
+  return kept.map((p) => ({ name: p.name, output: p.output.slice(-each) }));
 }
 
 function stampResult(ctx, fields) {

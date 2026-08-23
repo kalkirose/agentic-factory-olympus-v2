@@ -295,6 +295,14 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - **Flake filter.** Each red layer re-runs once, red-only, by process policy.
   A green re-run writes a flake event, never a finding. Survivors are
   persistent reds; only these enter triage.
+- **A layer that runs in parts.** A gate command is often a sequence of its
+  own, and one exit code covers all of it, so the tail of its stream is
+  whatever ran last rather than what failed. A command may say where its parts
+  begin — `::olympus part <name>`, and `::olympus part-failed <name>` for one
+  that failed — and then the red record keeps a bounded tail per part under
+  its name, beside the tail it always kept. Triage reads the failing part; the
+  verdict record names it. A command that prints neither line is recorded
+  exactly as before.
 - **Verdict triage** (judgment, fires only on persistent reds): clusters reds
   into findings by root cause; classes each as code-defect, suite-defect,
   env, or harness, with cited evidence. A harness finding also writes a

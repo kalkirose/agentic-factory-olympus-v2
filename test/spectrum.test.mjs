@@ -1,6 +1,7 @@
 // The Tier-1 spectrum runner: not-runnable attribution follows the needs
 // chain to the root red; the flake filter re-runs red layers once and stamps
-// flakes instead of findings; stamped layers are never re-run. The cycle plan
+// flakes instead of findings; stamped layers are never re-run. A red layer
+// that ran in parts records the failing part under its name. The cycle plan
 // decides what a cycle runs and what it carries.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -65,6 +66,78 @@ test('a not-runnable layer attributes to the root red through the needs chain', 
   const stamped = events(ctx).filter((e) => e.event === 'layer-result');
   assert.equal(stamped.length, 4);
   assert.ok(!events(ctx).some((e) => e.event === 'flake'));
+});
+
+// -- a layer that runs in parts ----------------------------------------------
+
+/** A command that says where its parts begin, in the protocol exec.mjs reads. */
+function partsCmd(lines) {
+  return ['node', '-e', lines.map((line) => `console.log(${JSON.stringify(line)});`).join('') + 'process.exit(1);'];
+}
+
+// The middle part fails, and the part after it prints more than the tail holds.
+const SEQUENCE = [
+  '::olympus part preflight',
+  'preflight clean',
+  '::olympus part unit suite',
+  'AssertionError: expected 4 to equal 5',
+  '::olympus part-failed unit suite',
+  '::olympus part e2e suite',
+  'e2e green'.padEnd(4000, '.'),
+];
+
+test('a red layer that ran in parts records the failing part with its own output', async (t) => {
+  const { ctx } = fixture(t);
+  const { results } = await runSpectrum(ctx, {
+    layers: [{ name: 'acceptance', command: 'sequence' }],
+    commands: { sequence: partsCmd(SEQUENCE) },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'sha1',
+  });
+  const [red] = results;
+  assert.equal(red.status, 'red');
+  assert.deepEqual(red.parts.map((p) => p.name), ['unit suite']);
+  assert.match(red.parts[0].output, /expected 4 to equal 5/);
+  // The failing part is in the middle, so the tail alone is the part after it.
+  assert.ok(!red.output.includes('expected 4 to equal 5'), 'the tail held the failure after all');
+  assert.match(red.output, /\.\.\./);
+  // The record carries what the results carry, and no marker line survives it.
+  const stamped = events(ctx).find((e) => e.event === 'layer-result');
+  assert.deepEqual(stamped.parts, red.parts);
+  assert.ok(!stamped.parts[0].output.includes('::olympus'));
+  assert.ok(!stamped.output.includes('::olympus'));
+});
+
+test('a command that opens parts but names no failure records every part', async (t) => {
+  const { ctx } = fixture(t);
+  const { results } = await runSpectrum(ctx, {
+    layers: [{ name: 'acceptance', command: 'sequence' }],
+    commands: { sequence: partsCmd(SEQUENCE.filter((line) => !line.startsWith('::olympus part-failed'))) },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'sha1',
+  });
+  assert.deepEqual(
+    results[0].parts.map((p) => p.name),
+    ['preflight', 'unit suite', 'e2e suite'],
+  );
+  assert.match(results[0].parts[1].output, /expected 4 to equal 5/);
+});
+
+test('a red layer whose command surfaces no parts records the tail alone', async (t) => {
+  const { ctx } = fixture(t);
+  const { results } = await runSpectrum(ctx, {
+    layers: [{ name: 'acceptance', command: 'silent' }],
+    commands: { silent: ['node', '-e', "console.log('boom');process.exit(1);"] },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'sha1',
+  });
+  assert.equal(results[0].parts, undefined);
+  const stamped = events(ctx).find((e) => e.event === 'layer-result');
+  assert.equal(stamped.parts, undefined);
+  assert.match(stamped.output, /boom/);
 });
 
 test('a red that turns green on the re-run stamps a flake, never a finding', async (t) => {

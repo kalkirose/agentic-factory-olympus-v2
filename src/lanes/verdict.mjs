@@ -360,7 +360,13 @@ async function runCycle(ctx, base, mode, { cycle }) {
     // The capture took these paths back before this tree was committed, so a
     // red on the surface they cover is explained, not mysterious.
     ...(dropped.length > 0 && { dropped }),
-    spectrum: spectrum.results.map(({ output, ...r }) => r),
+    // The record is a summary: the output stays in the ledger. What it does
+    // carry is the name of every part a red layer reported, so a red inside a
+    // sequence reads here as the part that failed and not as the layer alone.
+    spectrum: spectrum.results.map(({ output, parts, ...r }) => ({
+      ...r,
+      ...(parts?.length > 0 && { parts: parts.map((p) => p.name) }),
+    })),
     flakes: runEvents(ctx)
       .filter((e) => e.event === 'flake' && e.cycle === cycle)
       .map((e) => e.layer),
@@ -1284,10 +1290,28 @@ function triageRole(base, reds, priorOpen, brief, dropped = [], recaptured = [])
   lines.push(...takenBackLines(dropped, recaptured));
   lines.push('Persistent reds:');
   for (const r of reds) {
-    lines.push(`- layer ${r.layer}:`, r.output ?? '(no output)');
+    lines.push(`- layer ${r.layer}:`, ...redEvidence(r));
   }
   lines.push(...briefLines(brief));
   return lines.join('\n');
+}
+
+/**
+ * What a triage reads of one persistent red. A layer that ran in parts states
+ * the failing part first and under its name: the tail of a sequence is the part
+ * that ran last, and on a red in the middle that is the detail of the parts
+ * that passed. The tail stays beside it, because it holds what the runner said
+ * after every part was done. A layer that reported no parts reads as it always
+ * did.
+ */
+function redEvidence(r) {
+  const tail = r.output ?? '(no output)';
+  if (!r.parts?.length) return [tail];
+  return [
+    ...r.parts.flatMap((p) => [`  part ${p.name}:`, p.output || '(no output)']),
+    '  the layer, at the end of its run:',
+    tail,
+  ];
 }
 
 function refreezeRole(base, findings, record, brief) {
