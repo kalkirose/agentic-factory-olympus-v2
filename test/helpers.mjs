@@ -2,13 +2,42 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { longPath, isRetryableRemoval } from '../src/isolation/removal.mjs';
+
+// The ladder a fixture teardown removes under, and the path form it removes
+// in. Both are the production ones (ADR-0004): a fixture tree is a checked-out
+// repository with worktrees under it, and on Windows a file inside it can
+// still be held when the test that made it ends — a git process a moment from
+// exiting, an indexer, a scanner. The hold belongs to another process and it
+// passes on its own, so a teardown that reports the first EBUSY reds a suite
+// for a condition that was over a second later.
+const ATTEMPTS = 10;
+const DELAY_MS = 250;
 
 export function tempDir(prefix = 'olympus-test-') {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
+/**
+ * Deletes a fixture tree, waiting out a transient hold. Synchronous, because
+ * every teardown that calls it reads that way; the wait costs nothing at all
+ * when nothing holds the tree.
+ */
 export function removeDir(dir) {
-  rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+  const target = longPath(dir);
+  for (let attempt = 1; ; attempt++) {
+    try {
+      rmSync(target, { recursive: true, force: true, maxRetries: 5 });
+      return;
+    } catch (error) {
+      if (attempt >= ATTEMPTS || !isRetryableRemoval(error)) throw error;
+      sleepSync(DELAY_MS * attempt);
+    }
+  }
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 /** Polls `check` until it returns a truthy value. Test-only convenience. */
