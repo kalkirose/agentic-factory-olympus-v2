@@ -1849,6 +1849,24 @@ test('a diff no rule covers is stamped as labelled with nothing', async (t) => {
   assert.deepEqual([...fx.forge.state.labels], []);
 });
 
+test('a project that configured no rules leaves the label surface untouched', async (t) => {
+  // The derivation is total over the rules it was given and asks for nothing
+  // else. This diff carries the file another project's rule would fire on, and
+  // on a project that named no rule it derives nothing: the create carries no
+  // label, no apply call carries one, and the ship is the journey it always
+  // was. A harness that held label names of its own would fail exactly here.
+  const fx = shipFixture(t, { seats: MIGRATING_DEV });
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.deepEqual(events.find((e) => e.event === 'pr-labeled').labels, []);
+  assert.deepEqual(fx.forge.state.createLabels, []);
+  assert.ok(fx.forge.state.labelCalls.every((call) => call.labels.length === 0));
+  assert.deepEqual([...fx.forge.state.labels], []);
+  assert.ok(!events.some((e) => e.event === 'gate-integrity' && e.kind === 'pr-label-missing'));
+});
+
 test('a label the repository does not define parks the gate and names it', async (t) => {
   const fx = shipFixture(t, { seats: MIGRATING_DEV, config: { labels: LABEL_RULES } });
   fx.forge.state.autoChecks = () => [green()];
