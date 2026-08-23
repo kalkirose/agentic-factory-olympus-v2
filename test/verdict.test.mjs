@@ -51,6 +51,36 @@ test('f doubles what the harness boots', async () => {
 });
 `;
 
+// A pin an earlier story froze: the export set is closed. This story's own
+// criterion needs a second export, so the two are unsatisfiable together —
+// the intent conflict only an owner can settle.
+const PINNED_CLOSED = `import test from 'node:test';
+import assert from 'node:assert/strict';
+test('the export set is closed', async () => {
+  const mod = await import('../src/feature.mjs');
+  assert.deepEqual(Object.keys(mod).sort(), ['f']);
+});
+`;
+
+// The same pin, opened for the deliberate extension the ruling grants.
+const PINNED_EXTENDED = `import test from 'node:test';
+import assert from 'node:assert/strict';
+test('the export set is closed', async () => {
+  const mod = await import('../src/feature.mjs');
+  assert.deepEqual(Object.keys(mod).sort(), ['f', 'g']);
+});
+`;
+
+const PAIR_TEST = `import test from 'node:test';
+import assert from 'node:assert/strict';
+test('g is published', async () => {
+  const mod = await import('../src/feature.mjs');
+  assert.equal(typeof mod.g, 'function');
+});
+`;
+
+const PAIR_FEATURE = 'export const f = (x) => 2 * x;\nexport const g = () => 1;\n';
+
 const G_TEST = `import test from 'node:test';
 import assert from 'node:assert/strict';
 test('g increments', async () => {
@@ -154,7 +184,16 @@ function seedHandler(files, extra, specText = '# Spec\n\nf(x) returns 2*x.\n', e
     writeFileSync(join(ctx.paths.runs, ctx.runId, 'spec.md'), specText);
     writeFileSync(
       join(ctx.paths.runs, ctx.runId, 'freeze.json'),
-      JSON.stringify({ runId: ctx.runId, suiteSha: sha, frozenExclusions: exclusions }, null, 2) + '\n',
+      JSON.stringify(
+        {
+          runId: ctx.runId,
+          suiteSha: sha,
+          suiteFiles: Object.keys(files),
+          frozenExclusions: exclusions,
+        },
+        null,
+        2,
+      ) + '\n',
     );
     ctx.store.append('freeze', { actor: 'daemon', sha, killCount: 3, amendmentKills: 0 });
     if (extra) await extra(ctx, worktree);
@@ -303,6 +342,22 @@ function triageSeat(classFor) {
       }));
     return { report: { findings, persisting: persisting.map((p) => p.id), summary: 'triaged' } };
   };
+}
+
+/** A re-freeze suite behavior that declares nothing twice, then amends. */
+function refusesTwice() {
+  let refused = 0;
+  return () =>
+    refused++ < 2
+      ? { report: { suiteFiles: [], reds: [], summary: 'nothing declared' } }
+      : {
+          files: { 'tests/feature.test.mjs': STRONG_TEST, 'tests/marker.txt': 'ok' },
+          report: {
+            suiteFiles: ['tests/feature.test.mjs', 'tests/marker.txt'],
+            reds: [],
+            summary: 're-frozen',
+          },
+        };
 }
 
 function verifierSeat(decide) {
@@ -771,6 +826,151 @@ test('spec-deep and intent-deep suite defects amend the spec; the intent conflic
   const refreeze = events.find((e) => e.event === 're-freeze');
   assert.equal(refreeze.findings.length, 2);
   assert.ok(!events.some((e) => e.event === 'repair-round'));
+  // The ruling named no frozen test, so the suite arm ran as it always did:
+  // the amendment is recorded, and it was owed no file.
+  assert.deepEqual(refreeze.ruling.files, []);
+  const refrozen = fx.calls.find((c) => c.seat === 'suite');
+  assert.ok(!refrozen.prompt.includes('The ruling names these frozen test files'));
+});
+
+test('an intent ruling that names a frozen test reaches the suite, once, on the record', async (t) => {
+  // The conflict of a real run: the story's criterion needs a second export,
+  // an earlier story's frozen pin says the set is closed, and no
+  // implementation satisfies both. The owner rules for the extension and
+  // names the file; the amendment is the only place that ruling can land.
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': PAIR_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': () => ({
+      report: {
+        findings: [
+          {
+            class: 'suite-defect',
+            depth: 'intent',
+            layers: ['unit'],
+            summary: 'the frozen pin closes the export set the criterion extends',
+            evidence: 'tests/pinned.test.mjs pins the set closed',
+          },
+        ],
+        persisting: [],
+        summary: 'triaged',
+      },
+    }),
+    ...furyClean(),
+    'spec-birth': () => ({ report: { amendedSections: ['AC-1'], summary: 'amended' } }),
+    suite: ({ prompt }) =>
+      // The first pass amends everything but the file the ruling names. The
+      // check is what sends it back, so the ruling cannot be answered with a
+      // report about some other file.
+      prompt.includes('Correction brief')
+        ? {
+            files: { 'tests/pinned.test.mjs': PINNED_EXTENDED },
+            report: {
+              suiteFiles: ['tests/pinned.test.mjs'],
+              reds: [],
+              summary: 'the pin now admits the extension',
+            },
+          }
+        : {
+            files: { 'tests/pair.test.mjs': PAIR_TEST },
+            report: { suiteFiles: ['tests/pair.test.mjs'], reds: [], summary: 'nothing amended' },
+          },
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    suiteFiles: { 'tests/pair.test.mjs': PAIR_TEST, 'tests/pinned.test.mjs': PINNED_CLOSED },
+  });
+  const { runId } = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'intent-conflict');
+  assert.ok(park.answers.text.includes('Name the frozen test file'), park.answers.text);
+  fx.daemon.engine.answer({
+    runId,
+    actor: 'operator',
+    answer:
+      'AC-1 supersedes the closed export set. Amend tests/pinned.test.mjs to admit g as a ' +
+      'deliberate extension; the pin stays closed otherwise.',
+  });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The ruling reached the suite seat, naming the file it names.
+  const refreezes = fx.calls.filter((c) => c.seat === 'suite');
+  assert.equal(refreezes.length, 2);
+  assert.ok(refreezes[0].prompt.includes('The ruling is the authority for this amendment'));
+  assert.ok(refreezes[0].prompt.includes('- tests/pinned.test.mjs'));
+  // A pass that left the named file alone is a work-product defect, by name.
+  assert.match(
+    refreezes[1].prompt,
+    /the answered intent ruling names the frozen test tests\/pinned\.test\.mjs and it is unchanged/,
+  );
+  // One re-freeze, carrying the ruling, on the record.
+  const refreeze = events.filter((e) => e.event === 're-freeze');
+  assert.equal(refreeze.length, 1);
+  assert.equal(refreeze[0].ruling.park, park.seq);
+  assert.equal(refreeze[0].ruling.actor, 'operator');
+  assert.deepEqual(refreeze[0].ruling.files, ['tests/pinned.test.mjs']);
+  // And the next verdict found the conflict closed: one park, never a second.
+  assert.equal(events.filter((e) => e.event === 'park' && e.type === 'intent-conflict').length, 1);
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.deepEqual(
+    renders.map((e) => [e.cycle, e.verdict]),
+    [
+      [1, 'red'],
+      [2, 'green'],
+    ],
+  );
+  assert.equal(renders[1].suiteSha, refreeze[0].sha);
+});
+
+test('an operational fix does not swallow the re-freeze the ladder still owes', async (t) => {
+  // The two arms of one ladder pass: the env finding stamps its fix, and the
+  // suite arm behind it parks. The stamp alone would earn the next cycle, and
+  // the suite would go into it unamended — the same red, the same finding, the
+  // same park, forever. The owed amendment wins instead.
+  const marker = join(tempDir('olympus-refreeze-'), 'ext-marker.txt');
+  t.after(() => removeDir(dirname(marker)));
+  writeFileSync(marker, 'no\n');
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat((layer) =>
+      layer === 'ext' ? { class: 'env' } : { class: 'suite-defect', depth: 'test' },
+    ),
+    ...furyClean(),
+    // Two refusals spend the arm's invocation and its corrective round, and the
+    // park lands with the suite still unamended. The pass the retry buys writes
+    // the amendment, and the marker with it.
+    suite: refusesTwice(),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'ext', command: 'ext' },
+    ],
+    commands: { suite: SUITE_CMD, ext: markerCmd('tests/marker.txt') },
+    suiteFiles: { 'tests/feature.test.mjs': WRONG_TEST, 'tests/marker.txt': 'no\n' },
+  });
+  const { runId } = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'seat-failure');
+  assert.equal(park.detail.seat, 'suite');
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'retry' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  const refreeze = events.find((e) => e.event === 're-freeze');
+  // The amendment landed before the cycle the operational fix earned.
+  assert.ok(refreeze, 'the ladder never re-freezes');
+  assert.ok(refreeze.seq < renders[1].seq);
+  assert.equal(renders[1].suiteSha, refreeze.sha);
+  // The fix the first pass stamped stands: it is not re-taken, and the gate it
+  // would otherwise persist into is never raised.
+  assert.equal(events.filter((e) => e.event === 'operational-fix').length, 1);
+  assert.ok(!events.some((e) => e.event === 'park' && e.type === 'provisioning-gate'));
+  assert.deepEqual(
+    renders.map((e) => [e.cycle, e.verdict]),
+    [
+      [1, 'red'],
+      [2, 'green'],
+    ],
+  );
 });
 
 test('a persistent env finding parks the provisioning gate after its operational fix', async (t) => {

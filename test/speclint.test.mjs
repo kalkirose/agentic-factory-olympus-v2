@@ -12,8 +12,9 @@ import {
   frozenExclusions,
   SPEC_LINE_CAP,
 } from '../src/lanes/speclint.mjs';
+import { specLintDefects } from '../src/lanes/story.mjs';
 import { parseTouchedBlock, parseTouchedPaths } from '../src/seats/diffpolicy.mjs';
-import { tempDir, removeDir } from './helpers.mjs';
+import { tempDir, removeDir, gitSync, initOriginRepo } from './helpers.mjs';
 
 const CARD = `---
 key: alpha-1
@@ -86,8 +87,12 @@ function fixtureTree(t) {
   return dir;
 }
 
-function lint(t, text, { tier = null, testPaths = ['tests'], worktree = fixtureTree(t), on = card } = {}) {
-  return lintSpec(text, { card: on, cardPath: CARD_PATH, worktree, testPaths, tier });
+function lint(
+  t,
+  text,
+  { tier = null, testPaths = ['tests'], worktree = fixtureTree(t), on = card, baseFiles = null } = {},
+) {
+  return lintSpec(text, { card: on, cardPath: CARD_PATH, worktree, testPaths, tier, baseFiles });
 }
 
 // -- the clean spec ----------------------------------------------------------
@@ -393,6 +398,60 @@ test('(f) a supersede that names no file in the worktree is named', (t) => {
     lint(t, spec({ sections: [broken, tail].join('\n') }))[0],
     /AC-1 supersedes tests\/gone\.test\.mjs; no such file exists/,
   );
+});
+
+test('(f) a supersede of a file the run itself deleted holds against the base sha', (t) => {
+  // The candidate's own implement commit deletes what the criterion supersedes:
+  // the worktree has no such file, the base sha does, and the clause is right.
+  const gone = section('AC-1', ['tests/feature.test.mjs — f(2) is 4'], {
+    supersedes: ['tests/legacy.test.mjs — supersede — AC-1 replaces it'],
+  });
+  const tail = section('AC-2', ['tests/feature.test.mjs — f("x") throws']);
+  const text = spec({ sections: [gone, tail].join('\n') });
+  assert.deepEqual(lint(t, text, { baseFiles: ['tests/legacy.test.mjs'] }), []);
+});
+
+test('(f) a supersede of a file that never existed still refuses', (t) => {
+  const never = section('AC-1', ['tests/feature.test.mjs — f(2) is 4'], {
+    supersedes: ['tests/gone.test.mjs — supersede — AC-1 replaces it'],
+  });
+  const tail = section('AC-2', ['tests/feature.test.mjs — f("x") throws']);
+  const text = spec({ sections: [never, tail].join('\n') });
+  const defects = lint(t, text, { baseFiles: ['tests/legacy.test.mjs'] });
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(
+    defects[0],
+    /AC-1 supersedes tests\/gone\.test\.mjs; no such file exists in the worktree or at the spec's base sha\./,
+  );
+});
+
+test('(f) the lane asks git for the base sha, not the worktree it lints in', async (t) => {
+  // The wiring the rule stands on, against a real repository: the run's own
+  // commit deletes what the criterion supersedes, and the clause still holds.
+  const dir = tempDir('olympus-speclint-base-');
+  t.after(() => removeDir(dir));
+  initOriginRepo(dir, {
+    'tests/feature.test.mjs': 'export {};\n',
+    'tests/legacy.test.mjs': 'export {};\n',
+  });
+  const baseSha = gitSync(['rev-parse', 'HEAD'], dir).trim();
+  gitSync(['rm', '-q', 'tests/legacy.test.mjs'], dir);
+  gitSync(['-c', 'commit.gpgsign=false', 'commit', '-m', 'implement'], dir);
+  const specPath = join(dir, 'spec.md');
+  const sections = [
+    section('AC-1', ['tests/feature.test.mjs — f(2) is 4'], {
+      supersedes: ['tests/legacy.test.mjs — supersede — AC-1 replaces it'],
+    }),
+    section('AC-2', ['tests/feature.test.mjs — f("x") throws']),
+  ].join('\n');
+  writeFileSync(specPath, spec({ sections }));
+  const base = { card, cardPath: CARD_PATH, worktree: dir, testPaths: ['tests'], tier: null, specPath };
+  assert.deepEqual(await specLintDefects({ ...base, baseSha }), []);
+  // A run with no base sha to read falls back to the worktree, as the rule
+  // always did.
+  const fallback = await specLintDefects({ ...base, baseSha: null });
+  assert.equal(fallback.length, 1, fallback.join(' | '));
+  assert.match(fallback[0], /supersedes tests\/legacy\.test\.mjs; no such file exists in the worktree\./);
 });
 
 // -- (g) a dev-owned test-path entry names one file --------------------------

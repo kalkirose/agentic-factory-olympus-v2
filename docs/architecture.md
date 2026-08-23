@@ -207,7 +207,9 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   any judging seat spawns: the criterion sections match the card's id set,
   the cap holds, the touched-paths block parses and its entries clear the
   lane's diff policy, every planned test file lives under a test path, every
-  superseded file exists, a dev-owned test-path entry names one file, and
+  superseded file existed in the worktree or at the run's base sha — the
+  candidate's own work deletes what a criterion supersedes, and that deletion
+  is the supersede — a dev-owned test-path entry names one file, and
   every test mapping is one bullet on one line with its path first. A
   failure is a work-product defect — one corrective invocation, then the
   `seat-failure` park — and never spends a gate round.
@@ -321,6 +323,18 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   defect an operator acknowledged: then the lane answers the gate on that
   authority and stamps both the acknowledgment it used and the fix
   (ADR-0032). Re-freeze and operational fixes cost no implementation budget.
+  An arm that parks does not lose the arms behind it: a render whose open suite
+  defects have earned no re-freeze still owes one, and the ladder re-enters to
+  deliver it before the next cycle starts.
+- **An intent ruling reaches the frozen suite.** An intent-level suite defect
+  parks for the owner, who names the frozen test the ruling amends. The ruling
+  then rides the re-freeze behind it: the spec seat writes the supersede
+  clause, the suite seat is briefed with the ruling and with every frozen file
+  it names, and a pass that leaves one of them unchanged is a work-product
+  defect. The `re-freeze` stamp records the ruling it carried, which is what
+  makes it spent — one ruling, one amendment. Without that route an answer
+  could only reach the spec, the unchanged suite would render the same finding
+  next cycle, and the run would park on the same question forever.
 - **Repair progress is a closed finding, never a smaller open set.** A repair
   round is a stall when it closed none of the findings the render before it
   left open; a round that closes one while the review surfaces another is

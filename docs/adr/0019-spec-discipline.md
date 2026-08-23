@@ -39,7 +39,12 @@ structured field the freeze acts on.
   touch appears in that block;
   (e) every test file in a test mapping sits under a configured acceptance
   test path;
-  (f) every file a supersedes entry names exists in the worktree;
+  (f) every file a supersedes entry names existed where the clause was written:
+  in the worktree, or at the run's base sha. A clause is a statement about the
+  tree the spec was born on, and the candidate's own work deletes what a
+  criterion supersedes — that deletion is the supersede — so the rule refuses
+  only a target that existed at neither. A run whose base sha the lint cannot
+  read falls back to the worktree alone;
   (g) every touched-paths entry owned by `dev` under a test path names one
   file, never a directory and never a glob;
   (h) no touched-paths entry and no test-mapping path matches a

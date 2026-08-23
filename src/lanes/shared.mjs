@@ -105,6 +105,20 @@ export function seatReportAfter(events, seat, seq) {
   return null;
 }
 
+/**
+ * The latest recorded work-product failure of a seat after a point in the
+ * ledger, or null. A seat report says the seat answered; only this says whether
+ * the answer stood, so a caller that reads a report alone reads a failed
+ * amendment as a completed one.
+ */
+export function seatFailureAfter(events, seat, seq) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.event === 'seat-failure' && e.seat === seat && e.seq > seq) return e;
+  }
+  return null;
+}
+
 export function lastSeatReportEvent(events, seat) {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
@@ -131,6 +145,15 @@ export function readJson(path) {
 export function freezeExclusions(paths, runId) {
   const record = readJson(join(paths.runs, runId, 'freeze.json'));
   return Array.isArray(record?.frozenExclusions) ? record.frozenExclusions : [];
+}
+
+/**
+ * The suite files the run's freeze named. An absent or older record names none,
+ * and every reader of it treats that as "nothing known", never as "no suite".
+ */
+export function freezeSuiteFiles(paths, runId) {
+  const record = readJson(join(paths.runs, runId, 'freeze.json'));
+  return Array.isArray(record?.suiteFiles) ? record.suiteFiles : [];
 }
 
 /**

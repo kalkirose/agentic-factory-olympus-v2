@@ -26,7 +26,7 @@
 // Every handler re-derives its position from the run ledger and the git
 // state, so a daemon restart resumes mid-verdict without memory.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { basename, isAbsolute, join } from 'node:path';
 import { runReportPath } from '../daemon/home.mjs';
 import {
   carryPaths,
@@ -75,7 +75,9 @@ import {
   runEvents,
   answeredPark,
   freezeExclusions,
+  freezeSuiteFiles,
   seatReportAfter,
+  seatFailureAfter,
   readJson,
   parkDirective,
   GATE_FORMS,
@@ -221,7 +223,7 @@ function verdictHandler(mode, nextStage) {
       const events = runEvents(ctx);
       const renders = events.filter((e) => e.event === 'verdict-rendered');
       const last = renders[renders.length - 1];
-      const needCycle =
+      const moved =
         !last ||
         events.some(
           (e) =>
@@ -235,6 +237,15 @@ function verdictHandler(mode, nextStage) {
               // verdict certifies the tree that lands (ADR-0033).
               (e.event === 'pre-verdict-update' && e.ran === true)),
         );
+      // A moved tree earns a cycle — unless the ladder still owes this render
+      // the re-freeze it began. The ladder acts in arms, and an arm that parks
+      // leaves the arms behind it unrun while the arms in front of it have
+      // already stamped. Reading the stamp alone, the loop would start a fresh
+      // cycle over the unamended suite, render the same finding, and re-park
+      // the same question forever: the answer would never reach the suite it
+      // was about. So the owed re-freeze wins, the ladder re-enters where it
+      // stopped, and the cycle follows the amendment it was waiting for.
+      const needCycle = moved && !refreezeOwed(events, renders, last, mode);
       if (needCycle) {
         const outcome = await runCycle(ctx, base, mode, { cycle: renders.length + 1 });
         if (outcome.directive) return outcome.directive;
@@ -581,7 +592,10 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
   );
   let acted = false;
 
-  // Intent-level conflicts escalate; the answer directs the spec amendment.
+  // Intent-level conflicts escalate; the ruling directs the amendment. A ruling
+  // this run has already carried into a re-freeze is spent: it rides one
+  // amendment and one only, and the re-freeze that carried it says so on the
+  // record.
   let intentAnswer = null;
   if (intent.length > 0) {
     const park = answeredPark(events, 'intent-conflict');
@@ -590,17 +604,28 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
         question:
           'Verdict triage found an intent-level suite conflict:\n' +
           intent.map((f) => `- ${f.summary} (evidence: ${f.evidence})`).join('\n'),
-        text: 'the decision the spec amendment must follow',
+        text:
+          'the decision the amendment must follow. Name the frozen test file to ' +
+          'amend when the ruling reaches the suite',
         refs: [last.record],
       });
     }
-    intentAnswer = park.answer;
+    intentAnswer = rulingCarried(events, park.answer) ? null : park.answer;
   }
 
   // Env / harness → operational fix; a finding that persists after its fix
   // waits on the human (the substrate needs provisioning the daemon must
   // never self-clear).
-  if (ops.length > 0) {
+  // A fix this render already earned is not earned twice. The ladder re-enters
+  // a render whose later arm parked, and this arm's own record is what it reads
+  // to know it has run: without that, the second entry would find the findings
+  // "fixed" and park the provisioning gate over a substrate nobody claimed was
+  // broken.
+  const fixedThisRender = events.some(
+    (e) => e.event === 'operational-fix' && e.seq > last.seq,
+  );
+  if (ops.length > 0 && fixedThisRender) acted = true;
+  else if (ops.length > 0) {
     // A fix the local spectrum cannot test hands the run straight back to
     // ship, where the CI re-run tests it (ADR-0022). The stamp names the
     // findings and the reason, so the missing cycle reads as a decision.
@@ -674,11 +699,7 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
   // its re-freeze is a stall for loop safety — it still costs no budget.
   let suiteStalled = false;
   if (suiteDefects.length > 0) {
-    const prevRender = renders[renders.length - 2];
-    const window = prevRender ? eventsAfter(events, prevRender.seq).filter((e) => e.seq < last.seq) : [];
-    suiteStalled =
-      window.some((e) => e.event === 're-freeze') &&
-      suiteDefects.some((f) => prevRender.open.includes(f.id));
+    suiteStalled = suiteDefectStalled(events, renders, last, suiteDefects);
     if (!suiteStalled) {
       const outcome = await refreezeStep(ctx, base, {
         findings: suiteDefects,
@@ -868,6 +889,52 @@ function skipsSweep(last, open) {
 }
 
 /**
+ * Whether a suite defect already survived a re-freeze of its own. One defect
+ * buys one amendment: a defect the previous render left open, and that a
+ * re-freeze between the two renders was meant to close, is not amended again —
+ * the tree is the suspect from there, and the code arm takes it.
+ */
+function suiteDefectStalled(events, renders, last, suiteDefects) {
+  const prevRender = renders[renders.length - 2];
+  if (!prevRender) return false;
+  const window = eventsAfter(events, prevRender.seq).filter((e) => e.seq < last.seq);
+  return (
+    window.some((e) => e.event === 're-freeze') &&
+    suiteDefects.some((f) => prevRender.open.includes(f.id))
+  );
+}
+
+/**
+ * Whether the ladder still owes this render a re-freeze — the suite arm's own
+ * precondition, read from outside the ladder so the loop that decides whether
+ * to start a cycle and the arm that would amend the suite cannot disagree.
+ *
+ * A render with open suite defects owes one, until the `re-freeze` that answers
+ * it is stamped, and never when the defects already survived a re-freeze. The
+ * repair lane owes none: it routes a suite defect to the code arm.
+ */
+export function refreezeOwed(events, renders, last, mode) {
+  if (!last || mode !== 'story') return false;
+  if (events.some((e) => e.event === 're-freeze' && e.seq > last.seq)) return false;
+  const index = findingIndex(events);
+  const suiteDefects = last.open
+    .map((id) => index.get(id))
+    .filter((f) => f?.class === 'suite-defect');
+  if (suiteDefects.length === 0) return false;
+  return !suiteDefectStalled(events, renders, last, suiteDefects);
+}
+
+/**
+ * Whether a re-freeze of this run already carried a ruling into the suite. The
+ * amendment is where a ruling becomes a change to the frozen tests, and it
+ * happens once: a second delivery of the same answer would re-brief a seat
+ * about a change the suite already holds.
+ */
+function rulingCarried(events, answer) {
+  return events.some((e) => e.event === 're-freeze' && e.ruling?.answer === answer.seq);
+}
+
+/**
  * Whether the verdict stage handed a red render back to ship without a local
  * cycle. The render stays red until the CI re-run answers it, so the ship
  * stage reads this before it bounces a red verdict back.
@@ -997,10 +1064,15 @@ async function runDevSeat(ctx, base, mode, { seat, buildRole, pass = null, phase
 
 async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
   const events = runEvents(ctx);
+  // The frozen tests the ruling names. A conflict the owner settles against the
+  // suite is settled nowhere else: the spec can say the criterion supersedes a
+  // pin, and the pin still fails the run until the file itself changes. So the
+  // named files are stated to the seat and required of its work.
+  const ruled = intentAnswer ? ruledSuiteFiles(intentAnswer, base.frozenSuiteFiles ?? []) : [];
   // Spec-deep defects amend the born spec first; the answered intent
   // conflict rides the same amendment.
   const deep = findings.filter((f) => f.depth === 'spec' || f.depth === 'intent');
-  if (deep.length > 0 && !seatReportAfter(events, 'spec-birth', lastRenderSeq(events))) {
+  if (deep.length > 0 && !specAmended(events, lastRenderSeq(events))) {
     // The template holds after the freeze too: this amendment is re-linted
     // like every other one, and a defect takes the corrective route (ADR-0019).
     const amend = await seatWithChecks(ctx, {
@@ -1009,7 +1081,7 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
       cwd: base.worktree,
       env: base.env,
       constitution: base.constitution,
-      buildRole: (defects) => specAmendRole(base, deep, intentAnswer, defects),
+      buildRole: (defects) => specAmendRole(base, deep, intentAnswer, ruled, defects),
       checks: () => specLintDefects({ ...base, specPath: base.specRef }),
       defectReason: 'spec-defect',
     });
@@ -1022,7 +1094,7 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
-    buildRole: (brief) => refreezeRole(base, findings, record, brief),
+    buildRole: (brief) => refreezeRole(base, findings, record, intentAnswer, ruled, brief),
     checks: async (r) => {
       const defects = [];
       if (r.suiteFiles.length === 0) defects.push('no suite files declared');
@@ -1030,8 +1102,17 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
         if (!underAny(file, base.testPaths)) defects.push(`suite file outside the test paths: ${file}`);
         else if (!existsSync(join(base.worktree, file))) defects.push(`declared suite file missing: ${file}`);
       }
-      for (const file of await changedFiles(base.worktree)) {
+      const changed = await changedFiles(base.worktree);
+      for (const file of changed) {
         if (!underAny(file, base.testPaths)) defects.push(`change outside the test paths: ${file}`);
+      }
+      for (const file of ruled) {
+        if (!changed.includes(file)) {
+          defects.push(
+            `the answered intent ruling names the frozen test ${file} and it is unchanged; ` +
+              'this amendment is the only route a ruling has into the frozen suite.',
+          );
+        }
       }
       return defects;
     },
@@ -1049,8 +1130,42 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
     sha,
     files: report.suiteFiles,
     findings: findings.map((f) => f.id),
+    // What the amendment carried, where it carried one. The ruling is spent
+    // here, and the record is what says so to every later reader.
+    ...(intentAnswer && {
+      ruling: {
+        park: intentAnswer.parkSeq,
+        answer: intentAnswer.seq,
+        actor: intentAnswer.actor,
+        files: ruled,
+      },
+    }),
   });
   return {};
+}
+
+/**
+ * Whether the spec amendment this render asked for stands. A seat report says
+ * the seat answered; a work-product failure after it says the answer did not
+ * hold, and the amendment that never landed is owed again.
+ */
+function specAmended(events, renderSeq) {
+  const report = seatReportAfter(events, 'spec-birth', renderSeq);
+  if (!report) return false;
+  const failure = seatFailureAfter(events, 'spec-birth', renderSeq);
+  return !failure || failure.seq < report.seq;
+}
+
+/**
+ * The frozen suite files an answered ruling names. The owner writes the ruling
+ * in prose, so the match is made against the frozen set rather than parsed out
+ * of the sentence: a file counts as named when the ruling carries its
+ * repo-relative path or its file name. Nothing else in the text is read.
+ */
+function ruledSuiteFiles(answer, frozen) {
+  const text = [answer?.answer ?? '', answer?.option ?? ''].join('\n');
+  if (text.trim().length === 0) return [];
+  return frozen.filter((file) => text.includes(file) || text.includes(basename(file)));
 }
 
 // -- candidate capture -------------------------------------------------------
@@ -1314,23 +1429,41 @@ function redEvidence(r) {
   ];
 }
 
-function refreezeRole(base, findings, record, brief) {
+function refreezeRole(base, findings, record, intentAnswer, ruled, brief) {
   const layers = new Set(findings.flatMap((f) => f.layers ?? []));
   const reds = (record?.spectrum ?? []).filter((r) => layers.has(r.layer));
-  return [
+  const lines = [
     'Verdict triage classed these persistent reds as suite defects: the frozen tests mis-encode the spec.',
     `Amend the tests so they encode the spec at: ${base.specRef}`,
     `Write test files only under: ${base.testPaths.join(', ')}. Touch nothing else.`,
     'In the report, list every amended suite file; list expected residual reds (none when the amended suite is green).',
+  ];
+  if (intentAnswer) {
+    lines.push(
+      'An intent conflict was escalated and answered. The ruling is the authority for this amendment:',
+      `- ${intentAnswer.option ?? intentAnswer.answer} (${intentAnswer.actor})`,
+    );
+    if (ruled.length > 0) {
+      lines.push(
+        'The ruling names these frozen test files. Amend each one here, in this step, ' +
+          'exactly as the ruling directs and no further: this amendment is the only ' +
+          'route a ruling has into the frozen suite, and a run that leaves them ' +
+          'unchanged meets the same conflict again on the next verdict.',
+        ...ruled.map((f) => `- ${f}`),
+      );
+    }
+  }
+  lines.push(
     'Suite-defect findings:',
     ...findings.map((f) => `- ${findingLine(f)}`),
     'Red layers:',
     ...reds.map((r) => `- ${r.layer}`),
     ...briefLines(brief),
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
-function specAmendRole(base, findings, intentAnswer, defects = null) {
+function specAmendRole(base, findings, intentAnswer, ruled = [], defects = null) {
   const lines = [
     `Amend the born spec at this absolute path: ${base.specRef}`,
     'Edit the file in place. Keep unaffected sections unchanged.',
@@ -1344,6 +1477,14 @@ function specAmendRole(base, findings, intentAnswer, defects = null) {
       'An intent conflict was escalated and answered; honor the answer:',
       `- ${intentAnswer.option ?? intentAnswer.answer} (${intentAnswer.actor})`,
     );
+    if (ruled.length > 0) {
+      lines.push(
+        'The ruling settles the conflict against these frozen test files, and the suite ' +
+          'seat amends them in the step after yours. State the supersede in the spec so ' +
+          'the amended test has a clause behind it:',
+        ...ruled.map((f) => `- ${f}`),
+      );
+    }
   }
   lines.push(...briefLines(defects));
   return lines.join('\n');
@@ -1404,6 +1545,13 @@ async function verdictBase(ctx, mode) {
       card: worktreeCard(worktree, ctx.payload.card),
       tier: laneDiffPolicy(config, 'story'),
       specRef: join(ctx.paths.runs, ctx.runId, 'spec.md'),
+      // The tree the spec was written against. Every post-freeze amendment is
+      // linted here too, and a Supersedes clause names a file as it stood at
+      // this sha — the candidate's own commits have moved the worktree since.
+      baseSha: typeof ctx.payload.baseSha === 'string' ? ctx.payload.baseSha : null,
+      // The frozen suite by name. The re-freeze reads it to tell which files an
+      // answered intent ruling names.
+      frozenSuiteFiles: freezeSuiteFiles(ctx.paths, ctx.runId),
       suiteSha: currentSuiteSha(events),
       resetSha: freeze.sha,
       constitution: readConstitution(worktree, config),

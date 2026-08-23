@@ -67,11 +67,16 @@ const NONE = /^none\.?$/i;
  *
  * @param {string} specText
  * @param {{card: object, cardPath: string|null, worktree: string, testPaths: string[],
- *   tier: object|null}} ctx `tier` is the lane's diff policy, or null when the
- *   project declares none; `cardPath` names the card in rule (a)'s messages.
+ *   tier: object|null, baseFiles: string[]|null}} ctx `tier` is the lane's diff
+ *   policy, or null when the project declares none; `cardPath` names the card in
+ *   rule (a)'s messages; `baseFiles` is the supersede targets that exist at the
+ *   spec's base sha, or null when the base sha is unknown.
  * @returns {string[]} one message per defect, in rule order; empty means clean
  */
-export function lintSpec(specText, { card, cardPath = null, worktree, testPaths = [], tier = null }) {
+export function lintSpec(
+  specText,
+  { card, cardPath = null, worktree, testPaths = [], tier = null, baseFiles = null },
+) {
   const text = typeof specText === 'string' ? specText : '';
   const lines = text.split(/\r?\n/);
   const criteria = card?.acceptance ?? [];
@@ -122,13 +127,25 @@ export function lintSpec(specText, { card, cardPath = null, worktree, testPaths 
     }
   }
 
-  // (f) every superseded test exists.
+  // (f) every superseded test existed where the clause was written.
+  //
+  // A Supersedes clause is a statement about the tree the spec was born on, and
+  // the worktree it is linted in is not that tree. The candidate's own work
+  // deletes the file a criterion supersedes — that deletion IS the supersede —
+  // and a rule that read only the worktree called the seat's correct clause a
+  // defect, parked the run and cost an owner touch. So the clause resolves
+  // against the base sha as well: a target the run itself deleted is satisfied,
+  // and a target that existed at neither sha is still the defect this rule was
+  // written for. A lint with no base sha to read reads the worktree alone,
+  // which is where the rule started.
+  const atBase = baseFiles === null ? null : new Set(baseFiles);
   for (const entry of supersedes) {
-    if (!existsSync(join(worktree, entry.path))) {
-      defects.push(
-        `${entry.id} supersedes ${entry.path}; no such file exists in the worktree.`,
-      );
-    }
+    if (existsSync(join(worktree, entry.path))) continue;
+    if (atBase?.has(entry.path)) continue;
+    defects.push(
+      `${entry.id} supersedes ${entry.path}; no such file exists in the worktree` +
+        (atBase ? " or at the spec's base sha." : '.'),
+    );
   }
 
   // (g) a dev-owned test-path entry names one file.
@@ -170,6 +187,23 @@ export function lintSpec(specText, { card, cardPath = null, worktree, testPaths 
     );
   }
   return defects;
+}
+
+/**
+ * Every path a spec's Supersedes clauses name, deduplicated. The caller reads
+ * them out of the spec to ask git which ones existed at the spec's base sha,
+ * and hands the answer back as `baseFiles`. Naming them here keeps one parser
+ * for the clause: a caller that re-read the document with its own regex would
+ * be a second reading of the same lines, free to disagree with rule (f).
+ *
+ * @param {string} specText
+ * @param {{card: object}} ctx
+ * @returns {string[]}
+ */
+export function supersedeTargets(specText, { card }) {
+  const lines = String(specText ?? '').split(/\r?\n/);
+  const known = new Set((card?.acceptance ?? []).map((c) => c.id));
+  return unique(specSections(lines, known).flatMap((s) => s.supersedes.map((m) => m.path)));
 }
 
 /**

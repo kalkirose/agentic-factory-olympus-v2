@@ -31,7 +31,10 @@ ladder, judgment review — gets these concrete shapes:
   when no verdict exists yet or when a cycle trigger landed after the last
   one: `implementation-committed`, `re-freeze`, or `operational-fix`. The
   ladder acts only on a rendered red verdict with no pending trigger, so a
-  daemon restart re-derives its place from the ledger alone.
+  daemon restart re-derives its place from the ledger alone. One condition
+  outranks a trigger: a render whose open suite defects have earned no
+  `re-freeze` yet still owes that amendment, and the ladder re-enters to
+  deliver it before any cycle starts.
 - **Full spectrum** (ADR-0022 narrows this to the cycles that need it).
   Every Tier-1 layer (project config `gates.tier1`) runs
   to completion per cycle. A layer whose prerequisite failed stamps
@@ -82,9 +85,21 @@ ladder, judgment review — gets these concrete shapes:
   born spec (birth seat) first; the suite seat then amends the tests under
   the contract loop (changes only under the test paths), committing as
   `suite-committed` phase `re-freeze` plus a `re-freeze` stamp that moves
-  the suite sha. No budget, no judgment seats. Loop safety: a suite-defect
-  finding that survives its re-freeze routes to the stall arm
-  (`re-freeze-no-progress`) instead of a second re-freeze.
+  the suite sha. A spec amendment that failed its own lint is owed again: the
+  step reads the seat's failure record beside its report, so a defective
+  amendment never passes for a completed one. No budget, no judgment seats.
+  Loop safety: a suite-defect finding that survives its re-freeze routes to
+  the stall arm (`re-freeze-no-progress`) instead of a second re-freeze.
+- **An intent ruling reaches the frozen suite, once, on the record.** The
+  `intent-conflict` park asks the owner to name the frozen test file the
+  ruling amends. The ruling then rides the re-freeze that follows it: the spec
+  seat writes the supersede clause, the suite seat is briefed with the ruling
+  verbatim and with every frozen suite file the ruling names, and a pass that
+  leaves one of those files unchanged is a work-product defect by name. The
+  `re-freeze` stamp records the ruling it carried (`ruling`: the park, the
+  answer, the actor, the files), which is also what makes it spent — no later
+  amendment carries the same answer twice. A ruling that names no frozen file
+  rides the spec amendment alone, as it always did.
 - **Fresh pass.** Triggers: any stall, or a confirmed approach-level finding
   (`approach: true` — the finding names the implementation structure as
   wrong against the spec; the approach flag only counts on confirmed
@@ -113,9 +128,16 @@ A verdict can carry findings of several classes. Serializing one route per
 cycle would re-run the spectrum between the re-freeze, the operational
 fix, and the repair — deterministic re-runs are cheap, but each cycle also
 costs the triage seat. Batching applies every applicable route, then one
-cycle re-judges the joined result. A crash between routes is safe: the
-resumed ladder sees the stamped trigger, cycles, and routes the remainder
-next render.
+cycle re-judges the joined result.
+
+A batch that stops between routes is the case this shape has to get right. An
+arm that parks leaves the arms behind it unrun while the arms in front of it
+have already stamped, and a stamp is a cycle trigger. Read as a trigger alone,
+the resumed loop would start a cycle over inputs the unrun arm was about to
+change — for the suite arm, a spectrum over an unamended suite, which renders
+the finding again and parks the same question again, forever. So the ladder's
+own preconditions outrank the trigger: an owed re-freeze re-enters the ladder,
+and each arm reads its own record for this render to know it has already run.
 
 ## Why the progress rule compares set sizes
 

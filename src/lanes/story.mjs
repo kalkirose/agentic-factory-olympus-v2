@@ -39,7 +39,13 @@ import { noCriteriaMessage, parseIntentCard } from './card.mjs';
 import { runCommand } from './exec.mjs';
 import { probeCredentials } from './probes.mjs';
 import { readInheritance } from './resume.mjs';
-import { SPEC_LINE_CAP, amendedSections, frozenExclusions, lintSpec } from './speclint.mjs';
+import {
+  SPEC_LINE_CAP,
+  amendedSections,
+  frozenExclusions,
+  lintSpec,
+  supersedeTargets,
+} from './speclint.mjs';
 import {
   ACTOR,
   loadProjectConfig,
@@ -563,7 +569,7 @@ async function specBirth(ctx) {
  * The birth work product: the file exists, and it holds the template. A
  * conflict is a refusal to author, so it is checked against nothing.
  */
-function birthChecks(base, report) {
+async function birthChecks(base, report) {
   if (report.outcome === 'grounding-conflict') return [];
   if (!existsSync(base.specPath) || readFileSync(base.specPath, 'utf8').trim().length === 0) {
     return [`the spec is missing or empty at ${base.specPath}; author it there.`];
@@ -576,7 +582,7 @@ function birthChecks(base, report) {
  * (ADR-0019). It runs before the spec gate spawns, so a template defect is
  * fixed by the seat that wrote it and never spends a gate round.
  */
-export function specLintDefects(base) {
+export async function specLintDefects(base) {
   if (!base.card) return [];
   let text;
   try {
@@ -590,7 +596,25 @@ export function specLintDefects(base) {
     worktree: base.worktree,
     testPaths: base.testPaths,
     tier: base.tier,
+    baseFiles: await supersedeBaseFiles(base, text),
   });
+}
+
+/**
+ * The supersede targets that exist at the spec's base sha — the tree every
+ * Supersedes clause was written against. A run with no base sha on its payload,
+ * a spec that supersedes nothing, and a sha git cannot read all answer null,
+ * and the lint falls back to the worktree alone.
+ */
+async function supersedeBaseFiles(base, text) {
+  const targets = supersedeTargets(text, { card: base.card });
+  if (targets.length === 0) return null;
+  if (typeof base.baseSha !== 'string' || base.baseSha.length === 0) return null;
+  try {
+    return await filesAt(base.worktree, base.baseSha, targets);
+  } catch {
+    return null;
+  }
 }
 
 // -- spec gate (seat, 2 counted rounds, then the owner) ----------------------
@@ -1548,6 +1572,9 @@ async function laneBase(ctx) {
     cardPath,
     cardText,
     card,
+    // The tree the spec is written against. A Supersedes clause names a file as
+    // it stood here, not as the run's own commits later left it (ADR-0019).
+    baseSha: typeof ctx.payload.baseSha === 'string' ? ctx.payload.baseSha : null,
     // Derived from the ledger like every other position in this lane, so a
     // restart mid-suite re-reads the same notes instead of losing them.
     gateNotes: gateNotes(runEvents(ctx)),
