@@ -321,8 +321,15 @@ export function buildFixture({ prefix, scenario }) {
 
 // -- the binaries ------------------------------------------------------------
 
-/** Starts `olympusd start` and waits for the daemon-started stamp. */
+/**
+ * Starts `olympusd start` and waits for the daemon-started stamp this start
+ * writes. The count is taken first, so a second instance over the same home —
+ * the restart a hold is taken for — waits for its own stamp rather than
+ * reading the previous one's.
+ */
 export async function startDaemon(fx) {
+  const started = () => instanceEvents(fx).filter((e) => e.event === 'daemon-started').length;
+  const before = started();
   const child = spawn(process.execPath, [OLYMPUSD, 'start', '--home', fx.home], {
     env: fx.env,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -336,9 +343,7 @@ export async function startDaemon(fx) {
   child.stderr.on('data', (chunk) => {
     fx.stderr += chunk;
   });
-  await pollFor('the daemon to stamp its start', () =>
-    instanceEvents(fx).some((e) => e.event === 'daemon-started'),
-  );
+  await pollFor('the daemon to stamp its start', () => started() > before);
   return child;
 }
 
@@ -597,7 +602,11 @@ export function assertMilestones(assert, events, milestones) {
 export function assertStatusRenders(assert, text) {
   assert.match(text, /^daemon running \(pid \d+\)/, `status did not render:\n${text}`);
   assert.match(text, /RUNS \(\d+ open\)/, `status has no runs section:\n${text}`);
-  assert.match(text, new RegExp(`\\s${PROJECT}: (armed|paused), slot cap 1`), `status has no project line:\n${text}`);
+  assert.match(
+    text,
+    new RegExp(`\\s${PROJECT}: (armed|paused)(, held)?, slot cap 1`),
+    `status has no project line:\n${text}`,
+  );
 }
 
 /**

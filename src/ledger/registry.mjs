@@ -32,6 +32,16 @@ export const RUN_EVENTS = new Set([
   // run lifecycle
   'run-launched',
   'stage-entered',
+  // The stage that settled while an operator hold stood, and the stage the run
+  // did not enter behind it. A hold interrupts nothing: the running stage keeps
+  // its seats and finishes, and the chain stops at the boundary. Quiet — the
+  // quiet is the point — but never silent, because a run idling at a stage it
+  // completed reads exactly like a run that died there (ADR-0040).
+  'stage-held',
+  // The deferred stage, entered. It is the close of the wait `stage-held`
+  // opened, so the two bound a span every duration reading takes out of the
+  // run's work (ADR-0040).
+  'stage-released',
   // What a stage that runs no seat says while it polls: what it waits on, the
   // poll outcomes behind the stamp, and its time in the stage. One stamp per
   // batch of poll outcomes, so a stage that settles quickly stamps none and a
@@ -254,6 +264,11 @@ export const INSTANCE_EVENTS = new Set([
   // what it names, and the `resolved` beside it is that sweep (ADR-0004).
   'workspace-leftover',
   'arming-changed',
+  // One operator hold set or lifted, over one project or over the instance.
+  // The whole store of the hold, folded at every daemon start the way arming
+  // is: a hold outlives the instance that took it, which is what the restart
+  // recipe stands on (ADR-0040).
+  'hold-changed',
   'config-changed',
   'factory-starvation',
   // Ticketed breach escapes the sweep may not launch, because the project is

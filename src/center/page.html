@@ -115,7 +115,8 @@
     text-transform: uppercase; padding: 2px 8px; border-radius: 2px;
   }
   .badge.run-live     { color: var(--accent); border: 1px solid rgba(57,135,229,0.5); }
-  .badge.run-parked   { color: var(--warning); border: 1px solid rgba(250,178,25,0.5); }
+  .badge.run-parked,
+  .badge.run-held     { color: var(--warning); border: 1px solid rgba(250,178,25,0.5); }
   .badge.run-violated { color: var(--critical); border: 1px solid rgba(208,59,59,0.5); }
   .pipeline { display: flex; align-items: center; gap: 0; margin: 10px 0 8px; }
   .stage { display: flex; flex-direction: column; align-items: center; gap: 4px; flex: 1; position: relative; }
@@ -335,6 +336,10 @@ function renderHeader(s) {
   for (const p of s.projects) {
     const c = chip([el("span", "dot " + (p.armed ? "good" : "idle")), document.createTextNode("auto-launch "), el("b", null, (s.projects.length > 1 ? p.name + " " : "") + (p.armed ? "armed" : "paused"))]);
     tipped(c, "Frontier auto-launch arming for project " + p.name + ". Arm and pause via console.");
+    if (p.held) {
+      tipped(chip([el("span", "dot warning"), document.createTextNode("hold "), el("b", null, p.name)]),
+        "An operator hold stands over " + p.name + ": every run finishes its current stage and stops at the boundary. Release via console.");
+    }
   }
   const busy = s.projects.reduce((n, p) => n + p.slotsBusy, 0);
   const caps = s.projects.map((p) => p.slotCap).filter((c) => c !== null);
@@ -372,9 +377,11 @@ function renderRuns(s) {
   const box = $("runs");
   clear(box);
   const parked = s.runs.filter((r) => r.parked).length;
+  const held = s.runs.filter((r) => r.held).length;
   const busy = s.runs.length - parked;
   $("runs-note").textContent =
-    s.runs.length + " runs · " + busy + " slots busy · " + parked + " parked (slot freed)";
+    s.runs.length + " runs · " + busy + " slots busy · " + parked + " parked (slot freed)" +
+    (held > 0 ? " · " + held + " held (slot kept)" : "");
   if (s.runs.length === 0) return empty(box, "no open runs — the frontier launches on arm, or launch via console");
   for (const run of s.runs) {
     const card = el("div", "run" + (run.parked ? " parked" : ""));
@@ -383,6 +390,7 @@ function renderRuns(s) {
     head.appendChild(el("span", "name mono", run.runId + " · " + run.lane + (run.project ? " · " + run.project : "")));
     let badge;
     if (run.parked) badge = el("span", "badge run-parked", "parked · slot freed");
+    else if (run.held) badge = el("span", "badge run-held", "held · " + run.heldNext + " on release");
     else if (run.violated) badge = el("span", "badge run-violated", "liveness violated");
     else badge = el("span", "badge run-live", run.stage + (run.repair ? " · repair " + run.repair.round + "/3" : ""));
     head.appendChild(badge);
@@ -407,6 +415,10 @@ function renderRuns(s) {
       fact("park event", run.parkType ?? "park");
       fact("waiting", fmtMinutes(run.parkedMinutes));
       fact("resumes", "on console answer");
+    } else if (run.held) {
+      fact("settled", run.stage);
+      fact("next stage", run.heldNext);
+      fact("enters", "on console release");
     } else {
       fact("seats", run.seats.length > 0
         ? run.seats.map(seatChip).join(" + ")

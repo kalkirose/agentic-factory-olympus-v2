@@ -9,6 +9,8 @@
 //   olympusctl answer   --home <dir> (--run <id> | --seq <n>) (--option <o> | --text <t>)
 //   olympusctl arm      --home <dir> --project <name>
 //   olympusctl pause    --home <dir> --project <name>
+//   olympusctl hold     --home <dir> (--project <name> | --all)
+//   olympusctl release  --home <dir> (--project <name> | --all)
 //   olympusctl launch   --home <dir> --project <name> [--lane <name>]
 //                       [--card <path>] [--ticket <path>] [--escape <n>]
 //                       [--resume-from <runId>]
@@ -32,6 +34,14 @@
 // acknowledged answers itself on the record. `status` lists every standing
 // acknowledgment; `revoke` ends the one its fingerprint names, and carries the
 // fix it stands on. Nothing else ends one — a restart least of all.
+// `hold` stops the stage chain and interrupts nothing: every run finishes the
+// stage it is in and stops at the boundary, so the factory drains itself to a
+// moment with no live seat. `release` enters the deferred stage of every run
+// the release frees. A hold survives a restart, which is what makes it the
+// restart recipe: hold, wait for the runs to reach a boundary or a park, stop,
+// start, release. --all holds the instance; a project hold and the instance
+// hold are separate statements, and a release ends the one it names. `status`
+// marks a held run with the stage it did not enter.
 // The intake ticket is the repair lane's spec: --lane repair requires
 // --ticket, and no other lane accepts one. A repo-relative ticket path names
 // a ticket committed in the run worktree; an absolute path names a ticket in
@@ -80,7 +90,14 @@ function parseArgs(argv) {
     ['--fingerprint', 'fingerprint'],
     ['--fix', 'fix'],
   ]);
+  // The one option that carries no value: a scope is the instance or it is not.
+  const switches = new Map([['--all', 'all']]);
   for (let i = 0; i < rest.length; i++) {
+    const flag = switches.get(rest[i]);
+    if (flag) {
+      opts[flag] = true;
+      continue;
+    }
     const key = flags.get(rest[i]);
     if (!key) fail(`unknown option: ${rest[i]}`);
     opts[key] = rest[++i];
@@ -119,10 +136,13 @@ function queueCommand(paths, command) {
 const { command, opts } = parseArgs(process.argv.slice(2));
 if (!command) {
   fail(
-    'usage: olympusctl <status|queue|frontier|answer|arm|pause|launch|kill|resolve|revoke|fixed> --home <dir>\n' +
+    'usage: olympusctl <status|queue|frontier|answer|arm|pause|hold|release|launch|kill|resolve|revoke|fixed> --home <dir>\n' +
       '       answer: (--run <id> | --seq <n>) (--option <o> | --text <t>)\n' +
       '               queue prints the forms each park accepts; every run park\n' +
       '               takes --option abandon, which closes the run\n' +
+      '       hold:   (--project <name> | --all)\n' +
+      '               every run finishes its current stage and stops there;\n' +
+      '               release enters the stage each held run did not enter\n' +
       '       launch: --project <name> [--lane <name>] [--card <path>] [--ticket <path>]\n' +
       '               [--escape <n>] [--resume-from <runId>]\n' +
       '       --lane repair requires --ticket; no other lane accepts one\n' +
@@ -181,6 +201,21 @@ if (command === 'status') {
   });
 } else if (command === 'arm' || command === 'pause') {
   queueCommand(paths, { command, actor, project: need(opts, 'project') });
+} else if (command === 'hold' || command === 'release') {
+  // One scope per command. `--all` is the instance and `--project` is one
+  // project; naming both would leave the operator guessing which of the two
+  // the daemon acted on, and the two are not the same statement.
+  if (opts.all === true && opts.project !== undefined) {
+    fail('--all holds the instance; drop --project');
+  }
+  if (opts.all !== true && opts.project === undefined) {
+    fail(`${command} takes --project <name> or --all`);
+  }
+  queueCommand(paths, {
+    command,
+    actor,
+    ...(opts.all === true ? { all: true } : { project: opts.project }),
+  });
 } else if (command === 'launch') {
   const project = need(opts, 'project');
   const lane = opts.lane ?? 'story';

@@ -40,10 +40,13 @@ answer the operator owed.
 rule, in the ledger's own vocabulary: a span opens at `park` and closes at the
 `answer` behind it, or at the `resume` if a ledger carries no answer stamp; a
 span opens at `liveness-violation` and closes at the `resolved` that names its
-seq. Nothing else opens one. A span still open where the reading stops runs to
-that end, so an unanswered park at a kill counts to the close stamp and an
-unresolved violation does too. Spans are unioned before they are subtracted: a
-park inside an open violation is one stretch of waiting, not two.
+seq; a span opens at `stage-held` and closes at the `stage-released` behind it,
+because a run standing at a boundary under an operator hold is waiting on a
+person with nothing of its own left running (ADR-0040). Nothing else opens one.
+A span still open where the reading stops runs to that end, so an unanswered
+park at a kill counts to the close stamp and an unresolved violation does too.
+Spans are unioned before they are subtracted: a park inside an open violation is
+one stretch of waiting, not two.
 
 **Daemon downtime is not in the rule.** A run whose daemon died and started
 again is inactive for the gap, and the run ledger cannot see it — the daemon's

@@ -49,11 +49,11 @@ the classes are the extension point, and a new kind of wait is one entry.
 
 **A duration band counts work.** A stage visit's sample is the wall of the visit
 less every span of the band's classes inside it, and the band's classes are
-`human` and `queue`. The live reading is converted the same way and from the
-same ledger: the heartbeat says the stretch it has stood for, its own window is
-that stretch back from its stamp, and the run's ledger says how much of the
-window was waiting. So a run five minutes into a queue wait is compared as a run
-that has done nothing, which is what it is.
+`human`, `queue` and `hold` (ADR-0040). The live reading is converted the same
+way and from the same ledger: the heartbeat says the stretch it has stood for,
+its own window is that stretch back from its stamp, and the run's ledger says
+how much of the window was waiting. So a run five minutes into a queue wait is
+compared as a run that has done nothing, which is what it is.
 
 **The record carries both halves.** `stage-overrun` keeps `elapsed` meaning what
 it always meant — the stretch the stage has stood — and gains `work` and, when

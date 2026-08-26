@@ -30,6 +30,11 @@
  * `queue` is the run waiting on another run of its own project: it asked for
  * the ship token, somebody else was holding it, and it polls until the holder
  * merges. Nothing of the run's own work happens in that stretch (ADR-0033).
+ *
+ * `hold` is the run waiting on an operator hold: it settled a stage, the hold
+ * stood, and it stopped at the boundary until somebody released it. The run
+ * holds no child at all in that stretch, so it is the purest wait of the three
+ * (ADR-0040).
  */
 export const WAIT_CLASSES = {
   human: {
@@ -42,15 +47,21 @@ export const WAIT_CLASSES = {
     closes: (e) => e.event === 'ship-token' && e.state === 'acquired',
     inert: () => false,
   },
+  hold: {
+    opens: (e) => e.event === 'stage-held',
+    closes: (e) => e.event === 'stage-released',
+    inert: () => false,
+  },
 };
 
 /**
  * What a run duration counts as waiting. The wall-versus-active pair on the
- * close stamp answers "how long did the humans take", so it counts the human's
- * wait and nothing else: a queue wait is one run of the harness waiting for
+ * close stamp answers "how long did the humans take", so it counts the waits a
+ * person owns: the answer to a park, and the operator hold that stopped the run
+ * at a stage boundary. A queue wait is one run of the harness waiting for
  * another, which is the harness's own pace and belongs in its number.
  */
-const RUN_CLASSES = ['human'];
+const RUN_CLASSES = ['human', 'hold'];
 
 /**
  * The spans of one run ledger that are not active time, merged so that a park
@@ -127,15 +138,17 @@ export function inactiveMs(events, opts) {
  *   passes its own clock read, because the close stamp it is about to write
  *   does not exist yet; every later reader lets the close stamp answer.
  * @returns {{launchedAt: string, endedAt: string, wallMs: number,
- *   activeMs: number, parkedMs: number}|null}
+ *   activeMs: number, waitedMs: number}|null} `waitedMs` is the wall the run
+ *   spent on a person: a park nobody had answered, an unresolved violation, an
+ *   operator hold. It is exactly what `wallMs` holds and `activeMs` does not.
  */
 export function runDuration(events, { end } = {}) {
   const bounds = readBounds(events, undefined, end);
   if (bounds === null) return null;
   const { from, to, launchedAt, endedAt } = bounds;
-  const parkedMs = inactiveMs(events, { end: endedAt, classes: RUN_CLASSES });
+  const waitedMs = inactiveMs(events, { end: endedAt, classes: RUN_CLASSES });
   const wallMs = to - from;
-  return { launchedAt, endedAt, wallMs, activeMs: wallMs - parkedMs, parkedMs };
+  return { launchedAt, endedAt, wallMs, activeMs: wallMs - waitedMs, waitedMs };
 }
 
 function readBounds(events, start, end) {

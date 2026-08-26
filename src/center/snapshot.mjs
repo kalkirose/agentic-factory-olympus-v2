@@ -17,6 +17,7 @@ import { readEscapeSet, escapesWindow } from '../telemetry/escapes.mjs';
 import { furyYieldBaseline, BASELINE_WINDOW } from '../tripwires/metrics.mjs';
 import { withTripwireDefaults } from '../tripwires/registry.mjs';
 import { readInstanceConfig, armingState } from '../console/status.mjs';
+import { holdState, projectHeld } from '../daemon/hold.mjs';
 import { CRASH_RETRIES } from '../seats/runner.mjs';
 import { computeFrontier, roadmapPositions } from '../frontier/graph.mjs';
 import { readGraphSource } from '../frontier/source.mjs';
@@ -74,6 +75,7 @@ export async function buildSnapshot(paths, { now = new Date() } = {}) {
 
   const ships = shipList(allRuns);
   const instanceEvents = readEvents(paths.instanceLedger);
+  const holds = holdState(instanceEvents);
   const escapes = readEscapeSet(paths.escapesLedger);
 
   return {
@@ -81,7 +83,7 @@ export async function buildSnapshot(paths, { now = new Date() } = {}) {
     home: paths.home,
     instanceSeq: instanceEvents.at(-1)?.seq ?? 0,
     daemon: { running, ...(running && { pid: lock.pid }) },
-    projects: projects.map((name) => projectView(name, config, armed, open)),
+    projects: projects.map((name) => projectView(name, config, armed, holds, open)),
     semaphores: semaphoreView(config, open, instanceEvents),
     loud,
     runs: open,
@@ -141,6 +143,11 @@ function openRunView({ runId, project, lane, events }, now) {
     stages,
     parked: state.parked,
     ...(park && { parkType: park.type, parkedMinutes: minutesBetween(park.ts, now) }),
+    // A run standing at a boundary under an operator hold. Without it the page
+    // shows a run at a stage with no seat and nothing moving, which is what a
+    // dead run looks like (ADR-0040).
+    held: state.held,
+    ...(state.held && { heldNext: state.deferred }),
     violated: state.violated,
     elapsedMinutes: minutesBetween(launch.ts, now),
     cost: runCost(events),
@@ -167,13 +174,14 @@ function projectNames(config, allRuns) {
   return [...names].sort();
 }
 
-function projectView(name, config, armed, open) {
+function projectView(name, config, armed, holds, open) {
   const entry = config?.projects?.[name];
   return {
     name,
     armed: armed.get(name) === true,
+    held: projectHeld(holds, name),
     slotCap: entry?.slotCap ?? null,
-    // A parked run frees its slot; a violated run still holds one.
+    // A parked run frees its slot; a violated run and a held run still hold one.
     slotsBusy: open.filter((r) => r.project === name && !r.parked).length,
   };
 }

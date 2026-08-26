@@ -54,3 +54,9 @@ wrapper is not wanted.
 - Stop for maintenance with `olympusd stop`; the service manager must not
   auto-restart after a clean stop (systemd: clean exit + `Restart=on-failure`
   covers this).
+- A stop mid-stage ends the seats it finds and the run re-enters that stage at
+  the next start, so the work those children had done is spent again. The
+  cheap restart takes the hold first: `olympusctl hold --all`, wait until
+  `olympusctl status` shows every run held or parked, `olympusd stop`, start,
+  then `olympusctl release --all`. The hold is in the instance ledger, so it is
+  still standing when the new instance comes up (ADR-0040).

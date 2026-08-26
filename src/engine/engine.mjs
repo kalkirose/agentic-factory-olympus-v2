@@ -5,9 +5,10 @@
 // its recorded stamp.
 //
 // Liveness invariant, event-keyed: every open run holds an in-flight child,
-// a parked escalation, or a transition in progress (a running handler). The
-// engine checks at every handler settle; a violation stamps loud and leaves
-// the run open — alert, never auto-kill. The console resolves or kills it.
+// a parked escalation, an operator hold, or a transition in progress (a
+// running handler). The engine checks at every handler settle; a violation
+// stamps loud and leaves the run open — alert, never auto-kill. The console
+// resolves or kills it.
 import { readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
@@ -35,6 +36,7 @@ export class RunEngine {
   /**
    * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
    * @param {{instanceStore?: object, getSlotCap: (project: string) => number|undefined,
+   *   isHeld?: (project: string) => boolean,
    *   onClosed?: (info: {runId: string, project: string, lane: string, state: string}) => void,
    *   onParked?: (info: {runId: string, project: string, lane: string, type: string}) => void,
    *   semaphores?: import('../seats/semaphore.mjs').ModelSemaphores,
@@ -46,17 +48,20 @@ export class RunEngine {
    *   seatDefaults supplies machine-scoped runSeat options (claudeCommand)
    *   read fresh per dispatch, so a live config edit applies. composeCommand
    *   is the same machine-scoped read for the stack tool: a handler that asks
-   *   the run's stack a question gets the argv this host runs it with. onEvent
-   *   fires on every run-store append, project-attributed and carrying its source
-   *   ledger — the event key every in-daemon observer reads. archiveIo is the
-   *   archive's filesystem seam, read at every call. heartbeatMs is the stage
-   *   beat's interval, the seam the tests drive it at.
+   *   the run's stack a question gets the argv this host runs it with. isHeld
+   *   is the operator hold, read at every stage chain: a held project's runs
+   *   settle the stage they are in and stop at the boundary (ADR-0040).
+   *   onEvent fires on every run-store append, project-attributed and carrying
+   *   its source ledger — the event key every in-daemon observer reads.
+   *   archiveIo is the archive's filesystem seam, read at every call.
+   *   heartbeatMs is the stage beat's interval, the seam the tests drive it at.
    */
   constructor(
     paths,
     {
       instanceStore,
       getSlotCap,
+      isHeld,
       onClosed,
       onParked,
       semaphores,
@@ -70,6 +75,7 @@ export class RunEngine {
     this.paths = paths;
     this.instanceStore = instanceStore ?? null;
     this.getSlotCap = getSlotCap;
+    this.isHeld = isHeld ?? (() => false);
     this.onClosed = onClosed ?? null;
     this.onParked = onParked ?? null;
     this.semaphores = semaphores ?? null;
@@ -99,7 +105,12 @@ export class RunEngine {
 
   // -- slot accounting (lane-agnostic) --------------------------------------
 
-  /** Active runs of a project: open and not parked. A parked run frees its slot. */
+  /**
+   * Active runs of a project: open and not parked. A parked run frees its slot;
+   * a held run keeps it. A hold is operational rather than scheduling, and
+   * freeing the slots it stops would invite launches that oversubscribe the
+   * project the moment somebody releases it (ADR-0040).
+   */
   activeCount(project) {
     let count = 0;
     for (const run of this.runs.values()) {
@@ -151,6 +162,13 @@ export class RunEngine {
       closed: false,
       executing: false,
       settling: false,
+      // The operator hold, as this run stands under it: `held` while the run
+      // sits at a boundary it may not cross, `deferred` the stage waiting on
+      // the other side, and `deferredResume` whether entering it is a fresh
+      // entry or the re-execution an answered park owes.
+      held: false,
+      deferred: null,
+      deferredResume: false,
       seats: new Set(),
       lastAnswer: null,
       pulse: null,
@@ -179,6 +197,64 @@ export class RunEngine {
     run.stage = stage;
     run.store.append('stage-entered', { actor: ACTOR, stage, ...(resumed && { resumed }) });
     this.executeStage(run);
+  }
+
+  /**
+   * The one place stages chain, and so the one place an operator hold is read.
+   * A hold interrupts nothing: whatever ran has run, and the run stops here
+   * rather than entering what comes next (ADR-0040).
+   */
+  chainStage(run, next) {
+    if (this.isHeld(run.project)) this.holdAt(run, next);
+    else this.enterStage(run, next);
+  }
+
+  /**
+   * Records the boundary a held run is standing at and idles it. The stamp
+   * carries the stage that settled and the stage that did not start, because
+   * those two are what a release needs and what an operator reads.
+   *
+   * The stage beat keeps running over the wait. A held run holds no child and
+   * stamps nothing of its own, and telemetry that goes quiet is telemetry a
+   * reader has to interpret; a beat that says `hold` is a run saying it is
+   * quiet on purpose.
+   */
+  holdAt(run, next, { resumed = false } = {}) {
+    run.held = true;
+    run.deferred = next;
+    run.deferredResume = resumed;
+    run.store.append('stage-held', {
+      actor: ACTOR,
+      stage: run.stage,
+      next,
+      ...(resumed && { resumed }),
+    });
+    this.openPulse(run);
+  }
+
+  /**
+   * Enters the deferred stage of every run this release frees. A run whose
+   * project is still held by another scope stays where it is: the instance
+   * hold and a project hold are separate statements, and a release ends the
+   * one it names.
+   * @returns {string[]} the runs that entered their deferred stage
+   */
+  releaseHeldRuns() {
+    const released = [];
+    for (const run of [...this.runs.values()]) {
+      if (!run.held || run.closed || this.isHeld(run.project)) continue;
+      // The flag drops before the stage runs, so a stage that settles inside
+      // this call chains as any stage does and the release enters once.
+      const { deferred, deferredResume } = run;
+      run.held = false;
+      run.deferred = null;
+      run.deferredResume = false;
+      run.store.append('stage-released', { actor: ACTOR, stage: run.stage, next: deferred });
+      released.push(run.runId);
+      if (deferredResume) this.executeStage(run);
+      else this.enterStage(run, deferred);
+    }
+    return released;
   }
 
   executeStage(run) {
@@ -266,6 +342,10 @@ export class RunEngine {
         lastBeat: () => run.lastBeatSeq,
         describe: () => {
           if (this.stopped || run.closed || run.parked) return null;
+          // A held run is waiting on a person the way a park is, and it is the
+          // only wait with nothing of the run's own left running, so it is read
+          // before the seats.
+          if (run.held) return { waitingOn: 'hold', detail: { next: run.deferred } };
           const seats = [...run.seats].map((s) => s.seat).filter((s) => typeof s === 'string');
           // What the stage is waiting on, in the terms the stage has: the
           // seats in flight, or the handler itself when it runs no child.
@@ -292,7 +372,7 @@ export class RunEngine {
         this.stampViolation(run, `directive names unknown stage: ${directive.next}`);
         return;
       }
-      this.enterStage(run, directive.next);
+      this.chainStage(run, directive.next);
       return;
     }
     if (directive.park) {
@@ -452,7 +532,12 @@ export class RunEngine {
     run.parked = false;
     run.parkRecord = null;
     run.store.append('resume', { actor: ACTOR, stage: run.stage });
-    this.executeStage(run);
+    // A run may park while held, and its answer is recorded the moment the
+    // human gives it — the wait on the human is over. Re-entering the stage is
+    // the step the hold stops, so the run holds at the boundary it is already
+    // standing at and the resumed stage runs at the release (ADR-0040).
+    if (this.isHeld(run.project)) this.holdAt(run, run.stage, { resumed: true });
+    else this.executeStage(run);
   }
 
   /**
@@ -477,7 +562,11 @@ export class RunEngine {
       );
       if (open.length === 0) {
         run.violated = false;
-        if (!run.parked && !run.executing && run.seats.size === 0) this.executeStage(run);
+        // A held run is idle because an operator said so, and the resolution of
+        // an unrelated violation is not a release.
+        if (!run.parked && !run.held && !run.executing && run.seats.size === 0) {
+          this.executeStage(run);
+        }
       }
     }
     return line;
@@ -659,8 +748,12 @@ export class RunEngine {
   checkLiveness() {
     const violations = [];
     for (const run of this.runs.values()) {
-      if (run.closed || run.parked || run.violated || run.executing || run.seats.size > 0) continue;
-      this.stampViolation(run, 'no in-flight child, no parked escalation, no transition in progress');
+      if (run.closed || run.parked || run.held || run.violated) continue;
+      if (run.executing || run.seats.size > 0) continue;
+      this.stampViolation(
+        run,
+        'no in-flight child, no parked escalation, no operator hold, no transition in progress',
+      );
       violations.push(run.runId);
     }
     return violations;
@@ -679,9 +772,9 @@ export class RunEngine {
   // -- resume at daemon start ----------------------------------------------
 
   /**
-   * Resumes every open run from its ledger. A parked or violated run stays
-   * waiting on the human; every other run re-enters its recorded stage. A run
-   * the engine cannot resume (unknown lane or stage) violates loud.
+   * Resumes every open run from its ledger. A parked, held or violated run
+   * stays waiting on the human; every other run re-enters its recorded stage.
+   * A run the engine cannot resume (unknown lane or stage) violates loud.
    *
    * A closed run still sitting under `runs/` is a move that was blocked at its
    * close, so the start sweeps it up. The handle that blocked it belonged to
@@ -711,11 +804,26 @@ export class RunEngine {
       run.parkRecord = state.parkRecord;
       run.violated = state.violated;
       run.lastAnswer = state.lastAnswer;
+      run.held = state.held;
+      run.deferred = state.deferred;
+      run.deferredResume = state.deferredResume;
       resumed.push(runId);
       if (run.parked || run.violated) continue;
       const lane = this.lanes.get(run.lane);
       if (!lane || !run.stage || !lane.stages.includes(run.stage)) {
         this.stampViolation(run, `cannot resume: lane ${run.lane}, stage ${run.stage}`);
+        continue;
+      }
+      // A held run resumes as a held run: the stage it completed is not run
+      // again, and the stage behind the boundary waits for the release exactly
+      // as it did before the restart. The beat picks up where the last instance
+      // left it, so the quiet still reads as intentional (ADR-0040).
+      if (run.held) {
+        if (!lane.stages.includes(run.deferred)) {
+          this.stampViolation(run, `cannot resume a hold: unknown deferred stage ${run.deferred}`);
+          continue;
+        }
+        this.openPulse(run);
         continue;
       }
       this.enterStage(run, run.stage, { resumed: true });

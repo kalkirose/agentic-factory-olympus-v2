@@ -291,6 +291,33 @@ test('a seat chip carries the retry ordinal, a first spawn carries none', async 
   assert.deepEqual(s.semaphores, [{ model: 'model-a', max: null, inFlight: 2 }]);
 });
 
+test('a held run reads as held, and it keeps the slot it holds', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const paths = scaffoldHome(join(root, 'home'));
+  writeFileSync(
+    paths.instanceConfig,
+    JSON.stringify({ version: 1, projects: { alpha: { repoUrl: 'unused', slotCap: 3 } } }) + '\n',
+  );
+  const instance = openInstanceStore(paths);
+  instance.append('hold-changed', { actor: 'human', project: 'alpha', held: true });
+  instance.close();
+  const store = openRunStore(paths, 'r-held');
+  store.append('run-launched', { actor: ACTOR, project: 'alpha', lane: 'story', storyKey: 's-8' });
+  store.append('stage-entered', { actor: ACTOR, stage: 'verdict' });
+  store.append('stage-held', { actor: ACTOR, stage: 'verdict', next: 'update' });
+  store.close();
+
+  const s = await buildSnapshot(paths, { now: NOW });
+  const run = s.runs.find((r) => r.runId === 'r-held');
+  assert.equal(run.held, true);
+  assert.equal(run.heldNext, 'update');
+  assert.equal(run.parked, false);
+  const project = s.projects.find((p) => p.name === 'alpha');
+  assert.equal(project.held, true);
+  assert.equal(project.slotsBusy, 1);
+});
+
 // -- server -------------------------------------------------------------------
 
 async function startServer(t, home) {

@@ -32,6 +32,7 @@ import { WorkflowWatcher } from '../ship/workflows.mjs';
 import { projectForge } from '../lanes/assemble.mjs';
 import { EvalScheduler } from '../eval/review.mjs';
 import { Notifier } from './notifier.mjs';
+import { OperatorHold } from './hold.mjs';
 import { checkSeatEnvironment } from './environment.mjs';
 import { scaffoldHome, homePaths, runLedgerPath } from './home.mjs';
 import { acquireLock } from './lock.mjs';
@@ -115,6 +116,7 @@ export class Daemon {
     this.semaphores = null;
     this.isolation = null;
     this.frontier = null;
+    this.hold = null;
     this.tripwires = null;
     this.workflows = null;
     this.evals = null;
@@ -173,6 +175,20 @@ export class Daemon {
     });
     this.registerCommand('pause', async (command) => {
       this.frontier.setArmed(command.project, false, command.actor);
+    });
+    // The hold and the release: the operator's moment with no live seats. A
+    // hold ends nothing that is running and blocks nothing that launches — it
+    // stops the stage chain, and the runs drain themselves to their boundaries.
+    // Auto-launch is the other lever and stays independent of this one: pause
+    // governs entry, a hold governs progression (ADR-0040).
+    this.registerCommand('hold', async (command) => {
+      this.hold.set({ project: command.project, all: command.all }, true, command.actor);
+    });
+    this.registerCommand('release', async (command) => {
+      this.hold.set({ project: command.project, all: command.all }, false, command.actor);
+      // Every run this release frees, and no other: a run whose project is
+      // still held by the scope the release did not name stays where it is.
+      this.engine.releaseHeldRuns();
     });
     this.registerCommand('launch', async (command) => {
       await this.launchCommand(command);
@@ -275,6 +291,9 @@ export class Daemon {
       this.engine = new RunEngine(this.paths, {
         instanceStore: this.ledger,
         getSlotCap: (project) => this.config.projects[project]?.slotCap,
+        // Read at every stage chain, never cached in the engine: an operator
+        // who holds a project mid-run holds the very next boundary.
+        isHeld: (project) => this.hold?.isHeld(project) === true,
         onClosed: (info) => {
           this.scheduleWorkspaceRelease(info);
           this.frontier.queueSweep(info.project);
@@ -294,6 +313,10 @@ export class Daemon {
       }
       this.frontier = new FrontierLauncher(this);
       this.frontier.replayArming();
+      // Before any run resumes: a run that is held has to come back held, and
+      // the state that says so is the ledger this fold reads (ADR-0040).
+      this.hold = new OperatorHold(this);
+      this.hold.replay();
       // Before this instance writes anything of its own: whatever the last
       // one left behind is still the tail, and a tail that is not a clean
       // stop is the only trace an unstamped death leaves.

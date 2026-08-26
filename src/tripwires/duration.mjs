@@ -4,7 +4,8 @@
 // band is that reading; a stage past the band is the detection (ADR-0034).
 //
 // The history is work, never wall clock. A stage that stood in the ship-token
-// queue, or sat parked on a human, did nothing in that stretch, and a band that
+// queue, sat parked on a human, or waited out an operator hold at a boundary
+// did nothing in that stretch, and a band that
 // counted it would learn the pathology it exists to flag: one five-minute queue
 // wait once took an update band from 119 seconds to 112 minutes, and the next
 // run stood two hours in the same queue inside the band it had taught
@@ -65,10 +66,10 @@ export function stageVisits(events) {
 
 /**
  * What a stage band counts as waiting: the human's answer, the inert stretch
- * under an unresolved violation, and the ship-token queue. A band is a
- * statement about work, and none of the three is the stage working.
+ * under an unresolved violation, the ship-token queue, and the operator hold. A
+ * band is a statement about work, and none of the four is the stage working.
  */
-export const BAND_CLASSES = ['human', 'queue'];
+export const BAND_CLASSES = ['human', 'queue', 'hold'];
 
 /**
  * The work inside one window of a run, in milliseconds: the wall of it, less

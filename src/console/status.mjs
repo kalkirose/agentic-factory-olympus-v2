@@ -9,6 +9,7 @@ import { runLedgerPath } from '../daemon/home.mjs';
 import { readLock, pidAlive } from '../daemon/lock.mjs';
 import { withDefaults } from '../config/instance.mjs';
 import { standingAckList } from '../ledger/acks.mjs';
+import { holdState, projectHeld } from '../daemon/hold.mjs';
 import { openLoud } from '../telemetry/readers.mjs';
 import { escalationQueue } from '../telemetry/queue.mjs';
 
@@ -77,12 +78,17 @@ export function renderStatus(paths) {
   const loud = openLoud(paths);
   const queue = escalationQueue(paths);
   const runs = openRuns(paths);
-  const active = runs.filter((r) => !r.parked && !r.violated).length;
+  const active = runs.filter((r) => !r.parked && !r.held && !r.violated).length;
   const parked = runs.filter((r) => r.parked).length;
+  // Held runs are counted apart from active ones because they are the two
+  // different answers to "is the factory working": a held run holds its slot
+  // and does nothing, and an operator reading a busy-looking header while a
+  // hold stands is reading the wrong number (ADR-0040).
+  const held = runs.filter((r) => r.held).length;
   const lines = [];
   lines.push(
     `daemon ${running ? `running (pid ${lock.pid})` : 'stopped'}` +
-      ` · runs ${active} active / ${parked} parked` +
+      ` · runs ${active} active / ${parked} parked / ${held} held` +
       ` · loud ${loud.length} · queue ${queue.length}`,
   );
   lines.push('');
@@ -102,6 +108,9 @@ export function renderStatus(paths) {
   for (const run of runs) {
     const flags = [
       ...(run.parked ? [`parked:${run.parkRecord?.type}`] : []),
+      // The stage the run did not enter, because that is what a release will
+      // start and what the operator is deciding about.
+      ...(run.held ? [`held:${run.deferred}`] : []),
       ...(run.violated ? ['violated'] : []),
     ];
     const budget = run.payload?.budget;
@@ -115,11 +124,16 @@ export function renderStatus(paths) {
   const config = readInstanceConfig(paths);
   if (config) {
     const armed = armingState(paths);
+    // A hold with no run under it yet is still the reason the next boundary
+    // will not be crossed, so the project line carries it whether or not any
+    // run is standing on one.
+    const holds = holdState(readEvents(paths.instanceLedger));
     lines.push('');
     lines.push('PROJECTS');
     for (const [name, project] of Object.entries(config.projects)) {
       lines.push(
-        `  ${name}: ${armed.get(name) === true ? 'armed' : 'paused'}, slot cap ${project.slotCap}`,
+        `  ${name}: ${armed.get(name) === true ? 'armed' : 'paused'}` +
+          `${projectHeld(holds, name) ? ', held' : ''}, slot cap ${project.slotCap}`,
       );
     }
   }

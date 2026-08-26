@@ -15,6 +15,12 @@ export function deriveRunState(events) {
     parkSeq: 0,
     parkRecord: null,
     violated: false,
+    // The operator hold, as the ledger left it: held at a boundary, the stage
+    // the run did not enter, and whether entering it is the re-execution an
+    // answered park owes (ADR-0040).
+    held: false,
+    deferred: null,
+    deferredResume: false,
     lastAnswer: null,
     closed: null,
   };
@@ -36,6 +42,16 @@ export function deriveRunState(events) {
       }
       case 'stage-entered':
         state.stage = e.stage;
+        break;
+      case 'stage-held':
+        state.held = true;
+        state.deferred = e.next ?? null;
+        state.deferredResume = e.resumed === true;
+        break;
+      case 'stage-released':
+        state.held = false;
+        state.deferred = null;
+        state.deferredResume = false;
         break;
       case 'park':
         state.parkSeq = e.seq;

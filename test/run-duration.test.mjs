@@ -33,7 +33,7 @@ test('a parkless run spends all of its wall clock active', () => {
   const d = runDuration(parklessRun());
   assert.equal(d.wallMs, 6 * HOUR);
   assert.equal(d.activeMs, 6 * HOUR);
-  assert.equal(d.parkedMs, 0);
+  assert.equal(d.waitedMs, 0);
   assert.equal(d.launchedAt, at(0));
   assert.equal(d.endedAt, at(6));
   assert.deepEqual(inactiveSpans(parklessRun()), []);
@@ -49,7 +49,7 @@ test('a park-and-resume run reads wall above active by the exact span', () => {
   ];
   const d = runDuration(events);
   assert.equal(d.wallMs, 6 * HOUR);
-  assert.equal(d.parkedMs, 3 * HOUR);
+  assert.equal(d.waitedMs, 3 * HOUR);
   assert.equal(d.activeMs, 3 * HOUR);
   assert.ok(d.wallMs > d.activeMs);
   assert.deepEqual(inactiveSpans(events), [{ from: at(1), to: at(4) }]);
@@ -81,7 +81,7 @@ test('multiple parks sum', () => {
   ];
   const d = runDuration(events);
   assert.equal(d.wallMs, 10 * HOUR);
-  assert.equal(d.parkedMs, 6 * HOUR);
+  assert.equal(d.waitedMs, 6 * HOUR);
   assert.equal(d.activeMs, 4 * HOUR);
   assert.deepEqual(inactiveSpans(events), [
     { from: at(1), to: at(3) },
@@ -110,7 +110,7 @@ test('an inert span counts as parked', () => {
   ];
   const d = runDuration(events);
   assert.equal(d.wallMs, 6 * HOUR);
-  assert.equal(d.parkedMs, 4 * HOUR);
+  assert.equal(d.waitedMs, 4 * HOUR);
   assert.equal(d.activeMs, 2 * HOUR);
   assert.deepEqual(inactiveSpans(events), [{ from: at(1), to: at(5) }]);
 });
@@ -135,7 +135,7 @@ test('a park inside an open violation is counted once', () => {
     line(7, 8, 'run-closed', { state: 'shipped' }),
   ];
   const d = runDuration(events);
-  assert.equal(d.parkedMs, 4 * HOUR);
+  assert.equal(d.waitedMs, 4 * HOUR);
   assert.equal(d.activeMs, 4 * HOUR);
   assert.deepEqual(inactiveSpans(events), [{ from: at(1), to: at(5) }]);
 });
@@ -291,7 +291,7 @@ test('a queue wait is the harness waiting on itself, so it stays active time', (
   const d = runDuration(queuedRun());
   assert.equal(d.wallMs, 6 * HOUR);
   assert.equal(d.activeMs, 6 * HOUR);
-  assert.equal(d.parkedMs, 0);
+  assert.equal(d.waitedMs, 0);
   assert.deepEqual(inactiveSpans(queuedRun()), []);
 });
 

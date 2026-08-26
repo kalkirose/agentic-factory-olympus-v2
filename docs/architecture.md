@@ -14,8 +14,8 @@ recorded stamp. "Nobody invoked the next phase" is impossible by construction.
 Around the daemon:
 
 - **Console sessions** — any Claude session is a cockpit: it reads the ledgers
-  and writes control-channel commands the daemon obeys (pause, kill, launch,
-  answer). No session owns a run.
+  and writes control-channel commands the daemon obeys (pause, hold, kill,
+  launch, answer). No session owns a run.
 - **Command center** — a standalone read-only page plus a small GET server
   rooted at the daemon home. The daemon does not know it exists.
 - **Tripwire watcher** — a supervised in-daemon process that re-evaluates
@@ -581,8 +581,8 @@ Four layers, no timeouts:
 
 1. Child supervision: exit events; seat-failure path.
 2. The liveness invariant: every open run holds an in-flight child, a parked
-   escalation, or a transition in progress. A violation is a harness-class
-   red, loud.
+   escalation, an operator hold, or a transition in progress. A violation is a
+   harness-class red, loud.
 3. Progress telemetry compared against duration history. A seat stamps its own
    progress. Every stage beats besides: a polling handler stamps one heartbeat
    per batch of poll outcomes with the evidence of its wait, and the engine
@@ -600,6 +600,19 @@ Four layers, no timeouts:
    `silence` with the deadline in force. The runner treats it as a crash, so
    the seat re-dispatches into the session the dead child named. Total elapsed
    runtime stays unbounded: only silence has a ceiling (ADR-0037).
+
+## The operator hold
+
+`olympusctl hold --project <p>` (or `--all`) stops the stage chain and nothing
+else: every run finishes the stage it is in, stamps `stage-held` with the stage
+it did not enter, and idles there holding its slot. `release` enters the
+deferred stage of each run it frees and stamps `stage-released`. The state is an
+instance-ledger event replayed at every start, so a hold outlives the daemon
+that took it, and the restart recipe is hold → wait for boundaries and parks →
+stop with no live seat → start → release. Held time counts as waiting in every
+duration reading, and the stage beat keeps saying `waitingOn: hold` so the quiet
+reads as intentional. A pause governs entry and a hold governs progression; the
+two are independent, and both together are the full freeze (ADR-0040).
 
 ## Frontier auto-launch
 
