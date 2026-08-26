@@ -17,7 +17,7 @@ import {
 } from '../src/daemon/home.mjs';
 import { postFreeze, repairLane, restoreAnchor } from '../src/lanes/verdict.mjs';
 import { shipStep, CHECKLESS_POLLS, UPDATE_CAP } from '../src/lanes/ship.mjs';
-import { RERUN_BUDGET } from '../src/ledger/cycles.mjs';
+import { FLAKE_LIMIT, RERUN_BUDGET } from '../src/ledger/cycles.mjs';
 import { gitHubForge, noLogReason, parseGitHubRepo, PartialLogRefusal } from '../src/ship/forge.mjs';
 import { derivedLabels } from '../src/ship/labels.mjs';
 import { commitAll, restorePaths } from '../src/isolation/tree.mjs';
@@ -945,6 +945,58 @@ test('a CI cycle that repeats itself parks after one retry, never a seventh time
   const closed = events.find((e) => e.event === 'run-closed');
   assert.equal(closed.state, 'failed');
   assert.equal(closed.reason, 'cycle-repeat');
+});
+
+test('the third flake on one check and one head sha ends the re-runs, loudly', async (t) => {
+  // The observed loop: one required check answering both ways on a head sha
+  // that never moves, a green after every re-run, and an env-classed triage
+  // stamping the operational fix that grants the next one. Nothing in that
+  // sequence ends it — one run took 33 turns of it and merged red.
+  const fx = shipFixture(t, {
+    forgeOpts: { required: ['ci', 'hold'] },
+    seats: { 'verdict-triage': ciTriageSeat(['env']) },
+  });
+  // `hold` never completes, so the request never merges while the other check
+  // flaps: the state the incident sat in for the whole of its 33 turns.
+  let reads = 0;
+  const forgeChecks = fx.forge.checkRuns;
+  fx.forge.checkRuns = async (sha) => {
+    const list = await forgeChecks(sha);
+    if (!list.some((r) => r.name === 'ci')) return list;
+    return [++reads % 2 === 1 ? red() : green(), running('hold')];
+  };
+  fx.forge.state.autoChecks = () => [red(), running('hold')];
+  const runId = await fx.launch();
+  await waitParked(fx.paths, runId, 'cycle-repeat');
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  // Three flakes on the pair, and the third is the last: the greens after it
+  // are the same answer, and classifying them again is how one broken check
+  // writes a thousand ledger lines.
+  const flakes = live.filter((e) => e.event === 'ci-flake');
+  assert.equal(flakes.length, FLAKE_LIMIT);
+  assert.equal(new Set(flakes.map((e) => `${e.check}@${e.sha}`)).size, 1);
+  const record = live.find((e) => e.event === 'gate-integrity' && e.kind === 'deterministic-red');
+  assert.equal(record.check, 'ci');
+  assert.equal(record.sha, flakes[0].sha);
+  assert.equal(record.flakes, FLAKE_LIMIT);
+  assert.equal(record.pr, 7);
+  assert.equal(record.seq > flakes.at(-1).seq, true);
+  // The stop is the classification and not an empty budget: fixes were stamped
+  // behind the record, each one a grant the check would have spent before.
+  const after = (event, extra = () => true) =>
+    live.filter((e) => e.event === event && e.seq > record.seq && extra(e));
+  assert.ok(after('operational-fix').length > 0);
+  assert.equal(after('check-transition', (e) => e.status === 'rerun-requested').length, 0);
+  // The watcher keeps stamping what it sees. Only the reading was withdrawn.
+  assert.ok(after('check-transition', (e) => e.check === 'ci').length > 0);
+  // The record asks a human to go and look, so nothing in the run answers it —
+  // the close of the run it reported on included.
+  const lit = () => openLoud(fx.paths).some((e) => e.seq === record.seq && e.gist === record.gist);
+  assert.ok(lit());
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'failed');
+  assert.ok(lit());
 });
 
 test('a mixed CI verdict keeps the local sweep: the repair round is judged', async (t) => {

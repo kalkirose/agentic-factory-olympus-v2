@@ -2,12 +2,21 @@
 // made of, which changes make a cycle a new one, and where a repeat spends its
 // retry and where it parks. The repair ladder's progress rule reads the same
 // identity set and asks a different question, so its cases and the boundary
-// between the two guards are pinned here beside it. The lane wiring has its
-// own suites; this one pins the derivation, which is pure over the ledger and
-// therefore restart-safe by construction.
+// between the two guards are pinned here beside it. The flake reading a check
+// spends its re-runs on is the third derivation of the same kind, so its cases
+// sit here too. The lane wiring has its own suites; this one pins the
+// derivations, which are pure over the ledger and therefore restart-safe by
+// construction.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cycleFingerprint, cycleRepeat, RERUN_BUDGET } from '../src/ledger/cycles.mjs';
+import {
+  cycleFingerprint,
+  cycleRepeat,
+  ciFlakes,
+  deterministicRed,
+  FLAKE_LIMIT,
+  RERUN_BUDGET,
+} from '../src/ledger/cycles.mjs';
 import { repairStalled } from '../src/lanes/verdict.mjs';
 
 const SHA = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2';
@@ -379,4 +388,52 @@ test('a local verdict rests on no check state, so the checks never reach it', ()
   const before = cycleFingerprint(log.events, render);
   log.append('check-transition', { sha: SHA, check: 'ci', status: 'failure' });
   assert.equal(cycleFingerprint(log.events, { ...render, seq: 99 }), before);
+});
+
+// -- the flake reading and where it is withdrawn ------------------------------
+
+/** One red, one re-run, one green on a check: the flake the ledger records. */
+function flake(log, { sha = SHA, check = 'ci' } = {}) {
+  log.append('check-transition', { sha, check, status: 'failure' });
+  log.append('check-transition', { sha, check, status: 'rerun-requested' });
+  log.append('check-transition', { sha, check, status: 'success' });
+  return log.append('ci-flake', { pr: 7, sha, check });
+}
+
+test('a check is a flake twice on one head sha and deterministic-red at the third', () => {
+  const log = ledger();
+  flake(log);
+  assert.equal(ciFlakes(log.events, SHA, 'ci'), 1);
+  assert.equal(deterministicRed(log.events, SHA, 'ci'), false);
+  flake(log);
+  assert.equal(deterministicRed(log.events, SHA, 'ci'), false);
+  flake(log);
+  assert.equal(ciFlakes(log.events, SHA, 'ci'), FLAKE_LIMIT);
+  assert.equal(deterministicRed(log.events, SHA, 'ci'), true);
+});
+
+test('two head shas on one check are two trees: both stay flakes', () => {
+  // The pair is the key. Four flakes here, and neither sha carries the three
+  // that say a check answers both ways about one tree.
+  const log = ledger();
+  flake(log, { sha: SHA });
+  flake(log, { sha: NEXT_SHA });
+  flake(log, { sha: SHA });
+  flake(log, { sha: NEXT_SHA });
+  assert.equal(deterministicRed(log.events, SHA, 'ci'), false);
+  assert.equal(deterministicRed(log.events, NEXT_SHA, 'ci'), false);
+});
+
+test('two checks on one head sha are two questions: both stay flakes', () => {
+  const log = ledger();
+  flake(log, { check: 'ci' });
+  flake(log, { check: 'lint' });
+  flake(log, { check: 'ci' });
+  flake(log, { check: 'lint' });
+  assert.equal(deterministicRed(log.events, SHA, 'ci'), false);
+  assert.equal(deterministicRed(log.events, SHA, 'lint'), false);
+  // The third on one of them classifies that one and leaves the other alone.
+  flake(log, { check: 'lint' });
+  assert.equal(deterministicRed(log.events, SHA, 'lint'), true);
+  assert.equal(deterministicRed(log.events, SHA, 'ci'), false);
 });

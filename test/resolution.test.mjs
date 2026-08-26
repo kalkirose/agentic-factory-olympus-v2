@@ -86,6 +86,18 @@ test('a log that is gone is answered by nobody a ledger can name', () => {
   assert.deepEqual(ownedResolutions(events), []);
 });
 
+test('a check that answers both ways is answered by nobody a ledger can name', () => {
+  // A later green is one more of the answers the record is about, and the
+  // merge is what the record was trying to stop. Neither settles it.
+  const both = line('gate-integrity', { kind: 'deterministic-red', sha: 'abc', check: 'ci' });
+  const events = [
+    both,
+    line('check-transition', { sha: 'abc', check: 'ci', status: 'success' }),
+    line('merged', { pr: 7 }),
+  ];
+  assert.deepEqual(ownedResolutions(events), []);
+});
+
 // -- what a ledger's own events owe -------------------------------------------
 
 test('a re-freeze owns the take-back it re-takes', () => {

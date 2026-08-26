@@ -389,6 +389,10 @@ export const DEFECT_KINDS = new Set([
   // it. The triage still runs — a red check is a red check — but it judges the
   // red on the reason the log is absent rather than on the log.
   'triage-log-missing',
+  // A required check that answered both ways on one head sha often enough that
+  // its greens report nothing about the tree. The harness re-ran it on the
+  // strength of those greens, so the record is where the re-runs stop.
+  'deterministic-red',
 ]);
 
 /** The kind, or a throw naming it. The only way a kind reaches a stamp. */

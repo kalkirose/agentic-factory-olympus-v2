@@ -75,6 +75,7 @@ test('the defect vocabulary is closed, and holds the kinds that recur', () => {
   // makes the third occurrence a number instead of a reading job.
   assert.ok(DEFECT_KINDS.has('pr-label-missing'));
   assert.ok(DEFECT_KINDS.has('triage-log-missing'));
+  assert.ok(DEFECT_KINDS.has('deterministic-red'));
   for (const kind of DEFECT_KINDS) assert.equal(assertDefectKind(kind), kind);
   assert.throws(() => assertDefectKind('no-failure-log-found'), /unknown defect kind/);
   assert.throws(() => assertDefectKind(undefined), /unknown defect kind/);

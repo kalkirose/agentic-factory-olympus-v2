@@ -122,6 +122,21 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   `source: 'ci'`; the ship stage then re-enters the verdict stage, whose
   ladder applies the same routes and the same budgets as in-run reds. An
   `operational-fix` stamp grants the next re-run.
+- **A flake reading expires at the third flake.** `FLAKE_LIMIT` ci-flakes for
+  one check on one head sha reclassify that check deterministic-red:
+  `gate-integrity` kind `deterministic-red` (loud, once per pair), no further
+  `ci-flake` classification, and no automatic re-run of that check on that sha
+  whatever grant stands behind it. The rule is derived from the ledger in
+  `src/ledger/cycles.mjs` beside the re-run budget it overrides. What a re-run
+  tests is the claim that the red was the substrate and the green is the tree;
+  a check that has made that claim three times over a tree which did not move
+  between any of them is a check whose answer is about something else, and the
+  greens are what is not credible. The pair is the whole key: two head shas on
+  one check are two trees, and two checks on one head sha are two questions —
+  both stay ordinary flakes. A new head sha therefore starts clean, which is
+  what makes the repair route the way out. The record is answered by a human,
+  because a later green is one more of the answers it is about and the red
+  merge it warns of is the cost rather than the answer.
 - **The re-run budget belongs to the run and the finding.** `RERUN_BUDGET` is
   counted against the pair of the run and the failing check's name — across
   head shas, attempts, merge rounds and verdict cycles — and never against the
@@ -141,7 +156,7 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   `provisioning-gate`. The merge landing appends the paired `resolved`.
 - **A defect the harness recognizes has a name, not a sentence.** Every
   `gate-integrity` record the ship step stamps carries a `kind` from
-  `DEFECT_KINDS` in the ledger registry, checked at the stamp. Three kinds:
+  `DEFECT_KINDS` in the ledger registry, checked at the stamp. Four kinds:
   `auto-merge` above; `pr-label-missing`, stamped once per request that did not
   carry its labels out of the create, whether the apply call rescued it or not,
   and answered by the merge of that request; and `triage-log-missing`, stamped
@@ -149,7 +164,8 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   instead of the log, and answered by nobody. The escapes ledger takes the same
   closed word on `escape-recorded`, so a defect the harness named before the
   merge is recorded under that name when the merge carries it into the product
-  (ADR-0024). The set grows only here, in an ADR.
+  (ADR-0024). A fourth, `deterministic-red`, names the check whose flake
+  reading expired. The set grows only here, in an ADR.
 - **Competing merges ride the update path.** A PR behind its base and a PR
   the forge calls conflicting get the same daemon-driven update: fetch, merge
   the default branch into the run branch (never a rebase, never a
@@ -457,6 +473,15 @@ one job's log rather than a slice of the run's archive. Trigger: `triage-wait`
 stamps whose `waited` on the CI verdict is a large part of the ship stage.
 Reversal cost: low — one forge method and the predicate in `runsNotDone`; the
 stamp, the hold and the assert all stay where they are.
+
+If `FLAKE_LIMIT` proves too tight — a repository whose CI genuinely flaps
+three times on one head sha and is green on the merits — the constant rises,
+or the classification stops the re-runs and leaves the check's own state
+alone, which is the record without the withdrawal. Trigger:
+`deterministic-red` records on shas whose check then merges green with no
+repair behind it. Reversal cost: low — one constant in `src/ledger/cycles.mjs`
+and one predicate in the re-run filter; the record, the stamp site and the
+routes under them do not change.
 
 A forge with no workflow concept is untouched by the hold: its checks name no
 run, so there is nothing to read and nothing to wait for. The hold bites only

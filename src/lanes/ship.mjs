@@ -27,7 +27,11 @@
 // Both stamp `forge-anomaly` and take a route. A red check whose workflow run
 // is still executing is a third: the check is terminal and the run behind it
 // is not, so the watcher holds the red until the run ends and stamps
-// `triage-wait` once for the wait. Persistent CI reds render a red
+// `triage-wait` once for the wait. A check that turns green after a re-run
+// three times on one head sha is a fourth: the tree never moved between the
+// answers, so the flake reading is withdrawn, the check is reclassified
+// deterministic-red (loud) and it earns no further automatic re-run.
+// Persistent CI reds render a red
 // verdict (`source: 'ci'`) and re-enter the verdict stage — the same
 // four-class triage, the same routes, the same shared budgets as in-run
 // reds. An env-only verdict comes back here for the re-run without a local
@@ -39,7 +43,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { repairTicketPath, reconcileTicketPath, runReportPath } from '../daemon/home.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
 import { assertDefectKind } from '../ledger/registry.mjs';
-import { budgetOpen } from '../ledger/cycles.mjs';
+import { budgetOpen, ciFlakes, deterministicRed, FLAKE_LIMIT } from '../ledger/cycles.mjs';
 import { instanceParkForms } from '../ledger/parks.mjs';
 import { openEscapesStore } from '../telemetry/stores.mjs';
 import { stageHeartbeat } from '../telemetry/heartbeat.mjs';
@@ -519,7 +523,18 @@ async function pushBranch(ctx, base, { expected = null } = {}) {
 
 // -- the check watcher -------------------------------------------------------
 
-/** Stamps every observed state change per check, and the ci-flake events. */
+/**
+ * Stamps every observed state change per check, the ci-flake events, and the
+ * point at which a check stops being a flake.
+ *
+ * The flake reading rests on one claim: the red was the substrate, and the
+ * green is the tree. A check that has now made that claim `FLAKE_LIMIT` times
+ * on one head sha has answered both ways over a tree that never moved between
+ * any of the answers, so the claim is spent. The check is reclassified
+ * deterministic-red — loud, once per pair — and from there its greens buy it
+ * nothing: no further flake is classified, and no automatic re-run is granted
+ * (ADR-0008).
+ */
 function stampTransitions(ctx, opened, sha, runs) {
   const events = runEvents(ctx);
   const last = new Map();
@@ -555,9 +570,28 @@ function stampTransitions(ctx, opened, sha, runs) {
           e.status === 'rerun-requested',
       )
     ) {
+      // A check the ledger already reclassified is done being a flake: the
+      // green is one more of the answers the record is about, and classifying
+      // it again is how one broken check writes a thousand lines.
+      if (deterministicRed(events, sha, run.name)) continue;
       // The one automatic re-run turned the check green: a flake, never a
       // finding.
       ctx.store.append('ci-flake', { actor: ACTOR, pr: opened.pr, sha, check: run.name });
+      // The stamp above is the flake this pass counted; `events` is the ledger
+      // as it stood before it, and one check stamps at most one flake per pass.
+      const flakes = ciFlakes(events, sha, run.name) + 1;
+      if (flakes < FLAKE_LIMIT) continue;
+      gateIntegrity(ctx, {
+        kind: 'deterministic-red',
+        pr: opened.pr,
+        sha,
+        check: run.name,
+        flakes,
+        detail:
+          `${run.name} turned green after a re-run ${flakes} times on ${sha}, ` +
+          'a tree that did not move between them',
+        gist: `${run.name} is not a flake on ${sha.slice(0, 7)}: ${flakes} greens over one tree`,
+      });
     }
   }
 }
@@ -741,9 +775,14 @@ async function handleRed(ctx, base, opened, sha, redNow) {
   const events = runEvents(ctx);
   const lastOpFix = findLast(events, 'operational-fix')?.seq ?? 0;
   // One automatic re-run of the failed jobs per (run, finding); an operational
-  // fix grants the next one.
-  const needRerun = redNow.filter((r) =>
-    budgetOpen(rerunSpent(events, 'check-transition', r.name), lastOpFix),
+  // fix grants the next one. A check reclassified deterministic-red on this
+  // head sha takes neither: the re-run is the test of a flake, this check has
+  // stopped being one, and a grant that re-opens a budget cannot hand back a
+  // reading the ledger withdrew.
+  const needRerun = redNow.filter(
+    (r) =>
+      !deterministicRed(events, sha, r.name) &&
+      budgetOpen(rerunSpent(events, 'check-transition', r.name), lastOpFix),
   );
   if (needRerun.length > 0) {
     await base.forge.rerunFailed(sha);

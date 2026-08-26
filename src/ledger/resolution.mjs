@@ -82,6 +82,15 @@ export const LOUD_OWNERSHIP = {
       match: (item) => item.kind === 'triage-log-missing',
       by: 'the human, from a console',
     },
+    // The check answers both ways over a tree that never moved. A later green
+    // is one more of the answers the record is about, and a red merge is the
+    // cost rather than the answer, so nothing a ledger stamps settles it: the
+    // reader who can go and look at the check is the one who closes it.
+    {
+      name: 'deterministic-red',
+      match: (item) => item.kind === 'deterministic-red',
+      by: 'the human, from a console',
+    },
   ],
   // A red merge stays loud while the defect is still in the product. The
   // repair run's close-out fixes the escapes it ticketed, and pairs the

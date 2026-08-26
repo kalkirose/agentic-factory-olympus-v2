@@ -440,14 +440,24 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - **A defect the harness recognizes has a name** (ADR-0008, ADR-0024). Every
   `gate-integrity` record carries a `kind` from the closed `DEFECT_KINDS` set,
   and `escape-recorded` takes the same word where the harness already used it.
-  Three kinds today: `auto-merge`, `pr-label-missing` (a request that did not
-  carry its labels out of the create, answered by that request's merge) and
+  Four kinds today: `auto-merge`, `pr-label-missing` (a request that did not
+  carry its labels out of the create, answered by that request's merge),
   `triage-log-missing` (a CI failure log the forge answered with a reason
   instead of the log, answered by nobody — the reason still reaches the triage
-  seat, and the absence is now counted rather than absorbed).
+  seat, and the absence is now counted rather than absorbed) and
+  `deterministic-red` (a check whose flake reading expired, below).
 - **One red regime.** CI reds get one automatic re-run of failed jobs, then
   the same four-class triage and the same routes as in-run reds. Budgets are
   shared.
+- **A flake reading expires** (ADR-0008). Three ci-flakes for one check on one
+  head sha reclassify that check deterministic-red: loud once, no further
+  flake classification, and no automatic re-run of that check on that sha
+  whatever grant stands behind it. A re-run tests the claim that the red was
+  the substrate and the green is the tree; three of them over a tree that
+  never moved is a check answering about something else. The pair is the key —
+  two shas on one check are two trees, two checks on one sha are two
+  questions — so a new head sha starts clean and the repair route is the way
+  out.
 - **The re-run budget is the finding's, not the head sha's** (ADR-0008). One
   automatic re-run per (run, finding), counted across head shas, attempts and
   verdict cycles. A cancelled attempt spends the budget and never refreshes

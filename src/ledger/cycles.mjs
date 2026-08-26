@@ -1,5 +1,6 @@
-// Progress-keyed cycling: what a verdict cycle is fingerprinted on, and the
-// one automatic retry a repeated fingerprint spends.
+// Progress-keyed cycling: what a verdict cycle is fingerprinted on, the one
+// automatic retry a repeated fingerprint spends, and the point at which a
+// check's greens stop buying it re-runs.
 //
 // A cycle's outcome is fixed by four things and nothing else: the tree it
 // judges, the suite it judges it against, the findings it carries in, and —
@@ -37,6 +38,40 @@ export const RERUN_BUDGET = 1;
 export function budgetOpen(spent, granted) {
   if (spent.length < RERUN_BUDGET) return true;
   return granted > spent[spent.length - 1];
+}
+
+/**
+ * The ci-flakes one check may take on one head sha before the flake reading is
+ * withdrawn. Two greens after two reds is a substrate that hiccuped; the third
+ * says the answer does not depend on the tree, because the tree did not move
+ * between any of them.
+ */
+export const FLAKE_LIMIT = 3;
+
+/** The ci-flakes the ledger holds for one check on one head sha. */
+export function ciFlakes(events, sha, check) {
+  let flakes = 0;
+  for (const e of events) {
+    if (e.event === 'ci-flake' && e.sha === sha && e.check === check) flakes += 1;
+  }
+  return flakes;
+}
+
+/**
+ * Whether a check on one head sha has been reclassified deterministic-red: it
+ * turned green after a re-run `FLAKE_LIMIT` times over one unchanged tree, so
+ * what its greens report is not the tree. Past that point the check earns no
+ * automatic re-run, whatever grant stands behind it — the re-run was the test
+ * of a flake, and there is no flake left to test.
+ *
+ * The key is the pair and nothing else. Two head shas on one check are two
+ * different trees, and a check is allowed to be a flake on each of them; two
+ * checks on one head sha are two different questions about that tree. Only the
+ * same question, asked of the same tree, answered both ways again and again,
+ * is a check whose answer means nothing (ADR-0008).
+ */
+export function deterministicRed(events, sha, check) {
+  return ciFlakes(events, sha, check) >= FLAKE_LIMIT;
 }
 
 /**
