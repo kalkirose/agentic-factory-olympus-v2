@@ -6,6 +6,10 @@ error park the run instead of closing it.
 Superseded in part by ADR-0022: only the first cycle of an implementation
 pass runs the full spectrum; later cycles run the targeted set and carry the
 greens no red reaches.
+Superseded in part by ADR-0038: the review panel is the project's
+`review.lenses`, the default panel drops architecture and minimality, and the
+security lens rides the operational seat instead of one of its own — so the
+fan-out below is stated at a width the harness no longer runs by default.
 Superseded in part by ADR-0022: the repair progress rule keys on finding
 identities — a round is a stall when it closes none of the findings the render
 before it left open — and not on the size of the open set, so the sections

@@ -13,7 +13,7 @@ import {
 } from '../telemetry/readers.mjs';
 import { readEscapeSet, escapesWindow } from '../telemetry/escapes.mjs';
 import { computeFrontier } from '../frontier/graph.mjs';
-import { ALL_LENSES } from '../lanes/review.mjs';
+import { ALL_LENSES } from '../lanes/lenses.mjs';
 
 // Mirrors the check watcher's green set; a red duration never measures the
 // green critical path.

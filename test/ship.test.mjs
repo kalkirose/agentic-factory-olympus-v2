@@ -323,7 +323,7 @@ function seatFixture(seats) {
 
 function furyClean() {
   const seats = {};
-  for (const seat of ['fury-spec', 'fury-code-shape', 'fury-operational', 'fury-security', 'fury-interface']) {
+  for (const seat of ['fury-spec', 'fury-code-shape', 'fury-operational', 'fury-interface']) {
     seats[seat] = () => ({ report: { findings: [], summary: 'clean' } });
   }
   return seats;

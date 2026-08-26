@@ -21,8 +21,8 @@ const REPORT = {
   proposals: [
     {
       shape: 'cut-candidate',
-      title: 'fury-security zero yield',
-      evidence: 'no confirmed security finding across the window',
+      title: 'minimality lens zero yield',
+      evidence: 'no confirmed minimality finding across the window',
       change: 'cut the lens; land a restoring tripwire in the same PR',
     },
   ],

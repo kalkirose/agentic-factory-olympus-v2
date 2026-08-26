@@ -120,7 +120,8 @@ Two levels; the ownership test decides placement.
   before it is taken to be dead (`seatSilenceMs`). The console edits it live;
   no PR.
 - **Project config** — one JSON versioned in the project repo: repo facts,
-  commands, gates, conventions, lane specifics, per-lane budget thresholds,
+  commands, gates, conventions, the judgment panel (`review.lenses`), lane
+  specifics, per-lane budget thresholds,
   the external credentials the work needs with the read-only probe that
   proves each one and the surfaces each must be wired on, the label rules a
   request's diff is measured against (`labels`), the workflow files the daemon
@@ -232,7 +233,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   progress — parks the run at once (`spec-gate-stalled`, same options as the
   cap park, remaining cap unspent). The round stamp carries the identities.
 - **Adversary**: throwaway wrong implementations, all evaluated to verdict, in
-  disposable worktrees. One wave a round by default;
+  disposable worktrees. The brief names the security dimensions beside the
+  behavior the spec states, so a suite that asserts nothing about
+  authorization or input trust shows a survivor and grows a test for it
+  (ADR-0038). One wave a round by default;
   `lanes.story.adversaryWaves` raises the count, and the launch pins the config
   blob, so a raise lands at the next launch and never mid-run. A survivor is a
   demonstrated suite gap: one targeted amendment round (a killing test per
@@ -353,14 +357,18 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   read inside one bounded deadline. A failed probe parks the provisioning gate
   on its own evidence and no layer re-runs; a clean probe stamps the fix and
   the cycle runs as it always did (ADR-0022).
-- **Fury round.** Six lenses on five seats (architecture + minimality merge
-  into one code-shape seat with per-lens reporting; interface fires only on
-  UI diffs). One round per pass, on the candidate tree, before the verdict
-  renders. No re-fan-out over a judged tree. The verifier confirms or refutes
-  each HIGH; only confirmed HIGHs enter the verdict (confirm-to-block).
+- **Fury round.** The project's panel (`review.lenses`) over the seats that
+  carry its lenses. The default panel is spec, operational, security and
+  interface on three seats: security rides the operational seat, interface
+  fires only on UI diffs, and architecture + minimality are out of the default
+  set, so the code-shape seat that carries them spawns only where a project
+  names them back (ADR-0038). One round per pass, on the candidate tree,
+  before the verdict renders. No re-fan-out over a judged tree. The verifier
+  confirms or refutes each HIGH; only confirmed HIGHs enter the verdict
+  (confirm-to-block).
 - **Repair-lane review.** Deterministic gates in full; judgment collapses to
-  one generalist review seat (all six lenses, diff-scoped, per-lens
-  reporting). The verifier fires only when HIGHs exist.
+  one generalist review seat (the same panel on one seat, diff-scoped,
+  per-lens reporting). The verifier fires only when HIGHs exist.
 
 ## Ship step
 

@@ -429,6 +429,20 @@ test('a fixture story reaches a valid freeze record with kills and dispositions'
   const adversaryCalls = fx.calls.filter((c) => c.seat === 'adversary');
   assert.equal(adversaryCalls.length, 3);
   assert.ok(adversaryCalls.every((c) => c.denyTools.includes('Edit(tests/**)')));
+  // The security dimensions ride every wave: the verdict panel holds no seat
+  // of its own for them, and a wave is where a missing assertion is cheapest
+  // to find.
+  for (const dimension of [
+    'authorization on every entry point',
+    'input trust',
+    'secrets',
+    'trust boundaries',
+  ]) {
+    assert.ok(
+      adversaryCalls.every((c) => c.prompt.includes(`- ${dimension}`)),
+      dimension,
+    );
+  }
   // The constitution reached the pre-freeze seats; the spec gate judges, so
   // it also carries the authority order. The adversary carries neither: its
   // brief is to write a wrong implementation on purpose.

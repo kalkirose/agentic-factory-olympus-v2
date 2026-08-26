@@ -70,7 +70,6 @@ test('the authority order reaches exactly the judging seats', () => {
     'fury-spec',
     'fury-code-shape',
     'fury-operational',
-    'fury-security',
     'fury-interface',
     'fury-verifier',
     'generalist-review',

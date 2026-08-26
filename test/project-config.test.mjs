@@ -101,12 +101,32 @@ test('defaults fill every missing section', () => {
   assert.deepEqual(filled.commands, {});
   assert.deepEqual(filled.gates, { tier1: [] });
   assert.deepEqual(filled.conventions, []);
+  assert.deepEqual(filled.review, { lenses: ['spec', 'operational', 'security', 'interface'] });
   assert.deepEqual(filled.lanes, {});
   assert.equal(filled.stack, null);
   assert.deepEqual(filled.tripwires, []);
   assert.equal(filled.constitutionPath, DEFAULT_CONSTITUTION_PATH);
   assert.deepEqual(filled.credentials, []);
   assert.equal(filled.closeout, null);
+});
+
+// The panel a project declares replaces the default one, which is how a cut
+// lens comes back. A name outside the vocabulary is refused rather than
+// dropped: dropping it shrinks the panel, and a shrunk panel judges less and
+// still says green.
+test('the review panel takes lens names from the closed set, and a declared set replaces the default', () => {
+  const restored = ['spec', 'architecture', 'minimality', 'operational', 'security', 'interface'];
+  assert.deepEqual(validateProjectConfig({ ...valid(), review: { lenses: restored } }), []);
+  assert.deepEqual(withProjectDefaults({ version: 1, review: { lenses: restored } }).review.lenses, restored);
+  assert.deepEqual(errorPaths({ ...valid(), review: { lenses: ['spec', 'style'] } }), [
+    'review.lenses[1]',
+  ]);
+  assert.deepEqual(errorPaths({ ...valid(), review: { lenses: ['spec', 'spec'] } }), [
+    'review.lenses[1]',
+  ]);
+  assert.deepEqual(errorPaths({ ...valid(), review: { lenses: [] } }), ['review.lenses']);
+  assert.deepEqual(errorPaths({ ...valid(), review: { lens: ['spec'] } }), ['review.lens']);
+  assert.deepEqual(errorPaths({ ...valid(), review: ['spec'] }), ['review']);
 });
 
 test('the close-out learning block takes two absolute paths, or is absent', () => {

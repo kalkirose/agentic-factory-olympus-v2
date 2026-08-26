@@ -36,6 +36,7 @@ import {
 import { testEditDenyRules } from '../seats/boundary.mjs';
 import { laneDiffPolicy } from '../seats/diffpolicy.mjs';
 import { noCriteriaMessage, parseIntentCard } from './card.mjs';
+import { SECURITY_DIMENSIONS } from './lenses.mjs';
 import { runCommand } from './exec.mjs';
 import { probeCredentials } from './probes.mjs';
 import { readInheritance } from './resume.mjs';
@@ -1545,11 +1546,19 @@ function redStateFixRole(base, brief) {
   ].join('\n');
 }
 
+// The adversary brief. The security dimensions ride it because a wave is where
+// a missing assertion is cheapest to find: an implementation the suite cannot
+// tell from a right one on authorization or input trust is a gap the amendment
+// round closes, and the test that closes it is frozen against every candidate
+// after it (ADR-0038).
 function adversaryRole(base) {
   return [
     'You work in a disposable worktree; nothing you write ships.',
     `Write a plausible wrong implementation against the spec at: ${base.specPath}`,
     'Goal: the acceptance suite passes while the behavior violates the spec.',
+    'The dimensions below are wrong in ways a suite rarely asserts on, so weigh them',
+    'beside the behavior the spec names when you pick your wrongness:',
+    ...SECURITY_DIMENSIONS.map((dimension) => `- ${dimension}`),
     'Do not edit or delete test files; the suite is restored before evaluation.',
     'Report your approach and the deliberate wrongness.',
   ].join('\n');

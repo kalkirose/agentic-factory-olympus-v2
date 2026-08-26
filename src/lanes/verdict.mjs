@@ -64,6 +64,7 @@ import { cycleRepeat, openIdentities } from '../ledger/cycles.mjs';
 import { runSpectrum, persistentReds, cyclePlan } from './spectrum.mjs';
 import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview } from './review.mjs';
+import { panelLenses } from './lenses.mjs';
 import { freezeAnchor } from './resume.mjs';
 import { parseIntentCard } from './card.mjs';
 import { SUITE_SCHEMA, SPEC_AMEND_SCHEMA, specLintDefects } from './story.mjs';
@@ -1538,6 +1539,9 @@ async function verdictBase(ctx, mode) {
       env: runEnv(ctx, config),
       testPaths: config.repo.testPaths,
       uiPaths: config.repo.uiPaths ?? [],
+      // The judgment panel this run is judged by, pinned at the launch blob
+      // like every other config value the lane reads (ADR-0038).
+      lenses: panelLenses(config),
       // The freeze's exclusions: test-path files the spec assigned to the dev
       // seat. They ride into the deny rules and out of every restore, and
       // nowhere else — the rest of the test paths stay the frozen suite.
@@ -1587,6 +1591,7 @@ async function verdictBase(ctx, mode) {
     env: runEnv(ctx, config),
     testPaths: config.repo.testPaths ?? [],
     uiPaths: config.repo.uiPaths ?? [],
+    lenses: panelLenses(config),
     specRef: ticketPath,
     suiteSha: null,
     resetSha: ctx.payload.baseSha,

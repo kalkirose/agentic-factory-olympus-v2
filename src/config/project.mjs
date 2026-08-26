@@ -4,6 +4,7 @@
 // ownership test places every value: describes the project's code → here;
 // describes the machine → instance config.
 import { TRIPWIRE_METRICS, BREACH_OPS } from '../tripwires/registry.mjs';
+import { ALL_LENSES, DEFAULT_LENSES } from '../lanes/lenses.mjs';
 import { RUN_EVENTS, INSTANCE_EVENTS, ESCAPES_EVENTS } from '../ledger/registry.mjs';
 
 const KNOWN_EVENTS = new Set([...RUN_EVENTS, ...INSTANCE_EVENTS, ...ESCAPES_EVENTS]);
@@ -28,6 +29,9 @@ export function defaultProjectConfig() {
     gates: { tier1: [] },
     // one convention per line; prompt assembly consumes these
     conventions: [],
+    // the lenses the judgment review carries; naming a lens the default panel
+    // leaves out is what puts it back
+    review: { lenses: [...DEFAULT_LENSES] },
     // lane name → lane-specific settings; consuming milestones validate deeper
     lanes: {},
     // compose template for the per-run stack; null = the project has no stack
@@ -83,6 +87,7 @@ export function validateProjectConfig(config, { launch = false } = {}) {
   validateCommands(config.commands, err);
   validateGates(config.gates, config.commands, err);
   validateStringList(config.conventions, 'conventions', err);
+  validateReview(config.review, err);
   validateLanes(config.lanes, config.commands, err);
   validateStack(config.stack, err);
   validateGraph(config.graph, err);
@@ -224,6 +229,36 @@ function validateStoryLane(lane, commands, err) {
       err('lanes.story.adversaryWaves', 'must be a positive integer wave count');
     }
   }
+}
+
+// The judgment panel: the lenses the Fury round and the generalist seat carry.
+// The set is closed — the review implements every name it admits — and an
+// unknown name is refused rather than ignored, because ignoring it shrinks the
+// panel silently. A shrunk panel judges less and still says green, which is the
+// dangerous direction for a gate to be wrong in.
+function validateReview(review, err) {
+  if (review === undefined || review === null) return;
+  if (!isPlainObject(review)) {
+    err('review', 'must be an object');
+    return;
+  }
+  for (const key of Object.keys(review)) {
+    if (key !== 'lenses') err(`review.${key}`, 'unknown key: lenses');
+  }
+  if (review.lenses === undefined) return;
+  if (!isStringList(review.lenses) || review.lenses.length === 0) {
+    err('review.lenses', 'must be a non-empty array of lens names');
+    return;
+  }
+  const seen = new Set();
+  review.lenses.forEach((lens, i) => {
+    if (!ALL_LENSES.includes(lens)) {
+      err(`review.lenses[${i}]`, `must name a lens the review implements: ${ALL_LENSES.join(' | ')}`);
+    } else if (seen.has(lens)) {
+      err(`review.lenses[${i}]`, `duplicate lens: ${lens}`);
+    }
+    seen.add(lens);
+  });
 }
 
 function validateStack(stack, err) {
@@ -608,6 +643,7 @@ export function withProjectDefaults(config) {
     ...config,
     repo: { ...base.repo, ...config.repo },
     gates: { ...base.gates, ...config.gates },
+    review: { ...base.review, ...config.review },
     stack: config.stack ?? null,
     graph: config.graph ? { phases: [{ name: 'launch' }], ...config.graph } : null,
     closeout: config.closeout ?? null,

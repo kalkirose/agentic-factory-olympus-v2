@@ -297,13 +297,21 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
     'card-sweep',
     'reconcile-judge',
     'fury-spec',
-    'fury-code-shape',
     'fury-operational',
-    'fury-security',
   ]) {
     assert.ok(seats.includes(seat), `the ${seat} seat never ran`);
   }
   assert.ok(!seats.includes('fury-interface'), 'the interface seat ran on a diff with no UI path');
+  // The default panel holds neither cut lens, so the seat that carries them
+  // never spawns and the security lens rides the operational seat.
+  assert.ok(!seats.includes('fury-code-shape'), 'the cut lenses spawned a seat');
+  assert.ok(!seats.includes('fury-security'), 'a standalone security seat ran');
+  const operational = calls.find((c) => c.seat === 'fury-operational').prompt;
+  assert.ok(operational.includes('- security: authorization on every entry point'));
+  // The adversary waves carry the same dimensions into the suite.
+  const adversary = calls.find((c) => c.seat === 'adversary').prompt;
+  assert.ok(adversary.includes('- authorization on every entry point'));
+  assert.ok(adversary.includes('- trust boundaries'));
 
   // The machine's credential follows suite execution and nothing else.
   assert.equal(calls.find((c) => c.seat === 'dev').secret, true);
@@ -311,7 +319,7 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
   const spawned = events.filter((e) => e.event === 'seat-spawned');
   assert.ok(spawned.find((e) => e.seat === 'spec-gate').envStripped >= 1);
   assert.equal(spawned.find((e) => e.seat === 'dev').envStripped, undefined);
-  // Four Fury seats against two model slots: the fan-out queues, never fails.
+  // The Fury panel against one model slot: the fan-out queues, never fails.
   assert.ok(
     events.some((e) => e.event === 'semaphore-wait'),
     'the model semaphore never queued a seat',

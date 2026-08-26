@@ -210,6 +210,7 @@ function verdictFixture(t, opts) {
     suiteFiles = { 'tests/feature.test.mjs': STRONG_TEST },
     originFiles = {},
     seedExtra = null,
+    review = undefined,
     diffPolicy = undefined,
     specText = undefined,
     exclusions = [],
@@ -224,6 +225,7 @@ function verdictFixture(t, opts) {
       gates: { tier1: gates },
       lanes: { story: { suiteCommand: 'suite' } },
       stack,
+      ...(review && { review }),
       ...(diffPolicy && { diffPolicy }),
     }),
     'src/base.mjs': 'export const base = 1;\n',
@@ -310,9 +312,11 @@ function readRecord(paths, runId, cycle) {
 
 // Fixture seat behaviors shared across scenarios.
 
+// Every seat a panel can put on the fan-out. The code-shape seat is out of the
+// default panel and only fires where a scenario configures its lenses back on.
 function furyClean() {
   const seats = {};
-  for (const seat of ['fury-spec', 'fury-code-shape', 'fury-operational', 'fury-security', 'fury-interface']) {
+  for (const seat of ['fury-spec', 'fury-code-shape', 'fury-operational', 'fury-interface']) {
     seats[seat] = () => ({ report: { findings: [], summary: 'clean' } });
   }
   return seats;
@@ -388,10 +392,10 @@ test('a clean implementation ships green in one cycle; advisory findings never b
   const seats = {
     dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
     ...furyClean(),
-    'fury-code-shape': () => ({
+    'fury-operational': () => ({
       report: {
         findings: [
-          { lens: 'minimality', severity: 'MED', finding: 'duplicated helper', evidence: 'src/feature.mjs:1' },
+          { lens: 'operational', severity: 'MED', finding: 'no retry handling', evidence: 'src/feature.mjs:1' },
         ],
         summary: 'one advisory',
       },
@@ -426,15 +430,26 @@ test('a clean implementation ships green in one cycle; advisory findings never b
   assert.equal(record.verdict, 'green');
   assert.equal(record.spectrum.length, 3);
   assert.deepEqual(record.findings, []);
-  // Four Fury seats fired once each; no interface (no UI paths), no verifier,
-  // no triage, no generalist.
+  // The default panel fired once each; no interface (no UI paths), no
+  // verifier, no triage, no generalist.
   const seatsFired = fx.calls.map((c) => c.seat);
-  for (const seat of ['fury-spec', 'fury-code-shape', 'fury-operational', 'fury-security']) {
+  for (const seat of ['fury-spec', 'fury-operational']) {
     assert.equal(seatsFired.filter((s) => s === seat).length, 1);
   }
   for (const seat of ['fury-interface', 'fury-verifier', 'verdict-triage', 'generalist-review']) {
     assert.ok(!seatsFired.includes(seat), `${seat} must not fire`);
   }
+  // The cut lenses spawn nothing: no code-shape seat, and no seat anywhere is
+  // asked to judge architecture or minimality.
+  assert.ok(!seatsFired.includes('fury-code-shape'), 'the cut lenses spawned a seat');
+  for (const call of fx.calls) {
+    assert.ok(!call.prompt.includes('- architecture:'), call.seat);
+    assert.ok(!call.prompt.includes('- minimality:'), call.seat);
+  }
+  // Security folded onto the operational seat rather than out of the panel.
+  const operational = fx.calls.find((c) => c.seat === 'fury-operational').prompt;
+  assert.ok(operational.includes('- operational: failure paths'));
+  assert.ok(operational.includes('- security: authorization on every entry point'));
   // The dev seat carried the test-edit deny rules.
   const dev = fx.calls.find((c) => c.seat === 'dev');
   assert.ok(dev.denyTools.includes('Edit(tests/**)'));
@@ -474,7 +489,7 @@ test('the constitution reaches the working seats, and the judges get the authori
   assert.ok(promptOf('dev').includes(line));
   assert.ok(!promptOf('dev').includes('Authority order'));
   // Every judging seat takes both.
-  for (const seat of ['fury-spec', 'fury-security', 'fury-verifier']) {
+  for (const seat of ['fury-spec', 'fury-operational', 'fury-verifier']) {
     assert.ok(promptOf(seat).includes(line), seat);
     assert.match(promptOf(seat), /Authority order, highest first: the constitution above/);
     assert.match(promptOf(seat), /blocking finding against the spec/);
@@ -1439,7 +1454,10 @@ test('a gate mixing an acked harness finding with an env one parks all the same'
   assert.ok(!events.some((e) => e.event === 'finding-ack-used'));
 });
 
-test('confirm-to-block: only verifier-confirmed HIGHs enter the verdict; repair resolves them', async (t) => {
+// The security lens has no seat of its own, and a security defect on the
+// candidate still blocks the ship: the operational seat carries the lens, and a
+// confirmed HIGH under it takes the code arm like any other.
+test('confirm-to-block: only verifier-confirmed HIGHs enter the verdict, and a candidate security defect is one', async (t) => {
   const seats = {
     dev: () => ({
       files: { 'src/feature.mjs': GOOD_FEATURE, 'src/ui/widget.mjs': 'export const w = 1;\n' },
@@ -1450,16 +1468,9 @@ test('confirm-to-block: only verifier-confirmed HIGHs enter the verdict; repair 
       report: {
         findings: [
           { lens: 'operational', severity: 'HIGH', finding: 'no retry handling', evidence: 'src/feature.mjs:1' },
-        ],
-        summary: 'one',
-      },
-    }),
-    'fury-security': () => ({
-      report: {
-        findings: [
           { lens: 'security', severity: 'HIGH', finding: 'injection risk in query', evidence: 'src/feature.mjs:1' },
         ],
-        summary: 'one',
+        summary: 'two',
       },
     }),
     'fury-verifier': verifierSeat((item) =>
@@ -1474,8 +1485,10 @@ test('confirm-to-block: only verifier-confirmed HIGHs enter the verdict; repair 
   const { runId } = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
-  // The UI diff pulled the conditional interface seat in.
+  // The UI diff pulled the conditional interface seat in; no seat carried the
+  // security lens alone.
   assert.equal(fx.calls.filter((c) => c.seat === 'fury-interface').length, 1);
+  assert.ok(!fx.calls.some((c) => c.seat === 'fury-security'), 'a standalone security seat fired');
   // Refuted HIGH → advisory; confirmed HIGH → blocks.
   const findings = events.filter((e) => e.event === 'finding');
   const refuted = findings.find((e) => e.lens === 'operational');
@@ -1501,7 +1514,10 @@ test('confirm-to-block: only verifier-confirmed HIGHs enter the verdict; repair 
   assert.equal(events.filter((e) => e.event === 'repair-round').length, 1);
 });
 
-test('stall → fresh pass → second stall parks; abandon closes the run', async (t) => {
+// The cut is a config flip and not a deletion. A project that wants the two
+// lenses back names them, and the seat that carries them returns with its
+// blocking route intact.
+test('a project that names the cut lenses gets the code-shape seat back, and it blocks', async (t) => {
   const seats = {
     dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
     ...furyClean(),
@@ -1509,6 +1525,51 @@ test('stall → fresh pass → second stall parks; abandon closes the run', asyn
       report: {
         findings: [
           { lens: 'architecture', severity: 'HIGH', finding: 'logic in the wrong layer', evidence: 'src/feature.mjs:1' },
+        ],
+        summary: 'one',
+      },
+    }),
+    'fury-verifier': verifierSeat((item) =>
+      item.mode === 'confirm' ? { verdict: 'confirmed' } : { verdict: 'resolved' },
+    ),
+    'repair-dev': () => ({ report: { summary: 'moved' } }),
+    'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    review: {
+      lenses: ['spec', 'architecture', 'minimality', 'operational', 'security', 'interface'],
+    },
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The restored seat fired once, with both of its lenses.
+  const codeShape = fx.calls.filter((c) => c.seat === 'fury-code-shape');
+  assert.equal(codeShape.length, 1);
+  assert.ok(codeShape[0].prompt.includes('- architecture: placement, coupling'));
+  assert.ok(codeShape[0].prompt.includes('- minimality: reinvention'));
+  // Its HIGH blocked cycle 1; the repair round closed it.
+  const confirmed = events.find((e) => e.event === 'finding' && e.lens === 'architecture');
+  assert.equal(confirmed.confirmed, true);
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.deepEqual(renders[0].open, [confirmed.id]);
+  assert.equal(renders[1].verdict, 'green');
+  assert.equal(events.filter((e) => e.event === 'repair-round').length, 1);
+  // The generalist seat of the repair cycle carries the restored set too.
+  const generalist = fx.calls.find((c) => c.seat === 'generalist-review').prompt;
+  assert.ok(generalist.includes('- architecture: placement, coupling'));
+  assert.ok(generalist.includes('- minimality: reinvention'));
+});
+
+test('stall → fresh pass → second stall parks; abandon closes the run', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    ...furyClean(),
+    'fury-spec': () => ({
+      report: {
+        findings: [
+          { lens: 'spec', severity: 'HIGH', finding: 'the criterion is unimplemented', evidence: 'src/feature.mjs:1' },
         ],
         summary: 'one',
       },
@@ -1558,8 +1619,8 @@ test('stall → fresh pass → second stall parks; abandon closes the run', asyn
   assert.ok(freshDev.prompt.includes('stalled and was discarded'));
   // The Fury fan-out fired once per implementation pass.
   assert.deepEqual(
-    fx.calls.filter((c) => c.seat === 'fury-code-shape').map((c) => c.label),
-    ['fury-code-shape-c1', 'fury-code-shape-c3'],
+    fx.calls.filter((c) => c.seat === 'fury-spec').map((c) => c.label),
+    ['fury-spec-c1', 'fury-spec-c3'],
   );
   // No layer was ever red, so a repair cycle targets nothing and every green
   // carries. An open finding holds the confirmation sweep back: nothing is
@@ -1752,7 +1813,7 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
     'generalist-review': () => ({
       report: {
         findings: [
-          { lens: 'minimality', severity: 'LOW', finding: 'inline constant', evidence: 'src/g.mjs:1' },
+          { lens: 'operational', severity: 'LOW', finding: 'no failure path', evidence: 'src/g.mjs:1' },
         ],
         summary: 'advisory only',
       },

@@ -38,12 +38,13 @@ export const SEATS = Object.freeze({
   // implementation
   dev: seat({ web: true, explore: 2, executesSuite: true }),
   'repair-dev': seat({ web: true, explore: 2, executesSuite: true }),
-  // verdict
+  // verdict. Which of the Fury seats a run spawns follows the project's
+  // review panel: the code-shape seat sits out of the default panel and
+  // returns with the lenses it carries (ADR-0038).
   'verdict-triage': seat({ model: CERTIFICATION_MODEL }),
   'fury-spec': seat(),
   'fury-code-shape': seat(),
   'fury-operational': seat(),
-  'fury-security': seat(),
   'fury-interface': seat(),
   'fury-verifier': seat({ model: CERTIFICATION_MODEL }),
   'generalist-review': seat(),

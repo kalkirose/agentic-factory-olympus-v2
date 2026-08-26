@@ -1,15 +1,20 @@
-// The judgment review machinery: the Fury round (six lenses on five seats,
-// interface conditional on UI diffs, fully parallel), the generalist review
-// seat (all six lenses, diff-scoped — repair cycles and the repair lane),
-// and the verifier. Confirm-to-block: a lane finding never blocks alone; the
-// verifier confirms or refutes each HIGH against the code, and only
-// confirmed HIGHs enter the verdict. Sub-HIGH findings never block and are
-// never verified — they land in the run ledger as advisory material.
+// The judgment review machinery: the Fury round (the panel's lenses over the
+// seats that carry them, interface conditional on UI diffs, fully parallel),
+// the generalist review seat (the same lenses on one seat, diff-scoped —
+// repair cycles and the repair lane), and the verifier. Confirm-to-block: a
+// lane finding never blocks alone; the verifier confirms or refutes each HIGH
+// against the code, and only confirmed HIGHs enter the verdict. Sub-HIGH
+// findings never block and are never verified — they land in the run ledger as
+// advisory material.
 //
-// No re-fan-out over a judged tree: the five-seat round fires once per
-// implementation pass; every later cycle of the pass reviews the repair diff
-// with the generalist seat and resolution-checks prior confirmed HIGHs.
+// The panel is the project's `review.lenses`, resolved at the lane base; the
+// seat a lens rides and the default set live in the lens registry (ADR-0038).
+//
+// No re-fan-out over a judged tree: the fan-out fires once per implementation
+// pass; every later cycle of the pass reviews the repair diff with the
+// generalist seat and resolution-checks prior confirmed HIGHs.
 import { runReportPath } from '../daemon/home.mjs';
+import { LENS_CRITERIA, furyPanel } from './lenses.mjs';
 import {
   ACTOR,
   runEvents,
@@ -21,25 +26,6 @@ import {
   briefLines,
   gist,
 } from './shared.mjs';
-
-export const FURY_SEATS = Object.freeze({
-  'fury-spec': ['spec'],
-  'fury-code-shape': ['architecture', 'minimality'],
-  'fury-operational': ['operational'],
-  'fury-security': ['security'],
-  'fury-interface': ['interface'],
-});
-
-export const ALL_LENSES = Object.freeze(Object.values(FURY_SEATS).flat());
-
-const LENS_CRITERIA = {
-  spec: 'spec: the diff implements exactly the validated spec — nothing missing, nothing extra.',
-  architecture: 'architecture: placement, coupling, abstraction, domain language.',
-  minimality: 'minimality: reinvention, unearned generality, dead weight, comment discipline.',
-  operational: 'operational: failure paths, data-layer discipline, idempotency, observability.',
-  security: 'security: authorization on every entry point, input trust, secrets, trust boundaries.',
-  interface: 'interface: rendered screens against the design reference.',
-};
 
 export function reviewSchema(lenses) {
   return {
@@ -92,13 +78,14 @@ export const VERIFIER_SCHEMA = {
 };
 
 /**
- * The five-seat Fury fan-out for one implementation pass. Fires the four
- * always-on seats plus the interface seat when the diff touches a UI path;
- * all seats run in parallel. HIGHs go to the verifier; findings stamp once
- * per cycle. Returns the confirmed HIGHs.
+ * The Fury fan-out for one implementation pass. Fires every seat the panel
+ * puts on it, minus the interface seat when the diff touches no UI path; all
+ * seats run in parallel. HIGHs go to the verifier; findings stamp once per
+ * cycle. Returns the confirmed HIGHs.
  */
 export async function furyRound(ctx, base, { cycle, diffText, diffFiles }) {
-  const seats = Object.keys(FURY_SEATS).filter(
+  const panel = furyPanel(base.lenses);
+  const seats = Object.keys(panel).filter(
     (seat) =>
       seat !== 'fury-interface' ||
       (base.uiPaths.length > 0 && diffFiles.some((f) => underAny(f, base.uiPaths))),
@@ -108,8 +95,8 @@ export async function furyRound(ctx, base, { cycle, diffText, diffFiles }) {
       reviewSeat(ctx, {
         seat,
         label: `${seat}-c${cycle}`,
-        schema: reviewSchema(FURY_SEATS[seat]),
-        roleBlock: furyRole(seat, base, diffText),
+        schema: reviewSchema(panel[seat]),
+        roleBlock: furyRole(panel[seat], base, diffText),
         cwd: base.worktree,
         env: base.env,
         constitution: base.constitution,
@@ -125,16 +112,16 @@ export async function furyRound(ctx, base, { cycle, diffText, diffFiles }) {
 }
 
 /**
- * The generalist review seat: all six lenses over one diff. Used on repair
- * cycles (story lane) and as the only judgment seat of the repair lane. The
- * verifier fires only when HIGHs exist or prior confirmed HIGHs need a
+ * The generalist review seat: the panel's whole lens set over one diff. Used on
+ * repair cycles (story lane) and as the only judgment seat of the repair lane.
+ * The verifier fires only when HIGHs exist or prior confirmed HIGHs need a
  * resolution-check, so a clean small fix costs one review agent.
  */
 export async function generalistReview(ctx, base, { cycle, diffText, priorConfirmed }) {
   const outcome = await reviewSeat(ctx, {
     seat: 'generalist-review',
     label: `generalist-review-c${cycle}`,
-    schema: reviewSchema(ALL_LENSES),
+    schema: reviewSchema(base.lenses),
     roleBlock: generalistRole(base, diffText),
     cwd: base.worktree,
     env: base.env,
@@ -320,8 +307,7 @@ function verifierCoverageDefects(items, results) {
 
 // -- role blocks -------------------------------------------------------------
 
-function furyRole(seat, base, diffText) {
-  const lenses = FURY_SEATS[seat];
+function furyRole(lenses, base, diffText) {
   return [
     `Review the candidate implementation diff through these lenses, and label every finding with its lens:`,
     ...lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
@@ -336,8 +322,8 @@ function furyRole(seat, base, diffText) {
 
 function generalistRole(base, diffText) {
   return [
-    'Review the diff below through all six lenses, and label every finding with its lens:',
-    ...ALL_LENSES.map((lens) => `- ${LENS_CRITERIA[lens]}`),
+    'Review the diff below through these lenses, and label every finding with its lens:',
+    ...base.lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
     `The spec: ${base.specRef}`,
     'Judge the diff only. Do not fix anything; do not widen into unchanged code.',
     'Severity HIGH means the finding must block the ship. Cite evidence (file and line, or spec section) for every finding.',

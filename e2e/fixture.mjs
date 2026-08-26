@@ -240,9 +240,9 @@ export function buildFixture({ prefix, scenario }) {
       {
         version: 1,
         logLevel: 'info',
-        // Two seats of the default model at once, so the Fury fan-out queues
-        // on the semaphore instead of running four wide.
-        semaphores: { 'claude-opus-5': 2, 'claude-fable-5': 2 },
+        // One seat of the default model at once, so the Fury fan-out queues on
+        // the semaphore instead of running the panel wide.
+        semaphores: { 'claude-opus-5': 1, 'claude-fable-5': 2 },
         claudeCommand: ['node', SEAT_STUB],
         ghCommand: ['node', GH_STUB],
         secretEnv: ['E2E_SECRET_*'],
