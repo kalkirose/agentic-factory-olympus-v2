@@ -19,6 +19,11 @@ against, and no seat under that freeze can make the write legal by trying
 again. It is not a defect, it blocks nothing, and the capture commits the
 allowed set.
 
+A **swept path** is neither. It is a file a test run generated under a frozen
+path, that the freeze never held: nobody authored it, so reverting it takes
+nothing back, and the capture clears it before it decides what was taken back
+at all.
+
 - **Three tiers, declared per lane in project config.** The optional
   `diffPolicy` block keys tiers by lane name (`story`, `repair`). A changed
   path matching `deniedPaths` is a violation. A path matching
@@ -49,11 +54,30 @@ allowed set.
   `diff-policy-violation` carries it by default, and the re-freeze that
   re-takes the frozen surface owns it. A path the lane declared
   `recapturablePaths` stamps the quiet `diff-policy-recapture` instead: a run
-  event, no loud stream, no resolution owed.
-- **The hard tiers outrank the quiet class.** A take-back that `deniedPaths`
-  or `forbiddenPatterns` also match stays loud whatever `recapturablePaths`
-  says. Tamper protection sits on the code and config that decide whether a
-  candidate is green, and no glob widening reaches it.
+  event, no loud stream, no resolution owed. Both records carry
+  `kind: 'capture-takeback'`, the closed word for the defect (ADR-0008), so a
+  surface that keeps producing take-backs is a count and not a reading job.
+- **A generated artifact is swept, not taken back.** A frozen write under the
+  lane's `sweptPaths` that the freeze anchor does not hold is a file a test run
+  produced, not work a seat authored. The restore removes it with every other
+  frozen write, and the sweep runs before the classes are decided: no take-back
+  of either class, nothing in the commit record, nothing in a later brief. The
+  quiet `capture-swept` names what went, because the capture removed files from
+  a tree under judgment and nothing leaves a capture in silence.
+  `sweptPaths` defaults to the screenshot directory a browser-mode runner
+  writes to; a lane that declares its own list replaces the default, and a lane
+  that declares an empty one sweeps nothing.
+- **The freeze decides artifact from baseline.** A path the freeze anchor holds
+  is committed work whatever directory it sits in, so a seat rewriting a
+  committed visual baseline is a take-back and stays one. Only a file the
+  anchor does not hold can be swept. The anchor is the sha the capture's own
+  restore uses, so a re-freeze that commits an artifact makes every later write
+  to it a take-back again.
+- **The hard tiers outrank the quiet class, and the sweep.** A take-back that
+  `deniedPaths` or `forbiddenPatterns` also match stays loud whatever
+  `recapturablePaths` or `sweptPaths` says. Tamper protection sits on the code
+  and config that decide whether a candidate is green, and no glob widening
+  reaches it.
 - **A take-back reaches downstream on the record, in both classes.** The
   capture record carries the dropped paths and the wording; the
   implementation commit record carries the drops of its own pass, including a
@@ -214,6 +238,40 @@ this is a standing property of a directory. A spec that does name the file
 gets a better outcome anyway, since a declared baseline is a freeze exclusion
 and survives the capture whole.
 
+## Why a generated artifact is swept before it is classed
+
+The quiet class made the take-back of a machine-re-taken artifact cost no
+alert. It did not make it cost nothing.
+
+A window of five ships carried a dropped-screenshot list on four of them. One
+run took sixty-three back, another twenty-seven, another fifteen. Every one of
+those lists rode the capture record, the commit record, the verdict record and
+the triage brief; a triage seat read one and reported the loss as a defect of
+the machinery, which was answered with a standing acknowledgment, which had to
+keep answering it. The class was correct throughout. What it could not fix is
+that all of it was about files that had never existed until a red test run
+wrote them.
+
+A take-back is the capture refusing to discard a seat's work in silence. Where
+the file is a screenshot a browser-mode runner drops for each failing test,
+there is no work and there is no discard: the freeze does not hold the file,
+the restore removes it whether or not anybody records it, and every sentence
+downstream is about a loss that did not happen. Counting it as a take-back
+makes the count of take-backs mean nothing, which is the same disease the quiet
+class was invented to treat, one level down.
+
+So the sweep runs on the take-back set before it is classed, and it turns on
+two facts the capture already has: where the lane says a runner drops output,
+and what the freeze holds. Neither is a judgment about the change. A committed
+baseline under the very same glob is still a take-back, because the freeze
+holds it — that is the case the quiet class exists for, and the sweep does not
+touch it.
+
+The record stays, because the capture removed files from a tree under judgment.
+It is quiet, it names what went, and no later brief carries it: the difference
+between this and a take-back is not how loudly the loss is reported but whether
+a loss is being reported at all.
+
 ## Why the code that judges belongs behind the gate
 
 Gate scripts, package script definitions and test-runner configuration decide
@@ -282,6 +340,20 @@ stamps loud and the repeats stamp quiet, so a novel loss is still announced
 and a re-rendered surface is announced once. Trigger: one run that ships a
 wrong artifact whose only trace was a quiet record. Reversal cost: low, one
 count over the run's own events at the record site.
+
+If the sweep turns out to clear a file somebody needed — a generated artifact
+that a later step reads, or a runner whose output directory holds more than
+output — the lane sets `sweptPaths: []` and every file under it is a take-back
+again, in whichever class the tiers put it. Trigger: one run whose seat reports
+work missing under a swept path. Reversal cost: none in code, one config line;
+the classes and their records are unchanged underneath.
+
+If the default proves wrong for a repository — a project that commits its
+visual baselines nowhere near the screenshot directory, or one that generates
+into a directory the default does not name — the lane declares its own
+`sweptPaths` and the default stops applying. Trigger: swept records naming
+files the owner expected to be judged, or take-back records that keep naming
+one generated directory. Reversal cost: none in code, one config line.
 
 If reading the class back out of a finding's prose proves too loose — a
 sentence that mentions a re-capturable directory in passing quieting a defect

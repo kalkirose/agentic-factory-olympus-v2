@@ -18,9 +18,10 @@ work is derived from ledgers rather than held by whoever noticed it.
   append and refused when it is a word the registry does not hold. The
   category stays what it always was — a routing hint, seven broad classes —
   and the defect line stays the prose account. The kind is neither: it is the
-  same word the `gate-integrity` record used hours earlier, so a defect the
-  harness observed and then merged reads as one thing in two ledgers rather
-  than two sentences a human has to recognize as the same. The breach
+  same word the record that first met the defect used hours earlier — a
+  `gate-integrity` record, or the record of the step that observed it — so a
+  defect the harness saw and then merged reads as one thing in two ledgers
+  rather than two sentences a human has to recognize as the same. The breach
   conversion carries it over from the request's own record, `readEscapeSet`
   surfaces it, and the repair ticket prints it. Most escapes carry none, which
   is the honest answer for a defect in a product nobody has a vocabulary for.

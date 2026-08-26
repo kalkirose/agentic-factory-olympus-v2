@@ -8,6 +8,8 @@ import { scaffoldHome, runLedgerPath, archivedRunLedgerPath } from '../src/daemo
 import { readEvents } from '../src/ledger/ledger.mjs';
 import {
   DEFECT_KINDS,
+  GATE_INTEGRITY_KINDS,
+  OBSERVED_DEFECT_KINDS,
   LOUD_EVENTS,
   RUN_EVENTS,
   INSTANCE_EVENTS,
@@ -64,11 +66,37 @@ test('every closed defect kind that reaches a loud record has a rule of its own'
   // record the sweep walks past for ever, which is the state the vocabulary
   // exists to end.
   const rules = LOUD_OWNERSHIP['gate-integrity'];
-  for (const kind of DEFECT_KINDS) {
+  for (const kind of GATE_INTEGRITY_KINDS) {
     const rule = rules.find((r) => r.match?.({ kind }));
     assert.ok(rule, `no gate-integrity rule for kind ${kind}`);
     assert.equal(rule.name, kind);
   }
+});
+
+test('a kind a step stamps on its own record owes the gate-integrity table nothing', () => {
+  // These classify a record that already exists and already carries whatever
+  // loudness it is owed. Asking the gate-integrity table for a rule would be
+  // asking who answers a word, and nobody answers a word.
+  const rules = LOUD_OWNERSHIP['gate-integrity'];
+  for (const kind of OBSERVED_DEFECT_KINDS) {
+    assert.ok(DEFECT_KINDS.has(kind));
+    assert.ok(!GATE_INTEGRITY_KINDS.has(kind));
+    assert.equal(rules.find((r) => r.match?.({ kind })), undefined);
+  }
+});
+
+test('a take-back is owned by what the record holds, not by the word for it', () => {
+  // The kind rides the loud take-back record. The re-freeze still owns it: a
+  // record answers to the event that settles what it reports, and the word is
+  // there to be counted.
+  const takeBack = line('diff-policy-violation', {
+    violations: [],
+    dropped: ['tests/a.test.mjs'],
+    kind: 'capture-takeback',
+  });
+  assert.deepEqual(ownedResolutions([takeBack, line('re-freeze', { sha: 'abc' })]), [
+    { resolves: takeBack.seq, owner: 're-freeze' },
+  ]);
 });
 
 test('the merge of a request answers the labels it was opened without', () => {

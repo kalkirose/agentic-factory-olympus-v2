@@ -37,12 +37,16 @@ const LINE_LIMIT = 65536;
  * @param {string[]} argv
  * @param {{cwd?: string, env?: object, outputLimit?: number}} [opts]
  * @returns {Promise<{code: number|null, signal?: string|null, output: string,
+ *   truncated: boolean,
  *   parts: Array<{name: string, failed: boolean, output: string}>,
  *   error?: string}>}
  *   `code` is null when the command could not run at all (spawn error) —
  *   an environment defect, never a verdict about the tree under test.
  *   `parts` is what the command said about its own parts, in the order it
  *   opened them; empty for a command that said nothing.
+ *   `truncated` says the stream outgrew the bound, so `output` is a tail and
+ *   what the caller holds is not what the command printed. The caller decides
+ *   what that costs; this module never does.
  */
 export function runCommand(argv, { cwd, env, outputLimit = 4000 } = {}) {
   if (!Array.isArray(argv) || argv.length === 0) {
@@ -59,7 +63,7 @@ export function runCommand(argv, { cwd, env, outputLimit = 4000 } = {}) {
     try {
       spec = resolveArgv(argv, { env: base });
     } catch (error) {
-      resolve({ code: null, output: '', parts: [], error: error.message });
+      resolve({ code: null, output: '', truncated: false, parts: [], error: error.message });
       return;
     }
     const child = spawn(spec.file, spec.args, {
@@ -71,6 +75,7 @@ export function runCommand(argv, { cwd, env, outputLimit = 4000 } = {}) {
     });
     let output = '';
     let pending = '';
+    let truncated = false;
     const parts = [];
     let current = null;
 
@@ -88,7 +93,9 @@ export function runCommand(argv, { cwd, env, outputLimit = 4000 } = {}) {
     };
 
     const keep = (text) => {
-      output = (output + text).slice(-outputLimit);
+      const grown = output + text;
+      if (grown.length > outputLimit) truncated = true;
+      output = grown.slice(-outputLimit);
       if (current) current.output = (current.output + text).slice(-PART_OUTPUT);
     };
 
@@ -136,13 +143,13 @@ export function runCommand(argv, { cwd, env, outputLimit = 4000 } = {}) {
       if (settled) return;
       settled = true;
       flush();
-      resolve({ code: null, output, parts, error: error.message });
+      resolve({ code: null, output, truncated, parts, error: error.message });
     });
     child.on('close', (code, signal) => {
       if (settled) return;
       settled = true;
       flush();
-      resolve({ code, signal, output, parts });
+      resolve({ code, signal, output, truncated, parts });
     });
   });
 }

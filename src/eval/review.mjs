@@ -14,6 +14,7 @@
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
+import { DEFECT_KINDS } from '../ledger/registry.mjs';
 import { listShips } from '../telemetry/readers.mjs';
 import { runSeat } from '../seats/runner.mjs';
 import { superviseSeat } from '../engine/supervise.mjs';
@@ -169,6 +170,10 @@ function roleBlock({ review, window, last, paths }) {
     'Judge the window: gate and lens yield, escapes with their categories and',
     'detection sources, repair rounds and stalls, durations against earlier',
     'runs, and free-text notes that recur in vocabulary fields.',
+    'A defect the harness recognizes in itself carries a closed `kind` on the',
+    `record that met it: ${[...DEFECT_KINDS].join(', ')}. Count a recurrence of`,
+    'one of those by kind, never by wording, and read a class that still',
+    'recurs after its fix off that count.',
     'Read a run length off `activeMs` on its `run-closed` stamp, never off the',
     'wall clock: `wallMs` beside it counts the hours the run sat parked on a',
     'human or inert under a violation, and those are not the harness working.',

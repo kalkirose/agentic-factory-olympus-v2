@@ -138,6 +138,46 @@ test('a red layer whose command surfaces no parts records the tail alone', async
   const stamped = events(ctx).find((e) => e.event === 'layer-result');
   assert.equal(stamped.parts, undefined);
   assert.match(stamped.output, /boom/);
+  // The whole stream is in the record, so nothing is missing and the record
+  // names no defect.
+  assert.equal(stamped.kind, undefined);
+});
+
+test('a red the record could only keep the tail of names the defect it is', async (t) => {
+  // The class the per-part protocol exists to answer, still open: a long
+  // stream, no part markers, and a record that holds whatever ran last. The
+  // word goes on the record where the harness observes it, so a class that
+  // keeps recurring after its fix is a count rather than a seat's sentence.
+  const { ctx } = fixture(t);
+  const long = ['node', '-e', `console.log('x'.repeat(9000));process.exit(1);`];
+  await runSpectrum(ctx, {
+    layers: [{ name: 'acceptance', command: 'long' }],
+    commands: { long },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'sha1',
+  });
+  const stamped = events(ctx).find((e) => e.event === 'layer-result');
+  assert.equal(stamped.status, 'red');
+  assert.equal(stamped.parts, undefined);
+  assert.equal(stamped.kind, 'layer-log-truncated');
+});
+
+test('a red that named its failing part carries the evidence, and no defect', async (t) => {
+  // The same long stream, with the parts protocol in it. The failing part is
+  // recorded under its own name, so the record holds the failure and there is
+  // no defect to name.
+  const { ctx } = fixture(t);
+  await runSpectrum(ctx, {
+    layers: [{ name: 'acceptance', command: 'sequence' }],
+    commands: { sequence: partsCmd(SEQUENCE) },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'sha1',
+  });
+  const stamped = events(ctx).find((e) => e.event === 'layer-result');
+  assert.deepEqual(stamped.parts.map((p) => p.name), ['unit suite']);
+  assert.equal(stamped.kind, undefined);
 });
 
 test('a red that turns green on the re-run stamps a flake, never a finding', async (t) => {

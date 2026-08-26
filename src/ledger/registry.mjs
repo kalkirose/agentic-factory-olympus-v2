@@ -127,6 +127,13 @@ export const RUN_EVENTS = new Set([
   // are the same as any take-back, but the verdict's re-freeze already owns
   // the artifact, so an alert would report a handled case (ADR-0017).
   'diff-policy-recapture',
+  // The generated artifacts a capture cleared from frozen paths before it read
+  // what the tree changed: files the freeze does not hold, under a glob the
+  // lane declares swept. Quiet, and not a take-back — nothing authored was
+  // taken back, so no later step is told to reason about them. The record
+  // exists because the capture removed files from a tree under judgment, and
+  // nothing leaves a capture in silence (ADR-0017).
+  'capture-swept',
   // ship
   // The per-project ship token, at the two moments a run's own ledger is what
   // says where the token went: the wait, and the acquire. The token itself is
@@ -371,14 +378,20 @@ export const PARK_TYPES = new Set([
 // its own (ADR-0015).
 export const CLOSE_STATES = new Set(['shipped', 'failed', 'killed']);
 
-// Closed defect kinds. A `gate-integrity` record and an `escape-recorded` both
-// classify a defect, and both carried the recurring ones as prose: one defect
-// described in two sentences across two runs counts as nothing, and the reader
-// of those ledgers has to decide the sentences mean the same thing. A kind is
-// what makes a recurrence a number. The set is closed and grows the way every
-// registry above does — by a decision recorded in an ADR, never ad hoc from a
-// call site (ADR-0008, ADR-0024).
-export const DEFECT_KINDS = new Set([
+// Closed defect kinds. A defect the harness recognizes in itself used to be
+// carried as prose wherever it was recorded: one defect described in two
+// sentences across two runs counts as nothing, and the reader of those ledgers
+// has to decide the sentences mean the same thing. A kind is what makes a
+// recurrence a number. The word is assigned where the harness observes the
+// defect, never read back out of a seat's sentence about it. The set is closed
+// and grows the way every registry above does — by a decision recorded in an
+// ADR, never ad hoc from a call site (ADR-0008, ADR-0024).
+//
+// The kinds a `gate-integrity` record classifies. The record is loud and its
+// kind decides who answers it, so every one of these owns a rule in
+// `resolution.mjs` — a loud record nobody owns is one the sweep walks past for
+// ever.
+export const GATE_INTEGRITY_KINDS = new Set([
   // The required checks are green and auto-merge did not fire.
   'auto-merge',
   // A request that existed without the labels its own diff asks for. The
@@ -394,6 +407,26 @@ export const DEFECT_KINDS = new Set([
   // strength of those greens, so the record is where the re-runs stop.
   'deterministic-red',
 ]);
+
+// The kinds a step stamps on the record of the defect it just met. These
+// classify a record that already exists and already has whatever loudness it
+// is owed, so they add no alert and owe no ownership rule: the word is there to
+// be counted, not to be answered.
+export const OBSERVED_DEFECT_KINDS = new Set([
+  // A red layer whose recorded evidence is a bounded tail of one long stream,
+  // with no named part carrying the failure. Triage then judges the red on
+  // whatever ran last rather than on what failed. Stamped on `layer-result`.
+  'layer-log-truncated',
+  // A candidate capture that reverted a write to a path the lane froze. The
+  // revert is the design (ADR-0017); the kind is what makes a surface that
+  // keeps producing them countable. Stamped on both take-back records.
+  'capture-takeback',
+]);
+
+// The whole vocabulary. `escape-recorded` takes any of it: a defect the harness
+// named before a merge is recorded under that name when the merge carries it
+// into the product (ADR-0024).
+export const DEFECT_KINDS = new Set([...GATE_INTEGRITY_KINDS, ...OBSERVED_DEFECT_KINDS]);
 
 /** The kind, or a throw naming it. The only way a kind reaches a stamp. */
 export function assertDefectKind(kind) {

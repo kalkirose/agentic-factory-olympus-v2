@@ -32,6 +32,7 @@ import {
   carryPaths,
   changedFiles,
   commitAll,
+  filesAt,
   headSha,
   restorePaths,
   diffRange,
@@ -42,6 +43,7 @@ import { testEditDenyRules } from '../seats/boundary.mjs';
 import {
   DROP_NOTE,
   RECAPTURE_NOTE,
+  SWEEP_NOTE,
   captureGist,
   classifyTakeBacks,
   diffPolicyViolations,
@@ -51,6 +53,9 @@ import {
   parseTouchedPaths,
   recaptureGist,
   recaptureLine,
+  sweepCandidates,
+  sweepGist,
+  sweptTakeBacks,
   violationLine,
 } from '../seats/diffpolicy.mjs';
 import {
@@ -61,6 +66,7 @@ import {
   standingAcksFor,
 } from '../ledger/acks.mjs';
 import { cycleRepeat, openIdentities } from '../ledger/cycles.mjs';
+import { assertDefectKind } from '../ledger/registry.mjs';
 import { runSpectrum, persistentReds, cyclePlan } from './spectrum.mjs';
 import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview } from './review.mjs';
@@ -1192,11 +1198,18 @@ function ruledSuiteFiles(answer, frozen) {
  * corrective brief still states the take-back, because the seat is about to
  * re-read a tree that no longer holds its write.
  *
+ * A third thing is neither of those. A frozen write under the lane's
+ * `sweptPaths` that the freeze anchor does not hold is a file a test run
+ * generated, so the restore removing it takes nothing back and no downstream
+ * reader is told about a loss that did not happen. It is swept before the
+ * classes are decided, and stamps the quiet `capture-swept`.
+ *
  * Take-backs come in two record classes, and nothing else about them differs.
  * A path the lane declared `recapturablePaths` is an artifact a re-freeze
  * re-takes, so it stamps the quiet `diff-policy-recapture`; every other frozen
  * path stamps the loud record. The revert, `capture.dropped` and every
- * downstream statement cover both classes.
+ * downstream statement cover both classes, and both records carry the closed
+ * word for the defect.
  *
  * The restore runs before the record, so the tree is correct whether or not
  * the capture proceeds. `capture.dropped` carries the take-back out to the
@@ -1209,31 +1222,48 @@ async function captureDefects(ctx, base, mode, { seat, capture }) {
   // An exclusion is the seat's own file: the restore leaves it alone, so the
   // capture keeps it and the diff policy judges it like any other change.
   const exempt = mode === 'story' ? (base.frozenExclusions ?? []) : [];
-  const dropped =
+  const anchor = mode === 'story' ? restoreAnchor(runEvents(ctx)) : null;
+  const frozenWrites =
     mode === 'story'
       ? changed.filter((f) => underAny(f, base.testPaths) && !exempt.includes(f))
       : [];
   if (mode === 'story') {
-    await restorePaths(base.worktree, restoreAnchor(runEvents(ctx)), base.testPaths, {
-      except: exempt,
+    await restorePaths(base.worktree, anchor, base.testPaths, { except: exempt });
+  }
+  const tier = laneDiffPolicy(base.config, mode);
+  // The sweep parts first, because a swept path is not a take-back at all: the
+  // freeze never held the file, so the restore that just ran took nothing back
+  // by removing it. Nothing downstream is told about it, and the count of
+  // take-backs stays a count of writes to work somebody authored.
+  const swept = await sweptWrites(base, tier, frozenWrites, anchor);
+  const dropped = frozenWrites.filter((f) => !swept.includes(f));
+  if (swept.length > 0) {
+    ctx.store.append('capture-swept', {
+      actor: ACTOR,
+      seat,
+      lane: mode,
+      swept,
+      note: SWEEP_NOTE,
+      gist: gist(sweepGist(swept)),
     });
   }
   // Across the attempts of one seat pass, not just the last one: a write the
   // first capture took back is gone from the commit the corrective attempt
   // produces, and the commit record has to say so.
   for (const path of dropped) if (!capture.dropped.includes(path)) capture.dropped.push(path);
-  const tier = laneDiffPolicy(base.config, mode);
-  const kept = changed.filter((f) => !dropped.includes(f));
+  const kept = changed.filter((f) => !frozenWrites.includes(f));
   const violations = diffPolicyViolations(kept, tier, declaresPath(base, mode, tier));
   // The two classes of take-back part here, and only in the record: the quiet
   // class is reverted, committed around and stated downstream exactly like the
-  // loud one.
+  // loud one. Both carry the closed word for the defect, so a surface that
+  // keeps producing take-backs is a count rather than a sentence (ADR-0008).
   const { recaptured, held } = classifyTakeBacks(dropped, tier);
   if (recaptured.length > 0) {
     ctx.store.append('diff-policy-recapture', {
       actor: ACTOR,
       seat,
       lane: mode,
+      kind: assertDefectKind('capture-takeback'),
       recaptured,
       note: RECAPTURE_NOTE,
       recapturedLines: recaptured.map(recaptureLine),
@@ -1247,12 +1277,32 @@ async function captureDefects(ctx, base, mode, { seat, capture }) {
       lane: mode,
       violations,
       dropped: held,
-      ...(held.length > 0 && { note: DROP_NOTE, droppedLines: held.map(dropLine) }),
+      ...(held.length > 0 && {
+        kind: assertDefectKind('capture-takeback'),
+        note: DROP_NOTE,
+        droppedLines: held.map(dropLine),
+      }),
       gist: gist(captureGist({ violations, dropped: held })),
     });
   }
   if (violations.length === 0) return [];
   return [...violations.map(violationLine), ...dropped.map(dropLine)];
+}
+
+/**
+ * The frozen writes this capture sweeps: generated artifacts under a swept
+ * glob that the freeze anchor does not hold. The anchor is the sha the restore
+ * just used, so a re-freeze that committed an artifact makes it authored work
+ * from that moment on and a later write to it is a take-back again.
+ *
+ * The tree is read only when a path matched the glob, because the question is
+ * about files the runner produced and most captures produce none.
+ */
+async function sweptWrites(base, tier, frozenWrites, anchor) {
+  if (frozenWrites.length === 0 || anchor === null) return [];
+  const candidates = sweepCandidates(frozenWrites, tier);
+  if (candidates.length === 0) return [];
+  return sweptTakeBacks(candidates, tier, await filesAt(base.worktree, anchor, base.testPaths));
 }
 
 /**

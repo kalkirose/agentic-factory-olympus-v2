@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { Ledger, readEvents, tailEvents } from '../src/ledger/ledger.mjs';
 import {
   DEFECT_KINDS,
+  GATE_INTEGRITY_KINDS,
+  OBSERVED_DEFECT_KINDS,
   RUN_EVENTS,
   INSTANCE_EVENTS,
   assertDefectKind,
@@ -71,14 +73,37 @@ test('events outside the closed registry are refused', (t) => {
 });
 
 test('the defect vocabulary is closed, and holds the kinds that recur', () => {
-  // Two defects the ledgers carried twice each as free text. A word is what
-  // makes the third occurrence a number instead of a reading job.
-  assert.ok(DEFECT_KINDS.has('pr-label-missing'));
-  assert.ok(DEFECT_KINDS.has('triage-log-missing'));
+  // Four defects the ledgers carried as free text, each of them more than
+  // once. A word is what makes the next occurrence a number instead of a
+  // reading job.
+  for (const kind of [
+    'pr-label-missing',
+    'triage-log-missing',
+    'layer-log-truncated',
+    'capture-takeback',
+  ]) {
+    assert.ok(DEFECT_KINDS.has(kind), `${kind} is not a closed kind`);
+  }
   assert.ok(DEFECT_KINDS.has('deterministic-red'));
   for (const kind of DEFECT_KINDS) assert.equal(assertDefectKind(kind), kind);
   assert.throws(() => assertDefectKind('no-failure-log-found'), /unknown defect kind/);
   assert.throws(() => assertDefectKind(undefined), /unknown defect kind/);
+});
+
+test('the vocabulary says which record carries each kind, and the two sets are disjoint', () => {
+  // A kind on a `gate-integrity` record decides who answers a loud item. A
+  // kind a step stamps on its own record decides nothing and is counted. The
+  // split is what keeps the second class from owing the first class's rules.
+  assert.deepEqual(
+    [...GATE_INTEGRITY_KINDS].sort(),
+    ['auto-merge', 'deterministic-red', 'pr-label-missing', 'triage-log-missing'],
+  );
+  assert.deepEqual([...OBSERVED_DEFECT_KINDS].sort(), ['capture-takeback', 'layer-log-truncated']);
+  for (const kind of GATE_INTEGRITY_KINDS) assert.ok(!OBSERVED_DEFECT_KINDS.has(kind));
+  assert.deepEqual(
+    [...DEFECT_KINDS].sort(),
+    [...GATE_INTEGRITY_KINDS, ...OBSERVED_DEFECT_KINDS].sort(),
+  );
 });
 
 test('payload keys cannot shadow the envelope', (t) => {

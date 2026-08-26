@@ -44,10 +44,13 @@ export const LOUD_OWNERSHIP = {
       owner: 're-freeze',
     },
   ],
-  // Four classes: one per closed defect kind the ship step stamps, plus the
-  // seat's own harness finding, which names a finding instead of a kind. A
-  // green-but-no-merge alert is answered by the merge landing. A harness
-  // finding is answered by the first verdict whose open set no longer holds it.
+  // One class per kind in `GATE_INTEGRITY_KINDS`, plus the seat's own harness
+  // finding, which names a finding instead of a kind. A green-but-no-merge
+  // alert is answered by the merge landing. A harness finding is answered by
+  // the first verdict whose open set no longer holds it. The kinds a step
+  // stamps on its own record are not here: they classify a record that already
+  // has its owner, and a `diff-policy-violation` is owned by what it holds
+  // rather than by the word for the defect it holds (ADR-0008).
   'gate-integrity': [
     {
       name: 'auto-merge',

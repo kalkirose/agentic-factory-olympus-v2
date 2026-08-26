@@ -154,18 +154,33 @@ The ship step — PR open through ledger close — gets these concrete shapes:
   harness-class red: `gate-integrity` (loud) once per sha, one re-arm
   attempt (`operational-fix`, kind `auto-merge-rearm`), then
   `provisioning-gate`. The merge landing appends the paired `resolved`.
-- **A defect the harness recognizes has a name, not a sentence.** Every
-  `gate-integrity` record the ship step stamps carries a `kind` from
-  `DEFECT_KINDS` in the ledger registry, checked at the stamp. Four kinds:
-  `auto-merge` above; `pr-label-missing`, stamped once per request that did not
-  carry its labels out of the create, whether the apply call rescued it or not,
-  and answered by the merge of that request; and `triage-log-missing`, stamped
-  once per check on one head sha when the forge answers a log with a reason
-  instead of the log, and answered by nobody. The escapes ledger takes the same
-  closed word on `escape-recorded`, so a defect the harness named before the
-  merge is recorded under that name when the merge carries it into the product
-  (ADR-0024). A fourth, `deterministic-red`, names the check whose flake
-  reading expired. The set grows only here, in an ADR.
+- **A defect the harness recognizes has a name, not a sentence.** A defect of
+  the machinery carries a `kind` from `DEFECT_KINDS` in the ledger registry,
+  checked at the stamp. The word is assigned where the harness observes the
+  defect and never read back out of a seat's sentence about it, because a
+  sentence drifts with every run and a count does not.
+
+  `GATE_INTEGRITY_KINDS` are the four the `gate-integrity` record classifies.
+  The record is loud and its kind decides who answers it, so every one of them
+  owns a rule in the ownership table: `auto-merge` above; `pr-label-missing`,
+  stamped once per request that did not carry its labels out of the create,
+  whether the apply call rescued it or not, and answered by the merge of that
+  request; `triage-log-missing`, stamped once per check on one head sha when
+  the forge answers a log with a reason instead of the log, and answered by
+  nobody; and `deterministic-red`, the check whose flake reading expired.
+
+  `OBSERVED_DEFECT_KINDS` are the ones a step stamps on the record it was
+  already writing about the defect it just met: `layer-log-truncated` on a red
+  `layer-result` whose evidence is a bounded tail with no part carrying the
+  failure, and `capture-takeback` on both records a candidate capture writes
+  for a reverted frozen write (ADR-0017). These classify a record that already
+  exists and already has whatever loudness it is owed, so they raise no alert
+  and owe no ownership rule: the word is there to be counted, not answered.
+
+  The escapes ledger takes any word in the set on `escape-recorded`, so a
+  defect the harness named before the merge is recorded under that name when
+  the merge carries it into the product (ADR-0024). The set grows only here,
+  in an ADR.
 - **Competing merges ride the update path.** A PR behind its base and a PR
   the forge calls conflicting get the same daemon-driven update: fetch, merge
   the default branch into the run branch (never a rebase, never a
@@ -399,6 +414,33 @@ closed and cannot reopen; what it costs is a label check judging a bare
 request, and the request landing is the evidence it cost nothing this time. The
 count stays in the ledger, which is the whole point of a kind.
 
+## Why two of the kinds are stamped where nobody is asked to read them
+
+The first four kinds all classify a `gate-integrity` record, and that record is
+a claim on the owner's attention. It was tempting to keep the shape: give every
+recurring defect its word by giving it a loud record. Two classes make that the
+wrong move.
+
+Both were already recorded. A red layer whose evidence is a bounded tail
+already writes a `layer-result`; a capture that reverts a frozen write already
+writes a take-back record. Neither defect was invisible — what was missing was
+the word, and a second record for the same fact would have bought the count at
+the price of an alert per occurrence.
+
+Both were already answered. A window of five ships met the truncated-evidence
+class five times across three runs under two fingerprints, and the stale
+screenshot take-backs in four runs of five. Every one of those cost the owner a
+gate touch, and standing acknowledgments now hold the classes. A loud record
+per occurrence would have re-raised, once per cycle, exactly what the owner had
+already answered.
+
+So the word goes on the record the step was writing anyway. The class is
+counted from the moment it recurs, no alert strip grows, and the acknowledgment
+machinery is untouched, because a kind is a fact about a defect and never a
+question about it. The two sets are separate in the registry for the one thing
+that follows from the difference: a kind that reaches a loud record owes an
+ownership rule, and a kind that classifies a record already owned does not.
+
 ## Why the wait is one quiet stamp and not a heartbeat
 
 The stage heartbeat already says the ship stage is alive and what it waits on
@@ -493,6 +535,22 @@ with a ceiling on it. Trigger: `triage-wait` stamps carrying
 `status: 'unreadable'` that clear on a later poll with no other change.
 Reversal cost: low — one counter in `runsNotDone`, and the dispatch's own read
 already takes the same predicate.
+
+If a kind stamped on the record of the step that met the defect proves too
+quiet — a class that recurs for a whole window and nobody reads the count until
+the eval review does — it graduates to `GATE_INTEGRITY_KINDS` with a rule of
+its own, stamped once per run rather than once per occurrence. Trigger: a class
+whose count grows across a window and whose first reader is the review.
+Reversal cost: low; the word and the sites that assign it stay, and what is
+added is one stamp and one ownership rule.
+
+If `layer-log-truncated` proves to fire on reds whose tail did hold the
+failure — a runner that prints its failures last, so the bound cuts only green
+noise — the condition narrows from "the stream outgrew the bound" to a read of
+what the kept tail contains, or the layer opts out in project config the way
+the parts protocol is opted into. Trigger: records of the kind whose triage
+found the failure in the tail anyway. Reversal cost: low, one predicate at one
+stamp site.
 
 If the dispatch's own read proves redundant in practice — no route into the
 triage ever arrives without the watcher's hold behind it — it is one call per

@@ -15,6 +15,11 @@ import {
   pathTokens,
   recaptureGist,
   recaptureLine,
+  SWEEP_NOTE,
+  SWEPT_PATHS,
+  sweepCandidates,
+  sweepGist,
+  sweptTakeBacks,
   violationLine,
 } from '../src/seats/diffpolicy.mjs';
 import { validateProjectConfig, withProjectDefaults } from '../src/config/project.mjs';
@@ -298,6 +303,58 @@ test('the re-capturable line names the class, the revert, and the re-freeze', ()
   assert.match(recaptureGist([{ path: SHOT }]), /1 re-capturable frozen path\(s\) the capture reverted/);
 });
 
+// -- the sweep ---------------------------------------------------------------
+
+test('a generated file the freeze never held is swept; a frozen baseline is not', () => {
+  // The two halves of the rule. The glob says where a runner drops output; the
+  // freeze says whether the file under it is an artifact or committed work.
+  const dropped = [SHOT, 'tests/cart.test.mjs'];
+  assert.deepEqual(sweptTakeBacks(dropped, RECAP, []), [SHOT]);
+  assert.deepEqual(sweptTakeBacks(dropped, RECAP, [SHOT]), []);
+  assert.deepEqual(sweptTakeBacks(dropped, RECAP, new Set([SHOT])), []);
+});
+
+test('the sweep default holds where a lane declares nothing, and an empty list turns it off', () => {
+  assert.deepEqual(SWEPT_PATHS, ['**/__screenshots__/**']);
+  for (const tier of [null, undefined, {}, RECAP]) {
+    assert.deepEqual(sweptTakeBacks([SHOT, 'tests/cart.test.mjs'], tier, []), [SHOT]);
+  }
+  assert.deepEqual(sweptTakeBacks([SHOT], { sweptPaths: [] }, []), []);
+  // A lane that names its own directories replaces the default outright.
+  assert.deepEqual(sweptTakeBacks([SHOT, 'tests/out/run.json'], { sweptPaths: ['tests/out'] }, []), [
+    'tests/out/run.json',
+  ]);
+});
+
+test('the hard tiers outrank the sweep, exactly as they outrank the quiet class', () => {
+  const tier = {
+    deniedPaths: ['**/vitest*.config.*'],
+    forbiddenPatterns: ['-win32\\.'],
+    sweptPaths: ['**/__screenshots__/**', 'tests/**'],
+  };
+  const dropped = [
+    'tests/vitest.config.ts',
+    'apps/web/tests/visual/__screenshots__/shot-win32.png',
+    SHOT,
+  ];
+  assert.deepEqual(sweptTakeBacks(dropped, tier, []), [SHOT]);
+  // The candidate list answers the same way before the freeze is consulted.
+  assert.deepEqual(sweepCandidates(dropped, tier), [SHOT]);
+});
+
+test('a backslash path is swept as its slash form', () => {
+  const windows = SHOT.replaceAll('/', '\\');
+  assert.deepEqual(sweptTakeBacks([windows], RECAP, []), [windows]);
+  assert.deepEqual(sweptTakeBacks([windows], RECAP, [SHOT]), []);
+});
+
+test('the sweep record states what it cleared and asks for nothing', () => {
+  assert.match(SWEEP_NOTE, /Generated artifacts cleared from frozen paths/);
+  assert.match(SWEEP_NOTE, /took nothing back by removing them/);
+  assert.doesNotMatch(SWEEP_NOTE, /Restore it/);
+  assert.match(sweepGist([SHOT]), /^1 generated file\(s\) the capture swept from frozen paths: /);
+});
+
 // -- reading the class back out of prose -------------------------------------
 
 const SHOT_DIR = 'apps/web/tests/visual/__screenshots__';
@@ -399,6 +456,22 @@ test('a lane declares the re-capturable class in the same block, and alone', () 
   ]);
   assert.deepEqual(errorPaths(baseConfig({ diffPolicy: { story: { recapturablePath: ['a'] } } })), [
     'diffPolicy.story.recapturablePath',
+  ]);
+});
+
+test('a lane declares where a test run drops its output, in the same block', () => {
+  const config = baseConfig({ diffPolicy: { story: { sweptPaths: ['**/__screenshots__/**'] } } });
+  assert.deepEqual(validateProjectConfig(config), []);
+  assert.deepEqual(withProjectDefaults(config).diffPolicy.story, {
+    sweptPaths: ['**/__screenshots__/**'],
+  });
+  // An empty list is the lane saying it sweeps nothing, and validates.
+  assert.deepEqual(validateProjectConfig(baseConfig({ diffPolicy: { story: { sweptPaths: [] } } })), []);
+  assert.deepEqual(errorPaths(baseConfig({ diffPolicy: { story: { sweptPaths: 'x' } } })), [
+    'diffPolicy.story.sweptPaths',
+  ]);
+  assert.deepEqual(errorPaths(baseConfig({ diffPolicy: { story: { sweptPath: ['a'] } } })), [
+    'diffPolicy.story.sweptPath',
   ]);
 });
 

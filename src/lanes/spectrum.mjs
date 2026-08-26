@@ -26,6 +26,7 @@
 // layer stamped under this cycle reports `run` whatever the plan says: the
 // stamp is the fact. Deterministic re-runs are unlimited by doctrine; they
 // judge nothing.
+import { assertDefectKind } from '../ledger/registry.mjs';
 import { runCommand } from './exec.mjs';
 import { runEvents, ACTOR } from './shared.mjs';
 
@@ -37,6 +38,13 @@ const OUTPUT_TAIL = 1500;
 // parts begin (`::olympus part`, see exec.mjs) gets the failing part recorded
 // under its own name. The budget is the whole record's, shared between the
 // parts kept, and never cut below the floor.
+//
+// A red whose stream outgrew the tail and named no part is the case the parts
+// exist to answer, still open: the record holds whatever ran last and the
+// failure may not be in it. That record carries the closed word for the defect
+// (`layer-log-truncated`), so the class is counted where the harness observes
+// it instead of waiting for a triage seat to write a sentence about it
+// (ADR-0008).
 const PART_TAIL = 6000;
 const PART_FLOOR = 500;
 
@@ -145,6 +153,10 @@ async function runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark }) {
       sha,
       output: rerun.output.slice(-OUTPUT_TAIL),
       ...(parts.length > 0 && { parts }),
+      ...(parts.length === 0 &&
+        (rerun.truncated || rerun.output.length > OUTPUT_TAIL) && {
+          kind: assertDefectKind('layer-log-truncated'),
+        }),
       ...mark,
     }),
   };

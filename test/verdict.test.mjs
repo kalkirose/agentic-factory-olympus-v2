@@ -1869,6 +1869,16 @@ const POLICY = {
 // tiers are absent here on purpose: quieting a take-back turns no policing on.
 const RECAPTURE_POLICY = { story: { recapturablePaths: ['**/__screenshots__/**'] } };
 
+const SHOT = 'tests/visual/__screenshots__/checkout.png';
+
+// A freeze that holds a visual baseline. The baseline is committed work: a
+// write to it is a take-back whatever directory it sits in, and the sweep —
+// which is about files the freeze never held — must not reach it.
+const FROZEN_BASELINE = {
+  'tests/feature.test.mjs': STRONG_TEST,
+  [SHOT]: 'committed-baseline-bytes\n',
+};
+
 const SPEC_WITH_BLOCK = [
   '# Spec',
   '',
@@ -2033,6 +2043,7 @@ test('a take-back is stamped and the capture commits the allowed set anyway', as
   const stamp = events.find((e) => e.event === 'diff-policy-violation');
   assert.deepEqual(stamp.dropped, ['tests/feature.test.mjs']);
   assert.deepEqual(stamp.violations, []);
+  assert.equal(stamp.kind, 'capture-takeback');
   assert.match(stamp.gist, /1 frozen path\(s\) the capture reverted/);
   // No corrective invocation, no park, and the allowed half of the tree is
   // committed: the run walks straight into the verdict.
@@ -2068,25 +2079,25 @@ test('a re-capturable take-back stamps quiet, and stamps no loud record at all',
     dev: ({ label }) =>
       label === 'dev-1'
         ? {
-            files: {
-              'src/feature.mjs': GOOD_FEATURE,
-              'tests/visual/__screenshots__/checkout.png': 'baseline-bytes\n',
-            },
+            files: { 'src/feature.mjs': GOOD_FEATURE, [SHOT]: 're-rendered-bytes\n' },
             report: { summary: 'implemented, and the surface re-rendered' },
           }
         : { report: { summary: 'a second invocation the take-back must not buy' } },
     ...furyClean(),
   };
-  const fx = verdictFixture(t, { seats, diffPolicy: RECAPTURE_POLICY });
+  const fx = verdictFixture(t, {
+    seats,
+    diffPolicy: RECAPTURE_POLICY,
+    suiteFiles: FROZEN_BASELINE,
+  });
   const { runId } = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   const quiet = events.find((e) => e.event === 'diff-policy-recapture');
   assert.equal(quiet.seat, 'dev');
   assert.equal(quiet.lane, 'story');
-  assert.deepEqual(quiet.recaptured, [
-    { path: 'tests/visual/__screenshots__/checkout.png', pattern: '**/__screenshots__/**' },
-  ]);
+  assert.equal(quiet.kind, 'capture-takeback');
+  assert.deepEqual(quiet.recaptured, [{ path: SHOT, pattern: '**/__screenshots__/**' }]);
   assert.match(quiet.recapturedLines[0], /a re-capturable frozen path/);
   assert.match(quiet.note, /a record and not an open item/);
   // Nothing loud was stamped, so there is nothing to resolve and nothing the
@@ -2099,10 +2110,8 @@ test('a re-capturable take-back stamps quiet, and stamps no loud record at all',
   assert.equal(fx.calls.filter((c) => c.seat === 'dev').length, 1);
   assert.ok(!events.some((e) => e.event === 'park'));
   const commit = events.find((e) => e.event === 'implementation-committed');
-  assert.deepEqual(commit.dropped, ['tests/visual/__screenshots__/checkout.png']);
-  assert.deepEqual(readRecord(fx.paths, runId, 1).dropped, [
-    'tests/visual/__screenshots__/checkout.png',
-  ]);
+  assert.deepEqual(commit.dropped, [SHOT]);
+  assert.deepEqual(readRecord(fx.paths, runId, 1).dropped, [SHOT]);
 });
 
 test('the class quiets only what it names: an undeclared frozen path stays loud', async (t) => {
@@ -2112,7 +2121,7 @@ test('the class quiets only what it names: an undeclared frozen path stays loud'
         ? {
             files: {
               'src/feature.mjs': GOOD_FEATURE,
-              'tests/visual/__screenshots__/checkout.png': 'baseline-bytes\n',
+              [SHOT]: 're-rendered-bytes\n',
               'tests/feature.test.mjs': WRONG_TEST,
             },
             report: { summary: 'implemented, and I relaxed the test' },
@@ -2120,26 +2129,122 @@ test('the class quiets only what it names: an undeclared frozen path stays loud'
         : { report: { summary: 'a second invocation the take-back must not buy' } },
     ...furyClean(),
   };
+  const fx = verdictFixture(t, {
+    seats,
+    diffPolicy: RECAPTURE_POLICY,
+    suiteFiles: FROZEN_BASELINE,
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // One take-back per class, and the loud record carries only its own. Both
+  // carry the closed word for the defect: the class decides the loudness, and
+  // the word is the same defect either way.
+  const quiet = events.find((e) => e.event === 'diff-policy-recapture');
+  assert.deepEqual(quiet.recaptured.map((r) => r.path), [SHOT]);
+  assert.equal(quiet.kind, 'capture-takeback');
+  const loud = events.find((e) => e.event === 'diff-policy-violation');
+  assert.deepEqual(loud.dropped, ['tests/feature.test.mjs']);
+  assert.deepEqual(loud.violations, []);
+  assert.equal(loud.kind, 'capture-takeback');
+  assert.match(loud.droppedLines[0], /this path is frozen for this lane/);
+  // The commit and the verdict record judge one tree, so they carry both.
+  const commit = events.find((e) => e.event === 'implementation-committed');
+  assert.deepEqual([...commit.dropped].sort(), ['tests/feature.test.mjs', SHOT]);
+  assert.deepEqual(readRecord(fx.paths, runId, 1).dropped, commit.dropped);
+});
+
+test('a red cycle writes a screenshot the freeze never held: swept, not taken back', async (t) => {
+  // The live shape: a browser-mode runner drops one PNG per failing test into
+  // the screenshot directory beside the frozen suite. Nothing authored those
+  // files, so reverting them takes nothing back — and every verdict of the run
+  // used to haul the list to the next seat.
+  const seats = {
+    dev: ({ label }) =>
+      label === 'dev-1'
+        ? {
+            files: {
+              'src/feature.mjs': GOOD_FEATURE,
+              [SHOT]: 'failure-shot\n',
+              'tests/visual/__screenshots__/cart.png': 'failure-shot\n',
+            },
+            report: { summary: 'implemented; the red cycle left its screenshots' },
+          }
+        : { report: { summary: 'a second invocation nothing here buys' } },
+    ...furyClean(),
+  };
   const fx = verdictFixture(t, { seats, diffPolicy: RECAPTURE_POLICY });
   const { runId } = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
-  // One take-back per class, and the loud record carries only its own.
-  assert.deepEqual(
-    events.find((e) => e.event === 'diff-policy-recapture').recaptured.map((r) => r.path),
-    ['tests/visual/__screenshots__/checkout.png'],
-  );
-  const loud = events.find((e) => e.event === 'diff-policy-violation');
-  assert.deepEqual(loud.dropped, ['tests/feature.test.mjs']);
-  assert.deepEqual(loud.violations, []);
-  assert.match(loud.droppedLines[0], /this path is frozen for this lane/);
-  // The commit and the verdict record judge one tree, so they carry both.
-  const commit = events.find((e) => e.event === 'implementation-committed');
-  assert.deepEqual([...commit.dropped].sort(), [
-    'tests/feature.test.mjs',
-    'tests/visual/__screenshots__/checkout.png',
-  ]);
-  assert.deepEqual(readRecord(fx.paths, runId, 1).dropped, commit.dropped);
+  const swept = events.find((e) => e.event === 'capture-swept');
+  assert.equal(swept.seat, 'dev');
+  assert.equal(swept.lane, 'story');
+  assert.deepEqual([...swept.swept].sort(), ['tests/visual/__screenshots__/cart.png', SHOT]);
+  assert.match(swept.note, /Generated artifacts cleared from frozen paths/);
+  assert.match(swept.gist, /2 generated file\(s\)/);
+  // No take-back record of either class, and nothing downstream is told to
+  // reason about paths that never held anybody's work.
+  assert.ok(!events.some((e) => e.event === 'diff-policy-violation'));
+  assert.ok(!events.some((e) => e.event === 'diff-policy-recapture'));
+  assert.equal(events.find((e) => e.event === 'implementation-committed').dropped, undefined);
+  assert.equal(readRecord(fx.paths, runId, 1).dropped, undefined);
+  assert.equal(openLoud(fx.paths).filter((i) => i.ledger === `run:${runId}`).length, 0);
+  // The files are gone from the tree either way: the restore that reverts the
+  // frozen paths is what removes them, and the sweep only decides the record.
+  assert.equal(fx.calls.filter((c) => c.seat === 'dev').length, 1);
+  assert.ok(!events.some((e) => e.event === 'park'));
+});
+
+test('the sweep reaches nothing outside the frozen paths, and no capture without one', async (t) => {
+  // A generated file the seat wrote into its own area is the seat's change and
+  // the diff policy judges it like any other. Nothing here is frozen, so the
+  // capture has no take-back to sweep and stamps no sweep record.
+  const seats = {
+    dev: () => ({
+      files: {
+        'src/feature.mjs': GOOD_FEATURE,
+        'src/visual/__screenshots__/hero.png': 'generated\n',
+      },
+      report: { summary: 'implemented' },
+    }),
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, { seats, diffPolicy: RECAPTURE_POLICY });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!events.some((e) => e.event === 'capture-swept'));
+  assert.ok(!events.some((e) => e.event === 'diff-policy-violation'));
+  assert.equal(events.find((e) => e.event === 'implementation-committed').dropped, undefined);
+});
+
+test('a lane that declares an empty swept list keeps every take-back it had', async (t) => {
+  // The reversal: `sweptPaths: []` turns the sweep off for the lane, and a
+  // generated file under a frozen path is a take-back again, in whichever
+  // class the tiers put it.
+  const seats = {
+    dev: ({ label }) =>
+      label === 'dev-1'
+        ? {
+            files: { 'src/feature.mjs': GOOD_FEATURE, [SHOT]: 'failure-shot\n' },
+            report: { summary: 'implemented; the red cycle left its screenshot' },
+          }
+        : { report: { summary: 'a second invocation nothing here buys' } },
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    diffPolicy: { story: { recapturablePaths: ['**/__screenshots__/**'], sweptPaths: [] } },
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!events.some((e) => e.event === 'capture-swept'));
+  const quiet = events.find((e) => e.event === 'diff-policy-recapture');
+  assert.deepEqual(quiet.recaptured.map((r) => r.path), [SHOT]);
+  assert.equal(quiet.kind, 'capture-takeback');
+  assert.deepEqual(events.find((e) => e.event === 'implementation-committed').dropped, [SHOT]);
 });
 
 /**
@@ -2172,10 +2277,7 @@ test('a harness finding about a re-capturable take-back stamps no gate-integrity
   // reads an alert about an artifact the re-freeze already owns.
   const seats = {
     dev: () => ({
-      files: {
-        'src/feature.mjs': GOOD_FEATURE,
-        'tests/visual/__screenshots__/checkout.png': 'baseline-bytes\n',
-      },
+      files: { 'src/feature.mjs': GOOD_FEATURE, [SHOT]: 're-rendered-bytes\n' },
       report: { summary: 'implemented, and the surface re-rendered' },
     }),
     'verdict-triage': triageAbout('tests/visual/__screenshots__'),
@@ -2184,6 +2286,7 @@ test('a harness finding about a re-capturable take-back stamps no gate-integrity
   const fx = verdictFixture(t, {
     seats,
     diffPolicy: RECAPTURE_POLICY,
+    suiteFiles: FROZEN_BASELINE,
     gates: [
       { name: 'unit', command: 'suite' },
       { name: 'rlayer', command: 'rlayer' },
@@ -2195,7 +2298,7 @@ test('a harness finding about a re-capturable take-back stamps no gate-integrity
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   assert.deepEqual(
     events.find((e) => e.event === 'diff-policy-recapture').recaptured.map((r) => r.path),
-    ['tests/visual/__screenshots__/checkout.png'],
+    [SHOT],
   );
   // The finding stands, and says on itself why no defect record stands beside
   // it. Nothing loud was stamped and the loud strip carries nothing.

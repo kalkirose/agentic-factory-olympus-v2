@@ -267,7 +267,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   A take-back from a path the lane declared `recapturablePaths` — a baseline
   or fixture a re-freeze re-takes — stamps the quiet `diff-policy-recapture`
   instead, and the hard tiers outrank the class. The class is decided once,
-  here, and honored by every later step that meets the same paths. Nothing is
+  here, and honored by every later step that meets the same paths. A frozen
+  write under the lane's `sweptPaths` that the freeze anchor does not hold is
+  a generated artifact rather than a take-back: it is swept before the record,
+  stamps the quiet `capture-swept`, and reaches no later brief. Nothing is
   ever discarded without a record (ADR-0017).
 - **Deterministic core.** Every Tier-1 check (per-layer suites, lint, types,
   build) runs as a process. Unlimited rounds; a rerun judges nothing.
@@ -440,12 +443,19 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - **A defect the harness recognizes has a name** (ADR-0008, ADR-0024). Every
   `gate-integrity` record carries a `kind` from the closed `DEFECT_KINDS` set,
   and `escape-recorded` takes the same word where the harness already used it.
-  Four kinds today: `auto-merge`, `pr-label-missing` (a request that did not
-  carry its labels out of the create, answered by that request's merge),
+  Four of them classify a `gate-integrity` record, so each owns an ownership
+  rule: `auto-merge`, `pr-label-missing` (a request that did not carry its
+  labels out of the create, answered by that request's merge),
   `triage-log-missing` (a CI failure log the forge answered with a reason
   instead of the log, answered by nobody — the reason still reaches the triage
   seat, and the absence is now counted rather than absorbed) and
-  `deterministic-red` (a check whose flake reading expired, below).
+  `deterministic-red` (a check whose flake reading expired, below). Two more
+  are stamped by the step that met the defect, on the record it was already
+  writing: `layer-log-truncated` on a `layer-result` whose red evidence is a
+  bounded tail with no part carrying the failure, and `capture-takeback` on
+  both take-back records. Those two add no alert and answer to nobody — the
+  record they ride already has whatever loudness it is owed, and the word is
+  there so a class that recurs after its fix is a count.
 - **One red regime.** CI reds get one automatic re-run of failed jobs, then
   the same four-class triage and the same routes as in-run reds. Budgets are
   shared.

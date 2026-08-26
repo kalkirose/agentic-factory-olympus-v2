@@ -121,6 +121,33 @@ test('a finding that names no layer has no subject, so its words stay its identi
   }
 });
 
+test('a recorded fingerprint keeps its value: an ack outlives the code that keyed it', () => {
+  // An ack is a value in a ledger, recorded once and read for as long as the
+  // defect is unfixed. Any change to what a digest is computed over silently
+  // orphans every standing ack on the instance, and the first sign of it is a
+  // gate asking an operator a question they already answered. Both forms are
+  // pinned: the subject form a layered finding answers to, and the words form
+  // a layerless one falls back to.
+  assert.equal(ackFingerprint({ class: 'harness', layers: ['acceptance'] }), 'harness:82071f84b594');
+  const layerless = {
+    class: 'harness',
+    layers: [],
+    summary: 'The capture take-backs are generated screenshots under a frozen path.',
+    evidence: 'Fifteen files under the screenshot directory, and the freeze holds none of them.',
+  };
+  assert.equal(findingFingerprint(layerless), 'harness:606fb6b2b5c5');
+  assert.equal(ackFingerprint(layerless), 'harness:606fb6b2b5c5');
+  // And both still answer coverage, which is the only thing a fingerprint is
+  // recorded for.
+  const layered = { class: 'harness', layers: ['acceptance'], summary: 'a', evidence: 'b' };
+  const standing = new Map([
+    ['harness:82071f84b594', { seq: 1, fingerprint: 'harness:82071f84b594' }],
+    ['harness:606fb6b2b5c5', { seq: 2, fingerprint: 'harness:606fb6b2b5c5' }],
+  ]);
+  assert.equal(coveringAck(standing, layered).seq, 1);
+  assert.equal(coveringAck(standing, layerless).seq, 2);
+});
+
 test('an ack recorded under the words a run wrote is still honored', () => {
   // The identity is a better key than the words, and a defect nobody fixed is
   // not answered differently because the harness learned one.

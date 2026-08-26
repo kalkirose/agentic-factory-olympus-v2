@@ -9,12 +9,15 @@
 // that the seat under judgment cannot quietly move the ground it is judged
 // on, and content review cannot settle that.
 //
-// The same block carries one class that blocks nothing: `recapturablePaths`
+// The same block carries two classes that block nothing. `recapturablePaths`
 // names the frozen artifacts a re-freeze re-takes, and a write the capture
 // takes back from one of them is recorded quietly instead of loudly. The
 // classification is made once, here, at the moment of the revert; every later
 // step that meets those paths reads it off the record rather than judging the
-// same paths again and reaching a louder answer.
+// same paths again and reaching a louder answer. `sweptPaths` names where a
+// test run drops generated artifacts, and a file under one of them that the
+// freeze never held is cleared before the capture reads the tree at all — it
+// is nobody's work, so there is nothing to take back and nothing to report.
 import { underEntry } from '../config/project.mjs';
 
 // The declaration contract: a fenced block the spec author writes, one
@@ -157,6 +160,84 @@ export function dropLine(path) {
 }
 
 /**
+ * Where a test run drops generated artifacts, when the lane declares nowhere.
+ * A browser-mode runner writes a screenshot per failing test into this
+ * directory beside the suite, so a red cycle leaves a pile of files under a
+ * frozen path that no seat authored and no freeze holds.
+ *
+ * It is a default rather than a fact about one repository, because the
+ * directory is a test-runner convention and the cost of not knowing it is paid
+ * by every project that runs one. A lane that declares `sweptPaths` replaces
+ * this list; a lane that declares an empty one sweeps nothing.
+ */
+export const SWEPT_PATHS = ['**/__screenshots__/**'];
+
+/**
+ * The frozen writes that sit where a test run drops its output. Candidates
+ * only: whether one is a generated artifact or a committed baseline is a
+ * question about the freeze, which this module cannot see, so the caller
+ * answers it with `sweptTakeBacks`.
+ *
+ * The hard tiers outrank the sweep for the same reason they outrank the quiet
+ * class: a path `deniedPaths` or `forbiddenPatterns` also match is the ground
+ * the candidate is judged on, and no glob widening reaches it.
+ *
+ * @param {string[]} dropped repo-relative paths the capture reverted
+ * @param {object|null} tier the lane's policy tiers
+ * @returns {string[]} the candidates, in the order the paths arrived
+ */
+export function sweepCandidates(dropped, tier) {
+  const globs = tier?.sweptPaths ?? SWEPT_PATHS;
+  if (globs.length === 0) return [];
+  return dropped.filter((raw) => {
+    const path = raw.replaceAll('\\', '/');
+    return !guardedByTier(path, tier) && globs.some((entry) => underEntry(path, entry));
+  });
+}
+
+/**
+ * The take-backs a capture sweeps instead of recording: candidates the freeze
+ * does not hold.
+ *
+ * Both halves are load-bearing. The glob says where a runner drops output; the
+ * freeze says whether the file is an artifact or a baseline. A path the freeze
+ * holds is committed work — a visual baseline a seat rewrote is a take-back
+ * whatever directory it sits in, and stays one. A path the freeze does not hold
+ * existed nowhere before this seat's test run produced it, so reverting it
+ * takes nothing back: the capture would be reporting the loss of a file that
+ * only ever existed as the by-product of a red.
+ *
+ * @param {string[]} dropped repo-relative paths the capture reverted
+ * @param {object|null} tier the lane's policy tiers
+ * @param {Set<string>|string[]} frozen the paths the freeze anchor holds
+ * @returns {string[]} the swept subset, in the order the paths arrived
+ */
+export function sweptTakeBacks(dropped, tier, frozen) {
+  const held = frozen instanceof Set ? frozen : new Set(frozen ?? []);
+  return sweepCandidates(dropped, tier).filter((raw) => !held.has(raw.replaceAll('\\', '/')));
+}
+
+/** Whether a hard tier holds this path — the classes no quiet reading reaches. */
+function guardedByTier(path, tier) {
+  return (
+    (tier?.deniedPaths ?? []).some((entry) => underEntry(path, entry)) ||
+    (tier?.forbiddenPatterns ?? []).some((pattern) => compile(pattern).test(path))
+  );
+}
+
+/** The record's one-sentence statement of what a swept path is. */
+export const SWEEP_NOTE =
+  'Generated artifacts cleared from frozen paths. The lane declares where a test run drops ' +
+  'them and the freeze holds none of these files, so the restore that reverts the frozen paths ' +
+  'took nothing back by removing them, and no later step is asked to reason about them.';
+
+/** A one-line gist for the ledger stream index. */
+export function sweepGist(swept) {
+  const named = swept.slice(0, 3).join(', ');
+  return `${swept.length} generated file(s) the capture swept from frozen paths: ${named}`;
+}
+
+/**
  * Splits the paths one capture took back into the two classes the record
  * treats differently.
  *
@@ -187,10 +268,7 @@ export function classifyTakeBacks(dropped, tier) {
   const held = [];
   for (const raw of dropped) {
     const path = raw.replaceAll('\\', '/');
-    const guarded =
-      (tier?.deniedPaths ?? []).some((entry) => underEntry(path, entry)) ||
-      (tier?.forbiddenPatterns ?? []).some((pattern) => compile(pattern).test(path));
-    const entry = guarded
+    const entry = guardedByTier(path, tier)
       ? undefined
       : (tier?.recapturablePaths ?? []).find((e) => underEntry(path, e));
     if (entry) recaptured.push({ path, pattern: entry });
