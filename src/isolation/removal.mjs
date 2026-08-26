@@ -9,11 +9,22 @@ import { rmSync } from 'node:fs';
 import { win32 } from 'node:path';
 
 // Five attempts, with a backoff that grows by 250 ms per attempt: two and a
-// half seconds in all. That is the whole budget a close spends on a hold. A
-// hold that outlives it becomes a leftover the sweep retries later, never a
-// longer wait on the close path.
+// half seconds of waiting between whole-tree attempts. A hold that outlives the
+// ladder becomes a leftover the sweep retries later, never a longer wait on the
+// close path.
 const ATTEMPTS = 5;
 const DELAY_MS = 250;
+
+// The same idea one level down. `rm -r` walks the tree itself and gives up at
+// the first entry it cannot take, so without a budget of its own a hold on one
+// file throws away a walk of a whole checked-out application — a run worktree
+// carries a node_modules — and the ladder above starts that walk again from the
+// top. These two retries are spent on the one entry that refused, which is
+// where a hold that passes actually passes. Node grows the wait between them
+// the way this module does, so a refused entry adds 300 ms to each attempt of
+// the ladder above, and a close spends about four seconds on a hold in all.
+const WALK_RETRIES = 2;
+const WALK_DELAY_MS = 100;
 
 // What a passing hold answers with. Windows names one hold any of several
 // ways, depending on which layer refused it, and git reports the same
@@ -101,7 +112,8 @@ export async function removeWithRetry(remove, io = {}) {
 
 /**
  * Deletes a directory tree through the ladder above, in the path form the
- * platform accepts.
+ * platform accepts, and with a retry budget inside the walk as well as around
+ * it.
  * @param {string} path
  * @param {{remove?: Function, platform?: string, attempts?: number,
  *   delayMs?: number, sleep?: (ms: number) => Promise<void>}} [io]
@@ -109,7 +121,16 @@ export async function removeWithRetry(remove, io = {}) {
 export function removeTree(path, io = {}) {
   const remove = io.remove ?? rmSync;
   const target = longPath(path, io.platform ?? process.platform);
-  return removeWithRetry(() => remove(target, { recursive: true, force: true }), io);
+  return removeWithRetry(
+    () =>
+      remove(target, {
+        recursive: true,
+        force: true,
+        maxRetries: WALK_RETRIES,
+        retryDelay: WALK_DELAY_MS,
+      }),
+    io,
+  );
 }
 
 function wait(ms) {

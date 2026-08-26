@@ -8,7 +8,8 @@ import { homePaths, runLedgerPath, scaffoldHome } from '../src/daemon/home.mjs';
 import { readLock } from '../src/daemon/lock.mjs';
 import { Ledger, readEvents } from '../src/ledger/ledger.mjs';
 import { RUN_EVENTS } from '../src/ledger/registry.mjs';
-import { openLoud, openWorkspaceLeftovers } from '../src/telemetry/readers.mjs';
+import { openBreaches, openLoud, openWorkspaceLeftovers } from '../src/telemetry/readers.mjs';
+import { standingTripwires, withTripwireDefaults } from '../src/tripwires/registry.mjs';
 import { tempDir, removeDir, waitFor } from './helpers.mjs';
 
 function instanceEvents(home) {
@@ -650,6 +651,42 @@ test('the record of a workspace nothing will delete names what is holding it', a
   // Both carry the project, or no tripwire of that project ever counts them.
   assert.equal(released.project, 'alpha');
   assert.equal(record.project, 'alpha');
+});
+
+test('releases that keep failing breach the tripwire that counts them', async (t) => {
+  const home = tempDir();
+  const daemon = new Daemon(home);
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  stageRemovals(daemon, { remove: blockedRemove, holders: [{ pid: 4242, name: 'node.exe' }] });
+  daemon.tripwires.setRegistry(
+    'alpha',
+    standingTripwires()
+      .filter((entry) => entry.metric === 'workspace-release-failures')
+      .map(withTripwireDefaults),
+  );
+  // The band is three in ten. Four releases that clear nothing is the window
+  // that ran on the host for a week, and the point of the tripwire is that a
+  // human hears about it instead of reading the ledger later.
+  for (const runId of ['r1', 'r2', 'r3', 'r4']) {
+    stageWorkspace(home, runId);
+    await daemon.releaseWorkspace(runId, { project: 'alpha' });
+  }
+  const failed = instanceEvents(home).filter((e) => e.event === 'workspace-released' && !e.ok);
+  assert.equal(failed.length, 4);
+  const breach = await waitFor(
+    () => instanceEvents(home).find((e) => e.event === 'tripwire-breach'),
+    { label: 'the release failures to breach' },
+  );
+  assert.equal(breach.tripwire, 'workspace-release-failures');
+  assert.equal(breach.value, 4);
+  // The answer carries the image name every failure named, which is the whole
+  // of what the operator does next.
+  assert.deepEqual(breach.detail.holders, ['node.exe']);
+  assert.equal(openBreaches(homePaths(home)).length, 1);
 });
 
 test('a sweep reads the project of a release off the workspace record', async (t) => {

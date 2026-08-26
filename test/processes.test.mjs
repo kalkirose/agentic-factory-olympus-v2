@@ -223,9 +223,17 @@ test('the sweep hands the path over in the environment, never in the script', as
   const run = recorder((file, args, opts) => {
     if (/powershell/i.test(file)) {
       assert.equal(opts.env.OLYMPUS_SWEEP_ROOT, root);
+      // The working-directory reader goes the same way, for the same reason:
+      // nothing this module composes is ever read as script.
+      assert.match(opts.env.OLYMPUS_SWEEP_CWD_SOURCE, /NtQueryInformationProcess/);
+      assert.ok(!args.join(' ').includes(opts.env.OLYMPUS_SWEEP_CWD_SOURCE));
       // The script must carry no trace of the path it is asked about.
       assert.ok(!args.join(' ').includes(root));
-      return { code: 0, stdout: '111 node.exe\r\n222 esbuild.exe\r\n111 node.exe\r\n', stderr: '' };
+      return {
+        code: 0,
+        stdout: '111|cmdline|node.exe\r\n222|image|esbuild.exe\r\n111|cwd|node.exe\r\n',
+        stderr: '',
+      };
     }
     return { code: 0, stdout: '', stderr: '' };
   });
@@ -258,19 +266,46 @@ test('an enumeration that fails reports itself and kills nothing', async () => {
 test('the holder query names pids and image names, and ends nothing', async () => {
   const run = recorder((file) =>
     /powershell/i.test(file)
-      ? { code: 0, stdout: '111 node.exe\r\n222 esbuild.exe\r\n', stderr: '' }
+      ? { code: 0, stdout: '111|cwd|node.exe\r\n222|cmdline,image|esbuild.exe\r\n', stderr: '' }
       : { code: 0, stdout: '', stderr: '' },
   );
   const result = await pathHolders('C:\\home\\worktrees\\run-1', { platform: 'win32', run });
+  // What matched comes with the holder. A process matched on its working
+  // directory is standing in the tree and nothing the OS reports about it says
+  // so, which is the difference between an operator with a next move and one
+  // reading an errno.
   assert.deepEqual(result, {
     holders: [
-      { pid: 111, name: 'node.exe' },
-      { pid: 222, name: 'esbuild.exe' },
+      { pid: 111, via: ['cwd'], name: 'node.exe' },
+      { pid: 222, via: ['cmdline', 'image'], name: 'esbuild.exe' },
     ],
   });
   // A read, not a sweep: the release already killed what it could, and this
   // one says who survived it.
   assert.deepEqual(run.calls.filter((c) => /taskkill/i.test(c.file)), []);
+});
+
+test('a line the query did not write is not a holder', async () => {
+  // Whatever else reaches the pipe — a warning, a progress record, a line a
+  // profile printed — names no pid to kill.
+  const run = recorder((file) =>
+    /powershell/i.test(file)
+      ? {
+          code: 0,
+          stdout: [
+            'WARNING: something',
+            '333',
+            '444|node.exe',
+            '|cwd|node.exe',
+            '555|cwd|My Program.exe',
+          ].join('\r\n'),
+          stderr: '',
+        }
+      : { code: 0, stdout: '', stderr: '' },
+  );
+  const { holders } = await pathHolders('C:\\home\\worktrees\\run-1', { platform: 'win32', run });
+  // The one well-formed line, image name and its space intact.
+  assert.deepEqual(holders, [{ pid: 555, via: ['cwd'], name: 'My Program.exe' }]);
 });
 
 test('the holder query answers, never throws, and refuses an unsafe root', async () => {
@@ -295,7 +330,7 @@ test('the holder query answers, never throws, and refuses an unsafe root', async
 });
 
 test('a record names a handful of holders, not every one of a hundred', async () => {
-  const many = Array.from({ length: 25 }, (_, i) => `${100 + i} node.exe`).join('\r\n');
+  const many = Array.from({ length: 25 }, (_, i) => `${100 + i}|cwd|node.exe`).join('\r\n');
   const run = recorder((file) =>
     /powershell/i.test(file) ? { code: 0, stdout: many, stderr: '' } : { code: 0, stdout: '', stderr: '' },
   );
@@ -440,6 +475,51 @@ test(
     assert.equal(result.error, undefined);
     assert.ok(result.count >= 1, `expected the holder to be found, got ${JSON.stringify(result)}`);
     assert.ok(result.names.includes('node.exe'), JSON.stringify(result.names));
+    await waitFor(() => !alive(holder.pid), { label: 'the holder to be swept' });
+    assert.equal(alive(bystander.pid), true, 'a process outside the workspace must survive');
+  },
+);
+
+test(
+  'a process standing in a workspace is found when nothing about it names one',
+  { skip: WINDOWS_ONLY },
+  async (t) => {
+    const dir = tempDir();
+    const workspace = join(dir, 'worktrees', 'run-1');
+    mkdirSync(workspace, { recursive: true });
+    // The holder the ledger showed and the query did not: a dev server or a
+    // build worker started with a relative argument out of the app directory.
+    // Its image is the shared node, its command line names no path at all, and
+    // its working directory is the one thing keeping the tree undeletable.
+    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], {
+      cwd: workspace,
+      windowsHide: true,
+    });
+    const bystander = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], {
+      cwd: dir,
+      windowsHide: true,
+    });
+    t.after(async () => {
+      for (const child of [holder, bystander]) await terminateTree(child);
+      await waitFor(() => !alive(bystander.pid), { label: 'the bystander to go' });
+      removeDir(dir);
+    });
+    await waitFor(() => alive(holder.pid) && alive(bystander.pid), { label: 'both to be running' });
+
+    const { holders, error } = await pathHolders(workspace, { limit: Infinity });
+    assert.equal(error, undefined);
+    const found = holders.find((h) => h.pid === holder.pid);
+    assert.ok(found, `the holder was not named: ${JSON.stringify(holders)}`);
+    // On its working directory and on nothing else — the command line and the
+    // image path are both outside the workspace.
+    assert.deepEqual(found.via, ['cwd']);
+    assert.equal(found.name, 'node.exe');
+    assert.equal(holders.some((h) => h.pid === bystander.pid), false);
+
+    // And the sweep ends it, because a process standing in a tree the harness
+    // is deleting is the whole reason the delete was failing.
+    const swept = await sweepPathHolders(workspace);
+    assert.equal(swept.error, undefined);
     await waitFor(() => !alive(holder.pid), { label: 'the holder to be swept' });
     assert.equal(alive(bystander.pid), true, 'a process outside the workspace must survive');
   },

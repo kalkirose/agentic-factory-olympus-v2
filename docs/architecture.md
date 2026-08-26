@@ -502,11 +502,13 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   it creates a fresh run worktree, seats receive the absolute path, at close
   it removes the worktree. No shared checkout exists.
 - **Workspace release.** At close the release ends what is standing in the
-  workspace, removes the worktrees, and deletes the tree. It never fails on
-  the shape of a path: every delete the harness performs itself goes in the
-  extended-length Windows form, and a worktree `git worktree remove` refuses
-  is deleted directly and then pruned. A hold is retried on a bounded ladder;
-  a workspace that outlives it is a quiet leftover record naming the directory
+  workspace — matched by command line, by image path, or by working directory,
+  the last being the one that blocks an `rmdir` — removes the worktrees, and
+  deletes the tree. It never fails on the shape of a path: every delete the
+  harness performs itself goes in the extended-length Windows form, and a
+  worktree `git worktree remove` refuses is deleted directly and then pruned. A
+  hold is retried on a bounded ladder, around the walk and inside it; a
+  workspace that outlives it is a quiet leftover record naming the directory
   and the processes standing in it, which the periodic sweep retries
   (ADR-0004).
 - **Run stacks.** Each run launches its own compose project, named by run id,

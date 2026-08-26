@@ -32,17 +32,22 @@ below is byte for byte what shipped before.
   `taskkill /PID <pid> /T /F` on Windows. A failed or unavailable `taskkill`
   falls back to the direct kill, so the child never outlives the call.
 - **A release sweeps before it removes.** Workspace release enumerates the
-  processes whose command line or image path sits inside the run's workspace,
-  ends each one, and only then removes the worktrees. What it ended is stamped
-  on `workspace-released` as `swept: {count, names}`. A sweep is refused
-  outright on a root that is relative or shorter than four characters. What
-  the removal does when the sweep is not enough is ADR-0004.
+  processes standing inside the run's workspace, ends each one, and only then
+  removes the worktrees. Standing inside it is three separate things: a command
+  line that names the workspace, an image loaded out of it, and a working
+  directory inside it. What it ended is stamped on `workspace-released` as
+  `swept: {count, names}`. A sweep is refused outright on a root that is
+  relative or shorter than four characters. What the removal does when the
+  sweep is not enough is ADR-0004.
 - **The same enumeration, without the kill, names a holder.** A workspace that
-  survived the whole release is read once more, and the pid and image name of
-  everything standing in it go onto the record of it (ADR-0004). It is the
-  sweep's own query under the same root guard; it ends nothing, it never
-  throws, and it answers what outlived the kill — which on this harness is
-  usually a seat's surviving descendant.
+  survived the whole release is read once more, and the pid, image name and
+  matching signal of everything standing in it go onto the record of it
+  (ADR-0004). It is the sweep's own query under the same root guard; it ends
+  nothing, it never throws, and it answers what outlived the kill — which on
+  this harness is usually a seat's surviving descendant. The signal is on the
+  record because the three do not mean the same thing: a command-line match may
+  be a process that merely mentions the path, and a working-directory match is
+  a process that is physically in the way of the `rmdir`.
 - **Every exit stamps.** `daemon-stopped` is written by the control stop, by
   SIGINT, SIGTERM, SIGBREAK and SIGHUP, by `process.on('exit')` as the floor
   under all of them, and by a fault handler that stamps and then exits
@@ -149,12 +154,36 @@ fourteen of them, `git worktree remove` failed `EBUSY` twice, and the manual
 recovery was to find them and kill them.
 
 So the release performs that recovery itself, in the same order a human does:
-end what is standing in the workspace, then remove the workspace. The
-enumeration matches on command line and image path because those are the two
-things Windows will report about a process; a working directory is not
-reachable without reading another process's memory, which is a price this does
-not pay. A tool run out of the worktree is matched by its command line, which
-covers the case that was observed.
+end what is standing in the workspace, then remove the workspace.
+
+## Why the sweep reads a working directory
+
+Command line and image path are the two things Windows reports about a process,
+and matching on them alone leaves the holder that matters invisible. Measured on
+the host: a node started with `cwd` inside a workspace, a relative argument and
+the shared `node.exe` as its image is reported by neither field, `rmdir` on
+every directory above it fails `EBUSY`, and the enumeration returns nothing. The
+instance ledger has the same shape in it — twenty-one releases that cleared
+nothing, the last ones `EBUSY` on an application directory inside the tree, with
+a sweep that had just ended four processes and a leftover record that named no
+holder at all. One workspace took six release attempts across twenty hours and
+was still there.
+
+A working directory is only in the process's own memory, so the sweep reads it:
+the PEB holds the parameter block and the block holds the directory as a counted
+UTF-16 string. The read is a P/Invoke compiled inside the same PowerShell the
+enumeration already runs, and the cost is the price of the answer — measured at
+about 300 ms to read every process on the machine, on top of a query that was
+already spawning PowerShell. Everything it can be refused by, it answers nothing
+for: another user's process, a protected process, a process that exits between
+the listing and the read. A PowerShell that cannot compile the reader keeps the
+other two signals, because a narrower answer is the answer the query gave before
+and a release has to run either way.
+
+Everything the query matches is ended, the working-directory match included. A
+process whose working directory is inside a run workspace is inside a tree the
+harness is deleting, and there is no reading of that under which it should
+survive the delete.
 
 The sweep is best effort and says so. What it cannot enumerate is reported as
 an error on the release rather than thrown, because a sweep that fails must not
@@ -214,6 +243,16 @@ If the PowerShell enumeration proves too slow at release time, the sweep moves
 to a native handle query. Trigger: a release whose sweep dominates its
 duration. Reversal cost: low, `listPathHolders` is one function behind a stable
 return shape.
+
+If the working-directory read proves unavailable on a host — a PowerShell that
+refuses to compile a type, a policy that refuses the memory read — the sweep is
+already what it was without it: the two reported fields, and a leftover record
+for what they miss. That degradation is the fallback and it needs no change to
+reach. If instead the read proves unavailable often enough that leftovers come
+back, the answer is a job object at spawn, which makes the whole descendant tree
+killable without enumerating anything. Trigger: leftover records whose holders
+are empty on a host where the reader did not run. Reversal cost: moderate, a
+native binding or a launcher process is required either way.
 
 If `daemon-crash-detected` proves to need an operator's attention rather than a
 reader's, it joins the loud stream and takes a paired `resolved` like every

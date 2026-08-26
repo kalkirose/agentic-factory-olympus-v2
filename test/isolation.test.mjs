@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homePaths, scaffoldHome } from '../src/daemon/home.mjs';
@@ -23,6 +24,7 @@ import {
   commitTree,
   projectConfigJson,
   fakeComposeRunner,
+  waitFor,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -487,6 +489,25 @@ test(
   },
 );
 
+test('the walk inside a removal carries a retry budget of its own', async (t) => {
+  const paths = stagedWorkspace(t, 'r35');
+  const seen = [];
+  // `rm -r` gives up at the first entry it cannot take, and a run worktree is a
+  // checked-out application: without a budget down there, a hold on one file
+  // throws away the walk of a whole node_modules and the ladder starts it over.
+  await removeTree(workspaceRoot(paths, 'r35'), {
+    remove: (path, options) => {
+      seen.push(options);
+      return rmSync(path, options);
+    },
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].recursive, true);
+  assert.equal(seen[0].force, true);
+  assert.ok(seen[0].maxRetries > 0, JSON.stringify(seen[0]));
+  assert.ok(seen[0].retryDelay > 0, JSON.stringify(seen[0]));
+});
+
 // -- a removal git refuses ----------------------------------------------------
 // Measured over five ships: three releases failed on "Filename too long" and
 // eight on "Directory not empty", both of them git's answer about a tree the
@@ -550,6 +571,51 @@ test('a removal that git and the harness both refuse names both refusals', async
 /** A delete nothing will let through. */
 function blockedRemove() {
   throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+}
+
+test(
+  'a release clears a workspace a surviving process is standing in',
+  { skip: WINDOWS_ONLY },
+  async (t) => {
+    // The failure this reproduces, on the real filesystem with the real sweep:
+    // a seat's descendant outlives the seat with its working directory inside
+    // the run worktree, and Windows refuses every rmdir up the tree while it
+    // stands there. Nothing the operating system reports about the process
+    // names the worktree — its image is the shared node and its command line
+    // carries no path — so it is found by where it is standing or not at all.
+    let holder = null;
+    t.after(() => holder?.kill());
+    const { origin, paths } = fixture(t);
+    const isolation = new RunIsolation(paths, { composeRunner: fakeComposeRunner() });
+    const ws = await isolation.provision({
+      runId: 'r44',
+      project: 'alpha',
+      repoUrl: origin,
+      defaultBranch: 'main',
+      configPath: CONFIG_PATH,
+    });
+    holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], {
+      cwd: ws.worktree,
+      windowsHide: true,
+    });
+    await waitFor(() => holder.pid && !holder.killed && running(holder.pid), {
+      label: 'the holder to be standing in the worktree',
+    });
+    // The condition, stated before the release is asked to deal with it.
+    assert.throws(() => rmSync(ws.worktree, { recursive: true, force: true }), /EBUSY|EPERM/);
+
+    const { errors, leftover } = await isolation.release('r44');
+    assert.deepEqual(errors, []);
+    assert.equal(leftover, null);
+    assert.ok(!existsSync(workspaceRoot(paths, 'r44')));
+    await waitFor(() => !running(holder.pid), { label: 'the holder to be swept' });
+  },
+);
+
+function running(pid) {
+  return execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH'], { encoding: 'utf8' }).includes(
+    String(pid),
+  );
 }
 
 // -- who is holding a workspace nothing will delete --------------------------

@@ -96,9 +96,16 @@ about that is settled here.
   it would multiply the wait a close spends on a hold. Both refusals travel in
   the error, because they say different things.
 - **Every removal retries.** Five attempts, with a backoff that grows by
-  250 ms per attempt: two and a half seconds in all. The ladder wraps the
-  `git worktree remove` pass and each directory delete behind it, so one hold
-  is asked again wherever it lands.
+  250 ms per attempt: two and a half seconds of waiting between whole-tree
+  attempts. The ladder wraps the `git worktree remove` pass and each directory
+  delete behind it, so one hold is asked again wherever it lands.
+- **The walk inside a removal retries too.** `rm -r` walks the tree itself and
+  gives up at the first entry it cannot take, so a hold on one file would
+  otherwise throw away the walk of a whole checked-out application and the
+  ladder would start that walk from the top. Two retries are spent on the entry
+  that refused, which is where a hold that passes actually passes. The close's
+  whole budget for a hold is about four seconds; a hold that outlives it becomes
+  a leftover the sweep retries later, never a longer wait on the close path.
 - **Only a hold is retried.** The retryable set is the answers a passing hold
   gives — `EPERM`, `EACCES`, `EBUSY`, `ENOTEMPTY`, and the prose forms git
   reports the same conditions in, because a failed `worktree remove` reaches
@@ -110,8 +117,9 @@ about that is settled here.
 - **A workspace that survives every attempt is named, and so is what holds
   it.** The release returns it as `leftover`, and the daemon stamps
   `workspace-leftover` on the instance ledger with the run id, the directory,
-  what the filesystem said, and the processes standing in the directory — pid
-  and image name, up to ten. The holders are read after every removal has been
+  what the filesystem said, and the processes standing in the directory — pid,
+  image name and what put each one in the tree, up to ten. The holders are read
+  after every removal has been
   tried, on the directory that survived: the process sweep already ended what
   it could find (ADR-0016), so what this query answers is what outlived the
   sweep, which is the process the operator has to deal with. The query kills
@@ -214,10 +222,13 @@ seat's own descendant — a build watcher, an `esbuild.exe`, a `node.exe` the
 seat spawned and did not outlive (ADR-0016). One release swept four of them
 and was still refused.
 
-So the record names them: pid and image name, read from the directory that
-survived, after everything else has been tried. It costs one enumeration on a
-path that is already an exception, it ends nothing, and it turns a record that
-said "blocked" into one that says which process to end.
+So the record names them: pid, image name, and the signal each one matched on,
+read from the directory that survived, after everything else has been tried. It
+costs one enumeration on a path that is already an exception, it ends nothing,
+and it turns a record that said "blocked" into one that says which process to
+end. A record with no holder on it means the enumeration saw nothing, and that
+is a reading of its own: it was the shape of every leftover on this harness
+until the query learned to read a working directory (ADR-0016).
 
 ## Fallback paths
 
