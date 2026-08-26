@@ -4,6 +4,9 @@ Status: accepted (2026-08-16)
 Extended (2026-08-22): the net covered the polling stages and left the stages
 that hold a seat outside it. The stage beat closes that, and the tripwire fires
 on the shape that got through.
+Extended (2026-08-26): the band and the reading against it are work, not wall
+clock. A visit's waits come out of its sample and out of the live elapsed alike
+(ADR-0039); everything else here stands.
 
 ## The condition
 

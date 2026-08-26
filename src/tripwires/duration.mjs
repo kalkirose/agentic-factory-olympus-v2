@@ -3,8 +3,17 @@
 // has to be a reading of what the same stage of the same lane already did. A
 // band is that reading; a stage past the band is the detection (ADR-0034).
 //
+// The history is work, never wall clock. A stage that stood in the ship-token
+// queue, or sat parked on a human, did nothing in that stretch, and a band that
+// counted it would learn the pathology it exists to flag: one five-minute queue
+// wait once took an update band from 119 seconds to 112 minutes, and the next
+// run stood two hours in the same queue inside the band it had taught
+// (ADR-0039). So a visit is measured as the wall of it minus the waits the run
+// was not spending, by the one split the run's own durations use.
+//
 // Nothing here decides anything about a run. It returns numbers, and the
 // watcher is the only caller that stamps.
+import { inactiveMs } from '../ledger/durations.mjs';
 
 /**
  * The completed visits a band needs before it says anything. Under this the
@@ -55,8 +64,30 @@ export function stageVisits(events) {
 }
 
 /**
- * Completed durations of one stage in one run ledger, in milliseconds. The
- * open visit — the one the run is in — is not a sample of anything.
+ * What a stage band counts as waiting: the human's answer, the inert stretch
+ * under an unresolved violation, and the ship-token queue. A band is a
+ * statement about work, and none of the three is the stage working.
+ */
+export const BAND_CLASSES = ['human', 'queue'];
+
+/**
+ * The work inside one window of a run, in milliseconds: the wall of it, less
+ * every span the run spent waiting. Never negative — a ledger whose spans
+ * somehow outrun their window reads as no work rather than as anti-work.
+ * @param {object[]} events one run ledger
+ * @param {string} start ISO
+ * @param {string} end ISO
+ * @returns {number}
+ */
+export function activeMs(events, start, end) {
+  const wall = Date.parse(end) - Date.parse(start);
+  if (!Number.isFinite(wall)) return NaN;
+  return Math.max(0, wall - inactiveMs(events, { start, end, classes: BAND_CLASSES }));
+}
+
+/**
+ * Completed durations of one stage in one run ledger, in milliseconds of work.
+ * The open visit — the one the run is in — is not a sample of anything.
  * @param {object[]} events one run ledger
  * @param {string} stage
  * @returns {number[]}
@@ -64,7 +95,7 @@ export function stageVisits(events) {
 export function stageDurations(events, stage) {
   return stageVisits(events)
     .filter((v) => v.stage === stage && v.end !== null)
-    .map((v) => Date.parse(v.end) - Date.parse(v.start))
+    .map((v) => activeMs(events, v.start, v.end))
     .filter((ms) => Number.isFinite(ms) && ms >= 0);
 }
 

@@ -1,6 +1,10 @@
 # ADR-0036: Parked time is not active time
 
 Status: accepted (2026-08-22)
+Extended (2026-08-26): the split here is the only one, and the waits it folds
+are named classes now. A duration band reads the same fold and counts a
+different set of them (ADR-0039); the two numbers on the close stamp, and what
+they mean, are unchanged.
 
 ## The condition
 

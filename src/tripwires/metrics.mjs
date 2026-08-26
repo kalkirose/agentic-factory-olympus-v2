@@ -5,6 +5,7 @@
 // releases — never wall-clock. A duration may be a value (the CI critical
 // path, a leftover's age); it is never what triggers a reading.
 import { readEvents } from '../ledger/ledger.mjs';
+import { inactiveMs } from '../ledger/durations.mjs';
 import {
   listShips,
   listRunEvents,
@@ -85,12 +86,38 @@ const IMPLEMENTATIONS = {
         }
       }
     }
-    minutes.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+    minutes.sort(byTs);
     const sample = minutes.slice(-window).map((m) => m.minutes);
     return {
       value: sample.length > 0 ? median(sample) : null,
       eligible: sample.length > 0,
       detail: { merges: sample.length },
+    };
+  },
+
+  'verdict-cycles': async ({ paths, project, window }) => {
+    const runs = judgedRuns(paths, project).slice(-window);
+    // The worst run in the window, not the average of it: a run that was
+    // re-judged ten times is the thing worth reading, and four quick ships
+    // beside it do not make it less so.
+    const worst = runs.reduce((a, b) => (b.cycles > a.cycles ? b : a), { cycles: -Infinity });
+    return {
+      value: runs.length > 0 ? worst.cycles : null,
+      eligible: runs.length > 0,
+      detail: { runs: runs.length, ...(runs.length > 0 && { run: worst.runId }) },
+    };
+  },
+
+  'ship-token-wait': async ({ paths, project, window, now = Date.now() }) => {
+    const waits = tokenWaits(paths, project, now).slice(-window);
+    // The longest, for the same reason the leftover metric reads the oldest:
+    // one run that stood two hours in the queue is the condition, and a second
+    // short wait beside it does not make it better.
+    const longest = waits.reduce((a, b) => (b.minutes > a.minutes ? b : a), { minutes: -Infinity });
+    return {
+      value: waits.length > 0 ? longest.minutes : null,
+      eligible: waits.length > 0,
+      detail: { waits: waits.length, ...(waits.length > 0 && { run: longest.runId }) },
     };
   },
 
@@ -199,6 +226,40 @@ function workspaceReleases(paths, project) {
   );
 }
 
+/**
+ * Runs of one project that rendered a verdict, in the order their last render
+ * landed, each with the number of cycles it spent. A cycle is one rendered
+ * verdict, and a run's count is what the eval seat reads as re-judgment: the
+ * same tree, judged again, because the last judgment did not close.
+ */
+function judgedRuns(paths, project) {
+  const runs = [];
+  for (const { runId, events } of listRunEvents(paths, { project })) {
+    const renders = events.filter((e) => e.event === 'verdict-rendered');
+    if (renders.length === 0) continue;
+    runs.push({ runId, ts: renders.at(-1).ts, cycles: renders.length });
+  }
+  return runs.sort(byTs);
+}
+
+/**
+ * Ship-token queue waits of one project, in the order the runs queued, in
+ * minutes. A run still waiting is measured up to `now` — a wait nobody has
+ * ended is the one worth reading, and leaving it out until it ends is how the
+ * metric would go quiet exactly when the queue is stuck.
+ */
+function tokenWaits(paths, project, now) {
+  const waits = [];
+  for (const { runId, events } of listRunEvents(paths, { project })) {
+    const queued = events.find((e) => e.event === 'ship-token' && e.state === 'waiting');
+    if (!queued) continue;
+    const end = events.find((e) => e.event === 'run-closed')?.ts ?? new Date(now).toISOString();
+    const ms = inactiveMs(events, { start: queued.ts, end, classes: ['queue'] });
+    waits.push({ runId, ts: queued.ts, minutes: ms / 60000 });
+  }
+  return waits.sort(byTs);
+}
+
 /** Freeze records in ts order: kills and initial-wave count per freeze. */
 function collectFreezes(paths, project) {
   const freezes = [];
@@ -210,7 +271,7 @@ function collectFreezes(paths, project) {
       freezes.push({ ts: f.ts, kills: f.killCount, waves });
     }
   }
-  return freezes.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  return freezes.sort(byTs);
 }
 
 /** Confirmed findings per lens across the runs holding the last N verdicts. */
@@ -222,7 +283,7 @@ function collectYield(paths, project, window) {
       verdicts.push({ ts: v.ts, runId });
     }
   }
-  verdicts.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  verdicts.sort(byTs);
   const inWindow = new Set(verdicts.slice(-window).map((v) => v.runId));
   const byLens = Object.fromEntries(ALL_LENSES.map((lens) => [lens, 0]));
   for (const { runId, events } of runs) {
@@ -232,6 +293,11 @@ function collectYield(paths, project, window) {
     }
   }
   return { verdicts: Math.min(verdicts.length, window), byLens };
+}
+
+/** Ledger order across ledgers: the stamp's own time, ascending. */
+function byTs(a, b) {
+  return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0;
 }
 
 function median(values) {

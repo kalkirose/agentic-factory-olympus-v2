@@ -17,7 +17,7 @@
 import { readEvents } from '../ledger/ledger.mjs';
 import { listRunEvents } from '../telemetry/readers.mjs';
 import { withTripwireDefaults } from './registry.mjs';
-import { durationBand, stageDurations } from './duration.mjs';
+import { activeMs, durationBand, stageDurations } from './duration.mjs';
 import {
   evaluateMetric,
   countFreezes,
@@ -195,6 +195,13 @@ export class TripwireWatcher {
    * same stage of the same lane built in the other runs of the project, and a
    * stage past the band opens one queued record for the operator.
    *
+   * Both sides of that comparison are work. The band's samples are visits with
+   * their waits taken out, so the live reading has its own taken out too: the
+   * heartbeat says how long the stage has stood, and the run's ledger says how
+   * much of that it spent parked or standing in the ship-token queue. A run
+   * five minutes into a queue wait is not a run doing something no visit ever
+   * did (ADR-0039).
+   *
    * It detects and it does nothing else. The watcher holds no run, opens no
    * run store and returns no directive, so nothing here can kill a run, move
    * it, or change what it waits for. No span of wall-clock time appears in the
@@ -227,7 +234,9 @@ export class TripwireWatcher {
     // Cold start: the history is too thin to hold a band, so there is nothing
     // to be outside of. Quiet, because a guess the operator learns to ignore
     // is worse than no record at all.
-    if (band === null || line.elapsed <= band.upper) return;
+    if (band === null) return;
+    const work = stageWork(self.events, line);
+    if (work <= band.upper) return;
     this.ledger.append('stage-overrun', {
       actor: ACTOR,
       project,
@@ -235,6 +244,11 @@ export class TripwireWatcher {
       lane: self.lane,
       stage: line.stage,
       elapsed: line.elapsed,
+      // The two halves of the elapsed, so the record says which one is the
+      // condition: a stage that worked for hours and a stage that queued for
+      // them are different reports.
+      work,
+      ...(line.elapsed - work > 0 && { waited: line.elapsed - work }),
       ...(line.waitingOn !== undefined && { waitingOn: line.waitingOn }),
       // A poll beat counts what it read; a stage beat counts the intervals it
       // stood for. The record carries whichever the heartbeat brought, so the
@@ -244,7 +258,7 @@ export class TripwireWatcher {
       ...(line.detail !== undefined && { detail: line.detail }),
       band,
       gist: gist(
-        `${runId} has been in ${line.stage} for ${minutes(line.elapsed)} min; ` +
+        `${runId} has been in ${line.stage} for ${minutes(work)} min of work; ` +
           `the last ${samples.length} visits stayed under ${minutes(band.upper)} min`,
       ),
     });
@@ -313,6 +327,21 @@ export class TripwireWatcher {
       ),
     });
   }
+}
+
+/**
+ * The work behind one heartbeat: the stretch the stamp says it has stood for,
+ * less the waits the run's own ledger records inside it. The window is read off
+ * the stamp — its `ts` back by its `elapsed` — because that is the moment the
+ * stage started work, and it is the same window a completed visit of the stage
+ * would be measured over.
+ */
+function stageWork(events, line) {
+  const at = Date.parse(line.ts);
+  if (!Number.isFinite(at)) return line.elapsed;
+  const from = new Date(at - line.elapsed).toISOString();
+  const work = activeMs(events, from, line.ts);
+  return Number.isFinite(work) ? work : line.elapsed;
 }
 
 function round(value) {

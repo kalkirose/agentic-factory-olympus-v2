@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { runDuration, inactiveSpans } from '../src/ledger/durations.mjs';
+import { runDuration, inactiveSpans, inactiveMs } from '../src/ledger/durations.mjs';
 import { RunEngine } from '../src/engine/engine.mjs';
 import { scaffoldHome, runLedgerPath, archivedRunLedgerPath } from '../src/daemon/home.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
@@ -254,6 +254,69 @@ test('the center reads a ship in active hours and carries the wall beside it', a
   ]);
   assert.equal(snapshot.stats.medianHours, 3);
   assert.equal(snapshot.stats.medianWallHours, 9);
+});
+
+// -- the queue class ----------------------------------------------------------
+
+function queuedRun() {
+  return [
+    line(1, 0, 'run-launched', { project: 'alpha', lane: 'story' }),
+    line(2, 1, 'stage-entered', { stage: 'update' }),
+    line(3, 1, 'ship-token', { state: 'waiting', holder: 'other', ahead: 0 }),
+    line(4, 4, 'ship-token', { state: 'acquired' }),
+    line(5, 6, 'run-closed', { state: 'shipped' }),
+  ];
+}
+
+test('a ship-token wait is a span of the queue class', () => {
+  assert.deepEqual(inactiveSpans(queuedRun(), { classes: ['queue'] }), [
+    { from: at(1), to: at(4) },
+  ]);
+  assert.equal(inactiveMs(queuedRun(), { classes: ['queue'] }), 3 * HOUR);
+});
+
+test('a token nobody handed over runs to the end of the reading', () => {
+  const events = [
+    line(1, 0, 'run-launched', { project: 'alpha', lane: 'story' }),
+    line(2, 2, 'ship-token', { state: 'waiting', holder: 'other', ahead: 1 }),
+    line(3, 9, 'run-closed', { state: 'killed' }),
+  ];
+  assert.deepEqual(inactiveSpans(events, { classes: ['queue'] }), [{ from: at(2), to: at(9) }]);
+});
+
+test('a queue wait is the harness waiting on itself, so it stays active time', () => {
+  // ADR-0036 measures what the humans owed. A run waiting for another run of
+  // its own project is the harness's own pace, and it belongs in the harness's
+  // own number — the band is where the queue is taken out (ADR-0039).
+  const d = runDuration(queuedRun());
+  assert.equal(d.wallMs, 6 * HOUR);
+  assert.equal(d.activeMs, 6 * HOUR);
+  assert.equal(d.parkedMs, 0);
+  assert.deepEqual(inactiveSpans(queuedRun()), []);
+});
+
+test('a park inside a queue wait is one stretch of waiting, not two', () => {
+  const events = [
+    line(1, 0, 'run-launched', { project: 'alpha', lane: 'story' }),
+    line(2, 1, 'ship-token', { state: 'waiting', holder: 'other', ahead: 0 }),
+    line(3, 2, 'park', { type: 'provisioning-gate' }),
+    line(4, 3, 'answer', { actor: 'human', parkSeq: 3 }),
+    line(5, 3, 'resume', { stage: 'update' }),
+    line(6, 4, 'ship-token', { state: 'acquired' }),
+    line(7, 5, 'run-closed', { state: 'shipped' }),
+  ];
+  assert.deepEqual(inactiveSpans(events, { classes: ['human', 'queue'] }), [
+    { from: at(1), to: at(4) },
+  ]);
+});
+
+test('a stated window needs no launch stamp, and clamps the spans to itself', () => {
+  const events = queuedRun();
+  assert.deepEqual(inactiveSpans(events, { start: at(2), end: at(3), classes: ['queue'] }), [
+    { from: at(2), to: at(3) },
+  ]);
+  const stageOnly = events.filter((e) => e.event !== 'run-launched');
+  assert.equal(inactiveMs(stageOnly, { start: at(1), end: at(6), classes: ['queue'] }), 3 * HOUR);
 });
 
 test('an unmeasurable ledger reads as no duration, never a negative one', () => {

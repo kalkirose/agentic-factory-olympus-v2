@@ -646,11 +646,20 @@ the project, and its answer is a queued record naming the stage, the elapsed,
 what the stage was waiting on and the band. Under five completed visits there
 is no band and the watcher says nothing (ADR-0034).
 
-Two standing tripwires watch the harness's own housekeeping rather than a
-project's quality: failed workspace releases over the last ten releases, and
-the age of the oldest workspace no release has cleared. Both were set from the
-ledgers that showed the condition, and both take the machinery's ordinary
-escalation — a queued breach, open until a human answers it (ADR-0010).
+Both sides of that comparison are work, never wall clock. A visit's sample and
+a live stage's reading each have their waits taken out — the human's answer,
+the inert stretch under an unresolved violation, and the ship-token queue — by
+the one split the run's own durations use, and the record carries the work and
+the wait it came out of. A band that counted a queue wait would learn the
+pathology it exists to flag (ADR-0039).
+
+Four standing tripwires watch the harness's own housekeeping rather than a
+project's quality: failed workspace releases over the last ten releases, the
+age of the oldest workspace no release has cleared, the verdict cycles of the
+worst run of the last five judged, and the longest ship-token queue wait of the
+last five runs that queued. All four were set from the ledgers that showed the
+condition, and all take the machinery's ordinary escalation — a queued breach,
+open until a human answers it (ADR-0010).
 
 Standing quality bar (written by the runs themselves, never mined from
 outside): escaped defects per story (ceiling 0.5, rolling 10 ships),

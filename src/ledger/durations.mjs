@@ -6,63 +6,116 @@
 // under a liveness violation nobody had resolved yet. Time waiting on a human
 // or on a dead substrate is not the harness's pace.
 //
+// The same split answers a second question, over a window rather than a run: a
+// duration band asks what a stage of a lane usually takes, and a stage standing
+// in a queue is not taking anything. So the wait classes are named, a caller
+// says which of them its reading counts as waiting, and there is one derivation
+// behind both readings (ADR-0039).
+//
 // Everything here is a derivation over ledger lines. Nothing is held in
 // daemon memory, so a restart re-reads the same file and answers the same
 // numbers, and an archived ledger answers them years later.
 
-// A park opens the wait. The answer is what ends it — the human's stamp, not
-// the daemon's `resume` behind it — but a ledger whose answer is missing and
-// whose resume is present still ends the wait at the resume.
-const WAIT_OPEN = 'park';
-const WAIT_CLOSE = new Set(['answer', 'resume']);
+/**
+ * The named classes of wait, each with the stamps that open and close one.
+ *
+ * `human` is the run waiting on a person or on a dead substrate: a park opens
+ * the wait, and the answer is what ends it — the human's stamp, not the
+ * daemon's `resume` behind it — though a ledger whose answer is missing and
+ * whose resume is present still ends the wait at the resume. A
+ * `liveness-violation` opens an inert stretch: the invariant found no in-flight
+ * child, no parked escalation and no transition in progress, and it stays inert
+ * until the paired `resolved` lands.
+ *
+ * `queue` is the run waiting on another run of its own project: it asked for
+ * the ship token, somebody else was holding it, and it polls until the holder
+ * merges. Nothing of the run's own work happens in that stretch (ADR-0033).
+ */
+export const WAIT_CLASSES = {
+  human: {
+    opens: (e) => e.event === 'park',
+    closes: (e) => e.event === 'answer' || e.event === 'resume',
+    inert: (e) => e.event === 'liveness-violation',
+  },
+  queue: {
+    opens: (e) => e.event === 'ship-token' && e.state === 'waiting',
+    closes: (e) => e.event === 'ship-token' && e.state === 'acquired',
+    inert: () => false,
+  },
+};
 
-// The run is inert: the invariant found no in-flight child, no parked
-// escalation and no transition in progress. It stays inert until the paired
-// `resolved` lands, and an unresolved violation at the end runs to the end.
-const INERT_OPEN = 'liveness-violation';
+/**
+ * What a run duration counts as waiting. The wall-versus-active pair on the
+ * close stamp answers "how long did the humans take", so it counts the human's
+ * wait and nothing else: a queue wait is one run of the harness waiting for
+ * another, which is the harness's own pace and belongs in its number.
+ */
+const RUN_CLASSES = ['human'];
 
 /**
  * The spans of one run ledger that are not active time, merged so that a park
  * inside an unresolved violation is counted once rather than twice.
  *
  * @param {object[]} events one run ledger, in order
- * @param {{end?: string}} [opts] the moment the reading stops; defaults to the
- *   run's own close stamp
+ * @param {{start?: string, end?: string, classes?: string[]}} [opts] the window
+ *   the reading covers — `start` defaults to the run's launch stamp and `end`
+ *   to its close stamp — and the wait classes it counts as waiting.
  * @returns {{from: string, to: string}[]} in order, non-overlapping
  */
-export function inactiveSpans(events, { end } = {}) {
-  const bounds = readBounds(events, end);
+export function inactiveSpans(events, { start, end, classes = RUN_CLASSES } = {}) {
+  const bounds = readBounds(events, start, end);
   if (bounds === null) return [];
   const { from, to } = bounds;
+  const kinds = classes.map((name) => WAIT_CLASSES[name]).filter(Boolean);
+  if (kinds.length === 0) return [];
   const cleared = new Map();
   for (const e of events) {
     if (e.event === 'resolved') cleared.set(e.resolves, Date.parse(e.ts));
   }
   const spans = [];
-  let waiting = null;
+  // One open wait per class: a park and a queue wait are separate waits, and a
+  // run inside both is waiting once, which the merge below settles.
+  const open = kinds.map(() => null);
   for (const e of events) {
     const at = Date.parse(e.ts);
     // An event outside the reading opens nothing and closes nothing. The ship
     // stat stops at the merge, and the close-out stage that follows it is a
     // later run's worth of ledger as far as that reading is concerned.
     if (!Number.isFinite(at) || at > to) continue;
-    if (e.event === WAIT_OPEN) {
-      // A second park with no answer between is the same wait, still open.
-      if (waiting === null) waiting = at;
-    } else if (WAIT_CLOSE.has(e.event)) {
-      if (waiting !== null) {
-        spans.push([waiting, at]);
-        waiting = null;
+    kinds.forEach((kind, i) => {
+      if (kind.opens(e)) {
+        // A second open with no close between is the same wait, still open.
+        if (open[i] === null) open[i] = at;
+      } else if (kind.closes(e)) {
+        if (open[i] !== null) {
+          spans.push([open[i], at]);
+          open[i] = null;
+        }
+      } else if (kind.inert(e)) {
+        const resolvedAt = cleared.get(e.seq);
+        spans.push([at, resolvedAt === undefined ? to : resolvedAt]);
       }
-    } else if (e.event === INERT_OPEN) {
-      const resolvedAt = cleared.get(e.seq);
-      spans.push([at, resolvedAt === undefined ? to : resolvedAt]);
-    }
+    });
   }
-  // Open at the end: the run closed on a park nobody answered, or on a
-  // violation nobody resolved. It was waiting up to the last moment read.
-  if (waiting !== null) spans.push([waiting, to]);
+  // Open at the end: the run closed on a park nobody answered, on a violation
+  // nobody resolved, or on a token it never got. It was waiting up to the last
+  // moment read.
+  for (const at of open) if (at !== null) spans.push([at, to]);
   return merge(spans, from, to);
+}
+
+/**
+ * The milliseconds of one window that the run spent waiting rather than
+ * working. The window and the classes are `inactiveSpans`'s.
+ * @param {object[]} events one run ledger, in order
+ * @param {{start?: string, end?: string, classes?: string[]}} [opts]
+ * @returns {number}
+ */
+export function inactiveMs(events, opts) {
+  return inactiveSpans(events, opts).reduce(
+    (sum, span) => sum + (Date.parse(span.to) - Date.parse(span.from)),
+    0,
+  );
 }
 
 /**
@@ -77,29 +130,28 @@ export function inactiveSpans(events, { end } = {}) {
  *   activeMs: number, parkedMs: number}|null}
  */
 export function runDuration(events, { end } = {}) {
-  const bounds = readBounds(events, end);
+  const bounds = readBounds(events, undefined, end);
   if (bounds === null) return null;
   const { from, to, launchedAt, endedAt } = bounds;
-  const parkedMs = inactiveSpans(events, { end: endedAt }).reduce(
-    (sum, span) => sum + (Date.parse(span.to) - Date.parse(span.from)),
-    0,
-  );
+  const parkedMs = inactiveMs(events, { end: endedAt, classes: RUN_CLASSES });
   const wallMs = to - from;
   return { launchedAt, endedAt, wallMs, activeMs: wallMs - parkedMs, parkedMs };
 }
 
-function readBounds(events, end) {
-  const launch = events.find((e) => e.event === 'run-launched');
-  if (!launch) return null;
+function readBounds(events, start, end) {
+  // A window the caller states needs no launch stamp: a stage visit is a window
+  // of a run, and the run it belongs to is the ledger being read.
+  const launchedAt = start ?? events.find((e) => e.event === 'run-launched')?.ts ?? null;
+  if (launchedAt === null) return null;
   const endedAt = end ?? events.find((e) => e.event === 'run-closed')?.ts ?? null;
   if (endedAt === null) return null;
-  const from = Date.parse(launch.ts);
+  const from = Date.parse(launchedAt);
   const to = Date.parse(endedAt);
   // `ts` is recording data, and an out-of-order pair — clock skew, a
   // hand-edited fixture — is not a duration. It reads as no duration rather
   // than as a negative one.
   if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) return null;
-  return { from, to, launchedAt: launch.ts, endedAt };
+  return { from, to, launchedAt, endedAt };
 }
 
 /** Clamps to the reading, drops the empty, and unions what overlaps. */

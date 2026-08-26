@@ -48,6 +48,23 @@ export const TRIPWIRE_METRICS = {
     defaultWindow: null,
     defaultTriggers: ['merged', 'card-sweep'],
   },
+  // The most verdict cycles any one run of the last N judged runs spent. A
+  // cycle is one rendered verdict, so the value is how many times the worst run
+  // in the window was judged again after a judgment that did not close.
+  'verdict-cycles': {
+    unit: 'runs',
+    defaultWindow: 5,
+    defaultTriggers: ['verdict-rendered'],
+  },
+  // The longest ship-token queue wait of the last N runs that queued, in
+  // minutes. Serial merges are the design (ADR-0033) and the queue is what they
+  // cost; this is the reading of that cost, kept out of the update-stage band
+  // so a band never learns a queue wait as work.
+  'ship-token-wait': {
+    unit: 'runs',
+    defaultWindow: 5,
+    defaultTriggers: ['ship-token', 'merged'],
+  },
   // Releases that did not clear their workspace, counted over the last N
   // release attempts. The unit is the release itself: a close and a sweep tick
   // each make one, and a release is the state change the metric is about.
@@ -105,6 +122,27 @@ export function standingTripwires() {
       metric: 'frontier-width',
       breach: { op: '<', value: 2 },
       answer: 'card-edge review; an honest pinch closes the breach with no action',
+    },
+    {
+      id: 'verdict-cycles',
+      metric: 'verdict-cycles',
+      window: 5,
+      // Five is the observed ceiling of a run that was judged and closed;
+      // above it the window's runs were re-judging defects of the harness
+      // rather than of the product.
+      breach: { op: '>', value: 5 },
+      answer:
+        'read the cycles the run spent: past five, the gate is being asked ' +
+        'the same question it already failed to close',
+    },
+    {
+      id: 'ship-token-wait',
+      metric: 'ship-token-wait',
+      window: 5,
+      breach: { op: '>', value: 30 },
+      answer:
+        'read what the token holder was doing: the queue costs every waiting ' +
+        'run the whole of the holder\'s ship path',
     },
     {
       id: 'workspace-release-failures',

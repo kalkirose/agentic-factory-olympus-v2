@@ -19,6 +19,7 @@ import { BEATS_PER_STAMP, stageHeartbeat } from '../src/telemetry/heartbeat.mjs'
 import {
   BAND_FACTOR,
   MIN_SAMPLES,
+  activeMs,
   durationBand,
   stageDurations,
   stageVisits,
@@ -262,6 +263,37 @@ test('a resumed entry ends no visit, and an open visit is no sample at all', () 
   assert.deepEqual(stageDurations(events, 'close-out'), []);
 });
 
+// -- work versus waiting ------------------------------------------------------
+
+const launched = { seq: 1, ts: at(0), event: 'run-launched', actor: 'daemon', project: 'p', lane: 'story' };
+
+test('a parked hour inside a visit is no part of the sample', () => {
+  // The park nobody answered before the run closed: the visit ran to the close
+  // stamp, and every minute of it used to be a sample of the stage.
+  const events = [
+    launched,
+    { event: 'stage-entered', stage: 'verdict', ts: at(0) },
+    { event: 'park', type: 'provisioning-gate', ts: at(1) },
+    { event: 'run-closed', state: 'killed', ts: at(9) },
+  ];
+  assert.deepEqual(stageDurations(events, 'verdict'), [MINUTE]);
+});
+
+test('a ship-token wait is no part of an update sample', () => {
+  const events = [
+    launched,
+    { event: 'stage-entered', stage: 'update', ts: at(0) },
+    { event: 'ship-token', state: 'waiting', holder: 'other', ts: at(0) },
+    { event: 'ship-token', state: 'acquired', ts: at(5) },
+    { event: 'stage-entered', stage: 'ship', ts: at(7) },
+    { event: 'run-closed', state: 'shipped', ts: at(9) },
+  ];
+  // Five minutes queued, two minutes of work. Only the work is a sample, so a
+  // queue wait can never widen the band that is supposed to flag one.
+  assert.deepEqual(stageDurations(events, 'update'), [2 * MINUTE]);
+  assert.equal(activeMs(events, at(0), at(7)), 2 * MINUTE);
+});
+
 test('a band needs a history, and its top is never below the slowest visit', () => {
   const thin = Array(MIN_SAMPLES - 1).fill(MINUTE);
   assert.equal(durationBand(thin), null);
@@ -492,6 +524,68 @@ test('a stage holding a silent seat opens the record the silent hours never did'
   );
   assert.deepEqual(openStreamItems(paths, 'queued'), []);
   assert.equal(overruns(paths).length, 1);
+});
+
+/** A run in `update`, queued behind another run's ship token since `since`. */
+function queuedRun(paths, runId, { since = at(0), acquired = null } = {}) {
+  writeLedger(runLedgerPath(paths, runId), [
+    { seq: 1, ts: at(0), event: 'run-launched', actor: 'daemon', project: 'p', lane: 'story' },
+    { seq: 2, ts: at(0), event: 'stage-entered', actor: 'daemon', stage: 'update' },
+    { seq: 3, ts: since, event: 'ship-token', actor: 'daemon', state: 'waiting', holder: 'other' },
+    ...(acquired === null
+      ? []
+      : [{ seq: 4, ts: acquired, event: 'ship-token', actor: 'daemon', state: 'acquired' }]),
+  ]);
+}
+
+function updateBeat(elapsed, extra = {}) {
+  return {
+    seq: 9,
+    ts: at(50),
+    event: 'stage-heartbeat',
+    stage: 'update',
+    waitingOn: 'ship-token',
+    polls: BEATS_PER_STAMP,
+    elapsed,
+    ...extra,
+  };
+}
+
+test('a run standing in the ship-token queue is not a run past its band', async (t) => {
+  const paths = home(t);
+  for (let i = 0; i < MIN_SAMPLES; i++) historyStage(paths, `past-${i}`, 'update', MINUTE);
+  queuedRun(paths, 'live');
+  const { watcher } = watcherOver(t, paths);
+  // Fifty minutes in the stage against a band whose top is four. Every one of
+  // them was the queue's, so the stage has done nothing unusual at all — and a
+  // record here is how the band came to learn a queue wait as a stage's work.
+  await watcher.notify('p', updateBeat(50 * MINUTE), 'run:live');
+  assert.deepEqual(overruns(paths), []);
+});
+
+test('the record splits the elapsed into the work and the wait behind it', async (t) => {
+  const paths = home(t);
+  for (let i = 0; i < MIN_SAMPLES; i++) historyStage(paths, `past-${i}`, 'update', MINUTE);
+  queuedRun(paths, 'live', { acquired: at(2) });
+  const { watcher } = watcherOver(t, paths);
+  await watcher.notify('p', updateBeat(50 * MINUTE, { waitingOn: 'handler' }), 'run:live');
+  const [record] = overruns(paths);
+  assert.equal(record.stage, 'update');
+  assert.equal(record.elapsed, 50 * MINUTE);
+  assert.equal(record.work, 48 * MINUTE);
+  assert.equal(record.waited, 2 * MINUTE);
+  assert.match(record.gist, /48 min of work/);
+});
+
+test('a stage that never waited carries the work alone', async (t) => {
+  const paths = home(t);
+  for (let i = 0; i < MIN_SAMPLES; i++) historyRun(paths, `past-${i}`, 10 * MINUTE);
+  openRun(paths, 'live');
+  const { watcher } = watcherOver(t, paths);
+  await watcher.notify('p', heartbeat(150 * MINUTE), 'run:live');
+  const [record] = overruns(paths);
+  assert.equal(record.work, 150 * MINUTE);
+  assert.equal(record.waited, undefined);
 });
 
 test('an instance-ledger append carries no run, and keys no stage reading', async (t) => {

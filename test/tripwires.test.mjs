@@ -228,6 +228,71 @@ test('ci-critical-path takes the median of the longest green check, in minutes',
   assert.deepEqual(result.detail, { merges: 2 });
 });
 
+test('verdict-cycles reads the worst run of the window, not its average', async (t) => {
+  const paths = home(t);
+  const judged = (runId, day, cycles) =>
+    writeLedger(runLedgerPath(paths, runId), [
+      line(1, `2026-08-0${day}T00:00:00Z`, 'run-launched', { project: 'p', lane: 'story' }),
+      ...Array.from({ length: cycles }, (_, i) =>
+        line(2 + i, `2026-08-0${day}T0${i}:00:00Z`, 'verdict-rendered', {
+          cycle: i + 1,
+          verdict: i + 1 === cycles ? 'green' : 'red',
+        }),
+      ),
+    ]);
+  judged('r1', 1, 2);
+  judged('r2', 2, 3);
+  const quiet = await evaluateMetric('verdict-cycles', { paths, project: 'p', window: 5 });
+  assert.equal(quiet.value, 3);
+  assert.deepEqual(quiet.detail, { runs: 2, run: 'r2' });
+  // The sixth cycle of one run is the reading, whatever the others did.
+  judged('r3', 3, 6);
+  const loud = await evaluateMetric('verdict-cycles', { paths, project: 'p', window: 5 });
+  assert.equal(loud.value, 6);
+  assert.equal(loud.detail.run, 'r3');
+  // A window that reaches back past a run drops it, and the reading falls.
+  const narrow = await evaluateMetric('verdict-cycles', { paths, project: 'p', window: 1 });
+  assert.equal(narrow.value, 6);
+  const empty = await evaluateMetric('verdict-cycles', { paths, project: 'q', window: 5 });
+  assert.equal(empty.eligible, false);
+  assert.equal(empty.value, null);
+});
+
+test('ship-token-wait reads the longest queue wait, open ones included', async (t) => {
+  const paths = home(t);
+  const queued = (runId, day, { waited, closed }) =>
+    writeLedger(runLedgerPath(paths, runId), [
+      line(1, `2026-08-0${day}T00:00:00Z`, 'run-launched', { project: 'p', lane: 'story' }),
+      line(2, `2026-08-0${day}T00:00:00Z`, 'ship-token', { state: 'waiting', holder: 'other' }),
+      ...(waited === null
+        ? []
+        : [line(3, `2026-08-0${day}T00:${String(waited).padStart(2, '0')}:00Z`, 'ship-token', { state: 'acquired' })]),
+      ...(closed ? [line(4, `2026-08-0${day}T02:00:00Z`, 'run-closed', { state: 'shipped' })] : []),
+    ]);
+  queued('t1', 1, { waited: 5, closed: true });
+  queued('t2', 2, { waited: 40, closed: true });
+  const closedOnly = await evaluateMetric('ship-token-wait', { paths, project: 'p', window: 5 });
+  assert.equal(closedOnly.value, 40);
+  assert.deepEqual(closedOnly.detail, { waits: 2, run: 't2' });
+  // A run still in the queue is measured up to now: the wait nobody has ended
+  // is the one the metric exists for.
+  queued('t3', 3, { waited: null, closed: false });
+  const open = await evaluateMetric('ship-token-wait', {
+    paths,
+    project: 'p',
+    window: 5,
+    now: Date.parse('2026-08-03T02:00:00Z'),
+  });
+  assert.equal(open.value, 120);
+  assert.equal(open.detail.run, 't3');
+  // A run that never queued says nothing at all.
+  writeLedger(runLedgerPath(paths, 't4'), [
+    line(1, '2026-08-04T00:00:00Z', 'run-launched', { project: 'q', lane: 'story' }),
+  ]);
+  const none = await evaluateMetric('ship-token-wait', { paths, project: 'q', window: 5 });
+  assert.equal(none.eligible, false);
+});
+
 test('the frontier width is possible parallelism, not the launchable set', () => {
   const card = (key, blockedBy = [], phase = null) => ({ key, path: `${key}.md`, phase, blockedBy });
   const runs = new Map([
@@ -502,6 +567,32 @@ test('a breach opens once, stays open, and re-arms at resolution', async (t) => 
   await watcher.notify('p', { event: 'escape-recorded' });
   breaches = readEvents(paths.instanceLedger).filter((e) => e.event === 'tripwire-breach');
   assert.equal(breaches.length, 2);
+});
+
+test('the sixth verdict cycle of a run stamps, and the fifth does not', async (t) => {
+  const paths = home(t);
+  const ledger = openInstanceStore(paths);
+  t.after(() => ledger.close());
+  const watcher = new TripwireWatcher({ paths, ledger });
+  watcher.setRegistry('p', [standingTripwires().find((e) => e.id === 'verdict-cycles')]);
+  const judged = (cycles) =>
+    writeLedger(runLedgerPath(paths, 'r1'), [
+      line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+      ...Array.from({ length: cycles }, (_, i) =>
+        line(2 + i, `2026-08-01T0${i}:00:00Z`, 'verdict-rendered', { cycle: i + 1, verdict: 'red' }),
+      ),
+    ]);
+  const breaches = () => readEvents(paths.instanceLedger).filter((e) => e.event === 'tripwire-breach');
+  judged(5);
+  await watcher.notify('p', { event: 'verdict-rendered' });
+  assert.deepEqual(breaches(), []);
+  judged(6);
+  await watcher.notify('p', { event: 'verdict-rendered' });
+  assert.equal(breaches().length, 1);
+  assert.equal(breaches()[0].metric, 'verdict-cycles');
+  assert.equal(breaches()[0].value, 6);
+  assert.deepEqual(breaches()[0].detail, { runs: 1, run: 'r1' });
+  assert.equal(openBreaches(paths).length, 1);
 });
 
 test('a non-matching event queues no evaluation; ineligible metrics never breach', async (t) => {

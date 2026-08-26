@@ -76,6 +76,16 @@ proposals get these concrete shapes:
     project, in hours. Current state, so no window; eligible only while an
     open record exists. A duration as value, an append as trigger — every
     sweep that acts on a leftover stamps one.
+  - `verdict-cycles`: the most rendered verdicts any one run spent, over the
+    last N runs of the project that rendered any. The worst run rather than
+    the mean: a run re-judged ten times is the reading, and four quick ships
+    beside it do not make it less so.
+  - `ship-token-wait`: the longest ship-token queue wait of the last N runs
+    that queued, in minutes. A run still waiting is measured up to the read,
+    because a queue nobody has cleared is what the metric exists for. It is
+    the reading of what serial merges cost, kept out of the update-stage
+    duration band so no band learns a queue wait as a stage's work
+    (ADR-0039).
 - **Baseline proposals.** At the 5th freeze the watcher stamps a kill-rate
   proposal (observed kills, waves, per-freeze rates, and the observed floor
   as the suggested band); at the 5th verdict a per-lens yield proposal,
