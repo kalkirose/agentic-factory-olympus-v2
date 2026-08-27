@@ -437,3 +437,47 @@ test('two checks on one head sha are two questions: both stay flakes', () => {
   assert.equal(deterministicRed(log.events, SHA, 'lint'), true);
   assert.equal(deterministicRed(log.events, SHA, 'ci'), false);
 });
+
+test('a cancel and the green behind it are no part of the count', () => {
+  // The generator of the flood: a cancel is terminal and it is not green, so
+  // reading it as a red made every cancel-then-green cycle look like a flake.
+  // One head sha carried 36 of them. The count is of `ci-flake` records, and
+  // the watcher mints none for a cancel, so nothing here follows the cycle
+  // (ADR-0041).
+  const log = ledger();
+  for (let i = 0; i < FLAKE_LIMIT * 4; i++) {
+    log.append('check-transition', { sha: SHA, check: 'ci', status: 'cancelled' });
+    log.append('check-transition', { sha: SHA, check: 'ci', status: 'success' });
+  }
+  assert.equal(ciFlakes(log.events, SHA, 'ci'), 0);
+  assert.equal(deterministicRed(log.events, SHA, 'ci'), false);
+});
+
+test('the count is of the check and the tree, whatever attempt answered', () => {
+  // The identity of an attempt keys the evidence and the classification; it
+  // does not key this. Two attempts at one check on one tree are the same
+  // question asked twice, and the third green over that tree is the answer
+  // this rule is about, whichever check run produced it.
+  const log = ledger();
+  const attempts = ['41', '42', '43'];
+  for (const checkRunId of attempts) {
+    log.append('check-transition', { sha: SHA, check: 'ci', status: 'failure', checkRunId, attempt: 1 });
+    log.append('check-transition', { sha: SHA, check: 'ci', status: 'rerun-requested', checkRunId });
+    log.append('check-transition', { sha: SHA, check: 'ci', status: 'success', checkRunId, attempt: 2 });
+    log.append('ci-flake', { pr: 7, sha: SHA, check: 'ci', checkRunId });
+  }
+  assert.equal(ciFlakes(log.events, SHA, 'ci'), FLAKE_LIMIT);
+  assert.equal(deterministicRed(log.events, SHA, 'ci'), true);
+});
+
+test('the evidence stamps of a check are no part of its flake count', () => {
+  // `ci-evidence` lands beside the transitions of every red attempt, and a
+  // check that is captured twice is not a check that flaked twice.
+  const log = ledger();
+  flake(log);
+  for (const checkRunId of ['41', '42', '43', '44']) {
+    log.append('ci-evidence', { sha: SHA, check: 'ci', checkRunId, log: 'captured' });
+  }
+  assert.equal(ciFlakes(log.events, SHA, 'ci'), 1);
+  assert.equal(deterministicRed(log.events, SHA, 'ci'), false);
+});

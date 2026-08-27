@@ -21,16 +21,23 @@
 //
 // The check watcher is a ledger-stamping process: every observed state
 // change stamps `check-transition`; pending is a state, never a verdict; no
-// wall-clock timeout detects anything. Two forge states are not check states
-// at all and are classified before the watcher sees them — a request in
-// conflict with its base, and a head sha the forge carries no check run for.
-// Both stamp `forge-anomaly` and take a route. A red check whose workflow run
-// is still executing is a third: the check is terminal and the run behind it
-// is not, so the watcher holds the red until the run ends and stamps
-// `triage-wait` once for the wait. A check that turns green after a re-run
-// three times on one head sha is a fourth: the tree never moved between the
-// answers, so the flake reading is withdrawn, the check is reclassified
-// deterministic-red (loud) and it earns no further automatic re-run.
+// wall-clock timeout detects anything. It reads one attempt per check name —
+// the latest, decided from the attempts' own facts — and it captures the
+// evidence of every required check that is not green at the observation, so a
+// cancel-and-rerun from outside the harness cannot take a failing attempt's
+// log away from the triage that judges it (ADR-0041). Two forge states are not
+// check states at all and are classified before the watcher sees them — a
+// request in conflict with its base, and a head sha the forge carries no check
+// run for. Both stamp `forge-anomaly` and take a route. A red check whose
+// workflow run is still executing is a third: the check is terminal and the
+// run behind it is not, so the watcher holds the red until the run ends and
+// stamps `triage-wait` once for the wait. A check that turns green after a
+// re-run three times on one head sha is a fourth: the tree never moved between
+// the answers, so the flake reading is withdrawn, the check is reclassified
+// deterministic-red (loud) and it earns no further automatic re-run. A
+// cancelled check is a fifth, and it is neither red nor green: nobody ran it
+// to an answer, so the watcher waits a bounded number of observations for the
+// attempt that will, and escalates the cancel when none comes.
 // Persistent CI reds render a red
 // verdict (`source: 'ci'`) and re-enter the verdict stage — the same
 // four-class triage, the same routes, the same shared budgets as in-run
@@ -40,7 +47,12 @@
 // so a daemon restart resumes mid-ship without memory.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
-import { repairTicketPath, reconcileTicketPath, runReportPath } from '../daemon/home.mjs';
+import {
+  ciEvidenceDir,
+  repairTicketPath,
+  reconcileTicketPath,
+  runReportPath,
+} from '../daemon/home.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
 import { assertDefectKind } from '../ledger/registry.mjs';
 import { budgetOpen, ciFlakes, deterministicRed, FLAKE_LIMIT } from '../ledger/cycles.mjs';
@@ -63,7 +75,7 @@ import {
   resetHard,
 } from '../isolation/tree.mjs';
 import { testEditDenyRules } from '../seats/boundary.mjs';
-import { noLogReason } from '../ship/forge.mjs';
+import { attemptOrder, noLogReason, PartialLogRefusal } from '../ship/forge.mjs';
 import { derivedLabels } from '../ship/labels.mjs';
 import { takeShipToken } from '../ship/token.mjs';
 import { parseIntentCard } from './card.mjs';
@@ -100,9 +112,16 @@ import {
 // Check-run terminal states, normalized: a completed run reports its
 // conclusion; a pending run reports its status. `rerun-requested` is the
 // watcher's own stamp for the one failed-jobs re-run.
+//
+// A cancel is in none of these sets. It is terminal and it is not green, but
+// it is not a red either: nobody ran the check to an answer, somebody stopped
+// it. Reading it as a red made a cancel-then-green cycle look exactly like a
+// flake — one head sha once carried 36 cancels and 34 successes, and the
+// harness classified its way through all of them (ADR-0041).
 const GREEN = new Set(['success', 'neutral', 'skipped']);
-const RED = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'stale']);
-const TERMINAL = new Set([...GREEN, ...RED]);
+const RED = new Set(['failure', 'timed_out', 'action_required', 'stale']);
+const CANCELLED = 'cancelled';
+const TERMINAL = new Set([...GREEN, ...RED, CANCELLED]);
 const LOG_TAIL = 1500;
 
 /**
@@ -112,6 +131,16 @@ const LOG_TAIL = 1500;
  * stays what it always was — cadence, not detection.
  */
 export const CHECKLESS_POLLS = 20;
+
+/**
+ * The watcher's bound on a required check that stands cancelled with no later
+ * attempt behind it. A cancel is not an answer, so the watcher waits for the
+ * attempt that will answer — a re-run somebody asked for, a concurrency group
+ * releasing the job. Past the bound nobody is going to send one, and the run
+ * escalates the cancel rather than waiting on it for ever. Poll outcomes, like
+ * every other bound here, never wall-clock time.
+ */
+export const CANCELLED_POLLS = 20;
 
 /**
  * The bound on the branch updates one implementation pass takes before its
@@ -278,11 +307,12 @@ async function preVerdictUpdate(ctx, base) {
 function shipHandler({ forgeFor, pollMs }) {
   return async function ship(ctx) {
     const base = await shipBase(ctx, forgeFor);
-    // Poll outcomes of this stage entry that saw no check run at all, per
-    // head sha. The count lives here and the route's decisions live in the
-    // ledger: a restart re-enters the stage and counts again, while the
-    // stamps below still say which recovery step the run already spent.
-    const checkless = new Map();
+    // Poll outcomes of this stage entry that saw nothing move: no check run at
+    // all on a head sha, and a required check standing cancelled. The counts
+    // live here and the routes' decisions live in the ledger: a restart
+    // re-enters the stage and counts again, while the stamps below still say
+    // which recovery step the run already spent.
+    const polls = { checkless: new Map(), cancelled: new Map() };
     // The stage runs no seat, so nothing else stamps while it waits on the
     // forge or on the token. Every poll outcome that changed nothing beats.
     const heart = stageHeartbeat(ctx);
@@ -365,7 +395,7 @@ function shipHandler({ forgeFor, pollMs }) {
         if (out.directive) return out.directive;
         continue;
       }
-      const directive = await watchChecks(ctx, base, opened, st, checkless);
+      const directive = await watchChecks(ctx, base, opened, st, polls);
       if (directive) return directive;
       heart.beat('checks', { pr: opened.pr, sha: st.headSha });
       await sleep(pollMs);
@@ -524,8 +554,64 @@ async function pushBranch(ctx, base, { expected = null } = {}) {
 // -- the check watcher -------------------------------------------------------
 
 /**
- * Stamps every observed state change per check, the ci-flake events, and the
+ * The authoritative check run of every name on one head sha, with the number
+ * of the attempt it is.
+ *
+ * The forge lists every attempt it holds, so one name can carry three of them:
+ * a request whose check name once answered success 59 times, failure 35 and
+ * skipped 31 was read by taking whichever the forge listed first, which made
+ * the green-or-red reading of that request depend on the order an API answer
+ * came back in. The latest attempt is the answer — it is the one the forge
+ * itself will merge on — and `attemptOrder` decides which that is from the
+ * attempts' own facts. A forge that names no check-run id leaves every attempt
+ * on a name tied, and the read falls back to what it always was: one identity
+ * per name (ADR-0041).
+ * @param {Array<object>} runs the forge's check runs for one head sha
+ * @returns {Map<string, object>} name → the authoritative run, plus `attempt`
+ */
+export function checksByName(runs) {
+  const groups = new Map();
+  for (const run of runs) {
+    const list = groups.get(run.name) ?? [];
+    list.push(run);
+    groups.set(run.name, list);
+  }
+  const resolved = new Map();
+  for (const [name, list] of groups) {
+    list.sort(attemptOrder);
+    resolved.set(name, { ...list.at(-1), attempt: list.length });
+  }
+  return resolved;
+}
+
+/** The identity of one check attempt: its check-run id, or the name behind a forge that serves none. */
+function runKey(run) {
+  return run.id == null ? `name:${run.name}` : String(run.id);
+}
+
+/** What the watcher makes of one check run: green, red, cancelled, or pending. */
+function stateOf(run) {
+  const status = normalize(run);
+  if (GREEN.has(status)) return 'green';
+  if (RED.has(status)) return 'red';
+  if (status === CANCELLED) return 'cancelled';
+  return 'pending';
+}
+
+/** A terminal state that is not a green: a red, or a cancel. */
+function notGreen(status) {
+  return TERMINAL.has(status) && !GREEN.has(status);
+}
+
+/**
+ * Stamps every observed state change per check, captures the evidence of a
+ * required check that is not green, and stamps the ci-flake events and the
  * point at which a check stops being a flake.
+ *
+ * The evidence comes first, before any classification reads the state: what
+ * the forge holds about an attempt is not durable, and a cancel-and-rerun from
+ * outside the harness replaces the attempts a triage was going to read. The
+ * capture is the run's own copy (ADR-0041).
  *
  * The flake reading rests on one claim: the red was the substrate, and the
  * green is the tree. A check that has now made that claim `FLAKE_LIMIT` times
@@ -533,18 +619,29 @@ async function pushBranch(ctx, base, { expected = null } = {}) {
  * any of the answers, so the claim is spent. The check is reclassified
  * deterministic-red — loud, once per pair — and from there its greens buy it
  * nothing: no further flake is classified, and no automatic re-run is granted
- * (ADR-0008).
+ * (ADR-0008). A cancel is no part of that claim: nobody read an answer out of
+ * a check somebody stopped.
  */
-function stampTransitions(ctx, opened, sha, runs) {
+function observeChecks(ctx, opened, sha, byName) {
   const events = runEvents(ctx);
   const last = new Map();
   for (const e of events) {
-    if (e.event === 'check-transition' && e.sha === sha) last.set(e.check, e.status);
+    if (e.event === 'check-transition' && e.sha === sha) {
+      last.set(e.check, { status: e.status, id: e.checkRunId ?? null });
+    }
   }
   const required = new Set(opened.required ?? []);
-  for (const run of runs) {
+  for (const run of byName.values()) {
     const status = normalize(run);
-    if (last.get(run.name) === status) continue;
+    if (required.has(run.name) && notGreen(status)) {
+      captureCheckRun(ctx, events, opened, sha, run);
+    }
+    const held = last.get(run.name);
+    // A fresh attempt is a fresh observation even when it lands on the state
+    // the attempt before it held: the same red twice is two reds, and the
+    // ledger is where a reader counts them.
+    const moved = !held || held.status !== status || (held.id != null && held.id !== runKey(run));
+    if (!moved) continue;
     const fields = {
       actor: ACTOR,
       pr: opened.pr,
@@ -552,6 +649,7 @@ function stampTransitions(ctx, opened, sha, runs) {
       check: run.name,
       status,
       required: required.has(run.name),
+      ...(run.id != null && { checkRunId: String(run.id), attempt: run.attempt }),
     };
     if (TERMINAL.has(status) && run.startedAt && run.completedAt) {
       fields.duration = Date.parse(run.completedAt) - Date.parse(run.startedAt);
@@ -596,30 +694,179 @@ function stampTransitions(ctx, opened, sha, runs) {
   }
 }
 
-async function watchChecks(ctx, base, opened, st, checkless) {
+// -- captured CI evidence ----------------------------------------------------
+
+/**
+ * The metadata of one check attempt, written the moment the watcher sees it in
+ * a state that is not green. It costs no forge call — the watcher already
+ * holds the check run — and it is what identifies an attempt after the forge
+ * stops listing it: a cancel-and-rerun from outside the harness replaces the
+ * attempts of a head sha, and a triage run afterwards reads the replacements.
+ *
+ * The log is not here, because a log read out of a workflow run still
+ * executing is a partial log that reads exactly like a whole one (ADR-0008).
+ * `captureLogs` takes it at the first poll where the run reports itself over,
+ * which is the earliest moment the evidence is both whole and readable.
+ */
+function captureCheckRun(ctx, events, opened, sha, run) {
+  const checkRunId = runKey(run);
+  const held = events.some(
+    (e) => e.event === 'ci-evidence' && e.sha === sha && e.checkRunId === checkRunId,
+  );
+  if (held) return;
+  const dir = ciEvidenceDir(ctx.paths, ctx.runId, run.name, checkRunId, run.attempt ?? 1);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'check-run.json'),
+    JSON.stringify(
+      {
+        check: run.name,
+        checkRunId,
+        attempt: run.attempt ?? 1,
+        pr: opened.pr,
+        sha,
+        state: stateOf(run),
+        status: run.status,
+        conclusion: run.conclusion ?? null,
+        startedAt: run.startedAt ?? null,
+        completedAt: run.completedAt ?? null,
+        workflowRun: run.run ?? null,
+        detailsUrl: run.detailsUrl ?? null,
+        observedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ) + '\n',
+  );
+  ctx.store.append('ci-evidence', {
+    actor: ACTOR,
+    pr: opened.pr,
+    sha,
+    check: run.name,
+    checkRunId,
+    attempt: run.attempt ?? 1,
+    state: stateOf(run),
+    dir,
+    log: 'pending',
+  });
+}
+
+/**
+ * The failure logs of the attempts this poll is about to classify, taken
+ * before the classification runs. Every caller reaches here with the workflow
+ * runs behind these checks already reported complete, so the log is whole.
+ *
+ * One attempt is fetched once: the stamp that says the log landed — or that
+ * the forge answered with a reason instead of a log — is the record that stops
+ * the next poll asking again.
+ */
+async function captureLogs(ctx, base, opened, sha, runs) {
+  const events = runEvents(ctx);
+  for (const run of runs) {
+    const checkRunId = runKey(run);
+    const held = events.filter(
+      (e) => e.event === 'ci-evidence' && e.sha === sha && e.checkRunId === checkRunId,
+    );
+    if (held.length === 0 || held.some((e) => e.log !== 'pending')) continue;
+    let output;
+    try {
+      output = await base.forge.checkLog(run);
+    } catch (error) {
+      // The one refusal this read expects: the workflow run behind the check
+      // had not finished after all. The metadata stands, the log stays owed,
+      // and the next poll asks again. Every other failure is the forge's own
+      // and travels, exactly as it does from the triage's read.
+      if (!(error instanceof PartialLogRefusal)) throw error;
+      continue;
+    }
+    const dir = held[0].dir;
+    const reason = noLogReason(output);
+    if (reason == null) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'log.txt'), String(output));
+    }
+    ctx.store.append('ci-evidence', {
+      actor: ACTOR,
+      pr: opened.pr,
+      sha,
+      check: run.name,
+      checkRunId,
+      attempt: run.attempt ?? 1,
+      state: stateOf(run),
+      dir,
+      log: reason == null ? 'captured' : 'absent',
+      ...(reason == null ? { bytes: Buffer.byteLength(String(output)) } : { reason }),
+    });
+  }
+}
+
+/**
+ * The captured log of the latest attempt at one check on one head sha, or null
+ * when the run captured none. The ledger names the directory, so a reader
+ * finds the evidence without walking the filesystem, and a restart finds it
+ * exactly where the stamp says it is.
+ */
+function capturedLog(events, sha, check) {
+  const stamps = events.filter(
+    (e) => e.event === 'ci-evidence' && e.sha === sha && e.check === check && e.log === 'captured',
+  );
+  for (const stamp of stamps.reverse()) {
+    const path = join(stamp.dir, 'log.txt');
+    if (existsSync(path)) return { path, output: readFileSync(path, 'utf8'), stamp };
+  }
+  return null;
+}
+
+async function watchChecks(ctx, base, opened, st, polls) {
   const sha = st.headSha;
   const runs = await base.forge.checkRuns(sha);
-  stampTransitions(ctx, opened, sha, runs);
+  const byName = checksByName(runs);
+  observeChecks(ctx, opened, sha, byName);
   if (runs.length === 0) {
     // No check of any name on the head of an open request the forge does not
     // call conflicting: the required set is not late, it was never delivered.
     // Counted, then routed — the watcher does not wait on it.
-    const polls = (checkless.get(sha) ?? 0) + 1;
-    checkless.set(sha, polls);
-    if (polls < CHECKLESS_POLLS) return null;
-    checkless.set(sha, 0);
-    return checklessSha(ctx, base, opened, sha, polls);
+    const seen = (polls.checkless.get(sha) ?? 0) + 1;
+    polls.checkless.set(sha, seen);
+    if (seen < CHECKLESS_POLLS) return null;
+    polls.checkless.set(sha, 0);
+    return checklessSha(ctx, base, opened, sha, seen);
   }
-  checkless.delete(sha);
-  const requiredRuns = (opened.required ?? []).map((name) => runs.find((r) => r.name === name));
+  polls.checkless.delete(sha);
+  const requiredRuns = (opened.required ?? []).map((name) => byName.get(name));
   if (requiredRuns.some((r) => !r)) return null; // not all appeared: pending
-  const redNow = requiredRuns.filter((r) => RED.has(normalize(r)));
+  const redNow = requiredRuns.filter((r) => stateOf(r) === 'red');
   if (redNow.length > 0) return handleRed(ctx, base, opened, sha, redNow);
-  if (requiredRuns.every((r) => GREEN.has(normalize(r)))) {
+  const stopped = requiredRuns.filter((r) => stateOf(r) === 'cancelled');
+  if (stopped.length > 0) return handleCancelled(ctx, base, opened, sha, stopped, polls);
+  if (requiredRuns.every((r) => stateOf(r) === 'green')) {
     if (st.autoMergeArmed) return null; // the merge is the forge's next move
     return greenNoMerge(ctx, base, opened, sha);
   }
   return null; // pending is a state, never a verdict
+}
+
+/**
+ * A required check somebody stopped. It is not a red — no run of the check
+ * produced that state, and the automatic re-run exists to test a claim a
+ * cancel never made — and it is not a green either, so the watcher waits for
+ * the attempt that answers: a re-run, or a concurrency group letting the job
+ * through. Waiting is bounded by observations, and past the bound the cancel
+ * takes the escalation a red takes, with its evidence already on disk.
+ */
+async function handleCancelled(ctx, base, opened, sha, stopped, polls) {
+  const key = `${sha}:${stopped.map((r) => runKey(r)).join(',')}`;
+  const seen = (polls.cancelled.get(key) ?? 0) + 1;
+  polls.cancelled.set(key, seen);
+  if (seen < CANCELLED_POLLS) return null;
+  const executing = await runsNotDone(base, stopped);
+  // A run still executing holds the escalation the way it holds a red, and it
+  // holds the count with it: the bound is on observations of a cancel nobody
+  // replaced, not on the wait for the run behind one.
+  if (executing.length > 0) return stampWait(ctx, opened, sha, executing, stopped);
+  polls.cancelled.delete(key);
+  await captureLogs(ctx, base, opened, sha, stopped);
+  return ciTriage(ctx, base, opened, sha, stopped, waitedFor(runEvents(ctx), sha));
 }
 
 /**
@@ -772,6 +1019,10 @@ async function handleRed(ctx, base, opened, sha, redNow) {
   // acts on, and the poll after the run ends is where it acts.
   const executing = await runsNotDone(base, redNow);
   if (executing.length > 0) return stampWait(ctx, opened, sha, executing, redNow);
+  // The evidence, before the classification that decides what happens to these
+  // reds. The re-run below replaces the attempts on the forge, so this is the
+  // last moment their logs are the harness's to take (ADR-0041).
+  await captureLogs(ctx, base, opened, sha, redNow);
   const events = runEvents(ctx);
   const lastOpFix = findLast(events, 'operational-fix')?.seq ?? 0;
   // One automatic re-run of the failed jobs per (run, finding); an operational
@@ -794,6 +1045,10 @@ async function handleRed(ctx, base, opened, sha, redNow) {
         check: r.name,
         status: 'rerun-requested',
         required: true,
+        // The attempt the harness asked the forge to replace. The one that
+        // answers is a different check run, and the ledger says which was
+        // which.
+        ...(r.id != null && { checkRunId: String(r.id), attempt: r.attempt }),
       });
     }
     return null;
@@ -836,7 +1091,12 @@ async function ciTriage(ctx, base, opened, sha, redChecks, waited = null) {
     .filter((f) => f.source === 'triage');
   const reds = [];
   for (const r of redChecks) {
-    const output = await base.forge.checkOutput(sha, r.name);
+    // The snapshot first, the forge second. The capture was taken when the
+    // attempt was observed; the live read asks the forge what it still holds,
+    // which after an external cancel-and-rerun is the replacement rather than
+    // the attempt that failed (ADR-0041).
+    const captured = capturedLog(events, sha, r.name);
+    const output = captured ? captured.output : await base.forge.checkOutput(sha, r.name);
     // The forge answers a log it cannot serve with a reason, and the reason
     // travels to the seat as it always has: a red check is a red check, and a
     // triage told why the evidence is absent judges better than one told
@@ -932,12 +1192,16 @@ async function greenNoMerge(ctx, base, opened, sha) {
 
 async function stampMerged(ctx, base, opened, st) {
   const runs = await base.forge.checkRuns(st.headSha);
+  const byName = checksByName(runs);
   // The merge can land between polls; the final check states of the head
   // sha still stamp — all terminal states are covered, flakes included.
-  stampTransitions(ctx, opened, st.headSha, runs);
+  observeChecks(ctx, opened, st.headSha, byName);
   const required = new Set(opened.required ?? []);
-  const redChecks = runs
-    .filter((r) => required.has(r.name) && RED.has(normalize(r)))
+  // What landed on the default branch with a required check that never turned
+  // green — a red, or a cancel nobody replaced. The merge is the escape
+  // either way, and the state travels with it.
+  const redChecks = [...byName.values()]
+    .filter((r) => required.has(r.name) && notGreen(normalize(r)))
     .map((r) => r.name);
   // The merge is what a green-but-no-merge alert was waiting for, so the
   // engine's owning-event sweep clears it behind this stamp (ADR-0015).
@@ -1267,7 +1531,7 @@ async function breachFlow(ctx, base, merged, enqueueRepair) {
     // Ticket, then stamp, per escape. The ticket file is written first, so a
     // ticketed escape always has a ticket to repair from; the stamp is the
     // last thing that must succeed for the record to stay actionable.
-    const tails = await redCheckTails(base, merged);
+    const tails = await redCheckTails(ctx, base, merged);
     const set = readEscapeSet(ctx.paths.escapesLedger);
     for (const seq of entries) {
       const escape = set.find((e) => e.seq === seq);
@@ -1311,15 +1575,24 @@ async function breachFlow(ctx, base, merged, enqueueRepair) {
   }
 }
 
-/** The red checks at the merge, each with the tail of its output. */
-async function redCheckTails(base, merged) {
+/**
+ * The red checks at the merge, each with the tail of its output. The captured
+ * evidence answers first: the merge is behind these reds, so the forge has had
+ * every chance to re-run them, and the repair ticket is the one reader that
+ * cannot come back for a second look (ADR-0041).
+ */
+async function redCheckTails(ctx, base, merged) {
+  const events = runEvents(ctx);
   const tails = [];
   for (const name of merged.redChecks ?? []) {
-    let output;
-    try {
-      output = await base.forge.checkOutput(merged.sha, name);
-    } catch (error) {
-      output = `(the forge would not return the output of ${name}: ${error.message})`;
+    const captured = capturedLog(events, merged.sha, name);
+    let output = captured?.output;
+    if (output == null) {
+      try {
+        output = await base.forge.checkOutput(merged.sha, name);
+      } catch (error) {
+        output = `(the forge would not return the output of ${name}: ${error.message})`;
+      }
     }
     tails.push({ name, output: String(output ?? '').slice(-LOG_TAIL) });
   }
@@ -1391,8 +1664,11 @@ async function watchMergeCommit(ctx, base, merged, pollMs) {
   const heart = stageHeartbeat(ctx);
   for (;;) {
     if (ctx.stopped()) return 'stopped';
-    const runs = await base.forge.checkRuns(merged.mergeSha);
-    if (runs.length === 0) return null;
+    const all = await base.forge.checkRuns(merged.mergeSha);
+    if (all.length === 0) return null;
+    // The latest attempt at every name, the same read the request path takes:
+    // a merge commit carries re-runs too, and the answer is the last of them.
+    const runs = [...checksByName(all).values()];
     const events = runEvents(ctx);
     const last = new Map();
     for (const e of events) {
@@ -1407,7 +1683,10 @@ async function watchMergeCommit(ctx, base, merged, pollMs) {
       }
       ctx.store.append('merge-commit-check', fields);
     }
-    const reds = runs.filter((r) => RED.has(normalize(r)));
+    // Every terminal state that is not a green, the cancel included: the merge
+    // has landed, so a check that never answered green on it is the same news
+    // as one that answered red.
+    const reds = runs.filter((r) => notGreen(normalize(r)));
     if (reds.length === 0) {
       if (runs.every((r) => TERMINAL.has(normalize(r)))) return null;
       heart.beat('merge-commit-checks', { sha: merged.mergeSha });
@@ -1423,7 +1702,7 @@ async function watchMergeCommit(ctx, base, merged, pollMs) {
       for (const e of fresh) {
         if (e.event !== 'merge-commit-check' || e.check !== name) continue;
         if (e.status === 'rerun-requested') lastRerun = e.seq;
-        else if (RED.has(e.status)) lastRed = e.seq;
+        else if (notGreen(e.status)) lastRed = e.seq;
       }
       return { lastRerun, lastRed };
     };

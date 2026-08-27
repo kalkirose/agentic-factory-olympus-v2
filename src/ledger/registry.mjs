@@ -212,6 +212,14 @@ export const RUN_EVENTS = new Set([
   // derivation never ran read the same otherwise (ADR-0008).
   'pr-labeled',
   'check-transition',
+  // One CI check attempt's evidence, captured when the attempt was observed
+  // rather than when a reader needed it. It names the check run, the attempt,
+  // the directory the metadata and the log were written to, and whether the
+  // log is on disk, still owed, or refused with a reason. An external
+  // cancel-and-rerun once destroyed the failing attempts of a ship, and the
+  // triage that followed cited the cancellations because they were all the
+  // forge still held (ADR-0041).
+  'ci-evidence',
   'ci-flake',
   'branch-update',
   // One state of the forge that is not a state of a check: a pull request in

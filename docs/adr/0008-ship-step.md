@@ -8,6 +8,10 @@ Superseded in part by ADR-0033: `shipStep` supplies three stages — `update`,
 `ship`, `close-out`. The branch update runs before the final verdict, so the
 verdict certifies the tree that lands, and only the holder of the project's
 ship token opens or merges a request.
+Superseded in part by ADR-0041: a check attempt is identified by its check-run
+id, the authoritative run of a name is the latest attempt, a cancel is neither
+red nor green, and the evidence of a required check that is not green is
+captured when the watcher observes it rather than when a seat reads it.
 
 ## Decision
 

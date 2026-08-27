@@ -16,7 +16,7 @@ import {
   runLedgerPath,
 } from '../src/daemon/home.mjs';
 import { postFreeze, repairLane, restoreAnchor } from '../src/lanes/verdict.mjs';
-import { shipStep, CHECKLESS_POLLS, UPDATE_CAP } from '../src/lanes/ship.mjs';
+import { checksByName, shipStep, CHECKLESS_POLLS, UPDATE_CAP } from '../src/lanes/ship.mjs';
 import { FLAKE_LIMIT, RERUN_BUDGET } from '../src/ledger/cycles.mjs';
 import { gitHubForge, noLogReason, parseGitHubRepo, PartialLogRefusal } from '../src/ship/forge.mjs';
 import { derivedLabels } from '../src/ship/labels.mjs';
@@ -83,31 +83,38 @@ const PROBE_SCRIPT =
   `console.log('probe sent ${PROBE_LEAK}');` +
   `process.exit(process.env.${PROBE_VAR} === 'live' ? 0 : 1);`;
 
-const green = (name = 'ci') => ({
+// Every shorthand takes an optional check-run id and start time: two attempts
+// at one name are two check runs, and the watcher orders them by those two
+// facts. A shorthand that names neither is one attempt, and the forge fixture
+// mints its id when it hands the list out.
+const green = (name = 'ci', extra = {}) => ({
   name,
   status: 'completed',
   conclusion: 'success',
   startedAt: '2026-08-10T00:00:00Z',
   completedAt: '2026-08-10T00:03:00Z',
+  ...extra,
 });
-const red = (name = 'ci') => ({
+const red = (name = 'ci', extra = {}) => ({
   name,
   status: 'completed',
   conclusion: 'failure',
   startedAt: '2026-08-10T00:00:00Z',
   completedAt: '2026-08-10T00:02:00Z',
+  ...extra,
 });
-/** A check a human stopped: terminal, red, and nobody's flake. */
-const cancelled = (name = 'ci') => ({
+/** A check somebody stopped: terminal, no answer about the tree, nobody's flake. */
+const cancelled = (name = 'ci', extra = {}) => ({
   name,
   status: 'completed',
   conclusion: 'cancelled',
   startedAt: '2026-08-10T00:00:00Z',
   completedAt: '2026-08-10T00:01:00Z',
+  ...extra,
 });
-const running = (name = 'ci') => ({ name, status: 'in_progress' });
+const running = (name = 'ci', extra = {}) => ({ name, status: 'in_progress', ...extra });
 /** A red check that names the workflow run it is a job of. */
-const redOf = (run, name = 'ci') => ({ ...red(name), run });
+const redOf = (run, name = 'ci', extra = {}) => ({ ...red(name, extra), run });
 
 // -- fake forge over the fixture origin --------------------------------------
 
@@ -151,13 +158,23 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
       return false;
     }
   };
+  // A check run the fixture hands out carries its own id and the sha it sits
+  // on, the way the forge's does: the watcher identifies an attempt by that id
+  // and the log calls are addressed to the attempt, never to the name.
+  let nextCheckId = 900100;
+  const withIds = (sha, list) =>
+    list.map((run) => ({ sha, ...run, id: run.id == null ? String(nextCheckId++) : String(run.id) }));
   const checksFor = (sha) => {
-    if (!state.checks.has(sha) && state.autoChecks) state.checks.set(sha, state.autoChecks(sha));
+    if (!state.checks.has(sha) && state.autoChecks) {
+      state.checks.set(sha, withIds(sha, state.autoChecks(sha)));
+    }
     return state.checks.get(sha) ?? [];
   };
+  // The forge merges on the latest attempt at each required name, never on
+  // whichever attempt its own list happens to carry first.
   const allRequiredGreen = (sha) =>
     state.requiredChecks.every((name) => {
-      const run = checksFor(sha).find((r) => r.name === name);
+      const run = checksFor(sha).filter((r) => r.name === name).at(-1);
       return run?.status === 'completed' && ['success', 'neutral', 'skipped'].includes(run.conclusion);
     });
   const doMerge = () => {
@@ -171,11 +188,11 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
     pr.mergeSha = head('main');
     pr.state = 'merged';
     // Preset the merge sha's checks so autoChecks never leaks onto it.
-    state.checks.set(pr.mergeSha, mergeCommitChecks ?? []);
+    state.checks.set(pr.mergeSha, withIds(pr.mergeSha, mergeCommitChecks ?? []));
   };
   return {
     state,
-    setChecks: (sha, list) => state.checks.set(sha, list),
+    setChecks: (sha, list) => state.checks.set(sha, withIds(sha, list)),
     adminMerge: () => doMerge(),
     async preflight() {
       return {
@@ -252,16 +269,28 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
       state.reruns.push(sha);
       if (state.onRerun) state.onRerun(sha);
       else {
+        // A re-run is a fresh attempt: a new check run, with the id and the
+        // start time that say it came after the one it replaces.
         state.checks.set(
           sha,
-          checksFor(sha).map((r) =>
-            r.status === 'completed' && r.conclusion !== 'success' ? { name: r.name, status: 'queued' } : r,
+          withIds(
+            sha,
+            checksFor(sha).map((r) =>
+              r.status === 'completed' && r.conclusion !== 'success'
+                ? { name: r.name, status: 'queued', startedAt: '2026-08-10T01:00:00Z' }
+                : r,
+            ),
           ),
         );
       }
     },
     async checkOutput(sha, name) {
       return `log tail of ${name} at ${sha}`;
+    },
+    // The same answer for the attempt the caller holds. The fixture names the
+    // attempt in it, so a test can tell a captured log from a live read.
+    async checkLog(run) {
+      return `log tail of ${run.name} at ${run.sha} (check run ${run.id})`;
     },
   };
 }
@@ -1126,17 +1155,17 @@ test('a workflow run the forge will not answer for holds the dispatch too', asyn
   assert.equal(fx.forge.state.reruns.length, 0);
 });
 
-test('the dispatch reads the run state itself, right before it asks for a log', async (t) => {
+test('no log is asked for until the run state was read right before it', async (t) => {
   // The watcher's hold keeps an ordinary CI race cheap, and it is one caller
   // up from the call that can produce the wrong answer. This pins the gate at
-  // the dispatch: the run state is read again immediately before the first log
-  // the triage asks for, so no route in here can judge a partial log.
+  // every read of a log: the run state is read again immediately before the
+  // first one, so no route in here can take a partial log.
   const fx = shipFixture(t, { seats: CI_REPAIR_SEATS });
   let shas = 0;
   fx.forge.state.autoChecks = () => (++shas === 1 ? [redOf('900')] : [green()]);
   fx.forge.state.onRerun = (sha) => fx.forge.setChecks(sha, [redOf('900')]);
   const calls = [];
-  const { workflowRun, checkOutput } = fx.forge;
+  const { workflowRun, checkOutput, checkLog } = fx.forge;
   fx.forge.workflowRun = async (id) => {
     calls.push(`workflowRun:${id}`);
     return workflowRun(id);
@@ -1145,12 +1174,16 @@ test('the dispatch reads the run state itself, right before it asks for a log', 
     calls.push(`checkOutput:${name}`);
     return checkOutput(sha, name);
   };
+  fx.forge.checkLog = async (run) => {
+    calls.push(`checkLog:${run.name}`);
+    return checkLog(run);
+  };
   const runId = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
-  const first = calls.findIndex((c) => c.startsWith('checkOutput'));
-  assert.ok(first > 0, 'the triage asked for a log');
-  assert.equal(calls[first], 'checkOutput:ci');
+  const first = calls.findIndex((c) => c.startsWith('checkOutput') || c.startsWith('checkLog'));
+  assert.ok(first > 0, 'a log was asked for');
+  assert.equal(calls[first], 'checkLog:ci');
   assert.equal(calls[first - 1], 'workflowRun:900');
 });
 
@@ -1161,9 +1194,12 @@ test('a triage the forge served no log to stamps the closed kind, once', async (
   let shas = 0;
   fx.forge.state.autoChecks = () => (++shas === 1 ? [redOf('900')] : [green()]);
   fx.forge.state.onRerun = (sha) => fx.forge.setChecks(sha, [redOf('900')]);
-  // The forge's own shape for an answer that is a reason and not a log.
+  // The forge's own shape for an answer that is a reason and not a log. Both
+  // reads answer with it: a forge that will not serve a log will not serve it
+  // to the capture either, so nothing lands on disk for the triage to read.
   const absence = '(no failure log for ci: the forge would not read job 42: it answered with nothing)';
   fx.forge.checkOutput = async () => absence;
+  fx.forge.checkLog = async () => absence;
   const runId = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
@@ -1186,11 +1222,12 @@ test('a triage the forge served no log to stamps the closed kind, once', async (
 
 // -- the automatic-rerun budget, per (run, finding) --------------------------
 
-test('a cancelled check earns no automatic re-run: the cancel spends the budget', async (t) => {
+test('a cancelled check nobody replaces earns no re-run, and escalates at the bound', async (t) => {
   // A cancel is somebody stopping the work. Re-running it is the harness
   // deciding the opposite, and a fresh red manufactured that way used to read
-  // as a fresh entitlement.
-  const fx = shipFixture(t, { seats: CI_REPAIR_SEATS });
+  // as a fresh entitlement. The watcher waits for the attempt that answers,
+  // and this cancel never gets one.
+  const fx = shipFixture(t, { pollMs: 5, seats: CI_REPAIR_SEATS });
   let shas = 0;
   fx.forge.state.autoChecks = () => (++shas === 1 ? [cancelled()] : [green()]);
   const runId = await fx.launch();
@@ -1198,7 +1235,7 @@ test('a cancelled check earns no automatic re-run: the cancel spends the budget'
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   assert.equal(fx.forge.state.reruns.length, 0);
   assert.ok(!events.some((e) => e.event === 'check-transition' && e.status === 'rerun-requested'));
-  // The red took the escalation instead: the shared triage, at once.
+  // The cancel took the escalation once the bound was spent: the shared triage.
   assert.equal(
     events.find((e) => e.event === 'check-transition' && e.status === 'cancelled').required,
     true,
@@ -1206,6 +1243,198 @@ test('a cancelled check earns no automatic re-run: the cancel spends the budget'
   const ciRender = events.find((e) => e.event === 'verdict-rendered' && e.source === 'ci');
   assert.equal(ciRender.verdict, 'red');
   assert.ok(!events.some((e) => e.event === 'ci-flake'));
+  // The stopped attempt is on disk with the rest of them: one capture, and its
+  // log taken at the escalation.
+  const evidence = events.filter((e) => e.event === 'ci-evidence');
+  assert.equal(new Set(evidence.map((e) => e.checkRunId)).size, 1);
+  assert.equal(evidence[0].state, 'cancelled');
+});
+
+// -- captured CI evidence ----------------------------------------------------
+
+/**
+ * A captured directory after the close. The stamp names where the capture was
+ * written, and a closed run's directory travels to the archive whole, so the
+ * evidence is at the same place under the archive root.
+ */
+function archivedDir(fx, dir) {
+  assert.ok(dir.startsWith(fx.paths.runs), `the capture is inside the run: ${dir}`);
+  return join(fx.paths.archivedRuns, dir.slice(fx.paths.runs.length + 1));
+}
+
+test('the authoritative run of a name is the latest attempt, whatever the list order', () => {
+  const early = red('ci', { id: '10', startedAt: '2026-08-10T00:00:00Z' });
+  const late = green('ci', { id: '11', startedAt: '2026-08-10T01:00:00Z' });
+  for (const list of [
+    [early, late],
+    [late, early],
+  ]) {
+    const byName = checksByName(list);
+    assert.equal(byName.size, 1);
+    assert.equal(byName.get('ci').id, '11');
+    assert.equal(byName.get('ci').conclusion, 'success');
+    assert.equal(byName.get('ci').attempt, 2);
+  }
+});
+
+test('attempts that started together are ordered by the id minted last', () => {
+  const first = red('ci', { id: '10' });
+  const second = green('ci', { id: '9' });
+  assert.equal(checksByName([first, second]).get('ci').id, '10');
+  assert.equal(checksByName([second, first]).get('ci').id, '10');
+});
+
+test('a forge that names no check-run id leaves one identity per name', () => {
+  const byName = checksByName([red('ci'), red('lint')]);
+  assert.deepEqual([...byName.keys()].sort(), ['ci', 'lint']);
+  assert.equal(byName.get('ci').attempt, 1);
+  assert.equal(byName.get('ci').id, undefined);
+});
+
+test('a required name with two attempts is read on the later one', async (t) => {
+  // The measured defect: one check name carried success 59 times, failure 35
+  // and skipped 31, and the required set was resolved with `runs.find(name)`.
+  // The stale green is listed first here, which is the order that used to ship
+  // this request with a red required check on its head.
+  const stale = green('ci', { id: '10', startedAt: '2026-08-10T00:00:00Z' });
+  const latest = redOf('900', 'ci', { id: '11', startedAt: '2026-08-10T01:00:00Z' });
+  // The re-run is a third attempt, red again: a re-run always mints a check
+  // run of its own, and the stale green is still listed under the same name.
+  const rerun = redOf('900', 'ci', { id: '12', startedAt: '2026-08-10T02:00:00Z' });
+  const fx = shipFixture(t, { seats: CI_REPAIR_SEATS });
+  let shas = 0;
+  fx.forge.state.autoChecks = () => (++shas === 1 ? [stale, latest] : [green()]);
+  fx.forge.state.onRerun = (sha) => fx.forge.setChecks(sha, [stale, latest, rerun]);
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const opened = events.find((e) => e.event === 'pr-opened');
+  const ci = events.find((e) => e.event === 'verdict-rendered' && e.source === 'ci');
+  assert.ok(ci, 'the later attempt decided the read');
+  // One attempt per name reaches the ledger, and it is the one that answered.
+  // The stale green is listed on every poll and stamps nothing at all.
+  const stamped = events.filter(
+    (e) => e.event === 'check-transition' && e.sha === opened.sha && e.status !== 'rerun-requested',
+  );
+  assert.deepEqual([...new Set(stamped.map((e) => e.status))], ['failure']);
+  assert.deepEqual([...new Set(stamped.map((e) => e.checkRunId))], ['11', '12']);
+  assert.deepEqual(
+    stamped.map((e) => e.attempt),
+    [2, 3],
+  );
+});
+
+test('the failing attempt is captured before anything classifies it', async (t) => {
+  const fx = shipFixture(t, { seats: CI_REPAIR_SEATS });
+  let shas = 0;
+  fx.forge.state.autoChecks = () => (++shas === 1 ? [redOf('900')] : [green()]);
+  fx.forge.state.onRerun = (sha) => fx.forge.setChecks(sha, [redOf('900')]);
+  // What the forge still holds once the attempt is gone, and what the attempt
+  // itself said. Only the capture can carry the second one to the triage.
+  const live = 'the workflow run was cancelled';
+  fx.forge.checkOutput = async () => live;
+  fx.forge.checkLog = async (run) => `assertion failed in ${run.name} (check run ${run.id})`;
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const opened = events.find((e) => e.event === 'pr-opened');
+  const evidence = events.filter((e) => e.event === 'ci-evidence');
+  // Two attempts, two stamps each: the metadata at the observation, the log at
+  // the poll the workflow run reported itself over.
+  const attempts = [...new Set(evidence.map((e) => e.checkRunId))];
+  assert.equal(attempts.length, 2);
+  assert.equal(evidence.length, 4);
+  for (const id of attempts) {
+    const [first, second] = evidence.filter((e) => e.checkRunId === id);
+    assert.equal(first.log, 'pending');
+    assert.equal(first.state, 'red');
+    assert.equal(first.sha, opened.sha);
+    assert.equal(second.log, 'captured');
+    assert.ok(second.bytes > 0);
+    // The capture archived with the run that judged on it.
+    const kept = archivedDir(fx, second.dir);
+    assert.equal(readAt(kept, 'log.txt'), `assertion failed in ci (check run ${id})`);
+    const meta = JSON.parse(readAt(kept, 'check-run.json'));
+    assert.equal(meta.checkRunId, id);
+    assert.equal(meta.workflowRun, '900');
+    assert.equal(meta.conclusion, 'failure');
+    // The capture is before the stamp a reader classifies on.
+    const stamp = events.find(
+      (e) => e.event === 'check-transition' && e.checkRunId === id && e.status === 'failure',
+    );
+    assert.ok(first.seq < stamp.seq, 'the evidence precedes the transition');
+  }
+  // ... and before the re-run that replaces the attempt on the forge.
+  const rerun = events.find((e) => e.event === 'check-transition' && e.status === 'rerun-requested');
+  assert.ok(evidence.find((e) => e.log === 'captured').seq < rerun.seq);
+  // The triage judged the failure, not what the forge held afterwards.
+  const prompt = fx.calls.find((c) => c.seat === 'verdict-triage')?.prompt;
+  assert.ok(prompt?.includes('assertion failed in ci'), 'the capture reached the seat');
+  assert.ok(!prompt?.includes(live), 'the live answer was never asked for');
+});
+
+test('one attempt is captured once, whatever the poll count over it', async (t) => {
+  // The flapping check of the deterministic-red incident, on one head sha: the
+  // watcher reads it dozens of times and the evidence is written twice, because
+  // the second observation of one check run is the same piece of news.
+  const fx = shipFixture(t, {
+    pollMs: 5,
+    forgeOpts: { required: ['ci', 'hold'] },
+    seats: { 'verdict-triage': ciTriageSeat(['env']) },
+  });
+  let reads = 0;
+  const forgeChecks = fx.forge.checkRuns;
+  fx.forge.checkRuns = async (sha) => {
+    const list = await forgeChecks(sha);
+    if (!list.some((r) => r.name === 'ci')) return list;
+    return [++reads % 2 === 1 ? red('ci', { id: '77' }) : green('ci', { id: '77' }), running('hold')];
+  };
+  fx.forge.state.autoChecks = () => [red(), running('hold')];
+  const runId = await fx.launch();
+  await waitParked(fx.paths, runId, 'cycle-repeat');
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  const evidence = live.filter((e) => e.event === 'ci-evidence' && e.check === 'ci');
+  assert.equal(evidence.length, 2);
+  assert.deepEqual(
+    evidence.map((e) => e.log),
+    ['pending', 'captured'],
+  );
+  assert.ok(reads > 4, `the check was read many times: ${reads}`);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
+});
+
+test('a cancel a later attempt answers green mints no flake and no CI verdict', async (t) => {
+  // The measured flood: one head sha with 36 cancels and 34 successes on it.
+  // Read as a red, every cancel-then-green pair is the shape of a flake.
+  const fx = shipFixture(t, { pollMs: 5 });
+  const stopped = cancelled('ci', { id: '10', startedAt: '2026-08-10T00:00:00Z' });
+  const answered = green('ci', { id: '11', startedAt: '2026-08-10T01:00:00Z' });
+  fx.forge.state.autoChecks = () => [stopped];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'check-transition' && e.status === 'cancelled',
+    'the cancel observed',
+  );
+  fx.forge.setChecks(opened.sha, [stopped, answered]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(fx.forge.state.reruns.length, 0);
+  assert.ok(!events.some((e) => e.event === 'ci-flake'));
+  assert.ok(!events.some((e) => e.event === 'gate-integrity' && e.kind === 'deterministic-red'));
+  assert.ok(!events.some((e) => e.event === 'verdict-rendered' && e.source === 'ci'));
+  assert.equal(events.find((e) => e.event === 'merged').red, false);
+  // The cancel was still captured, and its state is its own word.
+  const evidence = events.filter((e) => e.event === 'ci-evidence');
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].state, 'cancelled');
+  assert.equal(evidence[0].log, 'pending');
+  const meta = JSON.parse(readAt(archivedDir(fx, evidence[0].dir), 'check-run.json'));
+  assert.equal(meta.conclusion, 'cancelled');
+  assert.equal(meta.checkRunId, '10');
 });
 
 test('the same finding across CI cycles spends one automatic re-run in all', async (t) => {
@@ -2634,6 +2863,52 @@ function checkOutputRunner({ log = null, logCode = 0, checkRuns = null, runStatu
   };
   return { calls, runner };
 }
+
+test('the adapter reads the log of the attempt the caller holds, by its own link', async () => {
+  // The capture holds one check run and wants that one's log. Nothing here
+  // re-finds a check by name, so nothing here can choose a different attempt.
+  const { calls, runner } = checkOutputRunner({ log: 'step\tassertion failed\n' });
+  const forge = gitHubForge({ repo: 'acme/widgets', runner });
+  const out = await forge.checkLog({
+    name: 'build-api',
+    detailsUrl: 'https://github.com/acme/widgets/actions/runs/900/job/22',
+  });
+  assert.match(out, /assertion failed/);
+  assert.ok(!calls.some((argv) => argv[2].endsWith('/check-runs')), 'no lookup by name');
+  assert.deepEqual(calls.at(-1), [
+    'gh', 'run', 'view', '--job', '22', '-R', 'acme/widgets', '--log-failed',
+  ]);
+  // A check with no job behind it answers with the reason, as every other
+  // absence on this path does.
+  assert.equal(
+    noLogReason(await forge.checkLog({ name: 'sentinel', detailsUrl: null })),
+    'no workflow job behind the check, at no url',
+  );
+});
+
+test('a name with three attempts on it reads the last one, in either list order', async () => {
+  // The measured shape: one check name carrying success, failure and skipped
+  // at once. `find` over the forge's list took whichever came back first.
+  const attempt = (id, conclusion, at, job) => ({
+    id,
+    name: 'build-api',
+    status: 'completed',
+    conclusion,
+    started_at: at,
+    details_url: `https://github.com/acme/widgets/actions/runs/900/job/${job}`,
+  });
+  const attempts = [
+    attempt(1, 'failure', '2026-08-10T00:00:00Z', 11),
+    attempt(2, 'skipped', '2026-08-10T01:00:00Z', 22),
+    attempt(3, 'failure', '2026-08-10T02:00:00Z', 33),
+  ];
+  for (const order of [attempts, [...attempts].reverse()]) {
+    const { calls, runner } = checkOutputRunner({ log: 'boom\n', checkRuns: order });
+    const out = await gitHubForge({ repo: 'acme/widgets', runner }).checkOutput('sha1', 'build-api');
+    assert.match(out, /boom/);
+    assert.equal(calls.at(-1)[4], '33');
+  }
+});
 
 test('the gh adapter reads a failed log through the check the watcher named', async () => {
   const { calls, runner } = checkOutputRunner({ log: 'step\tassertion failed: 1 !== 2\n' });

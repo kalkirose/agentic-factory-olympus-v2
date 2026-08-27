@@ -432,6 +432,26 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   the run ledger: per-check, PR merged/closed, merge-commit checks, and
   "green but auto-merge did not fire" (harness-class red). Pending is a
   state, never a verdict.
+- **A check name is a question; a check-run id is one answer to it**
+  (ADR-0041). A head sha carries several attempts on one name, so the watcher
+  resolves each name to the latest attempt — start time, with the check-run id
+  as the tie-break — and nothing reads the forge's list order. One attempt per
+  name reaches the classifiers, the evidence and the ledger, and the transition
+  stamps carry the id and the attempt number.
+- **CI evidence is captured when it is first seen** (ADR-0041). A required
+  check that is not green has its check-run metadata written to
+  `runs/<id>/ci/<check>/<checkRunId>-<attempt>/` at the observation, before any
+  classification, and its failure log written at the first poll where the
+  workflow run behind it reports itself over — which is before the automatic
+  re-run replaces that attempt on the forge. `ci-evidence` stamps the capture
+  and says whether the log is pending, captured or absent with the forge's
+  reason. The triage and the red-merge repair ticket read the capture first and
+  fetch live only as the fallback, so an external cancel-and-rerun cannot take
+  a failing attempt's log away from the run that judged on it.
+- **A cancel is not a red and not a green** (ADR-0041). Nobody ran the check to
+  an answer. It mints no `ci-flake`, earns no automatic re-run, and the watcher
+  waits a bounded count of poll outcomes for the attempt that will answer
+  before it escalates the cancel the way it escalates a red.
 - **Forge states are not check states** (ADR-0008). A request the forge calls
   conflicting gets no merge ref, so it runs no workflow and its head can
   carry no check at all; it takes the branch-update route a request behind
@@ -478,7 +498,8 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   never moved is a check answering about something else. The pair is the key —
   two shas on one check are two trees, two checks on one sha are two
   questions — so a new head sha starts clean and the repair route is the way
-  out.
+  out. Two attempts at one check on one tree stay one question, and a cancel
+  is no part of the count (ADR-0041).
 - **The re-run budget is the finding's, not the head sha's** (ADR-0008). One
   automatic re-run per (run, finding), counted across head shas, attempts and
   verdict cycles. A cancelled attempt spends the budget and never refreshes

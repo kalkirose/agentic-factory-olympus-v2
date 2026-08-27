@@ -113,3 +113,35 @@ export function archivedRunLedgerPath(paths, runId) {
 export function runReportPath(paths, runId, name) {
   return join(paths.runs, runId, 'reports', `${name}.json`);
 }
+
+/**
+ * The directory holding one CI check attempt's captured evidence: the check
+ * run's own metadata and, once the workflow run behind it is over, the failure
+ * log. It sits inside the run directory, so the evidence archives with the run
+ * that judged on it.
+ *
+ * The check-run id names it, because a name does not: one head sha carries
+ * several check runs of one name — the attempts — and the forge serves the log
+ * of exactly one of them. The attempt rides beside the id so a reader can order
+ * the directories without opening them (ADR-0041).
+ * @param {ReturnType<typeof homePaths>} paths
+ */
+export function ciEvidenceDir(paths, runId, check, checkRunId, attempt) {
+  return join(paths.runs, runId, 'ci', pathPart(check), `${pathPart(checkRunId)}-${attempt}`);
+}
+
+/**
+ * A forge's word as a directory name. A check is named after the job that
+ * produced it, and a job name carries whatever the workflow author wrote —
+ * spaces, brackets, slashes, a matrix dimension. The check's own name and the
+ * check-run id travel in the ledger stamp and in the captured metadata, so
+ * this may be lossy; what it may not be is a path the host refuses.
+ */
+function pathPart(word) {
+  return (
+    String(word)
+      .replace(/[^A-Za-z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60) || 'check'
+  );
+}

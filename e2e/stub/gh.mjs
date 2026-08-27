@@ -99,11 +99,15 @@ function checkRuns() {
     out: JSON.stringify({
       check_runs: [
         {
+          // One check run, one attempt: the id is what the watcher identifies
+          // it by, and the link is what a log call would be addressed to.
+          id: 4100,
           name: state.check,
           status: done ? 'completed' : 'in_progress',
           conclusion: done ? 'success' : null,
           started_at: '2020-01-01T00:00:00Z',
           completed_at: done ? '2020-01-01T00:01:00Z' : null,
+          details_url: 'https://github.com/olympus-e2e/fixture/actions/runs/900/job/4100',
         },
       ],
     }),
