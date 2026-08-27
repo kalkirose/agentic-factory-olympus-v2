@@ -13,8 +13,19 @@
 // No re-fan-out over a judged tree: the fan-out fires once per implementation
 // pass; every later cycle of the pass reviews the repair diff with the
 // generalist seat and resolution-checks prior confirmed HIGHs.
+//
+// The verifier is one of the two seats the replay probe is open to: it may ask
+// for a Tier-1 layer of its own run to be run again and read the output, where
+// a finding turns on what the code does under this host's credentials. The
+// lane seats never reach it — they judge a diff (ADR-0042).
 import { runReportPath } from '../daemon/home.mjs';
 import { LENS_CRITERIA, furyPanel } from './lenses.mjs';
+import {
+  PROBE_REQUEST_PROPERTY,
+  asksForProbe,
+  probeOfferLines,
+  withReplayRounds,
+} from './replay.mjs';
 import {
   ACTOR,
   runEvents,
@@ -73,6 +84,12 @@ export const VERIFIER_SCHEMA = {
       },
     },
     summary: { type: 'string' },
+    // The replay probe: the verifier may ask for one Tier-1 layer of its own
+    // run to be run again and read the output, where a finding turns on what
+    // the code does under this host's credentials rather than on what it says
+    // (ADR-0042). Optional; a report that carries it is a request, not a set
+    // of verdicts.
+    probe: PROBE_REQUEST_PROPERTY,
   },
   required: ['results', 'summary'],
 };
@@ -253,27 +270,47 @@ async function reviewSeat(ctx, { seat, label, schema, roleBlock, cwd, env, const
  * The verifier seat over one cycle's items: confirm-or-refute for new HIGHs,
  * resolved-or-unresolved for prior confirmed HIGHs. Coverage is a
  * deterministic check — one corrective invocation, then the seat-failure park.
+ *
+ * Around that loop sit the replay rounds. A finding can turn on what the code
+ * does under this host's credentials rather than on what it reads like, and
+ * the verifier holds none of them: it asks for a Tier-1 layer to be run again
+ * and is briefed with the output (ADR-0042).
  */
 async function verifierSeat(ctx, base, { cycle, items }) {
+  const outcome = await withReplayRounds(
+    ctx,
+    { seat: 'fury-verifier', cycle, label: `fury-verifier-c${cycle}`, base },
+    (round) => verifierRounds(ctx, base, { cycle, items, ...round }),
+  );
+  if (outcome.fail) return outcome;
+  return { results: new Map(outcome.report.results.map((r) => [r.id, r])) };
+}
+
+/** One verifier round: the contract loop, under the label the round names. */
+async function verifierRounds(ctx, base, { cycle, items, label, replays, budget }) {
   const limit = attemptLimit(runEvents(ctx), 'fury-verifier');
+  const layers = (base.config?.gates?.tier1 ?? []).map((layer) => layer.name);
   let brief = limit === 1 ? failureBrief(runEvents(ctx), 'fury-verifier') : null;
   for (let attempt = 1; ; attempt++) {
     const corrective = attempt === 2 || limit === 1;
     const outcome = await reviewSeat(ctx, {
       seat: 'fury-verifier',
-      label: `fury-verifier-c${cycle}${corrective ? '-r' : ''}`,
+      label: `${label}${corrective ? '-r' : ''}`,
       schema: VERIFIER_SCHEMA,
-      roleBlock: verifierRole(base, items, brief),
+      roleBlock: verifierRole(base, items, brief, { replays, budget, layers }),
       cwd: base.worktree,
       env: base.env,
       constitution: base.constitution,
       fresh: limit === 1,
     });
     if (outcome.fail) return outcome;
-    const defects = verifierCoverageDefects(items, outcome.report.results);
-    if (defects.length === 0) {
-      return { results: new Map(outcome.report.results.map((r) => [r.id, r])) };
-    }
+    // A report that asks for a probe it can still have is a request and not a
+    // set of verdicts, so the coverage rules do not judge it. Past the round
+    // budget the report is the answer whatever it asks for.
+    const defects = asksForProbe(outcome.report, budget)
+      ? []
+      : verifierCoverageDefects(items, outcome.report.results);
+    if (defects.length === 0) return outcome;
     if (attempt >= limit) {
       ctx.store.append('seat-failure', {
         actor: ACTOR,
@@ -333,7 +370,7 @@ function generalistRole(base, diffText) {
   ].join('\n');
 }
 
-function verifierRole(base, items, brief) {
+function verifierRole(base, items, brief, probe = null) {
   return [
     'Verify each review finding below against the code as it stands. Cite evidence for every verdict.',
     'For a "confirm" item, the verdict is "confirmed" or "refuted": confirmed only when the code shows the finding.',
@@ -347,6 +384,7 @@ function verifierRole(base, items, brief) {
           item.finding.severity ?? ''
         }: ${item.finding.finding ?? item.finding.summary} (evidence: ${item.finding.evidence})`,
     ),
+    ...(probe ? probeOfferLines(probe) : []),
     ...briefLines(brief),
   ].join('\n');
 }

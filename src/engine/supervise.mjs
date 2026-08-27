@@ -308,11 +308,18 @@ function seatEnv(seat, env, patterns) {
   return { env: kept, stripped };
 }
 
-// A pattern is an environment-variable name: exact (`DATABASE_URL`), or one
-// `*` at an end (`STRIPE_*`, `*_TOKEN`), or `*` alone for every name.
-// Case-sensitive, because the names are. The instance config refuses any other
-// shape, so nothing here can silently match nothing.
-function matchesSecret(name, patterns) {
+/**
+ * A pattern is an environment-variable name: exact (`DATABASE_URL`), or one
+ * `*` at an end (`STRIPE_*`, `*_TOKEN`), or `*` alone for every name.
+ * Case-sensitive, because the names are. The instance config refuses any other
+ * shape, so nothing here can silently match nothing.
+ *
+ * Exported because the strip is not the only place the host's secret names are
+ * read: the replay probe redacts the same set out of the output it hands a
+ * judgment seat, and one matcher is what keeps the two answers the same
+ * (ADR-0042).
+ */
+export function matchesSecret(name, patterns) {
   return patterns.some((pattern) => {
     if (pattern === '*') return true;
     if (pattern.endsWith('*')) return name.startsWith(pattern.slice(0, -1));

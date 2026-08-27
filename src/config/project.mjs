@@ -95,7 +95,7 @@ export function validateProjectConfig(config, { launch = false } = {}) {
   validateDiffPolicy(config.diffPolicy, err);
   validateBudgets(config.budgets, err);
   validateConstitutionPath(config.constitutionPath, err);
-  validateCredentials(config.credentials, config.commands, err);
+  validateCredentials(config.credentials, config.commands, config.gates, err);
   validateLabels(config.labels, err);
   validateWatchedWorkflows(config.watchedWorkflows, err);
   validateCloseout(config.closeout, err);
@@ -522,14 +522,24 @@ function validateCloseout(closeout, err) {
 
 // The external credentials the project's work needs, each named with the one
 // environment variable that carries it, the read-only command that proves it
-// works, and the surfaces beyond this host that will also need it. The probe
-// is required: a declared credential with nothing behind it reads as covered
-// and is not. The variable is one name, never a pattern — the probe answers
-// for exactly the value it was given.
+// works, the Tier-1 layers whose work needs it, and the surfaces beyond this
+// host that will also need it. The probe is required: a declared credential
+// with nothing behind it reads as covered and is not. The variable is one
+// name, never a pattern — the probe answers for exactly the value it was
+// given.
+//
+// `layers` is what makes a credential-absent red attributable by machine. A
+// Tier-1 layer named here needs this variable to judge anything, so a red of
+// that layer on a host where the variable is absent is reported with the
+// variable's name on the layer result itself, before a seat reasons about it
+// (ADR-0042). It also bounds the replay probe: a layer that needs a credential
+// is replayable only where the host declares that credential probe-eligible.
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const CREDENTIAL_CI_KEYS = ['secret', 'workflows'];
 
-function validateCredentials(credentials, commands, err) {
+function validateCredentials(credentials, commands, gates, err) {
+  const tier1 = isPlainObject(gates) && Array.isArray(gates.tier1) ? gates.tier1 : [];
+  const layerNames = new Set(tier1.filter(isPlainObject).map((layer) => layer.name));
   if (credentials === undefined) return;
   if (!Array.isArray(credentials)) {
     err('credentials', 'must be an array');
@@ -554,6 +564,19 @@ function validateCredentials(credentials, commands, err) {
     }
     if (typeof entry.probe !== 'string' || !isPlainObject(commands) || !commands[entry.probe]) {
       err(at('probe'), 'must name a key in commands');
+    }
+    if (entry.layers !== undefined) {
+      if (!isStringList(entry.layers) || entry.layers.length === 0) {
+        err(at('layers'), 'must be a non-empty array of Tier-1 layer names');
+      } else {
+        // A layer name nothing runs is a declaration that attributes no red
+        // and gates no replay: it reads like coverage and is a typo.
+        entry.layers.forEach((layer, j) => {
+          if (!layerNames.has(layer)) {
+            err(at(`layers[${j}]`), `must name a gates.tier1 layer: ${layer}`);
+          }
+        });
+      }
     }
     if (entry.ci !== undefined) validateCredentialCi(entry.ci, at, err);
   });

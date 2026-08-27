@@ -67,6 +67,29 @@ export function assertAbandonReason(reason) {
   return reason;
 }
 
+// Closed vocabulary for why a replay probe was refused. Closed for the reason
+// the others are, and for one more: these are the rules that bound what a
+// judgment seat can reach, so the set of them is the whole statement of the
+// bound and reads in one place (ADR-0042).
+export const PROBE_REFUSALS = new Set([
+  // The seat named something that is not a Tier-1 layer of this project's own
+  // gate table. The table is the whole of what the probe may run.
+  'not-a-tier1-layer',
+  // The layer needs a credential this host does not declare probe-eligible.
+  // Eligibility is the host's statement about the values it holds, so a
+  // project cannot widen it and a run cannot earn it.
+  'credential-not-eligible',
+  // The request came after the seat session spent its round budget. It takes
+  // no round of its own; the report the seat wrote with it stands.
+  'no-rounds-left',
+]);
+
+/** The refusal, or a throw naming it. The only way one reaches a stamp. */
+export function assertProbeRefusal(refusal) {
+  if (!PROBE_REFUSALS.has(refusal)) throw new Error(`unknown probe refusal: ${refusal}`);
+  return refusal;
+}
+
 export const RUN_EVENTS = new Set([
   // run lifecycle
   'run-launched',
@@ -106,6 +129,17 @@ export const RUN_EVENTS = new Set([
   // rather than one gate round per surface. Names only — the secret's value
   // is never read, on this host or on any other surface (ADR-0027).
   'credential-surface',
+  // One replay probe: a judgment seat asked the daemon to re-run a named
+  // Tier-1 layer of this run, and the daemon answered. It names the layer, the
+  // seat that asked, the round, the exit code, and the file the seat's copy of
+  // the output was written to; a request the rules refuse carries `refused`
+  // and no exit. The seat's own environment stays stripped, so this stamp is
+  // the whole record of a judgment seat reaching a command that holds the
+  // machine's credentials — and it is written for the refusals too, because a
+  // request that was turned down is as much a record as one that ran
+  // (ADR-0042). The output is never a field here: it goes to the file, past a
+  // redaction of every value the host declares a secret.
+  'probe-run',
   // The read-only substrate probe the operational-fix route runs before it
   // spends a layer re-run on this host: every port the run's stack publishes,
   // asked on both loopback families, with the answer of each attempt. `state`

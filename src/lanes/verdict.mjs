@@ -67,6 +67,13 @@ import {
 } from '../ledger/acks.mjs';
 import { cycleRepeat, openIdentities } from '../ledger/cycles.mjs';
 import { assertDefectKind } from '../ledger/registry.mjs';
+import {
+  PROBE_REQUEST_PROPERTY,
+  asksForProbe,
+  finalReplayLabel,
+  probeOfferLines,
+  withReplayRounds,
+} from './replay.mjs';
 import { runSpectrum, persistentReds, cyclePlan } from './spectrum.mjs';
 import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview } from './review.mjs';
@@ -183,6 +190,11 @@ export const TRIAGE_SCHEMA = {
     },
     persisting: { type: 'array', items: { type: 'string' } },
     summary: { type: 'string' },
+    // The replay probe: triage may ask for one Tier-1 layer of its own run to
+    // be run again and read the output, which is the only route it has to a
+    // credential-dependent red (ADR-0042). Optional; a report that carries it
+    // is a request and not yet a verdict.
+    probe: PROBE_REQUEST_PROPERTY,
   },
   required: ['findings', 'persisting', 'summary'],
 };
@@ -286,6 +298,9 @@ async function runCycle(ctx, base, mode, { cycle }) {
     commands: base.commands,
     cwd: base.worktree,
     env: base.env,
+    // What each layer needs of the host, so a red the host explains is
+    // attributed by the runner rather than guessed at by a seat (ADR-0042).
+    credentials: base.config.credentials ?? [],
     cycle,
     sha,
   };
@@ -430,18 +445,30 @@ function gateCommandError(ctx, error) {
 /**
  * The shared four-class triage over persistent reds. The ship step calls it
  * with CI checks as the red layers (`ci:<check>`); the routes stay the same.
+ *
+ * The seat may spend replay rounds before it reports: each one re-runs a
+ * Tier-1 layer of this run and briefs the seat again with the output, which is
+ * how a credential-dependent red becomes reproducible to a seat that holds no
+ * credential (ADR-0042). A round is a fresh invocation under its own label, so
+ * the resume reads the round it stopped in.
  */
 export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = [] }) {
   const events = runEvents(ctx);
   const stamped = events.filter(
     (e) => e.event === 'finding' && e.cycle === cycle && e.source === 'triage',
   );
+  const spec = {
+    seat: 'verdict-triage',
+    cycle,
+    label: `verdict-triage-c${cycle}`,
+    base,
+  };
   // A retry the human bought re-invokes the seat: the stamped report is the
   // one the checks refused, so replaying it buys nothing.
   const retrying = attemptLimit(events, 'verdict-triage') === 1;
-  if (stamped.length > 0 || (!retrying && triageReportedFor(ctx, cycle))) {
-    // Resumed after the stamp (or after an empty-findings report): rebuild.
-    const report = readJson(runReportPath(ctx.paths, ctx.runId, `verdict-triage-c${cycle}`)) ?? {};
+  if (stamped.length > 0) {
+    // Resumed after the stamp: rebuild, from the round the seat ended on.
+    const report = readJson(runReportPath(ctx.paths, ctx.runId, finalReplayLabel(ctx, spec))) ?? {};
     const persisting = new Set(report.persisting ?? []);
     return {
       open: [
@@ -452,15 +479,33 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
   }
   const redLayers = reds.map((r) => r.layer);
   const takeBacks = recordedTakeBacks(events);
-  const { report, fail } = await seatWithChecks(ctx, {
-    seat: 'verdict-triage',
-    label: `verdict-triage-c${cycle}`,
-    schema: TRIAGE_SCHEMA,
-    cwd: base.worktree,
-    env: base.env,
-    constitution: base.constitution,
-    buildRole: (brief) => triageRole(base, reds, priorOpen, brief, dropped, takeBacks.recaptured),
-    checks: (r) => triageChecks(r, { redLayers, priorOpen }),
+  const tier1 = (base.config?.gates?.tier1 ?? []).map((layer) => layer.name);
+  const { report, fail } = await withReplayRounds(ctx, spec, ({ label, replays, budget }) => {
+    // Resume by report, per round: a round whose seat already answered is
+    // never bought twice, and the loop carries on from the answer it left.
+    if (!retrying) {
+      const prior = triageReportAt(ctx, label);
+      if (prior) return { report: prior };
+    }
+    return seatWithChecks(ctx, {
+      seat: 'verdict-triage',
+      label,
+      schema: TRIAGE_SCHEMA,
+      cwd: base.worktree,
+      env: base.env,
+      constitution: base.constitution,
+      buildRole: (brief) =>
+        triageRole(base, reds, priorOpen, brief, dropped, takeBacks.recaptured, {
+          replays,
+          budget,
+          layers: tier1,
+        }),
+      // A report that asks for a probe it can still have is a request and not
+      // a verdict, so the coverage rules do not judge it. Past the round
+      // budget the report is the verdict whatever it asks for, and they are
+      // back.
+      checks: (r) => (asksForProbe(r, budget) ? [] : triageChecks(r, { redLayers, priorOpen })),
+    });
   });
   if (fail) return { fail };
   let nextId = 1 + runEvents(ctx).filter((e) => e.event === 'finding').length;
@@ -504,11 +549,18 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
   return { open: [...priorOpen.filter((f) => persisting.has(f.id)), ...fresh] };
 }
 
-function triageReportedFor(ctx, cycle) {
-  const path = runReportPath(ctx.paths, ctx.runId, `verdict-triage-c${cycle}`);
-  return runEvents(ctx).some(
+/**
+ * The report of one triage round the seat already wrote, or null. The ledger
+ * decides — a report file with no `seat-report` behind it is a file the
+ * contract loop refused, and reading it would take the answer the checks threw
+ * away.
+ */
+function triageReportAt(ctx, label) {
+  const path = runReportPath(ctx.paths, ctx.runId, label);
+  const reported = runEvents(ctx).some(
     (e) => e.event === 'seat-report' && e.seat === 'verdict-triage' && e.path === path,
   );
+  return reported ? readJson(path) : null;
 }
 
 // Why a finding about a re-capturable artifact carries no loud stamp, said on
@@ -1441,7 +1493,7 @@ function takenBackLines(dropped, recaptured = []) {
   ];
 }
 
-function triageRole(base, reds, priorOpen, brief, dropped = [], recaptured = []) {
+function triageRole(base, reds, priorOpen, brief, dropped = [], recaptured = [], probe = null) {
   const lines = [
     'Classify the persistent red Tier-1 layers below into findings. Cluster reds that share one root cause into one finding.',
     'Class each finding — code-defect | suite-defect | env | harness — and cite evidence for every class.',
@@ -1456,10 +1508,25 @@ function triageRole(base, reds, priorOpen, brief, dropped = [], recaptured = [])
   lines.push(...takenBackLines(dropped, recaptured));
   lines.push('Persistent reds:');
   for (const r of reds) {
-    lines.push(`- layer ${r.layer}:`, ...redEvidence(r));
+    lines.push(`- layer ${r.layer}:`, ...credentialAbsentLines(r), ...redEvidence(r));
   }
+  if (probe) lines.push(...probeOfferLines(probe));
   lines.push(...briefLines(brief));
   return lines.join('\n');
+}
+
+/**
+ * The attribution the harness made of a red before the seat read a line of it:
+ * this layer declares a credential the host does not hold. It leads the
+ * evidence because it decides what the rest of the output is worth — a suite
+ * that stopped at its own credential guard printed a stop, not a defect.
+ */
+function credentialAbsentLines(r) {
+  if (!r.credentialAbsent?.length) return [];
+  return [
+    `  the project declares this layer needs ${r.credentialAbsent.join(', ')}, and this host ` +
+      'holds no value for it. The layer could not judge the tree.',
+  ];
 }
 
 /**
@@ -1551,6 +1618,7 @@ function stallBrief(open) {
 
 /** What a layer line owes the reader beyond its status. */
 function layerNote(r) {
+  if (r.credentialAbsent?.length) return ` (credential absent: ${r.credentialAbsent.join(', ')})`;
   if (r.attributedTo) return ` (attributed to ${r.attributedTo})`;
   return r.mode === 'carried' ? ' (carried from an earlier cycle, not re-run)' : '';
 }

@@ -116,14 +116,16 @@ Two levels; the ownership test decides placement.
 - **Instance config** — daemon home, machine-scoped: model semaphores, paths,
   ledger home, notification-stream wiring, the push `notifier` target, slot
   caps keyed by project, the name patterns this host holds credentials in
-  (`secretEnv`), and how long a seat child of this host may emit nothing
+  (`secretEnv`), the exact names a judgment seat's replay probe may carry
+  (`probeCredentials`), and how long a seat child of this host may emit nothing
   before it is taken to be dead (`seatSilenceMs`). The console edits it live;
   no PR.
 - **Project config** — one JSON versioned in the project repo: repo facts,
   commands, gates, conventions, the judgment panel (`review.lenses`), lane
   specifics, per-lane budget thresholds,
   the external credentials the work needs with the read-only probe that
-  proves each one and the surfaces each must be wired on, the label rules a
+  proves each one, the Tier-1 layers each one is needed by (`layers`) and the
+  surfaces each must be wired on, the label rules a
   request's diff is measured against (`labels`), the workflow files the daemon
   watches on the default branch (`watchedWorkflows`), the tripwire registry,
   and the optional close-out extras (`closeout`).
@@ -188,6 +190,16 @@ Two levels; the ownership test decides placement.
   instance-config `secretEnv` pattern removed, and `seat-spawned` carries how
   many went (never which). Project-config commands always run with the full
   environment (ADR-0023).
+- **The replay probe.** A stripped judgment seat (verdict triage, the Fury
+  verifier) may ask the daemon to run one Tier-1 layer of its own run again and
+  read the output. It names a layer, never a command; the daemon runs it as the
+  spectrum does, with the host environment whole; the seat gets the output with
+  every value this host calls a secret replaced by the name it came from, and
+  never an environment value. Two rounds per seat session, each a fresh
+  invocation. Refused on a name outside the gate table, on a layer needing a
+  credential the host does not declare `probeCredentials`-eligible, and past
+  the budget. `probe-run` stamps every request, the refusals included, with the
+  exit code and the file the output went to — never the output (ADR-0042).
 
 ## Pre-freeze chain (story lane)
 
@@ -312,6 +324,11 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   replaced and what spawned it. A start a dead instance left open is closed
   `unclosed-at-recovery` by the daemon start and by the orphan sweep
   (ADR-0034).
+- **A red the host explains says so on the result.** A Tier-1 layer the project
+  declares a credential for, red on a host that holds no value for it, carries
+  `credentialAbsent` with the variable's name on its own `layer-result`, and
+  triage reads it at the head of that layer's evidence. A green layer is never
+  annotated (ADR-0042).
 - **Flake filter.** Each red layer re-runs once, red-only, by process policy.
   A green re-run writes a flake event, never a finding. Survivors are
   persistent reds; only these enter triage. The replaced red is stamped

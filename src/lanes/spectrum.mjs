@@ -27,6 +27,11 @@
 // stamp is the fact. Deterministic re-runs are unlimited by doctrine; they
 // judge nothing.
 //
+// A red the host explains gets that explanation on the result. A layer the
+// project declares a credential for cannot judge the tree when the variable is
+// absent, so its red carries the missing variable by name — before triage, and
+// without a seat reasoning about it (ADR-0042).
+//
 // Every attempt also stamps its ending. An attempt that judged the tree stamps
 // `layer-result`; every other ending stamps `layer-abandoned` with the reason
 // and what the attempt had printed. The stamp is written at one settle point
@@ -34,6 +39,7 @@
 // attempt without stamping — including a path written later (ADR-0034).
 import { assertDefectKind, assertAbandonReason } from '../ledger/registry.mjs';
 import { runCommand } from './exec.mjs';
+import { absentCredentials } from './replay.mjs';
 import { runEvents, ACTOR } from './shared.mjs';
 
 const OUTPUT_TAIL = 1500;
@@ -65,14 +71,18 @@ const ATTEMPTS = 2;
  *   commands: Record<string, string[]>, cwd: string, env?: object,
  *   cycle: number, sha: string, run?: Set<string>|null,
  *   prior?: Map<string, object>|null, confirmation?: boolean,
- *   exec?: typeof runCommand}} opts
+ *   credentials?: Array<object>, exec?: typeof runCommand}} opts
  *   `run` names the layers this cycle executes; every other layer carries its
  *   `prior` green forward. Both absent means the full spectrum.
+ *   `credentials` is the project's credential declaration; a layer it names
+ *   that this host cannot supply has its red attributed to the missing
+ *   variable, on the result itself.
  *   `exec` is the command seam. A runner that throws, or one that answers
  *   nothing at all, is a real ending of an attempt that no portable test can
  *   stage with a child process, so the call the condition breaks is injectable.
  * @returns {Promise<{results?: Array<{layer: string, status: string,
  *   mode: string, attributedTo?: string, output?: string,
+ *   credentialAbsent?: string[],
  *   parts?: Array<{name: string, output: string}>}>, error?: string}>}
  *   `error` is set when a layer command could not run at all — an
  *   environment defect, never a verdict about the tree.
@@ -89,6 +99,7 @@ export async function runSpectrum(
     run = null,
     prior = null,
     confirmation = false,
+    credentials = [],
     exec = runCommand,
   },
 ) {
@@ -122,7 +133,20 @@ export async function runSpectrum(
             ...mark,
           });
         } else {
-          const outcome = await runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark, exec });
+          const outcome = await runLayer(ctx, {
+            layer,
+            commands,
+            cwd,
+            env,
+            cycle,
+            sha,
+            mark,
+            exec,
+            // Read before the layer runs, so the attribution is a fact about
+            // the host this attempt started on rather than one about the host
+            // at the moment somebody read the record.
+            absent: absentCredentials(credentials, layer.name, env),
+          });
           if (outcome.error) return { error: outcome.error };
           record = outcome.record;
         }
@@ -134,6 +158,7 @@ export async function runSpectrum(
       status: record.status,
       mode,
       ...(record.attributedTo && { attributedTo: record.attributedTo }),
+      ...(record.credentialAbsent?.length > 0 && { credentialAbsent: record.credentialAbsent }),
       ...(record.output && { output: record.output }),
       ...(record.parts?.length > 0 && { parts: record.parts }),
     });
@@ -157,7 +182,7 @@ function carriedResult(layer, run, prior) {
  * filter is the loop: a first red is never the layer's answer, so it is
  * replaced by one red-only re-run and stamped as the replaced attempt it is.
  */
-async function runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark, exec }) {
+async function runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark, exec, absent }) {
   const argv = commands[layer.command];
   let previous = null;
   for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
@@ -170,6 +195,7 @@ async function runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark, exec
       sha,
       mark,
       exec,
+      absent,
       attempt,
       // Retry provenance: an attempt above the first names the attempt it
       // replaced and what spawned it, so a replacement is never silent.
@@ -228,7 +254,7 @@ async function runAttempt(ctx, spec) {
  * fact about one attempt, and a filter whose evidence is stamped somewhere else
  * is a filter that can lose it.
  */
-function settle(ctx, { layer, cycle, sha, mark, attempt }, made) {
+function settle(ctx, { layer, cycle, sha, mark, attempt, absent }, made) {
   const disposition = dispositionOf(made, attempt);
   made.disposition = disposition;
   const identity = { cycle, layer: layer.name, attempt, sha };
@@ -240,6 +266,13 @@ function settle(ctx, { layer, cycle, sha, mark, attempt }, made) {
       ...identity,
       status: disposition.status,
       ...disposition.evidence,
+      // The mechanical half of the attribution: this layer declared a
+      // credential the host does not hold, and it went red. The variable is
+      // named on the result, so the reason is on the record before a seat
+      // reads a line of the output (ADR-0042). A green layer is never
+      // annotated — the absence did not stop it, whatever the declaration
+      // says.
+      ...(disposition.status === 'red' && absent?.length > 0 && { credentialAbsent: absent }),
       ...mark,
     });
     return;

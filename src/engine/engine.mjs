@@ -43,13 +43,17 @@ export class RunEngine {
    *   semaphores?: import('../seats/semaphore.mjs').ModelSemaphores,
    *   seatDefaults?: () => object,
    *   composeCommand?: () => string[],
+   *   probePolicy?: () => {credentials?: string[], secretEnv?: string[]},
    *   archiveIo?: object,
    *   heartbeatMs?: number,
    *   onEvent?: (project: string, line: object, ledger: string) => void}} opts
    *   seatDefaults supplies machine-scoped runSeat options (claudeCommand)
    *   read fresh per dispatch, so a live config edit applies. composeCommand
    *   is the same machine-scoped read for the stack tool: a handler that asks
-   *   the run's stack a question gets the argv this host runs it with. isHeld
+   *   the run's stack a question gets the argv this host runs it with.
+   *   probePolicy is the machine's own statement about its credentials, read
+   *   the same way: which of them a judgment seat's replay probe may carry,
+   *   and which names this host calls secret at all (ADR-0042). isHeld
    *   is the operator hold, read at every stage chain: a held project's runs
    *   settle the stage they are in and stop at the boundary (ADR-0040).
    *   onEvent fires on every run-store append, project-attributed and carrying
@@ -68,6 +72,7 @@ export class RunEngine {
       semaphores,
       seatDefaults,
       composeCommand,
+      probePolicy,
       archiveIo,
       heartbeatMs,
       onEvent,
@@ -82,6 +87,10 @@ export class RunEngine {
     this.semaphores = semaphores ?? null;
     this.seatDefaults = seatDefaults ?? (() => ({}));
     this.composeCommand = composeCommand ?? (() => ['docker', 'compose']);
+    // No policy is the closed policy: no credential is probe-eligible until
+    // this host says one is, so being wrong about it costs a refused probe
+    // rather than an exposed key.
+    this.probePolicy = probePolicy ?? (() => ({}));
     this.archiveIo = archiveIo ?? {};
     this.heartbeatMs = heartbeatMs ?? PULSE_INTERVAL_MS;
     this.onEvent = onEvent ?? null;
@@ -286,6 +295,13 @@ export class RunEngine {
       // defaults: a handler that asks the run's own stack a question spawns
       // the argv the host is configured with, never a name it guessed.
       composeCommand: this.composeCommand(),
+      // What this host says about its own credentials, read per dispatch like
+      // the seat defaults: which of them a replay probe may carry into a
+      // command a judgment seat reads the output of, and which names the host
+      // calls secret at all — the second is what the probe redacts by
+      // (ADR-0042).
+      probeCredentials: this.probePolicy().credentials ?? [],
+      secretEnv: this.probePolicy().secretEnv ?? [],
       // For stores a handler opens itself (the escapes ledger): the same
       // project-attributed event key the run store carries.
       onAppend: (line, ledger) => this.onEvent?.(run.project, line, ledger),

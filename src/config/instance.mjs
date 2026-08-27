@@ -42,10 +42,17 @@ export function defaultInstanceConfig() {
     // machine's own binary, like `claudeCommand` and `ghCommand` do, and is
     // resolved the same way. Absent, the daemon pushes nothing and behaves
     // exactly as it did before the field existed.
+    //
+    // Absent by default too: `probeCredentials`, the exact names of the
+    // credentials this host holds in a form a judgment seat's replay probe may
+    // carry — test-mode keys, never live ones. Absent, no credential is
+    // probe-eligible and a Tier-1 layer that declares one cannot be replayed
+    // (ADR-0042).
   };
 }
 
 const LOG_LEVELS = new Set(['debug', 'info', 'warn', 'error']);
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
  * Validates a parsed instance config. Returns a list of errors, each with a
@@ -108,6 +115,28 @@ export function validateInstanceConfig(config) {
         if (stars > 1 || (stars === 1 && !pattern.startsWith('*') && !pattern.endsWith('*'))) {
           err(`secretEnv.${pattern}`, 'may hold one `*`, at the start or the end');
         }
+      }
+    }
+  }
+  // Which of this host's credentials a replay probe may carry into a command a
+  // judgment seat reads the output of. Exact names only, and the asymmetry
+  // with `secretEnv` is the reason: a pattern there widens what is stripped
+  // and fails safe, a pattern here widens what is exposed and fails open. So a
+  // `*` is refused rather than honored, and a name enters this list one
+  // deliberate edit at a time (ADR-0042).
+  if (config.probeCredentials !== undefined) {
+    const names = config.probeCredentials;
+    if (!Array.isArray(names) || !names.every((n) => typeof n === 'string' && n.length > 0)) {
+      err('probeCredentials', 'must be an array of environment-variable names');
+    } else {
+      const seen = new Set();
+      for (const name of names) {
+        if (!ENV_NAME.test(name)) {
+          err(`probeCredentials.${name}`, 'must be one environment-variable name, with no pattern');
+        } else if (seen.has(name)) {
+          err(`probeCredentials.${name}`, 'duplicate name');
+        }
+        seen.add(name);
       }
     }
   }

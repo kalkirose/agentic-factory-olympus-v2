@@ -131,6 +131,19 @@ export function ciEvidenceDir(paths, runId, check, checkRunId, attempt) {
 }
 
 /**
+ * Where one replay probe's output is written for the seat that asked for it —
+ * a run artifact that archives with the run, beside the reports.
+ *
+ * A file and not a ledger field: the output of a Tier-1 layer is minutes of a
+ * build, the ledger is a line-oriented record a person reads, and the probe's
+ * ledger stamp carries the exit code and points here (ADR-0042).
+ * @param {ReturnType<typeof homePaths>} paths
+ */
+export function probeOutputPath(paths, runId, name) {
+  return join(paths.runs, runId, 'probes', `${pathPart(name)}.txt`);
+}
+
+/**
  * A forge's word as a directory name. A check is named after the job that
  * produced it, and a job name carries whatever the workflow author wrote —
  * spaces, brackets, slashes, a matrix dimension. The check's own name and the

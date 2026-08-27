@@ -317,6 +317,13 @@ export class Daemon {
         semaphores: this.semaphores,
         seatDefaults: () => this.seatDefaults(),
         composeCommand: () => this.config.composeCommand,
+        // The machine's own statement about its credentials, read live like
+        // every other machine-scoped value: an operator who takes a name off
+        // the eligible list takes it off the next probe (ADR-0042).
+        probePolicy: () => ({
+          credentials: this.config.probeCredentials ?? [],
+          secretEnv: this.config.secretEnv ?? [],
+        }),
         onEvent: (project, line, ledger) => {
           this.tripwires?.notify(project, line, ledger);
           this.notifier?.notify({ ledger, project, line });
