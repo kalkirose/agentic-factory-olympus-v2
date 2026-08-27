@@ -2500,9 +2500,20 @@ test('a merge-born fresh pass carries the frozen suite onto main and reverts not
       }),
     },
   });
-  fx.forge.state.autoChecks = () => [running()];
+  // The checks answer to the run's own state, and never to a flip this test
+  // performs at a moment it does not control. The fixture forge resolves
+  // `autoChecks` once per head sha and keeps that answer, so a daemon that
+  // reached the fresh pass's sha before a mid-test flip would hold a check
+  // that never completes and the run would wait on it for ever. It is the
+  // fresh pass that decides: the shas before it carry the conflict this test
+  // is about, and the sha born on the moved base is the one that ships.
+  let runId;
+  fx.forge.state.autoChecks = () =>
+    runId && readEvents(runLedgerPath(fx.paths, runId)).some((e) => e.event === 'fresh-pass')
+      ? [green()]
+      : [running()];
   fx.forge.state.conflictMode = true;
-  const runId = await fx.launch();
+  runId = await fx.launch();
   await waitEvent(
     fx.paths,
     runId,
@@ -2546,7 +2557,6 @@ test('a merge-born fresh pass carries the frozen suite onto main and reverts not
   );
   assert.equal(render.verdict, 'green');
   assert.ok(!fx.calls.some((c) => c.seat === 'verdict-triage'));
-  fx.forge.state.autoChecks = () => [green()];
   // The longest journey in this file: a conflicted request, a fresh pass born
   // on the moved branch, a second spectrum, then the ship.
   const events = await waitClosed(fx.paths, runId, LONGEST_JOURNEY_ATTEMPTS);

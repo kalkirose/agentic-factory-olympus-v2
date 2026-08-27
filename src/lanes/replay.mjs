@@ -159,8 +159,11 @@ export async function withReplayRounds(ctx, spec, invoke) {
     if (budget === 0) {
       // The round budget is spent and the seat asked anyway. The refusal is
       // stamped like every other request and takes no round, so the report the
-      // seat wrote with it stands and the loop ends here.
-      if (!replays.some((r) => r.refused === 'no-rounds-left')) {
+      // seat wrote with it stands and the loop ends here. The stamp is read
+      // from the ledger and not from `replays`, which holds the rounds and
+      // leaves this refusal out by definition: a guard that read the rounds
+      // would find nothing and write the same stamp at every stage re-entry.
+      if (!askedPastBudget(ctx, spec)) {
         stampProbe(ctx, spec, {
           layer: request.layer,
           round: replays.length,
@@ -198,19 +201,25 @@ export function finalReplayLabel(ctx, { seat, cycle, label }) {
  * is not here.
  */
 function priorReplays(ctx, { seat, cycle }) {
-  return runEvents(ctx)
-    .filter(
-      (e) =>
-        e.event === 'probe-run' &&
-        e.requestedBy === seat &&
-        e.cycle === cycle &&
-        e.refused !== 'no-rounds-left',
-    )
+  return probeStamps(ctx, { seat, cycle })
+    .filter((e) => e.refused !== 'no-rounds-left')
     .map((e) =>
       e.refused
         ? { layer: e.layer, refused: e.refused, ...(e.detail && { detail: e.detail }) }
         : { layer: e.layer, exit: e.exit ?? null, output: readOutput(e.record) },
     );
+}
+
+/** Every probe stamp of one seat session, refusals included. */
+function probeStamps(ctx, { seat, cycle }) {
+  return runEvents(ctx).filter(
+    (e) => e.event === 'probe-run' && e.requestedBy === seat && e.cycle === cycle,
+  );
+}
+
+/** Whether this seat session already asked once past its round budget. */
+function askedPastBudget(ctx, spec) {
+  return probeStamps(ctx, spec).some((e) => e.refused === 'no-rounds-left');
 }
 
 function readOutput(path) {

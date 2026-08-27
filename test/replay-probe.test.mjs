@@ -265,6 +265,19 @@ test('the round budget is spent, and the report the seat wrote with the ask stan
   assert.match(ctx.runSeat.calls[2].roleBlock, /No replay probe is left in this session/);
 });
 
+test('a seat that keeps asking past its budget is refused once, not once per entry', async (t) => {
+  const { ctx } = fixture(t);
+  const spec = { seat: 'verdict-triage', cycle: 1, label: 'verdict-triage-c1', base: baseFor() };
+  const asking = async () => ({ report: asks('acceptance') });
+  // A stage that re-enters over the same ledger — a daemon that died behind
+  // the report twice — meets the same spent budget each time.
+  await withReplayRounds(ctx, { ...spec, cap: 0 }, asking);
+  await withReplayRounds(ctx, { ...spec, cap: 0 }, asking);
+  const refusals = probeRuns(ctx).filter((e) => e.refused === 'no-rounds-left');
+  assert.equal(refusals.length, 1);
+  assert.equal(refusals[0].layer, 'acceptance');
+});
+
 // -- what the seat is never given --------------------------------------------
 
 test('a value this host calls a secret is replaced in the output the seat reads', async (t) => {
