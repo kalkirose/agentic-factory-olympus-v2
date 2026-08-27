@@ -18,7 +18,7 @@
 // own closes a run (ADR-0015).
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { runReportPath } from '../daemon/home.mjs';
+import { commandLogPath, runReportPath } from '../daemon/home.mjs';
 import { textIdentity } from '../ledger/acks.mjs';
 import { cloneDir } from '../isolation/clones.mjs';
 import { addDisposableWorktree, removeWorktree, workspaceRoot } from '../isolation/worktrees.mjs';
@@ -295,6 +295,7 @@ function readinessHandler(postFreezeStage, forgeFor) {
       const lint = await runCommand(config.commands[story.lintCommand], {
         cwd: worktree,
         env: runEnv(ctx, config),
+        log: commandLogPath(ctx.paths, ctx.runId, 'card-lint'),
       });
       if (lint.code === null) {
         return commandError(
@@ -516,6 +517,7 @@ async function advanceBase(ctx, { worktree, config, story, prior, base, from }) 
   const run = await runCommand(config.commands[story.suiteCommand], {
     cwd: worktree,
     env: runEnv(ctx, config),
+    log: commandLogPath(ctx.paths, ctx.runId, 'red-state-inherited'),
   });
   if (run.code === null) return commandFail(ctx, run);
   const red = run.code !== 0;
@@ -1113,7 +1115,11 @@ async function runWave(ctx, base, clone, { round, wave }) {
   // Restore the suite from the sha before evaluation — a tampered test file
   // is structurally void, not detected.
   await restorePaths(tree, sha, base.testPaths);
-  const run = await runCommand(base.suiteArgv, { cwd: tree, env: base.env });
+  const run = await runCommand(base.suiteArgv, {
+    cwd: tree,
+    env: base.env,
+    log: commandLogPath(ctx.paths, ctx.runId, `adversary-r${round}-w${wave}`),
+  });
   if (run.code === null) return commandFail(ctx, run);
   const killed = run.code !== 0;
   ctx.store.append('adversary-wave', {
@@ -1141,7 +1147,11 @@ async function rerunWave(ctx, base, clone, { round, wave, sha }) {
     );
   }
   await restorePaths(tree, sha, base.testPaths);
-  const run = await runCommand(base.suiteArgv, { cwd: tree, env: base.env });
+  const run = await runCommand(base.suiteArgv, {
+    cwd: tree,
+    env: base.env,
+    log: commandLogPath(ctx.paths, ctx.runId, `adversary-r${round}-w${wave}-rerun`),
+  });
   if (run.code === null) return commandFail(ctx, run);
   const killed = run.code !== 0;
   ctx.store.append('adversary-wave', {
@@ -1250,7 +1260,11 @@ function freezeHandler(nextStage) {
     // by feature absence alone. One corrective fix round on green, then fail.
     for (let attempt = 1; ; attempt++) {
       const sha = await headSha(base.worktree);
-      const run = await runCommand(base.suiteArgv, { cwd: base.worktree, env: base.env });
+      const run = await runCommand(base.suiteArgv, {
+        cwd: base.worktree,
+        env: base.env,
+        log: commandLogPath(ctx.paths, ctx.runId, `red-state-a${attempt}`),
+      });
       if (run.code === null) return commandFail(ctx, run);
       const red = run.code !== 0;
       ctx.store.append('red-state-check', { actor: ACTOR, sha, result: red ? 'red' : 'green' });

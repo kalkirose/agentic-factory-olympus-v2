@@ -1,7 +1,24 @@
 // Runner for project-config commands (suite runs, reference lint). The argv
 // comes from the project config's `commands` table — the single home for
-// every runnable command. The result carries the exit code and an output
-// tail; the caller judges the code, this module never does.
+// every runnable command. The result carries the exit code, an output tail,
+// and the file the whole stream went to; the caller judges the code, this
+// module never does.
+//
+// THE FILE IS THE RECORD (ADR-0043). Every command run here streams its whole
+// output to a file, and the in-memory tail is the cheap summary beside it. The
+// tail alone lost the failure three times — a red in the middle of a long
+// sequence, minutes of green after it, and a record that held the green. A
+// consumer cannot reintroduce that by forgetting to ask for the file: the file
+// is written whether it is asked for or not, and what a consumer chooses is
+// only where it lands.
+//
+// What survives is what is worth keeping. A command that exited 0 has its file
+// deleted the moment it settles — the tail says all a green needs to say — and
+// a command that failed, was terminated, or could not run keeps its file, which
+// then archives with the run that ran it (`keep: 'always'` keeps a green's file
+// too, for the caller whose whole purpose is reading it). A per-file cap guards
+// a runaway command; the file says so on its last line and the result carries
+// `log.truncated`, so a bound that cut the evidence is never silent.
 //
 // A layer command is often a sequence of its own — a suite runner with steps,
 // a script that shells out several times — and it reports one exit code for
@@ -17,8 +34,13 @@
 //   ::olympus part-failed <name>   <name> failed; its own output is evidence
 //
 // Nothing changes for a command that prints neither: the parts are empty and
-// the tail is the tail it always was. Marker lines are consumed, never kept.
+// the tail is the tail it always was. Marker lines are consumed, never kept —
+// the file holds them, because the file is the stream as the command printed
+// it.
 import { spawn } from 'node:child_process';
+import { createWriteStream, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { resolveArgv } from '../engine/executable.mjs';
 
 const PART_PREFIX = '::olympus ';
@@ -33,22 +55,148 @@ const PART_LIMIT = 24;
 const LINE_LIMIT = 65536;
 
 /**
+ * What one command's file may hold. Generous: the longest gate command this
+ * harness has measured printed a few megabytes, and the cap is here for the
+ * command that has lost its mind, not for the one that talks a lot. A file
+ * that reaches it says so on its own last line, and the result says so in
+ * `log.truncated` — a cap that cut the evidence is recorded, never silent.
+ */
+export const LOG_CAP = 10 * 1024 * 1024;
+
+/**
+ * Where a command's file goes when the caller names no path.
+ *
+ * Every call site that has a run behind it hands over a path inside that run's
+ * directory, so the file inherits the run's lifecycle — archived at close-out,
+ * swept with the run directory after a crash — and no store of its own is
+ * added. The rest are the calls with no run to belong to: the forge's `gh`
+ * reads, and this harness's own tests. Their files land in the host's
+ * temporary directory, which the host itself reclaims, and a green deletes its
+ * own the moment it settles, so what can accumulate there is a failed `gh`
+ * call — bytes, in the one directory on the machine that is already somebody
+ * else's job to empty. That is the whole reason it is not on the daemon home:
+ * a store on the home would need a sweep of its own, and no defect here is
+ * worth new garbage collection (ADR-0043).
+ */
+export const COMMAND_LOG_ROOT = join(tmpdir(), 'olympus-commands');
+
+// Distinct within a process and readable to a person: the tool, when the run
+// that follows it needs finding, and a sequence that cannot collide inside one
+// millisecond.
+let logSequence = 0;
+function ambientLogFile(argv) {
+  logSequence += 1;
+  const tool =
+    String(argv[0])
+      .replace(/[^A-Za-z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(-24) || 'command';
+  const stamp = `${Date.now().toString(36)}-${process.pid}-${logSequence}`;
+  return join(COMMAND_LOG_ROOT, `${stamp}-${tool}.log`);
+}
+
+/**
+ * The file one command's output is streamed to, and the record of what
+ * happened to it. Never throws: a machine that cannot open the file still has
+ * to run the command, and the caller learns what it lost from `log.error`
+ * rather than from a failed command it would read as a verdict about the tree.
+ */
+function openCommandLog(path, cap) {
+  const record = { path, bytes: 0, truncated: false };
+  let stream = null;
+  let closed = Promise.resolve();
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    stream = createWriteStream(path);
+    closed = new Promise((resolve) => stream.once('close', resolve));
+    stream.on('error', (error) => {
+      record.error = error.message;
+      stream = null;
+    });
+  } catch (error) {
+    record.error = error.message;
+  }
+  return {
+    record,
+    write(text) {
+      if (!stream || record.truncated || text === '') return;
+      const room = cap - record.bytes;
+      const size = Buffer.byteLength(text);
+      if (size <= room) {
+        stream.write(text);
+        record.bytes += size;
+        return;
+      }
+      // The head is what a reader needs — a sequence fails forward, and the
+      // end of the stream is still in the tail the result carries.
+      const kept = Buffer.from(text, 'utf8').subarray(0, Math.max(0, room)).toString('utf8');
+      if (kept !== '') {
+        stream.write(kept);
+        record.bytes += Buffer.byteLength(kept);
+      }
+      record.truncated = true;
+      stream.write(
+        `\n[olympus] this log stopped at the ${cap}-byte cap; the rest of the command's ` +
+          'output was not written\n',
+      );
+    },
+    /**
+     * Closes the file and decides whether it survives. The handle is released
+     * before this resolves: a run directory with an open handle inside it is a
+     * directory Windows refuses to archive.
+     */
+    async settle(keep) {
+      if (stream) {
+        const ending = stream;
+        stream = null;
+        ending.end();
+        await closed;
+      }
+      if (keep) return;
+      try {
+        rmSync(path, { force: true });
+        record.removed = true;
+      } catch (error) {
+        record.error = record.error ?? error.message;
+      }
+    },
+  };
+}
+
+/**
  * Runs one command to completion.
  * @param {string[]} argv
- * @param {{cwd?: string, env?: object, outputLimit?: number}} [opts]
+ * @param {{cwd?: string, env?: object, outputLimit?: number,
+ *   log?: string|false, logCap?: number, keep?: 'evidence'|'always',
+ *   redact?: (text: string) => string}} [opts]
+ *   `log` is the file the whole stream is written to: a path the caller names
+ *   — normally inside its own run directory — or nothing, for a file under
+ *   `COMMAND_LOG_ROOT`. `false` writes no file at all, which is for the one
+ *   caller whose command's output must never be held anywhere (ADR-0027).
+ *   `keep` decides what survives the settle: `evidence` (the default) keeps
+ *   the file of a command that did not exit 0 and printed something, `always`
+ *   keeps it whatever happened.
+ *   `redact` rewrites the stream before anything holds it — the file, the
+ *   tail, and the parts alike. It is applied to whole lines.
  * @returns {Promise<{code: number|null, signal?: string|null, output: string,
  *   truncated: boolean,
  *   parts: Array<{name: string, failed: boolean, output: string}>,
+ *   log: {path: string, bytes: number, truncated: boolean, removed?: boolean,
+ *     error?: string}|null,
  *   error?: string}>}
  *   `code` is null when the command could not run at all (spawn error) —
  *   an environment defect, never a verdict about the tree under test.
  *   `parts` is what the command said about its own parts, in the order it
  *   opened them; empty for a command that said nothing.
- *   `truncated` says the stream outgrew the bound, so `output` is a tail and
- *   what the caller holds is not what the command printed. The caller decides
- *   what that costs; this module never does.
+ *   `truncated` says the stream outgrew the in-memory bound, so `output` is a
+ *   tail. It is not a statement that anything was lost: `log` says what the
+ *   harness still holds. `log.truncated` is the loss — the file hit its cap —
+ *   and `log.removed` says the file was a green's and is gone.
  */
-export function runCommand(argv, { cwd, env, outputLimit = 4000 } = {}) {
+export function runCommand(
+  argv,
+  { cwd, env, outputLimit = 4000, log: logFile, logCap = LOG_CAP, keep = 'evidence', redact } = {},
+) {
   if (!Array.isArray(argv) || argv.length === 0) {
     throw new Error('runCommand requires a non-empty argv');
   }
@@ -63,9 +211,19 @@ export function runCommand(argv, { cwd, env, outputLimit = 4000 } = {}) {
     try {
       spec = resolveArgv(argv, { env: base });
     } catch (error) {
-      resolve({ code: null, output: '', truncated: false, parts: [], error: error.message });
+      // Nothing ran, so there is no stream and no file to open: an argv this
+      // host cannot carry is a defect of the call, not output of a command.
+      resolve({
+        code: null,
+        output: '',
+        truncated: false,
+        parts: [],
+        log: null,
+        error: error.message,
+      });
       return;
     }
+    const log = logFile === false ? null : openCommandLog(logFile ?? ambientLogFile(argv), logCap);
     const child = spawn(spec.file, spec.args, {
       cwd,
       env: base,
@@ -92,7 +250,7 @@ export function runCommand(argv, { cwd, env, outputLimit = 4000 } = {}) {
       return part;
     };
 
-    const keep = (text) => {
+    const hold = (text) => {
       const grown = output + text;
       if (grown.length > outputLimit) truncated = true;
       output = grown.slice(-outputLimit);
@@ -102,13 +260,13 @@ export function runCommand(argv, { cwd, env, outputLimit = 4000 } = {}) {
     const absorb = (text) => {
       if (text === '') return;
       if (!text.includes(PART_PREFIX)) {
-        keep(text);
+        hold(text);
         return;
       }
       for (const line of text.split(/(?<=\n)/)) {
         const marker = PART_MARKER.exec(line.trimEnd());
         if (!marker) {
-          keep(line);
+          hold(line);
           continue;
         }
         const part = openPart(marker[2]);
@@ -117,39 +275,64 @@ export function runCommand(argv, { cwd, env, outputLimit = 4000 } = {}) {
       }
     };
 
+    // The one gate every byte passes: redacted once, then written to the file
+    // and read for markers. Whole lines, so a value cannot be halved by a
+    // chunk boundary, and the file gets the text the caller would have seen.
+    const take = (raw) => {
+      if (raw === '') return;
+      const text = redact ? redact(raw) : raw;
+      if (log) log.write(text);
+      absorb(text);
+    };
+
     const collect = (chunk) => {
       pending += chunk;
       const end = pending.lastIndexOf('\n');
       if (end === -1) {
         if (pending.length > LINE_LIMIT) {
-          absorb(pending);
+          take(pending);
           pending = '';
         }
         return;
       }
-      absorb(pending.slice(0, end + 1));
+      take(pending.slice(0, end + 1));
       pending = pending.slice(end + 1);
     };
 
     const flush = () => {
-      absorb(pending);
+      take(pending);
       pending = '';
     };
 
     child.stdout.on('data', collect);
     child.stderr.on('data', collect);
     let settled = false;
+    // The file settles with the command: a green's is deleted, a red's is
+    // kept, and the handle is released either way before the caller is
+    // answered. Nothing later has to remember to do it.
+    // What the child's ending adds is the argument; everything the stream
+    // produced is read here, after the flush, so a last line with no newline
+    // on it is in the answer and in the file.
+    const done = async (ending) => {
+      flush();
+      if (log) {
+        // Evidence is a failure with something to show for it. A green says
+        // all it has to say in the tail, and a failure that printed nothing
+        // leaves no empty file behind to be read as evidence of anything.
+        const evidence = ending.code !== 0 && log.record.bytes > 0;
+        await log.settle(keep === 'always' || evidence);
+      }
+      resolve({ ...ending, output, truncated, parts, log: log ? { ...log.record } : null });
+    };
     child.on('error', (error) => {
       if (settled) return;
       settled = true;
-      flush();
-      resolve({ code: null, output, truncated, parts, error: error.message });
+      void done({ code: null, error: error.message });
     });
     child.on('close', (code, signal) => {
       if (settled) return;
       settled = true;
-      flush();
-      resolve({ code, signal, output, truncated, parts });
+      void done({ code, signal });
     });
   });
 }

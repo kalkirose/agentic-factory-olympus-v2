@@ -342,6 +342,16 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   its name, beside the tail it always kept. Triage reads the failing part; the
   verdict record names it. A command that prints neither line is recorded
   exactly as before.
+- **A command's output is a file; the tail is the summary** (ADR-0043). Every
+  command the harness runs streams its whole output to a file while it runs —
+  a layer attempt, the suite, the lint, a replay probe. A caller with a run
+  behind it files it under `runs/<id>/commands/`, so it archives with that run
+  and needs no lifecycle of its own; a caller with no run gets one under the
+  host's temporary directory. A green's file is deleted the moment the command
+  settles and a failure's is kept, so what a run carries is what failed in it.
+  A red `layer-result` and every `layer-abandoned` name their file, and the
+  triage brief names it beside the tail. The file stops at 10 MB, says so on
+  its own last line, and stamps `log.truncated`.
 - **Verdict triage** (judgment, fires only on persistent reds): clusters reds
   into findings by root cause; classes each as code-defect, suite-defect,
   env, or harness, with cited evidence. A harness finding also writes a
@@ -500,8 +510,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   `deterministic-red` (a check whose flake reading expired, below). Two more
   are stamped by the step that met the defect, on the record it was already
   writing: `layer-log-truncated` on a `layer-result` whose red evidence is a
-  bounded tail with no part carrying the failure, and `capture-takeback` on
-  both take-back records. Those two add no alert and answer to nobody — the
+  bounded tail with no part carrying the failure and no file holding the whole
+  stream either — a stream that outgrew the file's own cap, or an attempt with
+  no file at all (ADR-0043) — and `capture-takeback` on both take-back
+  records. Those two add no alert and answer to nobody — the
   record they ride already has whatever loudness it is owed, and the word is
   there so a class that recurs after its fix is a count.
 - **One red regime.** CI reds get one automatic re-run of failed jobs, then

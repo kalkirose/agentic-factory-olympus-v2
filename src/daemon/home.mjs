@@ -131,6 +131,20 @@ export function ciEvidenceDir(paths, runId, check, checkRunId, attempt) {
 }
 
 /**
+ * Where one command's whole output is streamed while it runs — the file the
+ * record of that command points at.
+ *
+ * Inside the run directory, so it needs no lifecycle of its own: it archives
+ * with the run at close-out and goes with the directory when a crashed run is
+ * swept. A green command's file is deleted the moment the command settles, so
+ * what a run carries here is what failed in it (ADR-0043).
+ * @param {ReturnType<typeof homePaths>} paths
+ */
+export function commandLogPath(paths, runId, name) {
+  return join(paths.runs, runId, 'commands', `${pathPart(name)}.log`);
+}
+
+/**
  * Where one replay probe's output is written for the seat that asked for it —
  * a run artifact that archives with the run, beside the reports.
  *

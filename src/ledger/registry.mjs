@@ -517,9 +517,11 @@ export const GATE_INTEGRITY_KINDS = new Set([
 // is owed, so they add no alert and owe no ownership rule: the word is there to
 // be counted, not to be answered.
 export const OBSERVED_DEFECT_KINDS = new Set([
-  // A red layer whose recorded evidence is a bounded tail of one long stream,
-  // with no named part carrying the failure. Triage then judges the red on
-  // whatever ran last rather than on what failed. Stamped on `layer-result`.
+  // A red layer whose output the harness cannot produce: a bounded tail of one
+  // long stream, no named part carrying the failure, and no whole stream on
+  // disk either — the file outgrew its own cap, or the attempt had no file
+  // (ADR-0043). Triage then judges the red on whatever ran last rather than on
+  // what failed. Stamped on `layer-result`.
   'layer-log-truncated',
   // A candidate capture that reverted a write to a path the lane froze. The
   // revert is the design (ADR-0017); the kind is what makes a surface that

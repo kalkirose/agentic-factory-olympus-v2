@@ -5,8 +5,9 @@
 // evaluation.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { COMMAND_LOG_ROOT } from '../src/lanes/exec.mjs';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
 import { storyLane } from '../src/lanes/story.mjs';
@@ -23,6 +24,19 @@ import {
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
+
+/** Every file under a directory whose text holds a word. Empty when there is
+ * no directory at all: a store nothing wrote is a store that leaked nothing. */
+function filesHolding(dir, word) {
+  if (!existsSync(dir)) return [];
+  const found = [];
+  for (const name of readdirSync(dir)) {
+    const path = join(dir, name);
+    if (statSync(path).isDirectory()) found.push(...filesHolding(path, word));
+    else if (readFileSync(path, 'utf8').includes(word)) found.push(path);
+  }
+  return found;
+}
 
 const DEFAULT_CARD = `---
 key: alpha-1
@@ -621,6 +635,11 @@ test('a stale credential parks readiness before the first seat spawns', async (t
   // The probe's own output reaches neither the ledger nor the human.
   assert.ok(!readFileSync(live, 'utf8').includes(PROBE_LEAK));
   assert.ok(!park.question.includes(PROBE_LEAK));
+  // Nor any file. Every other command in the harness streams its output to
+  // one (ADR-0043); this is the one that writes none, because nothing reads
+  // its output and everything it prints can carry the credential (ADR-0027).
+  assert.deepEqual(filesHolding(join(fx.paths.runs, runId), PROBE_LEAK), []);
+  assert.deepEqual(filesHolding(COMMAND_LOG_ROOT, PROBE_LEAK), []);
 
   setCredential('live');
   fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'key rotated' });

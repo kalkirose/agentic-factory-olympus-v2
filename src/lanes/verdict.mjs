@@ -1539,11 +1539,18 @@ function credentialAbsentLines(r) {
  */
 function redEvidence(r) {
   const tail = r.output ?? '(no output)';
-  if (!r.parts?.length) return [tail];
+  // Everything below is a bound of some kind. The file is not, so it is named
+  // beside them: a red in the middle of a long sequence is in that file
+  // whether any tail here reached it or not (ADR-0043).
+  const whole = r.log
+    ? [`  the whole output of this layer is at ${r.log} — read it when the evidence below does not name the failure.`]
+    : [];
+  if (!r.parts?.length) return [...whole, tail];
   return [
     ...r.parts.flatMap((p) => [`  part ${p.name}:`, p.output || '(no output)']),
     '  the layer, at the end of its run:',
     tail,
+    ...whole,
   ];
 }
 

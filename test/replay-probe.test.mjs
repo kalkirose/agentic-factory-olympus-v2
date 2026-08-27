@@ -189,6 +189,37 @@ test('a triage seat asks for a layer, reads its output, and reports on it', asyn
   assert.match(readFileSync(runs[0].record, 'utf8'), /the acceptance suite said boom/);
 });
 
+test('the record of a long replay names the suite that failed in the middle of it', async (t) => {
+  // The measured defect (ADR-0043): a replay of a suite runner whose middle
+  // step failed and whose later steps then ran green for minutes. The seat was
+  // handed the end of that, which is the green that followed, and its report
+  // could not name what had failed. The record is now the whole run.
+  const { ctx } = fixture(t);
+  ctx.runSeat = seatQueue(ctx, [asks('acceptance'), COVERED]);
+  const sequence = [
+    'console.log("PASS step one");',
+    'console.log("FAIL step two: the second secret was accepted");',
+    'console.log("t".repeat(20000));',
+    'console.log("PASS step three");',
+    'process.exit(1);',
+  ].join('');
+  const base = baseFor({ command: ['node', '-e', sequence] });
+  await triageStep(ctx, base, { cycle: 1, reds: REDS, priorOpen: [] });
+
+  const stamp = probeRuns(ctx)[0];
+  const held = readFileSync(stamp.record, 'utf8');
+  assert.match(held, /FAIL step two: the second secret was accepted/, 'the record cannot name the failure');
+  assert.ok(held.length > 20000, 'the record is a tail again');
+  assert.equal(stamp.bytes, held.length);
+  assert.equal(stamp.capped, undefined);
+
+  // What the brief carries is bounded, and it says where the rest is.
+  const brief = ctx.runSeat.calls[1].roleBlock;
+  assert.ok(brief.includes(stamp.record), 'the brief does not name the file');
+  assert.match(brief, /PASS step three/, 'the brief lost the end of the run');
+  assert.match(brief, /read that file if the failure is not below/);
+});
+
 test('a report that asks for a probe is not judged on coverage', async (t) => {
   const { ctx } = fixture(t);
   // The asking report names no finding for the red layer at all. Held to the

@@ -37,6 +37,7 @@
 // and what the attempt had printed. The stamp is written at one settle point
 // that every ending of an attempt leaves through, so a path cannot end an
 // attempt without stamping — including a path written later (ADR-0034).
+import { commandLogPath } from '../daemon/home.mjs';
 import { assertDefectKind, assertAbandonReason } from '../ledger/registry.mjs';
 import { runCommand } from './exec.mjs';
 import { absentCredentials } from './replay.mjs';
@@ -52,11 +53,15 @@ const OUTPUT_TAIL = 1500;
 // parts kept, and never cut below the floor.
 //
 // A red whose stream outgrew the tail and named no part is the case the parts
-// exist to answer, still open: the record holds whatever ran last and the
-// failure may not be in it. That record carries the closed word for the defect
-// (`layer-log-truncated`), so the class is counted where the harness observes
-// it instead of waiting for a triage seat to write a sentence about it
-// (ADR-0008).
+// exist to answer: the record holds whatever ran last and the failure may not
+// be in it. Every attempt now streams its whole output to a file in the run
+// directory (ADR-0043), so what the record holds is the tail *and* the file,
+// and that case is open only when the file is not there either — a caller with
+// no file at all, or a stream that outgrew the file's own cap. That is when
+// the record carries the closed word for the defect (`layer-log-truncated`),
+// so the word keeps meaning what it always meant: output the harness cannot
+// produce, counted where the harness observes it instead of waiting for a
+// triage seat to write a sentence about it (ADR-0008).
 const PART_TAIL = 6000;
 const PART_FLOOR = 500;
 // What a layer is allowed to attempt: the run, and the flake filter's one
@@ -81,9 +86,11 @@ const ATTEMPTS = 2;
  *   nothing at all, is a real ending of an attempt that no portable test can
  *   stage with a child process, so the call the condition breaks is injectable.
  * @returns {Promise<{results?: Array<{layer: string, status: string,
- *   mode: string, attributedTo?: string, output?: string,
+ *   mode: string, attributedTo?: string, output?: string, log?: string,
  *   credentialAbsent?: string[],
  *   parts?: Array<{name: string, output: string}>}>, error?: string}>}
+ *   `log` is the file holding that layer's whole output, for the red that has
+ *   one: the tail and the parts are the summary, the file is the text.
  *   `error` is set when a layer command could not run at all — an
  *   environment defect, never a verdict about the tree.
  */
@@ -160,6 +167,7 @@ export async function runSpectrum(
       ...(record.attributedTo && { attributedTo: record.attributedTo }),
       ...(record.credentialAbsent?.length > 0 && { credentialAbsent: record.credentialAbsent }),
       ...(record.output && { output: record.output }),
+      ...(record.log && { log: record.log }),
       ...(record.parts?.length > 0 && { parts: record.parts }),
     });
   }
@@ -225,6 +233,7 @@ async function runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark, exec
  */
 async function runAttempt(ctx, spec) {
   const { argv, layer, cwd, env, cycle, sha, mark, exec, attempt, retryOf, trigger } = spec;
+  const logFile = attemptLogFile(ctx, { cycle, layer: layer.name, attempt });
   const start = ctx.store.append('layer-started', {
     actor: ACTOR,
     cycle,
@@ -236,7 +245,13 @@ async function runAttempt(ctx, spec) {
   });
   const made = { start };
   try {
-    made.outcome = await exec(argv, { cwd, env });
+    made.outcome = await exec(argv, {
+      cwd,
+      env,
+      // One file per attempt, named by the attempt: the flake filter's first
+      // red keeps its own evidence when the re-run replaces it.
+      ...(logFile !== null && { log: logFile }),
+    });
   } catch (error) {
     made.thrown = error;
     throw error;
@@ -244,6 +259,17 @@ async function runAttempt(ctx, spec) {
     settle(ctx, spec, made);
   }
   return made;
+}
+
+/**
+ * The file this attempt's whole output is streamed to, inside the run
+ * directory. Null for a context with no run behind it — a caller that builds a
+ * spectrum out of a bare store — and then the command primitive files it under
+ * its own root instead (ADR-0043).
+ */
+function attemptLogFile(ctx, { cycle, layer, attempt }) {
+  if (!ctx?.paths?.runs || !ctx.runId) return null;
+  return commandLogPath(ctx.paths, ctx.runId, `c${cycle}-${layer}-a${attempt}`);
 }
 
 /**
@@ -284,6 +310,10 @@ function settle(ctx, { layer, cycle, sha, mark, attempt, absent }, made) {
     ...(disposition.detail !== undefined && { detail: disposition.detail }),
     ...(disposition.exitSignal && { signal: disposition.exitSignal }),
     ...(disposition.partialOutput && { partialOutput: disposition.partialOutput }),
+    // The whole output of an attempt nobody judged: a file the run keeps and
+    // archives, because a replaced red is the one record of minutes that were
+    // spent (ADR-0043).
+    ...(disposition.log && { log: disposition.log }),
     ...mark,
   });
 }
@@ -306,17 +336,31 @@ function dispositionOf({ outcome, thrown }, attempt) {
     };
   }
   const partialOutput = outcome.output ? outcome.output.slice(-OUTPUT_TAIL) : undefined;
+  // The file the stream went to, when one survived this attempt. A green
+  // deletes its own, so only a record that is about a failure ever names one.
+  const log = outcome.log?.removed === true ? undefined : outcome.log?.path;
+  // Whether that file is the whole stream. A file the cap cut is still the
+  // best evidence there is and is still named; what it is not is complete,
+  // and the record says which of the two it is holding.
+  const whole = Boolean(log) && outcome.log.truncated !== true;
   if (outcome.code === null) {
     // A spawn that failed carries the reason; a child a signal took carries the
     // signal. Neither is the command's answer, and neither is read as one.
     return outcome.error
-      ? { event: 'layer-abandoned', reason: 'command-error', detail: outcome.error, partialOutput }
+      ? {
+          event: 'layer-abandoned',
+          reason: 'command-error',
+          detail: outcome.error,
+          partialOutput,
+          log,
+        }
       : {
           event: 'layer-abandoned',
           reason: 'terminated',
           detail: `the layer command was terminated by ${outcome.signal ?? 'a signal'}`,
           exitSignal: outcome.signal ?? null,
           partialOutput,
+          log,
         };
   }
   if (outcome.code === 0) return { event: 'layer-result', status: 'green', evidence: {} };
@@ -329,6 +373,7 @@ function dispositionOf({ outcome, thrown }, attempt) {
       reason: 'superseded-by-rerun',
       detail: `exit ${outcome.code}`,
       partialOutput,
+      log,
     };
   }
   const parts = recordedParts(outcome.parts);
@@ -337,8 +382,13 @@ function dispositionOf({ outcome, thrown }, attempt) {
     status: 'red',
     evidence: {
       output: partialOutput ?? '',
+      ...(log && { log }),
       ...(parts.length > 0 && { parts }),
+      // The defect is output the harness cannot produce. A file that holds the
+      // whole stream is not that, whatever the tail lost; a stream that
+      // outgrew the file's cap, or an attempt with no file at all, is.
       ...(parts.length === 0 &&
+        !whole &&
         (outcome.truncated || (outcome.output?.length ?? 0) > OUTPUT_TAIL) && {
           kind: assertDefectKind('layer-log-truncated'),
         }),

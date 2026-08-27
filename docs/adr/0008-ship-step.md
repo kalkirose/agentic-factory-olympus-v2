@@ -554,7 +554,11 @@ noise — the condition narrows from "the stream outgrew the bound" to a read of
 what the kept tail contains, or the layer opts out in project config the way
 the parts protocol is opted into. Trigger: records of the kind whose triage
 found the failure in the tail anyway. Reversal cost: low, one predicate at one
-stamp site.
+stamp site. **Taken, for the other reason** (ADR-0043): every command now
+streams its whole output to a file, so the tail is no longer all the harness
+holds. The condition is now "no part carries the failure and no file holds the
+stream" — one predicate at the same stamp site, and the word still means output
+the harness cannot produce.
 
 If the dispatch's own read proves redundant in practice — no route into the
 triage ever arrives without the watcher's hold behind it — it is one call per

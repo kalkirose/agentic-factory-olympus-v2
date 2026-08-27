@@ -184,7 +184,14 @@ async function probeOne(ctx, config, { name, env: variable, probe }, { phase, cw
   // the same environment the suite runs with, whole, because a project-config
   // command keeps every name a seat would lose (ADR-0023). The surface sweep
   // has already answered for the value's presence.
-  const run = await runCommand(config.commands[probe], { cwd, env });
+  //
+  // The one command in the harness that writes no output file. Every other
+  // caller keeps the stream on disk so a record can point at it (ADR-0043);
+  // this one is a yes/no question whose exit code is the whole answer, and its
+  // output can carry the credential it just asked about. Nothing reads that
+  // output, so there is nothing here for a file to make readable — only a key
+  // for a file to leave lying about (ADR-0027).
+  const run = await runCommand(config.commands[probe], { cwd, env, log: false });
   if (run.code === null) {
     // The probe could not run at all — a defect of this machine, not a verdict
     // about the credential, so it takes the route every unrunnable command

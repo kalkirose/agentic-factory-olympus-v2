@@ -32,8 +32,14 @@
 // to a file beside the run's reports, past a redaction of every value this host
 // declares a secret. A command that prints a key therefore hands the seat a
 // redaction token and not the key.
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+//
+// The file is the whole run, not a tail of it. The command primitive streams it
+// there while the layer runs (ADR-0043), redacting as it writes, so the replay
+// of a forty-minute suite that failed in the middle keeps the failure it was
+// asked to reproduce. What the seat is handed in its brief stays bounded — a
+// brief is a prompt — so the brief carries the end of the output and the path
+// of the rest, and a seat that needs what is between the two reads the file.
+import { readFileSync, statSync } from 'node:fs';
 import { probeOutputPath } from '../daemon/home.mjs';
 import { matchesSecret } from '../engine/supervise.mjs';
 import { assertProbeRefusal } from '../ledger/registry.mjs';
@@ -55,9 +61,10 @@ export const PROBE_SEATS = new Set(['verdict-triage', 'fury-verifier']);
  */
 export const PROBE_ROUNDS = 2;
 
-// What the seat is handed of a replay's output. Larger than a layer result's
-// ledger tail, because reproducing the red is the whole purpose, and bounded,
-// because it lands in a prompt.
+// What the seat is handed of a replay's output in its brief. Larger than a
+// layer result's ledger tail, because reproducing the red is the whole
+// purpose, and bounded, because it lands in a prompt. The file it is a tail of
+// is not bounded by this, and the brief names it.
 const PROBE_OUTPUT = 12000;
 
 // The shortest value the redaction will replace. A three-character credential
@@ -222,14 +229,37 @@ function askedPastBudget(ctx, spec) {
   return probeStamps(ctx, spec).some((e) => e.refused === 'no-rounds-left');
 }
 
+/**
+ * What a round's brief carries of the output: the end of it, and the path of
+ * the whole. The end, because a runner says at the end what it thought of
+ * itself; the path, because the failure of a long sequence is in the middle
+ * and no bound a prompt can carry will reach it. A seat that needs the middle
+ * opens the file (ADR-0043).
+ */
 function readOutput(path) {
   if (typeof path !== 'string') return '';
+  let text;
   try {
-    return readFileSync(path, 'utf8');
+    text = readFileSync(path, 'utf8');
   } catch {
     // The file went with an archive, or never landed. The exit code the stamp
     // carries is still the answer; the seat is told the output is gone.
     return '(the probe output is no longer on disk)';
+  }
+  if (text.length <= PROBE_OUTPUT) return text;
+  const bytes = fileBytes(path) ?? text.length;
+  return (
+    `(the last ${PROBE_OUTPUT} characters. The whole output is ${bytes} bytes, at ${path} — ` +
+    'read that file if the failure is not below.)\n' +
+    text.slice(-PROBE_OUTPUT)
+  );
+}
+
+function fileBytes(path) {
+  try {
+    return statSync(path).size;
+  } catch {
+    return null;
   }
 }
 
@@ -267,20 +297,33 @@ async function runReplay(ctx, spec, request, round) {
   // The same spawn the spectrum makes of this layer: the run's own tree, the
   // run's stack env, and the host environment whole underneath it. The seat's
   // environment is untouched by any of it.
+  //
+  // The redaction is handed to the primitive rather than run over the answer,
+  // so no unredacted copy of a probe's output exists on this disk at any
+  // moment — the process holds the host's credentials, and this file is
+  // written for a seat that holds none (ADR-0027). The file is kept whatever
+  // the exit code was: a green replay is an answer the seat asked for.
+  const pairs = secretValues(ctx, spec);
+  const path = probeOutputPath(ctx.paths, ctx.runId, `${spec.seat}-c${spec.cycle}-p${round}`);
   const run = await runCommand(config.commands[layer.command], {
     cwd: worktree,
     env,
     outputLimit: PROBE_OUTPUT,
+    log: path,
+    keep: 'always',
+    redact: (text) => redactSecrets(text, pairs),
   });
-  const path = probeOutputPath(ctx.paths, ctx.runId, `${spec.seat}-c${spec.cycle}-p${round}`);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, redactSecrets(run.output ?? '', secretValues(ctx, spec)), 'utf8');
   stampProbe(ctx, spec, {
     layer: layer.name,
     command: layer.command,
     round,
     exit: run.code,
     record: path,
+    ...(run.log?.bytes !== undefined && { bytes: run.log.bytes }),
+    // The cap cut this one: the seat is judging on a file that stops before
+    // the command did, and the stamp says so rather than leaving a reader to
+    // measure it (ADR-0043).
+    ...(run.log?.truncated && { capped: true }),
     ...(run.error && { error: run.error }),
   });
 }
@@ -360,6 +403,8 @@ export function probeOfferLines({ replays, budget, layers }) {
     'The layer runs with this host\'s credentials. You get the output only: no environment ' +
       'value ever reaches you, and every value this host calls a secret is replaced in the ' +
       'output by the name it came from.',
+    'The whole output goes to a file. What you read here is the end of it, and the path of ' +
+      'the file is above that text: open it when the failure you are after ran before the end.',
     'Ask only where the evidence you hold cannot settle the question. Each probe costs the ' +
       'whole run of that layer.',
   );

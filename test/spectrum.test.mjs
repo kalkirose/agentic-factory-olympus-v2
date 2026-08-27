@@ -5,7 +5,7 @@
 // decides what a cycle runs and what it carries.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, existsSync, readFileSync } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { scaffoldHome, runLedgerPath } from '../src/daemon/home.mjs';
 import { openRunStore } from '../src/telemetry/stores.mjs';
@@ -143,13 +143,13 @@ test('a red layer whose command surfaces no parts records the tail alone', async
   assert.equal(stamped.kind, undefined);
 });
 
-test('a red the record could only keep the tail of names the defect it is', async (t) => {
-  // The class the per-part protocol exists to answer, still open: a long
-  // stream, no part markers, and a record that holds whatever ran last. The
-  // word goes on the record where the harness observes it, so a class that
-  // keeps recurring after its fix is a count rather than a seat's sentence.
+test('a red whose stream outgrew the tail names the file that holds all of it', async (t) => {
+  // The class the per-part protocol was written for, closed at the primitive:
+  // a long stream with no part markers still leaves the record holding a tail,
+  // and the whole of it is in the file the record names. Nothing is missing,
+  // so nothing is a defect.
   const { ctx } = fixture(t);
-  const long = ['node', '-e', `console.log('x'.repeat(9000));process.exit(1);`];
+  const long = ['node', '-e', `console.log('x'.repeat(9000));console.log('THE FAILURE');process.exit(1);`];
   await runSpectrum(ctx, {
     layers: [{ name: 'acceptance', command: 'long' }],
     commands: { long },
@@ -160,7 +160,78 @@ test('a red the record could only keep the tail of names the defect it is', asyn
   const stamped = events(ctx).find((e) => e.event === 'layer-result');
   assert.equal(stamped.status, 'red');
   assert.equal(stamped.parts, undefined);
+  assert.equal(stamped.kind, undefined);
+  assert.ok(existsSync(stamped.log), 'the red left no file to read');
+  const held = readFileSync(stamped.log, 'utf8');
+  assert.ok(held.length > 9000, 'the file holds no more than the tail did');
+  assert.match(held, /THE FAILURE/);
+});
+
+test('a red whose file the cap cut names the file and the defect both', async (t) => {
+  // The one reading of `layer-log-truncated` left: the harness cannot produce
+  // the output, because the command outgrew the file's own cap. A cap is not
+  // reachable through the spectrum's own options, so the outcome is staged at
+  // the command seam.
+  const { ctx } = fixture(t);
+  const capped = async () => ({
+    code: 1,
+    output: 'x'.repeat(9000),
+    truncated: true,
+    parts: [],
+    log: { path: join(ctx.paths.runs, 'r1', 'commands', 'capped.log'), bytes: 10, truncated: true },
+  });
+  await runSpectrum(ctx, {
+    layers: [{ name: 'acceptance', command: 'long' }],
+    commands: { long: RED },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'sha1',
+    exec: capped,
+  });
+  const stamped = events(ctx).find((e) => e.event === 'layer-result');
   assert.equal(stamped.kind, 'layer-log-truncated');
+  assert.match(stamped.log, /capped\.log$/, 'the record dropped the evidence it does hold');
+});
+
+test('a green layer leaves no file behind, and its record names none', async (t) => {
+  const { ctx } = fixture(t);
+  const { results } = await runSpectrum(ctx, {
+    layers: [{ name: 'acceptance', command: 'talks' }],
+    commands: { talks: ['node', '-e', `console.log('y'.repeat(9000));process.exit(0);`] },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'sha1',
+  });
+  assert.equal(results[0].status, 'green');
+  const stamped = events(ctx).find((e) => e.event === 'layer-result');
+  assert.equal(stamped.log, undefined);
+  assert.deepEqual(readdirSync(join(ctx.paths.runs, 'r1', 'commands')), []);
+});
+
+test('the red the flake filter replaced keeps its own file, under its own attempt', async (t) => {
+  const { root, ctx } = fixture(t);
+  const marker = join(root, 'flake-marker-log');
+  const flaky = [
+    'node',
+    '-e',
+    `const fs=require('fs');const p=${JSON.stringify(marker)};` +
+      `if(fs.existsSync(p)){console.log('the green re-run');process.exit(0);}` +
+      `fs.writeFileSync(p,'x');console.log('THE FIRST RED');process.exit(1);`,
+  ];
+  await runSpectrum(ctx, {
+    layers: [{ name: 'acceptance', command: 'flaky' }],
+    commands: { flaky },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'sha1',
+  });
+  const abandoned = events(ctx).find((e) => e.event === 'layer-abandoned');
+  assert.equal(abandoned.reason, 'superseded-by-rerun');
+  assert.match(readFileSync(abandoned.log, 'utf8'), /THE FIRST RED/);
+  // The green that replaced it took its own file with it.
+  assert.deepEqual(readdirSync(join(ctx.paths.runs, 'r1', 'commands')), [
+    'c1-acceptance-a1.log',
+  ]);
 });
 
 test('a red that named its failing part carries the evidence, and no defect', async (t) => {
