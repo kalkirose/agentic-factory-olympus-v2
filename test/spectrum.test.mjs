@@ -149,7 +149,13 @@ test('a red whose stream outgrew the tail names the file that holds all of it', 
   // and the whole of it is in the file the record names. Nothing is missing,
   // so nothing is a defect.
   const { ctx } = fixture(t);
-  const long = ['node', '-e', `console.log('x'.repeat(9000));console.log('THE FAILURE');process.exit(1);`];
+  // The exit is `process.exitCode`: a child that calls `process.exit` loses
+  // whatever the pipe has not taken yet, and this one is asserted whole.
+  const long = [
+    'node',
+    '-e',
+    `console.log('x'.repeat(9000));console.log('THE FAILURE');process.exitCode=1;`,
+  ];
   await runSpectrum(ctx, {
     layers: [{ name: 'acceptance', command: 'long' }],
     commands: { long },

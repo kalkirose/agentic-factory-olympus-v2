@@ -201,7 +201,9 @@ test('the record of a long replay names the suite that failed in the middle of i
     'console.log("FAIL step two: the second secret was accepted");',
     'console.log("t".repeat(20000));',
     'console.log("PASS step three");',
-    'process.exit(1);',
+    // Not `process.exit`: the stream is asserted whole, and a child that exits
+    // on the spot loses whatever the pipe has not taken.
+    'process.exitCode=1;',
   ].join('');
   const base = baseFor({ command: ['node', '-e', sequence] });
   await triageStep(ctx, base, { cycle: 1, reds: REDS, priorOpen: [] });

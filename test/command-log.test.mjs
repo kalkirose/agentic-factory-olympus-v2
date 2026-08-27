@@ -22,12 +22,20 @@ function fixture(t) {
   return { root, file: (name) => join(root, 'commands', `${name}.log`) };
 }
 
-/** A command that prints `size` characters, then one named line, then exits. */
+/**
+ * A command that prints `size` characters, then one named line, then exits.
+ *
+ * The exit is `process.exitCode` and never `process.exit`. A write to a pipe
+ * does not complete before the call returns on every platform, and a child that
+ * exits on the spot loses whatever the pipe had not taken — which on Linux is
+ * most of a long stream. A child that runs out of work flushes first.
+ */
 function talks(size, last, code) {
   return [
     process.execPath,
     '-e',
-    `console.log('x'.repeat(${size}));console.log(${JSON.stringify(last)});process.exit(${code});`,
+    `console.log('x'.repeat(${size}));console.log(${JSON.stringify(last)});` +
+      `process.exitCode=${code};`,
   ];
 }
 
@@ -52,7 +60,7 @@ test("a red command's file survives, and holds what the tail could not", async (
   const argv = [
     process.execPath,
     '-e',
-    "console.log('THE STEP THAT FAILED');console.log('y'.repeat(30000));process.exit(1);",
+    "console.log('THE STEP THAT FAILED');console.log('y'.repeat(30000));process.exitCode=1;",
   ];
   const run = await runCommand(argv, { log: path });
 
@@ -80,7 +88,9 @@ test('a command that could not run at all writes no file and says so', async (t)
 
 test('a failure that printed nothing leaves no empty file to be read as evidence', async (t) => {
   const { root, file } = fixture(t);
-  const run = await runCommand([process.execPath, '-e', 'process.exit(2)'], { log: file('quiet') });
+  const run = await runCommand([process.execPath, '-e', 'process.exitCode=2;'], {
+    log: file('quiet'),
+  });
   assert.equal(run.code, 2);
   assert.equal(run.log.removed, true);
   assert.deepEqual(readdirSync(join(root, 'commands')), []);
@@ -118,7 +128,7 @@ test('the cap a command meets by default is ten megabytes, and it is not silent'
   const argv = [
     process.execPath,
     '-e',
-    "const line='x'.repeat(1024*1024);for(let i=0;i<11;i++)console.log(line);process.exit(1);",
+    "const line='x'.repeat(1024*1024);for(let i=0;i<11;i++)console.log(line);process.exitCode=1;",
   ];
   const run = await runCommand(argv);
   try {
@@ -179,7 +189,7 @@ test('the redaction runs before the file, so no unredacted copy is ever on disk'
   const argv = [
     process.execPath,
     '-e',
-    `console.log('key was ' + process.env.PROBE_VALUE);process.exit(1);`,
+    `console.log('key was ' + process.env.PROBE_VALUE);process.exitCode=1;`,
   ];
   const run = await runCommand(argv, {
     log: path,
@@ -199,7 +209,7 @@ test('the file holds the stream the command printed, part markers and all', asyn
     '-e',
     "console.log('::olympus part unit suite');console.log('the unit suite failed');" +
       "console.log('::olympus part-failed unit suite');console.log('::olympus part e2e suite');" +
-      "console.log('z'.repeat(9000));process.exit(1);",
+      "console.log('z'.repeat(9000));process.exitCode=1;",
   ];
   const run = await runCommand(argv, { log: path });
 
