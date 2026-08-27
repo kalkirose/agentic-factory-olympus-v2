@@ -1,9 +1,22 @@
 // The orchestrator daemon core: home scaffold, single-instance lock,
 // instance config with live edit pickup, instance ledger, control inbox,
 // and the run engine that owns every open run.
-import { watch, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  watch,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, basename } from 'node:path';
-import { openEscapesStore, openInstanceStore, resolveClosedRun } from '../telemetry/stores.mjs';
+import {
+  openEscapesStore,
+  openInstanceStore,
+  openRunStore,
+  resolveClosedRun,
+} from '../telemetry/stores.mjs';
 import { openWorkspaceLeftovers } from '../telemetry/readers.mjs';
 import { markEscapeFixed as appendFixedMark, readEscapeSet } from '../telemetry/escapes.mjs';
 import { settleBreachOf } from '../telemetry/breaches.mjs';
@@ -13,6 +26,7 @@ import { ModelSemaphores } from '../seats/semaphore.mjs';
 import { RunIsolation } from '../isolation/isolation.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
 import { checkAnswer } from '../ledger/parks.mjs';
+import { recoverOpenAttempts } from '../ledger/attempts.mjs';
 import { ACK_OPTION, standingAcksFor } from '../ledger/acks.mjs';
 import {
   cloneDir,
@@ -877,12 +891,39 @@ export class Daemon {
       if (!open.has(runId)) ids.add(runId);
     }
     for (const runId of ids) {
+      // A run the engine does not hold has nobody left to stamp the ending of
+      // a gate-layer attempt it started, so the sweep stamps it (ADR-0034).
+      this.recoverAttemptsOf(runId);
       // Same branch rule as a normal close; a workspace with no ledger at all
       // reads as not shipped, which is the safe side of the guess.
       await this.releaseWorkspace(runId, {
         orphan: true,
         keepBranch: closeState(this.paths, runId) !== 'shipped',
       });
+    }
+  }
+
+  /**
+   * Closes the gate-layer attempts one unheld run ledger left open. The live
+   * ledger only, and only while the run is still open: a closed run has said
+   * its last word at `run-closed` and every reader treats it as such
+   * (ADR-0015), so an attempt left open behind that close stays as the ledger
+   * recorded it.
+   *
+   * The store is opened for this write and closed again, so the sweep never
+   * holds a handle on a run directory it is about to move.
+   */
+  recoverAttemptsOf(runId) {
+    if (this.engine?.runs.has(runId)) return;
+    const path = runLedgerPath(this.paths, runId);
+    if (!existsSync(path)) return;
+    const events = readEvents(path);
+    if (events.length === 0 || events.some((e) => e.event === 'run-closed')) return;
+    const store = openRunStore(this.paths, runId);
+    try {
+      recoverOpenAttempts(store, { actor: ACTOR, trigger: 'orphan-sweep' });
+    } finally {
+      store.close();
     }
   }
 

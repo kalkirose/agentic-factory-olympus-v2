@@ -28,6 +28,45 @@ export const SEAT_TERMINAL_EVENTS = new Set([
   'seat-terminated',
 ]);
 
+// The events that end one gate-layer attempt. Every `layer-started` pairs with
+// exactly one of these, and the pairing is the invariant `attempts.mjs` reads
+// (ADR-0034).
+export const LAYER_TERMINAL_EVENTS = new Set(['layer-result', 'layer-abandoned']);
+
+// Closed vocabulary for why an attempt was abandoned. Closed for the reason
+// every registry here is: a reason written as prose at a call site counts as
+// nothing, and the reader of two ledgers has to decide whether two sentences
+// mean the same thing.
+export const LAYER_ABANDON_REASONS = new Set([
+  // The flake filter owes every red one red-only re-run, so a first red is
+  // replaced rather than judged. The record is what the replaced attempt did.
+  'superseded-by-rerun',
+  // The command could not run at all — an environment defect, never a verdict
+  // about the tree. The route parks the run under `command-error`.
+  'command-error',
+  // A signal ended the child: the daemon stopping, or an operator killing the
+  // run. The exit is not the command's answer and is never read as one.
+  'terminated',
+  // The runner itself threw while the attempt was in flight. The throw carries
+  // on to the engine; the stamp is what says the attempt is over.
+  'runner-error',
+  // The backstop: a path left the attempt without deciding anything. It is a
+  // defect in the runner rather than a state of the tree, and it exists so that
+  // a path written later cannot end an attempt in silence.
+  'unstamped-exit',
+  // A start a dead instance left open, closed by the recovery guard at the next
+  // daemon start or by the orphan sweep.
+  'unclosed-at-recovery',
+]);
+
+/** The reason, or a throw naming it. The only way a reason reaches a stamp. */
+export function assertAbandonReason(reason) {
+  if (!LAYER_ABANDON_REASONS.has(reason)) {
+    throw new Error(`unknown layer-abandoned reason: ${reason}`);
+  }
+  return reason;
+}
+
 export const RUN_EVENTS = new Set([
   // run lifecycle
   'run-launched',
@@ -96,6 +135,14 @@ export const RUN_EVENTS = new Set([
   // mid-layer stamps a fresh start for the execution it begins (ADR-0034).
   'layer-started',
   'layer-result',
+  // The attempt that ended without a verdict about the tree: the red the flake
+  // filter's re-run replaced, a command that could not run, a child a signal
+  // took, a throw in the runner, and the start a dead instance left open. It
+  // carries the reason, what the attempt had printed by then, and the seq of
+  // the start it closes. A 38-minute acceptance attempt once vanished with no
+  // record of any kind and its re-run replaced it in silence; nothing in the
+  // ledger said either had happened (ADR-0034).
+  'layer-abandoned',
   'flake',
   'finding',
   'verdict-rendered',

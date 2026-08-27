@@ -26,7 +26,13 @@
 // layer stamped under this cycle reports `run` whatever the plan says: the
 // stamp is the fact. Deterministic re-runs are unlimited by doctrine; they
 // judge nothing.
-import { assertDefectKind } from '../ledger/registry.mjs';
+//
+// Every attempt also stamps its ending. An attempt that judged the tree stamps
+// `layer-result`; every other ending stamps `layer-abandoned` with the reason
+// and what the attempt had printed. The stamp is written at one settle point
+// that every ending of an attempt leaves through, so a path cannot end an
+// attempt without stamping — including a path written later (ADR-0034).
+import { assertDefectKind, assertAbandonReason } from '../ledger/registry.mjs';
 import { runCommand } from './exec.mjs';
 import { runEvents, ACTOR } from './shared.mjs';
 
@@ -47,6 +53,10 @@ const OUTPUT_TAIL = 1500;
 // (ADR-0008).
 const PART_TAIL = 6000;
 const PART_FLOOR = 500;
+// What a layer is allowed to attempt: the run, and the flake filter's one
+// red-only re-run. The bound is process policy and lives here alone, because
+// the attempt loop and the settle point both read it.
+const ATTEMPTS = 2;
 
 /**
  * Runs one verdict cycle's Tier-1 spectrum.
@@ -54,9 +64,13 @@ const PART_FLOOR = 500;
  * @param {{layers: Array<{name: string, command: string, needs?: string[]}>,
  *   commands: Record<string, string[]>, cwd: string, env?: object,
  *   cycle: number, sha: string, run?: Set<string>|null,
- *   prior?: Map<string, object>|null, confirmation?: boolean}} opts
+ *   prior?: Map<string, object>|null, confirmation?: boolean,
+ *   exec?: typeof runCommand}} opts
  *   `run` names the layers this cycle executes; every other layer carries its
  *   `prior` green forward. Both absent means the full spectrum.
+ *   `exec` is the command seam. A runner that throws, or one that answers
+ *   nothing at all, is a real ending of an attempt that no portable test can
+ *   stage with a child process, so the call the condition breaks is injectable.
  * @returns {Promise<{results?: Array<{layer: string, status: string,
  *   mode: string, attributedTo?: string, output?: string,
  *   parts?: Array<{name: string, output: string}>}>, error?: string}>}
@@ -65,7 +79,18 @@ const PART_FLOOR = 500;
  */
 export async function runSpectrum(
   ctx,
-  { layers, commands, cwd, env, cycle, sha, run = null, prior = null, confirmation = false },
+  {
+    layers,
+    commands,
+    cwd,
+    env,
+    cycle,
+    sha,
+    run = null,
+    prior = null,
+    confirmation = false,
+    exec = runCommand,
+  },
 ) {
   const stamped = new Map(
     runEvents(ctx)
@@ -86,8 +111,9 @@ export async function runSpectrum(
       } else {
         const blocked = (layer.needs ?? []).find((need) => status.get(need)?.status !== 'green');
         if (blocked) {
-          record = ctx.store.append('layer-result', {
-            actor: ACTOR,
+          // A layer that never started owes no pairing: the stamp is the
+          // layer's, not an attempt's, and it carries no attempt number.
+          record = stampLayer(ctx, 'layer-result', {
             cycle,
             layer: layer.name,
             status: 'not-runnable',
@@ -96,7 +122,7 @@ export async function runSpectrum(
             ...mark,
           });
         } else {
-          const outcome = await runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark });
+          const outcome = await runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark, exec });
           if (outcome.error) return { error: outcome.error };
           record = outcome.record;
         }
@@ -126,39 +152,164 @@ function carriedResult(layer, run, prior) {
   return previous?.status === 'green' ? previous : null;
 }
 
-async function runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark }) {
+/**
+ * One layer, run until an attempt judges it or the attempts run out. The flake
+ * filter is the loop: a first red is never the layer's answer, so it is
+ * replaced by one red-only re-run and stamped as the replaced attempt it is.
+ */
+async function runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark, exec }) {
   const argv = commands[layer.command];
-  const started = (attempt) =>
-    ctx.store.append('layer-started', { actor: ACTOR, cycle, layer: layer.name, attempt, sha, ...mark });
-  started(1);
-  const first = await runCommand(argv, { cwd, env });
-  if (first.code === null) return { error: first.error };
-  if (first.code === 0) {
-    return { record: stampResult(ctx, { cycle, layer: layer.name, status: 'green', sha, ...mark }) };
-  }
-  // Flake filter: one red-only re-run by process policy.
-  started(2);
-  const rerun = await runCommand(argv, { cwd, env });
-  if (rerun.code === null) return { error: rerun.error };
-  if (rerun.code === 0) {
-    ctx.store.append('flake', { actor: ACTOR, cycle, layer: layer.name, sha });
-    return { record: stampResult(ctx, { cycle, layer: layer.name, status: 'green', sha, ...mark }) };
-  }
-  const parts = recordedParts(rerun.parts);
-  return {
-    record: stampResult(ctx, {
+  let previous = null;
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+    const settled = await runAttempt(ctx, {
+      argv,
+      layer,
+      cwd,
+      env,
       cycle,
-      layer: layer.name,
-      status: 'red',
       sha,
-      output: rerun.output.slice(-OUTPUT_TAIL),
+      mark,
+      exec,
+      attempt,
+      // Retry provenance: an attempt above the first names the attempt it
+      // replaced and what spawned it, so a replacement is never silent.
+      ...(previous && { retryOf: previous.seq, trigger: 'flake-filter' }),
+    });
+    if (settled.disposition.event === 'layer-result') return { record: settled.record };
+    if (settled.disposition.reason !== 'superseded-by-rerun') {
+      return { error: settled.disposition.detail };
+    }
+    previous = settled.start;
+  }
+  // Unreachable: the last attempt never supersedes itself. A throw beats a
+  // silent undefined if a later change to `ATTEMPTS` or the policy makes it so.
+  throw new Error(`layer ${layer.name} ran out of attempts without a result`);
+}
+
+/**
+ * One execution of one layer command: the start stamp, the run, and the
+ * terminal stamp that closes it.
+ *
+ * STRUCTURAL RULE. The attempt body records what it learned and decides
+ * nothing; `settle` below is the only writer of an attempt's terminal stamp,
+ * and it is called from the `finally` every ending of this function leaves
+ * through — an exit code, a throw, and a `return` a later change adds inside
+ * the body. That is what makes "no attempt ends without a record" a property of
+ * the runner rather than a rule each path has to remember (ADR-0034).
+ */
+async function runAttempt(ctx, spec) {
+  const { argv, layer, cwd, env, cycle, sha, mark, exec, attempt, retryOf, trigger } = spec;
+  const start = ctx.store.append('layer-started', {
+    actor: ACTOR,
+    cycle,
+    layer: layer.name,
+    attempt,
+    sha,
+    ...(retryOf !== undefined && { retryOf, trigger }),
+    ...mark,
+  });
+  const made = { start };
+  try {
+    made.outcome = await exec(argv, { cwd, env });
+  } catch (error) {
+    made.thrown = error;
+    throw error;
+  } finally {
+    settle(ctx, spec, made);
+  }
+  return made;
+}
+
+/**
+ * The single settle point: what this attempt's ending means, and the one stamp
+ * that says so. Writes `made.disposition` and `made.record`.
+ *
+ * A green re-run stamps the flake here too. The flake and the result are one
+ * fact about one attempt, and a filter whose evidence is stamped somewhere else
+ * is a filter that can lose it.
+ */
+function settle(ctx, { layer, cycle, sha, mark, attempt }, made) {
+  const disposition = dispositionOf(made, attempt);
+  made.disposition = disposition;
+  const identity = { cycle, layer: layer.name, attempt, sha };
+  if (disposition.event === 'layer-result') {
+    if (disposition.status === 'green' && attempt > 1) {
+      ctx.store.append('flake', { actor: ACTOR, cycle, layer: layer.name, sha });
+    }
+    made.record = stampLayer(ctx, 'layer-result', {
+      ...identity,
+      status: disposition.status,
+      ...disposition.evidence,
+      ...mark,
+    });
+    return;
+  }
+  made.record = stampLayer(ctx, 'layer-abandoned', {
+    ...identity,
+    reason: assertAbandonReason(disposition.reason),
+    ...(made.start && { startedSeq: made.start.seq }),
+    ...(disposition.detail !== undefined && { detail: disposition.detail }),
+    ...(disposition.exitSignal && { signal: disposition.exitSignal }),
+    ...(disposition.partialOutput && { partialOutput: disposition.partialOutput }),
+    ...mark,
+  });
+}
+
+/**
+ * What an attempt's ending was, from what the attempt recorded. Pure: the
+ * whole policy of the flake filter is here, and nothing here writes.
+ */
+function dispositionOf({ outcome, thrown }, attempt) {
+  if (thrown) {
+    return { event: 'layer-abandoned', reason: 'runner-error', detail: thrown.message };
+  }
+  if (!outcome) {
+    // The backstop. A path left the attempt without running anything and
+    // without deciding anything, which is a defect in this runner.
+    return {
+      event: 'layer-abandoned',
+      reason: 'unstamped-exit',
+      detail: 'the attempt ended without an outcome',
+    };
+  }
+  const partialOutput = outcome.output ? outcome.output.slice(-OUTPUT_TAIL) : undefined;
+  if (outcome.code === null) {
+    // A spawn that failed carries the reason; a child a signal took carries the
+    // signal. Neither is the command's answer, and neither is read as one.
+    return outcome.error
+      ? { event: 'layer-abandoned', reason: 'command-error', detail: outcome.error, partialOutput }
+      : {
+          event: 'layer-abandoned',
+          reason: 'terminated',
+          detail: `the layer command was terminated by ${outcome.signal ?? 'a signal'}`,
+          exitSignal: outcome.signal ?? null,
+          partialOutput,
+        };
+  }
+  if (outcome.code === 0) return { event: 'layer-result', status: 'green', evidence: {} };
+  if (attempt < ATTEMPTS) {
+    // The flake filter owes this red a re-run, so this attempt judges nothing.
+    // Its output is kept anyway: it is what the attempt spent its minutes on,
+    // and without it a replaced attempt leaves the ledger with nothing at all.
+    return {
+      event: 'layer-abandoned',
+      reason: 'superseded-by-rerun',
+      detail: `exit ${outcome.code}`,
+      partialOutput,
+    };
+  }
+  const parts = recordedParts(outcome.parts);
+  return {
+    event: 'layer-result',
+    status: 'red',
+    evidence: {
+      output: partialOutput ?? '',
       ...(parts.length > 0 && { parts }),
       ...(parts.length === 0 &&
-        (rerun.truncated || rerun.output.length > OUTPUT_TAIL) && {
+        (outcome.truncated || (outcome.output?.length ?? 0) > OUTPUT_TAIL) && {
           kind: assertDefectKind('layer-log-truncated'),
         }),
-      ...mark,
-    }),
+    },
   };
 }
 
@@ -180,8 +331,14 @@ function recordedParts(parts = []) {
   return kept.map((p) => ({ name: p.name, output: p.output.slice(-each) }));
 }
 
-function stampResult(ctx, fields) {
-  return ctx.store.append('layer-result', { actor: ACTOR, ...fields });
+/**
+ * The one writer of a layer's own stamps. Every terminal record of an attempt
+ * and every not-runnable stamp is written here and nowhere else, which is what
+ * a structural test can hold: one append of a `layer-` event in this file, and
+ * one call of `settle` behind it.
+ */
+function stampLayer(ctx, event, fields) {
+  return ctx.store.append(event, { actor: ACTOR, ...fields });
 }
 
 /** Follows a not-runnable chain down to the red layer that caused it. */

@@ -21,6 +21,7 @@ import {
   SEAT_TERMINAL_EVENTS,
 } from '../ledger/registry.mjs';
 import { OWNER_EVENTS, settleOwnedLoud } from '../ledger/resolution.mjs';
+import { recoverOpenAttempts } from '../ledger/attempts.mjs';
 import { checkAnswer, runParkForms } from '../ledger/parks.mjs';
 import { runLedgerPath, archivedRunLedgerPath } from '../daemon/home.mjs';
 import { openRunStore, archiveRun } from '../telemetry/stores.mjs';
@@ -781,6 +782,10 @@ export class RunEngine {
    * another process and rarely survives the gap between two daemons; the run
    * lives in the archive (ADR-0002), and until it gets there its loud record
    * stays open and nothing else would ever move it.
+   *
+   * The start is also the recovery guard for gate-layer attempts: an attempt
+   * whose process died with the instance has nobody left to stamp its ending,
+   * so the resume stamps it (ADR-0034).
    */
   resumeOpenRuns() {
     const resumed = [];
@@ -807,6 +812,11 @@ export class RunEngine {
       run.held = state.held;
       run.deferred = state.deferred;
       run.deferredResume = state.deferredResume;
+      // Before the run does anything else: a gate-layer attempt the dead
+      // instance left open is closed here, and it has to be closed before the
+      // stage re-enters, because a re-entered verdict stage stamps a fresh
+      // start for the layer it re-runs (ADR-0034).
+      recoverOpenAttempts(run.store, { actor: ACTOR, trigger: 'daemon-start' });
       resumed.push(runId);
       if (run.parked || run.violated) continue;
       const lane = this.lanes.get(run.lane);

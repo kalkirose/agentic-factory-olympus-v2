@@ -7,6 +7,9 @@ on the shape that got through.
 Extended (2026-08-26): the band and the reading against it are work, not wall
 clock. A visit's waits come out of its sample and out of the live elapsed alike
 (ADR-0039); everything else here stands.
+Extended (2026-08-27): a layer start with no ending was half a record. Every
+attempt now stamps how it ended, at one settle point in the runner; everything
+else here stands.
 
 ## The condition
 
@@ -36,6 +39,19 @@ here — the heartbeat, the band, the queued record — sat unused, because the 
 stage that needed it was the one stage that did not beat. A stage's liveness
 cannot be delegated to what the stage is holding: the thing being watched
 cannot be the thing that reports.
+
+The start stamp then produced a second condition of its own. A start with no
+ending is half a record. An acceptance attempt started at 20:40, ran for 38
+minutes, and vanished: no result, no reason, nothing. The next line for that
+layer was a second start, and the second attempt replaced the first without a
+word about either. A reader of that ledger cannot say whether the first attempt
+went red, was killed, or is still running somewhere. The telemetry rule the rest
+of the harness holds to — every terminal state stamps — covered runs and the
+daemon and stopped at the layer.
+
+The runner had five ways to end an attempt and stamped after two of them. That
+is the shape of the defect, not the count: a rule each path has to remember is
+a rule the next path added will not.
 
 The banned answer is a clock that decides. A stage killed at a threshold is a
 stage that loses a merge to a slow forge, and the threshold becomes the thing
@@ -86,6 +102,50 @@ exactly as it did: a layer already stamped with a result is skipped, and a
 layer caught mid-execution runs again and stamps a second start for the second
 execution. Nothing in the engine reads a start, so a lost one costs a reader a
 line and costs the run nothing.
+
+**Every `layer-started` pairs with exactly one terminal stamp.** An attempt that
+judged the tree stamps `layer-result`, which now carries the attempt it belongs
+to. Every other ending stamps `layer-abandoned`: the reason from a closed
+vocabulary, what the attempt had printed by then, and the seq of the start it
+closes. The vocabulary is six words — the red a re-run replaced, a command that
+could not spawn, a child a signal took, a throw in the runner, a path that
+decided nothing, and a start recovered after a death — and it grows the way
+every registry in this harness does.
+
+**The terminal stamp is written at one settle point, never per path.** The
+attempt body records what it learned and stamps nothing. One function reads that
+record, decides what the ending was, and writes the stamp, and it is called from
+the `finally` that every ending of the attempt leaves through: an exit code, a
+throw, and a `return` a later change adds. So "no attempt ends without a record"
+is a property of the runner rather than a rule at each call site. A structural
+test holds it: one append of a `layer-` event in the runner, one call of the
+settle point, and that call inside the `finally`.
+
+**A red the flake filter replaces is an ending like any other.** The first red
+is not the layer's answer — the filter owes it one red-only re-run — so it
+stamps `layer-abandoned` with its exit code and its output tail rather than a
+result. The layer's own result still comes from the attempt that decided it, and
+the resume still reads `layer-result` alone, so nothing about carrying and
+skipping changes.
+
+**An attempt above the first names what it replaced.** The start of attempt N
+carries `retryOf`, the seq of the start it retries, and the trigger that spawned
+it. A replacement is never silent, and the abandonment of the attempt it
+replaced sits between the two.
+
+**A start a dead instance left open is closed at recovery.** The daemon start
+reads every open run ledger it resumes and stamps `unclosed-at-recovery` for
+every unpaired start, before the stage re-enters and starts anything of its own.
+The orphan sweep does the same for an open ledger the engine does not hold. Both
+carry the sweep that found the attempt, which is the reader's only clue about
+when it was closed. A closed run is left alone: it said its last word at
+`run-closed`, and every reader treats that as the last word (ADR-0015).
+
+**The pairing reader tolerates the older shape.** A `layer-result` written
+before this decision carries no attempt, and one such result closed the layer
+for its cycle however many attempts had run. It therefore pairs with every open
+start of its layer and cycle. Without that rule the first recovery pass over an
+existing home would invent an abandonment for every layer the harness ever ran.
 
 **The batch is the volume control, and it is a count of poll outcomes.** A
 stage that settles inside its first batch — or, for the stage beat, inside its
@@ -189,6 +249,52 @@ record is the one that reads correctly at any length of silence: a ledger whose
 last line is `layer-started <layer> 06:33Z` says what the run is doing at 06:34
 and at 07:33 alike.
 
+## Why the ending is stamped at a settle point rather than on each path
+
+The obvious repair for a missing stamp is to add the stamp where it is missing.
+That repair was available on the day the start stamp landed, and it is the
+repair that produced the defect: two of the five endings stamped, because two
+call sites were the two somebody thought of. The other three were a spawn that
+failed, a child a signal took, and a throw — each of them a path somebody wrote
+without asking what the ledger owed.
+
+A settle point inverts who has to remember. The body of an attempt cannot stamp,
+because it has no writer. The only writer runs in a `finally`, so it runs for
+every ending the language has. A path added tomorrow that returns early is
+stamped `unstamped-exit` — a reason in the vocabulary, so the defect arrives as
+a countable record rather than as another gap.
+
+This is the same rule the loud-resolution sweep is built on and the same rule
+the stream indexes are built on: a guarantee that a call site must remember is a
+guarantee that goes missing at the next call site added.
+
+## Why a replaced attempt is abandoned rather than given a result
+
+A first red could have stamped a red `layer-result` and let the re-run overwrite
+it. That would put a red under the cycle that the resume reads, and a restart
+between the two attempts would then read the layer as red and skip the re-run
+the flake filter owes it. The filter would quietly stop existing across a
+restart.
+
+The record and the verdict are therefore different things. `layer-result` is the
+layer's verdict for the cycle, and exactly one attempt earns it. Everything else
+an attempt produced is evidence, and evidence is what `layer-abandoned` carries.
+The 38 minutes that vanished were evidence: an output tail from that attempt
+would have said in one line what a human then spent an evening reconstructing.
+
+## Why a signalled child is not a red
+
+A child a signal took returns no exit code, and the runner used to read that as
+a command that could not run. The operator saw "a Tier-1 gate command could not
+run: undefined" for a layer that ran for half an hour and was killed by the
+daemon's own stop. Neither half of that sentence was true.
+
+A signal is somebody ending the process, and the run is usually going down with
+it. The attempt is over and says so, the reason names the signal, and the exit
+is never read as the command's answer about the tree. The layer runs again when
+the run resumes, from attempt 1, and the abandonment is what makes the two
+executions readable as two.
+
 ## Fallback paths
 
 If the batch proves too coarse for a stage whose poll cadence is much slower
@@ -219,6 +325,26 @@ than one constant, read where the engine opens the beat. Trigger: heartbeat
 stamps outnumbering the run's own events in a shipped ledger. Reversal cost:
 low — one argument at one call site; the stamp, the stand-down rule and the
 tripwire that reads it do not change.
+
+If the abandonment stamps prove too loud — a spectrum whose ledger is more
+abandonment than result, because every red layer of every cycle now writes two
+records instead of one — the `superseded-by-rerun` stamp drops its output tail
+and keeps the exit code alone. Trigger: a run ledger an operator cannot read for
+the volume of replaced attempts. Reversal cost: low — one field in the
+disposition, and the pairing does not change.
+
+If `unclosed-at-recovery` turns out to fire on attempts that were not dead — a
+second writer on one run ledger, or a recovery pass that ran while a layer was
+still executing — the guard moves behind proof that the process is gone rather
+than behind the instance being gone. Trigger: one recovery stamp followed by a
+result for the same attempt. Reversal cost: medium — the guard needs the child's
+pid on the start stamp, which is one more field written where the attempt
+begins.
+
+If the closed reason vocabulary proves too coarse — one word covering two
+conditions an operator answers differently — it splits, the way the defect kinds
+do. Trigger: two abandonments with one reason that need two different answers.
+Reversal cost: low — one entry in the set, and the disposition that names it.
 
 If the queued record proves too quiet for a stall that blocks a whole project,
 the class moves from queued to loud, where it joins the liveness violation on

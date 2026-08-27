@@ -303,9 +303,20 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   hour inside one layer reads as that layer running since a time rather than as
   a silent ledger. A record, never state: the resume still reads
   `layer-result` alone (ADR-0034).
+- **Every attempt also stamps its ending.** A `layer-started` pairs with
+  exactly one terminal stamp: `layer-result` for an attempt that judged the
+  tree, or `layer-abandoned` (reason, partial output, the start it closes) for
+  every other ending. The stamp is written at one settle point in the runner
+  that every ending of an attempt leaves through, so a path added later cannot
+  end an attempt in silence. An attempt above the first names the attempt it
+  replaced and what spawned it. A start a dead instance left open is closed
+  `unclosed-at-recovery` by the daemon start and by the orphan sweep
+  (ADR-0034).
 - **Flake filter.** Each red layer re-runs once, red-only, by process policy.
   A green re-run writes a flake event, never a finding. Survivors are
-  persistent reds; only these enter triage.
+  persistent reds; only these enter triage. The replaced red is stamped
+  `superseded-by-rerun` with what it printed, so a re-run never replaces an
+  attempt silently.
 - **A layer that runs in parts.** A gate command is often a sequence of its
   own, and one exit code covers all of it, so the tail of its stream is
   whatever ran last rather than what failed. A command may say where its parts
