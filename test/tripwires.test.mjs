@@ -206,6 +206,181 @@ test('fury-lens-yield counts confirmed findings for one lens over the verdict wi
   assert.equal(quiet.eligible, true);
 });
 
+// -- the memory forecast (ADR-0045) -------------------------------------------
+//
+// One run's peaks per layer, written the way the spectrum writes them. `peaks`
+// maps a layer to what its process tree reached, in mebibytes; a layer with a
+// declared ceiling carries it on the same reading, so the forecast never has to
+// read today's config against yesterday's measurements.
+
+function peakRun(paths, runId, project, ts, peaks, { ceilings = {}, archived = false } = {}) {
+  const entries = Object.entries(peaks);
+  writeLedger(archived ? archivedRunLedgerPath(paths, runId) : runLedgerPath(paths, runId), [
+    line(1, ts, 'run-launched', { project, lane: 'story' }),
+    ...entries.map(([layer, peakRssMb], i) =>
+      line(2 + i, ts, 'layer-result', {
+        cycle: 1,
+        layer,
+        attempt: 1,
+        status: 'green',
+        resources: {
+          peakRssMb,
+          samples: 12,
+          intervalMs: 2000,
+          source: 'linux-proc',
+          ...(ceilings[layer] && { ceilingMb: ceilings[layer] }),
+        },
+      }),
+    ),
+    line(2 + entries.length, ts, 'verdict-rendered', { cycle: 1, pass: 1, verdict: 'green' }),
+  ]);
+}
+
+test('a layer whose peak climbs every run trips the forecast, and a flat one stays quiet', async (t) => {
+  const paths = home(t);
+  // Four runs of one layer, each holding more than the run before it, and a
+  // second layer beside it that never moves. Nothing has died yet: that is the
+  // whole point of the reading.
+  const climb = [900, 1400, 2000, 2700];
+  climb.forEach((peakRssMb, i) =>
+    peakRun(paths, `g${i}`, 'p', `2026-08-0${i + 1}T00:00:00Z`, {
+      acceptance: peakRssMb,
+      lint: 300,
+    }),
+  );
+  const result = await evaluateMetric('layer-peak-trend', { paths, project: 'p', window: 5 });
+  assert.equal(result.eligible, true);
+  assert.equal(result.value, 4);
+  assert.equal(result.detail.layer, 'acceptance');
+  assert.deepEqual(result.detail.peaks, climb);
+  assert.equal(result.detail.runs, 4);
+
+  // The flat layer alone reads as what it is: one reading, going nowhere.
+  const flat = home(t);
+  [1, 2, 3, 4].forEach((day) =>
+    peakRun(flat, `f${day}`, 'p', `2026-08-0${day}T00:00:00Z`, { lint: 300 }),
+  );
+  const quiet = await evaluateMetric('layer-peak-trend', { paths: flat, project: 'p', window: 5 });
+  assert.equal(quiet.eligible, true);
+  assert.equal(quiet.value, 1);
+});
+
+test('a climb that stopped is history, and noise between runs is not a climb', async (t) => {
+  const paths = home(t);
+  // It climbed for three runs and then settled. A forecast reads the tail.
+  [900, 1400, 2000, 2010, 2015].forEach((peakRssMb, i) =>
+    peakRun(paths, `s${i}`, 'p', `2026-08-0${i + 1}T00:00:00Z`, { acceptance: peakRssMb }),
+  );
+  const settled = await evaluateMetric('layer-peak-trend', { paths, project: 'p', window: 5 });
+  assert.equal(settled.value, 1, 'a climb that ended two runs ago still reads as a climb');
+
+  // A layer that wanders by a few megabytes between identical runs is a layer
+  // doing nothing. Without a noise floor this is a breach every window.
+  const noisy = home(t);
+  [1000, 1004, 1009, 1013, 1018].forEach((peakRssMb, i) =>
+    peakRun(noisy, `n${i}`, 'p', `2026-08-0${i + 1}T00:00:00Z`, { acceptance: peakRssMb }),
+  );
+  const wander = await evaluateMetric('layer-peak-trend', { paths: noisy, project: 'p', window: 5 });
+  assert.equal(wander.value, 1);
+});
+
+test('a declared ceiling is read as the fraction of it the layer holds', async (t) => {
+  const paths = home(t);
+  peakRun(paths, 'h1', 'p', '2026-08-01T00:00:00Z', { acceptance: 2000, lint: 400 }, {
+    ceilings: { acceptance: 4096 },
+  });
+  peakRun(paths, 'h2', 'p', '2026-08-02T00:00:00Z', { acceptance: 3600, lint: 400 }, {
+    ceilings: { acceptance: 4096 },
+  });
+  const result = await evaluateMetric('layer-peak-headroom', { paths, project: 'p', window: 5 });
+  assert.equal(result.eligible, true);
+  // The worst reading in the window, not the last: a layer that touched its
+  // ceiling once has a ceiling problem.
+  assert.equal(result.value, round(3600 / 4096));
+  assert.equal(result.detail.layer, 'acceptance');
+  assert.equal(result.detail.peakRssMb, 3600);
+  assert.equal(result.detail.ceilingMb, 4096);
+  assert.equal(result.detail.run, 'h2');
+  // The standing band is four fifths, and this reading is past it.
+  const band = standingTripwires().find((e) => e.id === 'layer-peak-headroom');
+  assert.equal(band.breach.value, 0.8);
+  assert.ok(result.value > band.breach.value);
+
+  // A project that declares no ceiling anywhere is watched by the trend alone.
+  const undeclared = home(t);
+  peakRun(undeclared, 'u1', 'p', '2026-08-01T00:00:00Z', { acceptance: 9000 });
+  const none = await evaluateMetric('layer-peak-headroom', {
+    paths: undeclared,
+    project: 'p',
+    window: 5,
+  });
+  assert.equal(none.eligible, false);
+  assert.equal(none.value, null);
+});
+
+test('a ledger written before the measurement existed reads clean, and measures nothing', async (t) => {
+  const paths = home(t);
+  // Exactly what the running daemon is writing right now: layer results with no
+  // reading on them at all. The additive field is absent, not zero, and neither
+  // metric may invent a number for it.
+  writeLedger(runLedgerPath(paths, 'old'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-01T01:00:00Z', 'layer-result', {
+      cycle: 1,
+      layer: 'acceptance',
+      attempt: 1,
+      status: 'red',
+      output: 'one test failed',
+    }),
+    line(3, '2026-08-01T02:00:00Z', 'verdict-rendered', { cycle: 1, pass: 1, verdict: 'red' }),
+  ]);
+  for (const metric of ['layer-peak-headroom', 'layer-peak-trend']) {
+    const result = await evaluateMetric(metric, { paths, project: 'p', window: 5 });
+    assert.equal(result.eligible, false, metric);
+    assert.equal(result.value, null, metric);
+  }
+
+  // And a run measured beside it is read on its own, with no zero carried in
+  // from the ledgers that predate the field.
+  peakRun(paths, 'new', 'p', '2026-08-03T00:00:00Z', { acceptance: 2000 }, {
+    ceilings: { acceptance: 2048 },
+  });
+  const headroom = await evaluateMetric('layer-peak-headroom', { paths, project: 'p', window: 5 });
+  assert.equal(headroom.detail.runs, 1);
+  assert.ok(headroom.value > 0.9);
+});
+
+test('a replaced attempt counts, and several attempts in one run count once', async (t) => {
+  const paths = home(t);
+  // The flake filter abandons the first red and re-runs it, so half a layer's
+  // deaths are `layer-abandoned`. A history that read results alone would learn
+  // this layer's memory from the quieter half of its runs.
+  writeLedger(runLedgerPath(paths, 'a1'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-01T01:00:00Z', 'layer-abandoned', {
+      cycle: 1,
+      layer: 'acceptance',
+      attempt: 1,
+      reason: 'superseded-by-rerun',
+      resources: { peakRssMb: 3900, samples: 9, intervalMs: 2000, source: 'linux-proc', ceilingMb: 4096 },
+    }),
+    line(3, '2026-08-01T02:00:00Z', 'layer-result', {
+      cycle: 1,
+      layer: 'acceptance',
+      attempt: 2,
+      status: 'green',
+      resources: { peakRssMb: 1200, samples: 9, intervalMs: 2000, source: 'linux-proc', ceilingMb: 4096 },
+    }),
+  ]);
+  const result = await evaluateMetric('layer-peak-headroom', { paths, project: 'p', window: 5 });
+  assert.equal(result.detail.peakRssMb, 3900, 'the replaced attempt was not read');
+  assert.equal(result.detail.runs, 1, 'one run counted as two');
+});
+
+function round(value) {
+  return Math.round(value * 1000) / 1000;
+}
+
 test('ci-critical-path takes the median of the longest green check, in minutes', async (t) => {
   const paths = home(t);
   const ship = (runId, ts, sha, checks) =>

@@ -37,9 +37,19 @@
 // and what the attempt had printed. The stamp is written at one settle point
 // that every ending of an attempt leaves through, so a path cannot end an
 // attempt without stamping — including a path written later (ADR-0034).
+//
+// Every attempt is also measured. What the layer's process tree peaked at
+// rides its record, and an attempt that died of that peak is classed there and
+// then: exit 134 and its kin are a mechanical fact, and a run that dies of
+// memory used to reach a judgment seat as a generic red for the seat to
+// attribute — twice, on two runs that were then abandoned (ADR-0045). The
+// classification happens at the same one settle point the stamp does, so it
+// covers every ending an attempt has rather than the endings somebody
+// remembered.
 import { commandLogPath } from '../daemon/home.mjs';
 import { assertDefectKind, assertAbandonReason } from '../ledger/registry.mjs';
 import { runCommand } from './exec.mjs';
+import { exhaustionOf } from './resources.mjs';
 import { absentCredentials } from './replay.mjs';
 import { runEvents, ACTOR } from './shared.mjs';
 
@@ -87,10 +97,13 @@ const ATTEMPTS = 2;
  *   stage with a child process, so the call the condition breaks is injectable.
  * @returns {Promise<{results?: Array<{layer: string, status: string,
  *   mode: string, attributedTo?: string, output?: string, log?: string,
- *   credentialAbsent?: string[],
+ *   credentialAbsent?: string[], resources?: object, exhaustion?: object,
  *   parts?: Array<{name: string, output: string}>}>, error?: string}>}
  *   `log` is the file holding that layer's whole output, for the red that has
  *   one: the tail and the parts are the summary, the file is the text.
+ *   `resources` is what the layer's process tree peaked at, and `exhaustion`
+ *   is the harness's own attribution of a red that died of it — both facts
+ *   about the attempt, decided before any seat reads the output (ADR-0045).
  *   `error` is set when a layer command could not run at all — an
  *   environment defect, never a verdict about the tree.
  */
@@ -166,6 +179,8 @@ export async function runSpectrum(
       mode,
       ...(record.attributedTo && { attributedTo: record.attributedTo }),
       ...(record.credentialAbsent?.length > 0 && { credentialAbsent: record.credentialAbsent }),
+      ...(record.resources && { resources: record.resources }),
+      ...(record.exhaustion && { exhaustion: record.exhaustion }),
       ...(record.output && { output: record.output }),
       ...(record.log && { log: record.log }),
       ...(record.parts?.length > 0 && { parts: record.parts }),
@@ -251,6 +266,10 @@ async function runAttempt(ctx, spec) {
       // One file per attempt, named by the attempt: the flake filter's first
       // red keeps its own evidence when the re-run replaces it.
       ...(logFile !== null && { log: logFile }),
+      // Every layer attempt is measured. A gate layer is the one command in
+      // this harness that runs long enough for its memory to be a fact worth
+      // keeping, and the reading is what the forecast is built from (ADR-0045).
+      resources: true,
     });
   } catch (error) {
     made.thrown = error;
@@ -280,8 +299,9 @@ function attemptLogFile(ctx, { cycle, layer, attempt }) {
  * fact about one attempt, and a filter whose evidence is stamped somewhere else
  * is a filter that can lose it.
  */
-function settle(ctx, { layer, cycle, sha, mark, attempt, absent }, made) {
-  const disposition = dispositionOf(made, attempt);
+function settle(ctx, spec, made) {
+  const { layer, cycle, sha, mark, attempt, absent } = spec;
+  const disposition = dispositionOf(made, attempt, layer.memoryCeilingMb ?? null);
   made.disposition = disposition;
   const identity = { cycle, layer: layer.name, attempt, sha };
   if (disposition.event === 'layer-result') {
@@ -291,6 +311,12 @@ function settle(ctx, { layer, cycle, sha, mark, attempt, absent }, made) {
     made.record = stampLayer(ctx, 'layer-result', {
       ...identity,
       status: disposition.status,
+      // What the layer's process tree peaked at, on every result the harness
+      // could measure. A green carries it too: a green at the ceiling is the
+      // reading the forecast needs, and it is the one nobody would think to
+      // keep (ADR-0045).
+      ...(disposition.resources && { resources: disposition.resources }),
+      ...(disposition.exhaustion && { exhaustion: disposition.exhaustion }),
       ...disposition.evidence,
       // The mechanical half of the attribution: this layer declared a
       // credential the host does not hold, and it went red. The variable is
@@ -301,6 +327,7 @@ function settle(ctx, { layer, cycle, sha, mark, attempt, absent }, made) {
       ...(disposition.status === 'red' && absent?.length > 0 && { credentialAbsent: absent }),
       ...mark,
     });
+    if (disposition.exhaustion) stampExhaustion(ctx, spec, disposition.exhaustion);
     return;
   }
   made.record = stampLayer(ctx, 'layer-abandoned', {
@@ -310,10 +337,59 @@ function settle(ctx, { layer, cycle, sha, mark, attempt, absent }, made) {
     ...(disposition.detail !== undefined && { detail: disposition.detail }),
     ...(disposition.exitSignal && { signal: disposition.exitSignal }),
     ...(disposition.partialOutput && { partialOutput: disposition.partialOutput }),
+    // The measurement rides an abandoned attempt too. The flake filter replaces
+    // a first red rather than judging it, and the attempt it replaced is often
+    // the first death of the pair — a history that skipped it would learn the
+    // layer's memory from half its runs.
+    ...(disposition.resources && { resources: disposition.resources }),
+    ...(disposition.exhaustion && { exhaustion: disposition.exhaustion }),
     // The whole output of an attempt nobody judged: a file the run keeps and
     // archives, because a replaced red is the one record of minutes that were
     // spent (ADR-0043).
     ...(disposition.log && { log: disposition.log }),
+    ...mark,
+  });
+  if (disposition.exhaustion) stampExhaustion(ctx, spec, disposition.exhaustion);
+}
+
+/**
+ * The loud record a layer that died of memory earns, stamped at the settle
+ * beside the layer's own. It names the layer, the peak the harness measured
+ * and the ceiling the project declared, so the class is answered before triage
+ * is dispatched rather than reasoned out by a seat after the fact (ADR-0045).
+ *
+ * One per layer while the record stands open. The flake filter gives an OOM
+ * two deaths, the cycles give it more, and a strip that reports the same
+ * ceiling six times reports it worse than once. The layer's own green answers
+ * the record and re-arms this (`resolution.mjs`).
+ */
+function stampExhaustion(ctx, { layer, cycle, sha, mark }, exhaustion) {
+  const events = ctx.store.events();
+  const resolved = new Set(
+    events.filter((e) => e.event === 'resolved').map((e) => e.resolves),
+  );
+  const standing = events.some(
+    (e) =>
+      e.event === 'gate-integrity' &&
+      e.kind === 'resource-exhaustion' &&
+      e.layer === layer.name &&
+      !resolved.has(e.seq),
+  );
+  if (standing) return;
+  const held =
+    typeof exhaustion.peakRssMb === 'number' ? `${exhaustion.peakRssMb} MB` : 'an unmeasured peak';
+  const against =
+    typeof exhaustion.ceilingMb === 'number'
+      ? ` against a declared ceiling of ${exhaustion.ceilingMb} MB`
+      : '';
+  ctx.store.append('gate-integrity', {
+    actor: ACTOR,
+    kind: assertDefectKind('resource-exhaustion'),
+    layer: layer.name,
+    cycle,
+    sha,
+    ...exhaustion,
+    gist: `${layer.name} died of memory at ${held}${against}`,
     ...mark,
   });
 }
@@ -321,8 +397,13 @@ function settle(ctx, { layer, cycle, sha, mark, attempt, absent }, made) {
 /**
  * What an attempt's ending was, from what the attempt recorded. Pure: the
  * whole policy of the flake filter is here, and nothing here writes.
+ *
+ * `ceilingMb` is what the project declared this layer may hold. Optional, and
+ * absent for every layer that declares nothing: the classification then rests
+ * on the exit and the output alone, and the forecast reads the trend instead
+ * of a fraction (ADR-0045).
  */
-function dispositionOf({ outcome, thrown }, attempt) {
+function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null) {
   if (thrown) {
     return { event: 'layer-abandoned', reason: 'runner-error', detail: thrown.message };
   }
@@ -343,6 +424,24 @@ function dispositionOf({ outcome, thrown }, attempt) {
   // best evidence there is and is still named; what it is not is complete,
   // and the record says which of the two it is holding.
   const whole = Boolean(log) && outcome.log.truncated !== true;
+  // What this attempt cost the machine, and what the harness makes of an
+  // ending that cost it everything. Both ride every disposition below: an
+  // attempt is measured whichever way it ends, and the flake filter's replaced
+  // red is as much a death of memory as the one that follows it (ADR-0045).
+  const exhaustion = exhaustionOf(outcome, { ceilingMb });
+  const cost = {
+    ...(outcome.resources && {
+      // The declaration rides the reading. A forecast that had to fetch the
+      // ceiling from a config blob could only ever read today's number against
+      // a history of peaks measured under yesterday's; carried here, every
+      // reading says what it was measured against (ADR-0045).
+      resources: {
+        ...outcome.resources,
+        ...(typeof ceilingMb === 'number' && { ceilingMb }),
+      },
+    }),
+    ...(exhaustion && { exhaustion }),
+  };
   if (outcome.code === null) {
     // A spawn that failed carries the reason; a child a signal took carries the
     // signal. Neither is the command's answer, and neither is read as one.
@@ -353,6 +452,7 @@ function dispositionOf({ outcome, thrown }, attempt) {
           detail: outcome.error,
           partialOutput,
           log,
+          ...cost,
         }
       : {
           event: 'layer-abandoned',
@@ -361,9 +461,12 @@ function dispositionOf({ outcome, thrown }, attempt) {
           exitSignal: outcome.signal ?? null,
           partialOutput,
           log,
+          ...cost,
         };
   }
-  if (outcome.code === 0) return { event: 'layer-result', status: 'green', evidence: {} };
+  if (outcome.code === 0) {
+    return { event: 'layer-result', status: 'green', evidence: {}, ...cost };
+  }
   if (attempt < ATTEMPTS) {
     // The flake filter owes this red a re-run, so this attempt judges nothing.
     // Its output is kept anyway: it is what the attempt spent its minutes on,
@@ -374,12 +477,14 @@ function dispositionOf({ outcome, thrown }, attempt) {
       detail: `exit ${outcome.code}`,
       partialOutput,
       log,
+      ...cost,
     };
   }
   const parts = recordedParts(outcome.parts);
   return {
     event: 'layer-result',
     status: 'red',
+    ...cost,
     evidence: {
       output: partialOutput ?? '',
       ...(log && { log }),

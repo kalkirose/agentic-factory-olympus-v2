@@ -96,7 +96,13 @@ test('the vocabulary says which record carries each kind, and the two sets are d
   // split is what keeps the second class from owing the first class's rules.
   assert.deepEqual(
     [...GATE_INTEGRITY_KINDS].sort(),
-    ['auto-merge', 'deterministic-red', 'pr-label-missing', 'triage-log-missing'],
+    [
+      'auto-merge',
+      'deterministic-red',
+      'pr-label-missing',
+      'resource-exhaustion',
+      'triage-log-missing',
+    ],
   );
   assert.deepEqual([...OBSERVED_DEFECT_KINDS].sort(), ['capture-takeback', 'layer-log-truncated']);
   for (const kind of GATE_INTEGRITY_KINDS) assert.ok(!OBSERVED_DEFECT_KINDS.has(kind));

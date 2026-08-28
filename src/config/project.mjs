@@ -191,6 +191,17 @@ function validateGates(gates, commands, err) {
         }
       }
     }
+    // What this layer's process tree may hold, in mebibytes. Optional, and a
+    // statement rather than a limit: the harness enforces nothing with it, and
+    // a runner's own `--max-old-space-size` is still the thing that decides
+    // when the process aborts. What declaring it buys is a warning before that
+    // happens — a layer with a ceiling is watched as a fraction of it, and a
+    // layer without one is watched for a climb alone (ADR-0045).
+    if (layer.memoryCeilingMb !== undefined) {
+      if (typeof layer.memoryCeilingMb !== 'number' || !(layer.memoryCeilingMb > 0)) {
+        err(at('memoryCeilingMb'), 'must be a positive number of mebibytes');
+      }
+    }
     if (typeof layer.name === 'string') seen.add(layer.name);
   });
 }

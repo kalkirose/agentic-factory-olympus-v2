@@ -82,6 +82,28 @@ export const TRIPWIRE_METRICS = {
     defaultWindow: null,
     defaultTriggers: ['workspace-released', 'workspace-leftover'],
   },
+  // The worst gate layer's peak memory as a fraction of the ceiling its
+  // project declared for it, over the last N runs. A layer at four fifths of
+  // its ceiling dies on whatever is added to it next; the two runs that found
+  // this class died at a ceiling nobody was watching (ADR-0045). A project
+  // that declares no ceiling anywhere is never eligible — the trend metric
+  // below is what watches those.
+  'layer-peak-headroom': {
+    unit: 'runs',
+    defaultWindow: 5,
+    // Read once per cycle rather than once per layer: every layer of the cycle
+    // has stamped by the render, and the metric walks every run ledger.
+    defaultTriggers: ['verdict-rendered', 'run-closed'],
+  },
+  // How many runs in a row one layer's peak has climbed, worst layer over the
+  // last N runs. It needs no declaration of any kind: a memory that rises
+  // every single run is going somewhere, and the reading says where it is
+  // going before the ceiling says it has arrived.
+  'layer-peak-trend': {
+    unit: 'runs',
+    defaultWindow: 5,
+    defaultTriggers: ['verdict-rendered', 'run-closed'],
+  },
 };
 
 export const BREACH_OPS = new Set(['>', '>=', '<', '<=']);
@@ -158,6 +180,30 @@ export function standingTripwires() {
       metric: 'workspace-leftover-age',
       breach: { op: '>', value: 4 },
       answer: 'end the processes the leftover record names, or delete the directory by hand',
+    },
+    {
+      id: 'layer-peak-headroom',
+      metric: 'layer-peak-headroom',
+      window: 5,
+      // Four fifths. Below it a layer has room for the work of several stories;
+      // above it the next test added to the layer is the one that kills a run,
+      // and which test that is nobody chooses.
+      breach: { op: '>', value: 0.8 },
+      answer:
+        'raise the layer ceiling or bound what the layer runs; a layer this ' +
+        'close to its ceiling dies on whatever is added to it next',
+    },
+    {
+      id: 'layer-peak-trend',
+      metric: 'layer-peak-trend',
+      window: 5,
+      // Four runs of the window of five. Three would fire on a pair of ordinary
+      // stories; five could only fire on a full window, which is one run before
+      // the reading stops being a forecast.
+      breach: { op: '>=', value: 4 },
+      answer:
+        'read the peaks the layer recorded: a memory that climbs every run ' +
+        'reaches its ceiling on a run nobody picked',
     },
   ];
 }

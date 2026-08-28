@@ -354,6 +354,19 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   A red `layer-result` and every `layer-abandoned` name their file, and the
   triage brief names it beside the tail. The file stops at 10 MB, says so on
   its own last line, and stamps `log.truncated`.
+- **A layer's memory is measured, classed and forecast** (ADR-0045). Every
+  layer attempt records what its process tree peaked at — Windows peak working
+  set, Linux `VmHWM`, sampled every 2 seconds from outside the command, with
+  the interval on the record as the floor of what it could see. An attempt that
+  failed on exit 134 and its kin, on a heap-abort signature in its output, or
+  at the ceiling the project declared for the layer, is stamped
+  `resource-exhaustion` — a closed gate-integrity kind naming the layer and the
+  peak — so no triage seat spends a round attributing it. One record per layer
+  while it stands open; the layer's own green answers it. A layer may declare
+  `memoryCeilingMb` in `gates.tier1`, and two standing tripwires read the
+  history across runs: `layer-peak-headroom` (past four fifths of a declared
+  ceiling) and `layer-peak-trend` (four runs of climbing, noise-floored), both
+  loud before a ceiling kills a run rather than after.
 - **Verdict triage** (judgment, fires only on persistent reds): clusters reds
   into findings by root cause; classes each as code-defect, suite-defect,
   env, or harness, with cited evidence. A harness finding also writes a
@@ -516,13 +529,15 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - **A defect the harness recognizes has a name** (ADR-0008, ADR-0024). Every
   `gate-integrity` record carries a `kind` from the closed `DEFECT_KINDS` set,
   and `escape-recorded` takes the same word where the harness already used it.
-  Four of them classify a `gate-integrity` record, so each owns an ownership
+  Five of them classify a `gate-integrity` record, so each owns an ownership
   rule: `auto-merge`, `pr-label-missing` (a request that did not carry its
   labels out of the create, answered by that request's merge),
   `triage-log-missing` (a CI failure log the forge answered with a reason
   instead of the log, answered by nobody — the reason still reaches the triage
-  seat, and the absence is now counted rather than absorbed) and
-  `deterministic-red` (a check whose flake reading expired, below). Two more
+  seat, and the absence is now counted rather than absorbed),
+  `deterministic-red` (a check whose flake reading expired, below) and
+  `resource-exhaustion` (a layer that died of memory rather than of the tree,
+  answered by that layer's own green — ADR-0045). Two more
   are stamped by the step that met the defect, on the record it was already
   writing: `layer-log-truncated` on a `layer-result` whose red evidence is a
   bounded tail with no part carrying the failure and no file holding the whole

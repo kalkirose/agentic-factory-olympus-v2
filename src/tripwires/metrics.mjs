@@ -152,6 +152,58 @@ const IMPLEMENTATIONS = {
     };
   },
 
+  'layer-peak-headroom': async ({ paths, project, window }) => {
+    const history = layerPeakHistory(paths, project, window);
+    let worst = null;
+    for (const [layer, readings] of history) {
+      for (const reading of readings) {
+        if (typeof reading.ceilingMb !== 'number' || reading.ceilingMb <= 0) continue;
+        const fraction = reading.peakRssMb / reading.ceilingMb;
+        // The worst reading in the window, not the last one: a layer that
+        // touched its ceiling once has a ceiling problem, and a quieter run
+        // after it does not make the touch go away.
+        if (!worst || fraction > worst.fraction) worst = { layer, fraction, ...reading };
+      }
+    }
+    return {
+      value: worst ? round(worst.fraction) : null,
+      eligible: worst !== null,
+      detail: worst
+        ? {
+            layer: worst.layer,
+            peakRssMb: worst.peakRssMb,
+            ceilingMb: worst.ceilingMb,
+            run: worst.runId,
+            runs: countedRuns(history),
+          }
+        : {},
+    };
+  },
+
+  'layer-peak-trend': async ({ paths, project, window, params }) => {
+    const history = layerPeakHistory(paths, project, window);
+    const growth = params?.growth ?? PEAK_GROWTH;
+    const floorMb = params?.floorMb ?? PEAK_FLOOR_MB;
+    let worst = null;
+    let readable = false;
+    for (const [layer, readings] of history) {
+      if (readings.length >= 2) readable = true;
+      const streak = climbingTail(readings, { growth, floorMb });
+      if (!worst || streak > worst.streak) {
+        worst = { layer, streak, peaks: readings.map((r) => r.peakRssMb) };
+      }
+    }
+    return {
+      value: worst ? worst.streak : null,
+      // Below two readings there is no direction at all, so there is nothing
+      // to be wrong about. Quiet, the way a cold duration band is quiet.
+      eligible: readable,
+      detail: worst
+        ? { layer: worst.layer, peaks: worst.peaks, runs: countedRuns(history) }
+        : {},
+    };
+  },
+
   'frontier-width': async ({ paths, project, params, readSource }) => {
     const source = await readSource(project);
     if (!source) return { value: null, eligible: false, detail: {} };
@@ -210,6 +262,88 @@ export function countVerdicts(paths, project) {
 export function furyYieldBaseline(paths, project) {
   const { verdicts, byLens } = collectYield(paths, project, BASELINE_WINDOW);
   return { verdicts, byLens };
+}
+
+// -- layer peak memory --------------------------------------------------------
+//
+// What a step of a climb has to be before it counts as one. A gate layer's
+// memory moves a little between identical runs — a different allocation order,
+// a cache that filled — and a rule with no noise floor would read that as a
+// trend and cry every window. Both have to be cleared: two per cent of the
+// reading before it, and sixteen mebibytes.
+
+const PEAK_GROWTH = 0.02;
+const PEAK_FLOOR_MB = 16;
+
+/**
+ * Per-layer peak-memory readings over the last `window` runs of a project that
+ * measured anything, oldest run first.
+ *
+ * One reading per layer per run — the largest peak that layer reached in it.
+ * A layer runs several times inside one run (the flake filter's re-run, a
+ * later cycle, the confirmation sweep) and those are one story about one tree,
+ * not four data points; the largest of them is what the run is worth to a
+ * forecast. Abandoned attempts count: the flake filter's replaced red is often
+ * the first death of a pair, and a history that skipped it would learn the
+ * layer's memory from half its runs.
+ * @returns {Map<string, Array<{runId: string, peakRssMb: number,
+ *   ceilingMb: number|null}>>}
+ */
+function layerPeakHistory(paths, project, window) {
+  const runs = [];
+  for (const { runId, events } of listRunEvents(paths, { project })) {
+    const byLayer = new Map();
+    let ts = null;
+    for (const e of events) {
+      if (e.event !== 'layer-result' && e.event !== 'layer-abandoned') continue;
+      const peakRssMb = e.resources?.peakRssMb;
+      // A ledger written before the measurement existed carries no reading, and
+      // reads here as a run that measured nothing rather than as a zero.
+      if (typeof peakRssMb !== 'number' || typeof e.layer !== 'string') continue;
+      if (ts === null) ts = e.ts;
+      const ceilingMb =
+        typeof e.resources.ceilingMb === 'number' ? e.resources.ceilingMb : null;
+      const standing = byLayer.get(e.layer);
+      if (!standing || peakRssMb > standing.peakRssMb) {
+        byLayer.set(e.layer, {
+          runId,
+          peakRssMb,
+          ceilingMb: ceilingMb ?? standing?.ceilingMb ?? null,
+        });
+      }
+    }
+    if (byLayer.size > 0) runs.push({ ts, byLayer });
+  }
+  runs.sort(byTs);
+  const history = new Map();
+  for (const run of runs.slice(-window)) {
+    for (const [layer, reading] of run.byLayer) {
+      if (!history.has(layer)) history.set(layer, []);
+      history.get(layer).push(reading);
+    }
+  }
+  return history;
+}
+
+/** How many runs the readings came from. Detail for the operator, not a value. */
+function countedRuns(history) {
+  return new Set([...history.values()].flat().map((r) => r.runId)).size;
+}
+
+/**
+ * How many readings the layer has climbed for, counting back from the latest.
+ * The tail and not the longest streak anywhere in the window: a climb that
+ * stopped three runs ago is history, and this metric is a forecast.
+ */
+function climbingTail(readings, { growth, floorMb }) {
+  if (readings.length === 0) return 0;
+  let length = 1;
+  for (let i = readings.length - 1; i > 0; i--) {
+    const step = readings[i].peakRssMb - readings[i - 1].peakRssMb;
+    if (step < floorMb || step < readings[i - 1].peakRssMb * growth) break;
+    length += 1;
+  }
+  return length;
 }
 
 // -- shared collectors --------------------------------------------------------
@@ -298,6 +432,11 @@ function collectYield(paths, project, window) {
 /** Ledger order across ledgers: the stamp's own time, ascending. */
 function byTs(a, b) {
   return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0;
+}
+
+/** A fraction a person can read, and a breach comparison that is stable. */
+function round(value) {
+  return Math.round(value * 1000) / 1000;
 }
 
 function median(values) {

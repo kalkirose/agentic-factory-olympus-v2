@@ -518,6 +518,13 @@ export const GATE_INTEGRITY_KINDS = new Set([
   // its greens report nothing about the tree. The harness re-ran it on the
   // strength of those greens, so the record is where the re-runs stop.
   'deterministic-red',
+  // A gate layer that died of memory rather than of the tree: the abort a heap
+  // ceiling ends a process with, the words a runner prints about one, or a peak
+  // that reached the ceiling the project declared for the layer. It is stamped
+  // where the attempt settles, from the exit and the measured peak alone, so
+  // the attribution costs no judgment seat a cycle — it was reasoned out by one
+  // twice, after two runs had already died of it (ADR-0045).
+  'resource-exhaustion',
 ]);
 
 // The kinds a step stamps on the record of the defect it just met. These

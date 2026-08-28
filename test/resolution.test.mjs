@@ -48,6 +48,7 @@ test('an owning event is an event some ledger can actually stamp', () => {
     [...OWNER_EVENTS].sort(),
     [
       'implementation-committed',
+      'layer-result',
       'merged',
       're-freeze',
       'run-archived',

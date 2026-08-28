@@ -86,6 +86,17 @@ proposals get these concrete shapes:
     the reading of what serial merges cost, kept out of the update-stage
     duration band so no band learns a queue wait as a stage's work
     (ADR-0039).
+  - `layer-peak-headroom`: the worst gate layer's measured peak memory as a
+    fraction of the ceiling its project declared, over the last N runs
+    (ADR-0045). The worst reading in the window rather than the last, and
+    eligible only where some layer declares a ceiling.
+  - `layer-peak-trend`: how many runs in a row one layer's peak has climbed,
+    worst layer over the last N runs (ADR-0045). The tail streak, because a
+    climb that stopped is history; noise-floored at 2% and 16 MB, because a
+    layer wanders between identical runs. It needs no declaration of any kind,
+    which is what covers every layer on the day it ships. Both read once per
+    verdict render rather than once per layer result: the metrics walk every
+    run ledger, and a cycle stamps thirty layer results.
 - **Baseline proposals.** At the 5th freeze the watcher stamps a kill-rate
   proposal (observed kills, waves, per-freeze rates, and the observed floor
   as the suggested band); at the 5th verdict a per-lens yield proposal,

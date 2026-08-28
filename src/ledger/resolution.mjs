@@ -94,6 +94,18 @@ export const LOUD_OWNERSHIP = {
       match: (item) => item.kind === 'deterministic-red',
       by: 'the human, from a console',
     },
+    // The layer died of memory. What answers that is the same layer judging
+    // the tree again and passing — a raised ceiling, a bounded runner, a
+    // smaller step — so the owner is that layer's own green, in this run.
+    // A run that never gets one leaves the record open, which is the true
+    // report: the layer is still dying and nobody has fixed it (ADR-0045).
+    {
+      name: 'resource-exhaustion',
+      match: (item) => item.kind === 'resource-exhaustion',
+      owner: 'layer-result',
+      owns: (item, result) => result.layer === item.layer && result.status === 'green',
+      fields: (item) => ({ layer: item.layer }),
+    },
   ],
   // A red merge stays loud while the defect is still in the product. The
   // repair run's close-out fixes the escapes it ticketed, and pairs the

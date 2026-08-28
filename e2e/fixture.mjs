@@ -45,6 +45,16 @@ export const REQUIRED_CHECK = 'ci';
 
 // -- the fixture project -----------------------------------------------------
 
+// The `smoke` gate is the one here that stands in for a real layer's shape
+// rather than its job: it holds an allocation, and it holds it for longer than
+// the harness's own peak-memory sampler takes to produce a reading (ADR-0045).
+// A gate that answers in five milliseconds is under the sampling floor on every
+// host, and a fixture made only of those would leave the measurement untestable
+// through the assembled binaries.
+export const SMOKE_HELD_MB = 48;
+export const SMOKE_CEILING_MB = 512;
+const SMOKE_HOLD_MS = 1400;
+
 const PROJECT_CONFIG = {
   version: 1,
   repo: { testPaths: ['tests'], uiPaths: [] },
@@ -58,7 +68,9 @@ const PROJECT_CONFIG = {
     tier1: [
       { name: 'lint', command: 'lint' },
       { name: 'suite', command: 'suite' },
-      { name: 'smoke', command: 'smoke', needs: ['suite'] },
+      // The one layer that declares what it may hold, so the e2e proves the
+      // declaration reaches the reading in the ledger (ADR-0045).
+      { name: 'smoke', command: 'smoke', needs: ['suite'], memoryCeilingMb: SMOKE_CEILING_MB },
     ],
   },
   lanes: { story: { suiteCommand: 'suite', lintCommand: 'cardlint' } },
@@ -156,7 +168,11 @@ process.exit(run.status ?? 1);
 const SMOKE_GATE = `import { mark } from './mark.mjs';
 
 mark('smoke');
-console.log('smoke: ok');
+const held = [];
+for (let i = 0; i < ${SMOKE_HELD_MB}; i++) held.push(Buffer.alloc(1024 * 1024, 1));
+setTimeout(() => {
+  console.log('smoke: ok, ' + held.length + ' MB held');
+}, ${SMOKE_HOLD_MS});
 `;
 
 const CARD_LINT_GATE = `import { readdirSync, readFileSync } from 'node:fs';

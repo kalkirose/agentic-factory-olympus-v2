@@ -14,6 +14,8 @@ import { runCost } from '../src/ledger/cost.mjs';
 import {
   CARD_PATH,
   PROJECT,
+  SMOKE_CEILING_MB,
+  SMOKE_HELD_MB,
   assertMilestones,
   assertNoWiringFailure,
   assertSeatArgv,
@@ -239,6 +241,29 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
     assert.ok(
       existsSync(join(runDir(fx, runId), `verdict-${cycle}.json`)),
       `no verdict record for cycle ${cycle}`,
+    );
+  }
+
+  // -- what the layers cost the machine (ADR-0045) --------------------------
+  // The assembled binaries, the fixture's own gate commands, the ledger the
+  // daemon wrote: a green layer that held 48 MB is on the record as having held
+  // it, with the ceiling its project declared and the sampling floor beside it.
+  // That record is the whole input of the memory forecast, so a chain that
+  // measures nothing here forecasts nothing at all.
+  if (process.platform === 'win32' || process.platform === 'linux') {
+    const smoke = cycle2.find((e) => e.layer === 'smoke');
+    assert.ok(smoke.resources, 'the layer that held memory recorded nothing');
+    assert.ok(
+      smoke.resources.peakRssMb > SMOKE_HELD_MB,
+      `smoke held ${SMOKE_HELD_MB} MB and recorded ${smoke.resources.peakRssMb} MB`,
+    );
+    assert.ok(smoke.resources.samples > 0);
+    assert.equal(smoke.resources.ceilingMb, SMOKE_CEILING_MB);
+    assert.equal(typeof smoke.resources.intervalMs, 'number');
+    // Nothing died of memory, so nothing said anything did.
+    assert.deepEqual(
+      events.filter((e) => e.event === 'gate-integrity' && e.kind === 'resource-exhaustion'),
+      [],
     );
   }
 

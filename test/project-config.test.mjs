@@ -68,6 +68,25 @@ test('a gate prerequisite must name an earlier layer', () => {
   assert.deepEqual(errorPaths(config), ['gates.tier1[0].needs']);
 });
 
+test('a gate layer may declare what its process tree is allowed to hold', () => {
+  // Optional, and a statement rather than a limit (ADR-0045): a layer that
+  // declares one is watched as a fraction of it, and a layer that declares
+  // nothing is watched for a climb alone. A figure that is not an amount of
+  // memory would read as a ceiling and set none, which is the direction a
+  // typo here must not be allowed to be wrong in.
+  const config = valid();
+  config.gates.tier1[0].memoryCeilingMb = 4096;
+  assert.deepEqual(validateProjectConfig(config), []);
+  for (const bad of [0, -1, 'lots', null, NaN]) {
+    const wrong = valid();
+    wrong.gates.tier1[1].memoryCeilingMb = bad;
+    assert.deepEqual(errorPaths(wrong), ['gates.tier1[1].memoryCeilingMb'], String(bad));
+  }
+  // A config that declares none is exactly the config it was before the field
+  // existed: no default is filled in, so nothing is watched against a guess.
+  assert.equal(withProjectDefaults(valid()).gates.tier1[0].memoryCeilingMb, undefined);
+});
+
 test('duplicate layer names and tripwire ids are refused', () => {
   const config = valid();
   config.gates.tier1.push({ name: 'lint', command: 'lint' });

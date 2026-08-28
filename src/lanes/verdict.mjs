@@ -1629,7 +1629,12 @@ function triageRole(base, reds, priorOpen, brief, dropped = [], recaptured = [],
   lines.push(...takenBackLines(dropped, recaptured));
   lines.push('Persistent reds:');
   for (const r of reds) {
-    lines.push(`- layer ${r.layer}:`, ...credentialAbsentLines(r), ...redEvidence(r));
+    lines.push(
+      `- layer ${r.layer}:`,
+      ...exhaustionLines(r),
+      ...credentialAbsentLines(r),
+      ...redEvidence(r),
+    );
   }
   if (probe) lines.push(...probeOfferLines(probe));
   lines.push(...briefLines(brief));
@@ -1647,6 +1652,31 @@ function credentialAbsentLines(r) {
   return [
     `  the project declares this layer needs ${r.credentialAbsent.join(', ')}, and this host ` +
       'holds no value for it. The layer could not judge the tree.',
+  ];
+}
+
+/**
+ * The other attribution the harness made before the seat read anything: this
+ * layer died of memory. It leads for the same reason the credential line does,
+ * and for one more — the class was twice reasoned out by a seat over an hour
+ * of an expensive round, on a fact the exit code and the measured peak had
+ * already settled (ADR-0045). The seat is told, never asked.
+ */
+function exhaustionLines(r) {
+  if (!r.exhaustion) return [];
+  const held =
+    typeof r.exhaustion.peakRssMb === 'number'
+      ? `at ${r.exhaustion.peakRssMb} MB`
+      : 'at a peak this host could not measure';
+  const against =
+    typeof r.exhaustion.ceilingMb === 'number'
+      ? `, against the ${r.exhaustion.ceilingMb} MB ceiling the project declares for it`
+      : '';
+  return [
+    `  this layer died of resource exhaustion ${held}${against} (${r.exhaustion.evidence}). ` +
+      'The harness has already classed it and stamped it; it is an env defect of this host ' +
+      'and not a defect of the tree. Do not spend a round attributing it — say what has to ' +
+      'change for the layer to fit.',
   ];
 }
 

@@ -37,11 +37,18 @@
 // the tail is the tail it always was. Marker lines are consumed, never kept —
 // the file holds them, because the file is the stream as the command printed
 // it.
+//
+// A caller may also ask what the command cost the machine. The measurement is
+// the same additive shape the file is: an option to ask for it, a field on the
+// result, and nothing at all for the caller that does not (ADR-0045). It reads
+// the process tree from outside — the command's own spawn is untouched — so
+// what asking for it changes about the command is nothing.
 import { spawn } from 'node:child_process';
 import { createWriteStream, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { resolveArgv } from '../engine/executable.mjs';
+import { startPeakSampler } from './resources.mjs';
 
 const PART_PREFIX = '::olympus ';
 const PART_MARKER = /^::olympus (part|part-failed)[ \t]+(.+?)[ \t]*$/;
@@ -168,7 +175,8 @@ function openCommandLog(path, cap) {
  * @param {string[]} argv
  * @param {{cwd?: string, env?: object, outputLimit?: number,
  *   log?: string|false, logCap?: number, keep?: 'evidence'|'always',
- *   redact?: (text: string) => string}} [opts]
+ *   redact?: (text: string) => string, resources?: boolean,
+ *   sampleIntervalMs?: number}} [opts]
  *   `log` is the file the whole stream is written to: a path the caller names
  *   — normally inside its own run directory — or nothing, for a file under
  *   `COMMAND_LOG_ROOT`. `false` writes no file at all, which is for the one
@@ -178,11 +186,16 @@ function openCommandLog(path, cap) {
  *   keeps it whatever happened.
  *   `redact` rewrites the stream before anything holds it — the file, the
  *   tail, and the parts alike. It is applied to whole lines.
+ *   `resources` measures the peak memory of the tree the command spawns. Off
+ *   by default: it is worth a sampler for a layer that runs for an hour and
+ *   worth nothing for a forge read that runs for a second (ADR-0045).
  * @returns {Promise<{code: number|null, signal?: string|null, output: string,
  *   truncated: boolean,
  *   parts: Array<{name: string, failed: boolean, output: string}>,
  *   log: {path: string, bytes: number, truncated: boolean, removed?: boolean,
  *     error?: string}|null,
+ *   resources: {peakRssMb: number, peakProcess?: {name: string, rssMb: number},
+ *     samples: number, intervalMs: number, source: string}|null,
  *   error?: string}>}
  *   `code` is null when the command could not run at all (spawn error) —
  *   an environment defect, never a verdict about the tree under test.
@@ -192,10 +205,22 @@ function openCommandLog(path, cap) {
  *   tail. It is not a statement that anything was lost: `log` says what the
  *   harness still holds. `log.truncated` is the loss — the file hit its cap —
  *   and `log.removed` says the file was a green's and is gone.
+ *   `resources` is null for the caller that did not ask and for the host that
+ *   cannot answer. `intervalMs` on it is the floor of what it could see.
  */
 export function runCommand(
   argv,
-  { cwd, env, outputLimit = 4000, log: logFile, logCap = LOG_CAP, keep = 'evidence', redact } = {},
+  {
+    cwd,
+    env,
+    outputLimit = 4000,
+    log: logFile,
+    logCap = LOG_CAP,
+    keep = 'evidence',
+    redact,
+    resources = false,
+    sampleIntervalMs,
+  } = {},
 ) {
   if (!Array.isArray(argv) || argv.length === 0) {
     throw new Error('runCommand requires a non-empty argv');
@@ -219,6 +244,7 @@ export function runCommand(
         truncated: false,
         parts: [],
         log: null,
+        resources: null,
         error: error.message,
       });
       return;
@@ -231,6 +257,15 @@ export function runCommand(
       stdio: ['ignore', 'pipe', 'pipe'],
       ...(spec.windowsVerbatimArguments && { windowsVerbatimArguments: true }),
     });
+    // The measurement starts once there is a tree to measure and never before:
+    // it reads the child from outside, so it needs the pid the spawn returned
+    // and nothing else of the command (ADR-0045).
+    const sampler =
+      resources && child.pid
+        ? startPeakSampler(child.pid, {
+            ...(sampleIntervalMs !== undefined && { intervalMs: sampleIntervalMs }),
+          })
+        : null;
     let output = '';
     let pending = '';
     let truncated = false;
@@ -315,6 +350,10 @@ export function runCommand(
     // on it is in the answer and in the file.
     const done = async (ending) => {
       flush();
+      // The measurement ends with the command, before the answer: the sampler
+      // is a process of its own on Windows, and one still running when the run
+      // directory is archived is a handle inside it.
+      const measured = sampler ? await sampler.stop().catch(() => null) : null;
       if (log) {
         // Evidence is a failure with something to show for it. A green says
         // all it has to say in the tail, and a failure that printed nothing
@@ -322,7 +361,14 @@ export function runCommand(
         const evidence = ending.code !== 0 && log.record.bytes > 0;
         await log.settle(keep === 'always' || evidence);
       }
-      resolve({ ...ending, output, truncated, parts, log: log ? { ...log.record } : null });
+      resolve({
+        ...ending,
+        output,
+        truncated,
+        parts,
+        log: log ? { ...log.record } : null,
+        resources: measured,
+      });
     };
     child.on('error', (error) => {
       if (settled) return;
