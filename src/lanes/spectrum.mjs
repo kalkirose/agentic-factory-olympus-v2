@@ -23,6 +23,17 @@
 // cycle whose green the verdict ships on runs every part of every layer, so
 // no carry ever reaches a shipped record unproven at its own sha.
 //
+// The order the layers run in is the order the project declared, one at a
+// time, unless the project named concurrency groups (ADR-0047). Then the
+// layers of one group that follow each other in that order hold the machine
+// together, the groups still run in order, and every layer keeps its own
+// stamps, its own parts, its own log file and its own resource reading. What
+// a concurrent layer says beyond that is who it ran beside: `concurrentWith`
+// on its stamps and on its result, because two spans that overlap are not two
+// spans that followed each other and no reader of the ledger could tell
+// otherwise. A project that names no group runs exactly the sequence it ran
+// before this existed.
+//
 // Each execution stamps its start as well: a layer is one process that can
 // hold a run for an hour, and before that stamp the ledger said nothing
 // between the route that ordered the cycle and the first result, so a run
@@ -58,6 +69,7 @@
 import { commandLogPath } from '../daemon/home.mjs';
 import { assertDefectKind, assertAbandonReason } from '../ledger/registry.mjs';
 import { runCommand } from './exec.mjs';
+import { layerBatches } from './schedule.mjs';
 import { PARTS_ENV, carriedParts, mergeCarried } from './parts.mjs';
 import { exhaustionOf } from './resources.mjs';
 import { absentCredentials } from './replay.mjs';
@@ -99,9 +111,13 @@ const ATTEMPTS = 2;
  *   cycle: number, sha: string, run?: Set<string>|null,
  *   prior?: Map<string, object>|null, confirmation?: boolean,
  *   parts?: Map<string, {run: string[], carry: Array<object>}>|null,
+ *   groups?: Array<string[]>|null,
  *   credentials?: Array<object>, exec?: typeof runCommand}} opts
  *   `run` names the layers this cycle executes; every other layer carries its
  *   `prior` green forward. Both absent means the full spectrum.
+ *   `groups` names the layers this project lets hold the machine together
+ *   (ADR-0047). Absent is the strict sequence, which is what every project ran
+ *   before the field existed.
  *   `parts` narrows a layer that runs in parts to the parts a diff could have
  *   reached, and names the greens it carries instead (ADR-0046). Absent for
  *   every layer it does not mention, and absent altogether for a cycle that
@@ -116,7 +132,10 @@ const ATTEMPTS = 2;
  *   mode: string, attributedTo?: string, output?: string, log?: string,
  *   credentialAbsent?: string[], resources?: object, exhaustion?: object,
  *   parts?: Array<{name: string, status: string, inputs?: string[],
- *     output?: string, carriedFrom?: number}>}>, error?: string}>}
+ *     output?: string, carriedFrom?: number}>,
+ *   concurrentWith?: string[]}>, error?: string}>}
+ *   `concurrentWith` names the layers this one held the machine beside, and is
+ *   absent for every layer that ran alone (ADR-0047).
  *   `parts` is the whole part table of a layer that runs in parts: what each
  *   part decided, what could change that, and — on a part this cycle did not
  *   run — the cycle whose execution earned its green. Only the parts that are
@@ -142,6 +161,7 @@ export async function runSpectrum(
     prior = null,
     confirmation = false,
     parts = null,
+    groups = null,
     credentials = [],
     exec = runCommand,
   },
@@ -154,73 +174,160 @@ export async function runSpectrum(
   const mark = confirmation ? { confirmation: true } : {};
   const status = new Map();
   const results = [];
-  for (const layer of layers) {
-    let record = stamped.get(layer.name);
-    // The confirmation sweep is the cycle whose green the verdict ships on,
-    // and it will not stand on a part nothing ran at this sha. A result this
-    // cycle already stamped that carried a part is therefore not a result the
-    // sweep can reuse: the layer runs again, whole, and the stamp it leaves
-    // carries nothing (ADR-0046). Idempotent by construction — the re-run's
-    // own stamp is the last one, and a daemon that comes back reads it and
-    // stops.
-    if (record && confirmation && carriedParts(record).length > 0) record = undefined;
-    let mode = 'run';
-    if (!record) {
-      const carried = carriedResult(layer, run, prior);
-      if (carried) {
-        record = carried;
-        mode = 'carried';
-      } else {
-        const blocked = (layer.needs ?? []).find((need) => status.get(need)?.status !== 'green');
-        if (blocked) {
-          // A layer that never started owes no pairing: the stamp is the
-          // layer's, not an attempt's, and it carries no attempt number.
-          record = stampLayer(ctx, 'layer-result', {
-            cycle,
-            layer: layer.name,
-            status: 'not-runnable',
-            attributedTo: rootRed(status, blocked),
-            sha,
-            ...mark,
-          });
-        } else {
-          const outcome = await runLayer(ctx, {
-            layer,
-            commands,
-            cwd,
-            env,
-            cycle,
-            sha,
-            mark,
-            exec,
-            // What this layer runs of itself, and what it carries instead.
-            // Never in a confirmation sweep: that pass runs everything.
-            target: confirmation ? null : (parts?.get(layer.name) ?? null),
-            // Read before the layer runs, so the attribution is a fact about
-            // the host this attempt started on rather than one about the host
-            // at the moment somebody read the record.
-            absent: absentCredentials(credentials, layer.name, env),
-          });
-          if (outcome.error) return { error: outcome.error };
-          record = outcome.record;
-        }
-      }
+  // The sequence, batched by what this project lets run together (ADR-0047).
+  // A batch of one is the whole of the old behaviour; a project that named no
+  // group gets nothing but batches of one.
+  for (const batch of layerBatches(layers, groups)) {
+    // Decided first, run second. What a layer of this batch says it ran beside
+    // has to be true, and a batch-mate this cycle stamped already, carries, or
+    // cannot run holds the machine for no part of it. So the batch is planned
+    // whole, so every decision that needs no child process is taken here, and
+    // the layers that are left are the ones that really do run together.
+    const planned = batch.map((layer) => ({
+      layer,
+      ...planLayer(ctx, { layer, stamped, confirmation, run, prior, status, cycle, sha, mark }),
+    }));
+    const running = planned.filter((p) => p.record === null).map((p) => p.layer.name);
+    // The record stays in declared order however the machine interleaved the
+    // work. A batch of one awaits exactly the one call the loop awaited
+    // before. `allSettled` and not `all`: a batch this runner leaves through a
+    // throw must leave no sibling child running behind it, and the throw the
+    // caller sees must be the first one in declared order rather than the
+    // first one in time.
+    const settled = await Promise.allSettled(
+      planned.map((entry) =>
+        entry.record !== null
+          ? entry
+          : executeLayer(ctx, {
+              layer: entry.layer,
+              concurrentWith: running.filter((name) => name !== entry.layer.name),
+              commands,
+              cwd,
+              env,
+              cycle,
+              sha,
+              confirmation,
+              parts,
+              credentials,
+              exec,
+              mark,
+            }),
+      ),
+    );
+    for (const attempt of settled) {
+      if (attempt.status === 'rejected') throw attempt.reason;
+      const outcome = attempt.value;
+      // A command that could not run at all ends the spectrum, and it ends it
+      // at the first layer of the batch in declared order: the answer must not
+      // depend on which concurrent child happened to fail first.
+      if (outcome.error) return { error: outcome.error };
+      const { layer, record, mode } = outcome;
+      status.set(layer.name, record);
+      results.push({
+        layer: layer.name,
+        status: record.status,
+        mode,
+        ...(record.attributedTo && { attributedTo: record.attributedTo }),
+        ...(record.credentialAbsent?.length > 0 && { credentialAbsent: record.credentialAbsent }),
+        ...(record.resources && { resources: record.resources }),
+        ...(record.exhaustion && { exhaustion: record.exhaustion }),
+        ...(record.output && { output: record.output }),
+        ...(record.log && { log: record.log }),
+        ...(record.parts?.length > 0 && { parts: record.parts }),
+        // Only ever this cycle's own fact. A carried record is an older
+        // cycle's, and what that cycle ran beside says nothing about this one.
+        ...(mode === 'run' &&
+          record.concurrentWith?.length > 0 && { concurrentWith: record.concurrentWith }),
+      });
     }
-    status.set(layer.name, record);
-    results.push({
-      layer: layer.name,
-      status: record.status,
-      mode,
-      ...(record.attributedTo && { attributedTo: record.attributedTo }),
-      ...(record.credentialAbsent?.length > 0 && { credentialAbsent: record.credentialAbsent }),
-      ...(record.resources && { resources: record.resources }),
-      ...(record.exhaustion && { exhaustion: record.exhaustion }),
-      ...(record.output && { output: record.output }),
-      ...(record.log && { log: record.log }),
-      ...(record.parts?.length > 0 && { parts: record.parts }),
-    });
   }
   return { results };
+}
+
+/**
+ * What one layer of a batch is before any child process runs: the stamp this
+ * cycle already holds, the green it carries, or the not-runnable it earns.
+ * `record: null` means the layer has to run. Synchronous by design, so a whole
+ * batch is decided before any of it is dispatched.
+ */
+function planLayer(ctx, { layer, stamped, confirmation, run, prior, status, cycle, sha, mark }) {
+  let record = stamped.get(layer.name);
+  // The confirmation sweep is the cycle whose green the verdict ships on,
+  // and it will not stand on a part nothing ran at this sha. A result this
+  // cycle already stamped that carried a part is therefore not a result the
+  // sweep can reuse: the layer runs again, whole, and the stamp it leaves
+  // carries nothing (ADR-0046). Idempotent by construction — the re-run's
+  // own stamp is the last one, and a daemon that comes back reads it and
+  // stops.
+  if (record && confirmation && carriedParts(record).length > 0) record = undefined;
+  if (record) return { record, mode: 'run' };
+  const carried = carriedResult(layer, run, prior);
+  if (carried) return { record: carried, mode: 'carried' };
+  // No layer of a batch may need another layer of the same batch, so this
+  // reads the batches that already settled and never a sibling in flight.
+  const blocked = (layer.needs ?? []).find((need) => status.get(need)?.status !== 'green');
+  if (blocked) {
+    // A layer that never started owes no pairing: the stamp is the layer's,
+    // not an attempt's, and it carries no attempt number.
+    return {
+      record: stampLayer(ctx, 'layer-result', {
+        cycle,
+        layer: layer.name,
+        status: 'not-runnable',
+        attributedTo: rootRed(status, blocked),
+        sha,
+        ...mark,
+      }),
+      mode: 'run',
+    };
+  }
+  return { record: null, mode: 'run' };
+}
+
+/**
+ * One layer of a batch that has to run. Records nothing beyond the layer's own
+ * stamps, so the caller can keep the result set in declared order whatever
+ * order the batch settled in.
+ */
+async function executeLayer(
+  ctx,
+  {
+    layer,
+    concurrentWith,
+    commands,
+    cwd,
+    env,
+    cycle,
+    sha,
+    confirmation,
+    parts,
+    credentials,
+    exec,
+    mark,
+  },
+) {
+  const outcome = await runLayer(ctx, {
+    layer,
+    commands,
+    cwd,
+    env,
+    cycle,
+    sha,
+    mark,
+    exec,
+    // Who this layer holds the machine beside, on every stamp its attempts
+    // leave (ADR-0047). Empty for a layer that ran alone.
+    concurrentWith,
+    // What this layer runs of itself, and what it carries instead. Never in a
+    // confirmation sweep: that pass runs everything.
+    target: confirmation ? null : (parts?.get(layer.name) ?? null),
+    // Read before the layer runs, so the attribution is a fact about the host
+    // this attempt started on rather than one about the host at the moment
+    // somebody read the record.
+    absent: absentCredentials(credentials, layer.name, env),
+  });
+  if (outcome.error) return { error: outcome.error };
+  return { layer, record: outcome.record, mode: 'run' };
 }
 
 /**
@@ -239,7 +346,10 @@ function carriedResult(layer, run, prior) {
  * filter is the loop: a first red is never the layer's answer, so it is
  * replaced by one red-only re-run and stamped as the replaced attempt it is.
  */
-async function runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark, exec, absent, target }) {
+async function runLayer(
+  ctx,
+  { layer, commands, cwd, env, cycle, sha, mark, exec, absent, target, concurrentWith = [] },
+) {
   const argv = commands[layer.command];
   // The narrowing the command is asked for, on the environment it runs in. A
   // command that does not read it runs everything and is recorded for
@@ -257,6 +367,7 @@ async function runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark, exec
       mark,
       exec,
       absent,
+      concurrentWith,
       carry: target?.carry ?? [],
       attempt,
       // Retry provenance: an attempt above the first names the attempt it
@@ -295,6 +406,8 @@ async function runAttempt(ctx, spec) {
     attempt,
     sha,
     ...(retryOf !== undefined && { retryOf, trigger }),
+    // The span this stamp opens overlaps these layers' spans (ADR-0047).
+    ...(spec.concurrentWith?.length > 0 && { concurrentWith: spec.concurrentWith }),
     ...mark,
   });
   const made = { start };
@@ -339,10 +452,19 @@ function attemptLogFile(ctx, { cycle, layer, attempt }) {
  * is a filter that can lose it.
  */
 function settle(ctx, spec, made) {
-  const { layer, cycle, sha, mark, attempt, absent, carry } = spec;
+  const { layer, cycle, sha, mark, attempt, absent, carry, concurrentWith } = spec;
   const disposition = dispositionOf(made, attempt, layer.memoryCeilingMb ?? null, carry);
   made.disposition = disposition;
-  const identity = { cycle, layer: layer.name, attempt, sha };
+  // The terminal stamp closes the span the start opened, and says the same
+  // thing about it: this reading is not the machine's whole cost for that
+  // stretch, and this duration is not the cycle's (ADR-0047).
+  const identity = {
+    cycle,
+    layer: layer.name,
+    attempt,
+    sha,
+    ...(concurrentWith?.length > 0 && { concurrentWith }),
+  };
   if (disposition.event === 'layer-result') {
     if (disposition.status === 'green' && attempt > 1) {
       ctx.store.append('flake', { actor: ACTOR, cycle, layer: layer.name, sha });

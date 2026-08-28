@@ -27,7 +27,9 @@ export function defaultProjectConfig() {
     commands: {},
     // deterministic gate layers; `command` names a key in `commands`.
     // `partTargeting: false` turns off part-level carrying inside a layer
-    // (ADR-0046); absent leaves it on.
+    // (ADR-0046); absent leaves it on. `concurrencyGroups` names the layers
+    // that may hold the machine together (ADR-0047); absent is the strict
+    // sequence.
     gates: { tier1: [] },
     // one convention per line; prompt assembly consumes these
     conventions: [],
@@ -64,6 +66,9 @@ export function defaultProjectConfig() {
     // optional close-out extras the project asks for after a shipped story;
     // null = the close-out is exactly what it always was
     closeout: null,
+    // the per-run cache directory the harness offers a run's commands
+    // (ADR-0048); `false` offers none, absent leaves it on
+    runCache: true,
   };
 }
 
@@ -101,6 +106,12 @@ export function validateProjectConfig(config, { launch = false } = {}) {
   validateLabels(config.labels, err);
   validateWatchedWorkflows(config.watchedWorkflows, err);
   validateCloseout(config.closeout, err);
+  // The fallback path of ADR-0048: `false` offers a run's commands no cache
+  // directory, and every command transforms and builds from zero as it did
+  // before the directory existed.
+  if (config.runCache !== undefined && typeof config.runCache !== 'boolean') {
+    err('runCache', 'must be a boolean');
+  }
   if (isPlainObject(config.lanes) && isPlainObject(config.lanes.story)) {
     if (!Array.isArray(config.repo?.testPaths) || config.repo.testPaths.length === 0) {
       err('repo.testPaths', 'the story lane requires at least one test path');
@@ -169,13 +180,12 @@ function validateGates(gates, commands, err) {
   if (gates.partTargeting !== undefined && typeof gates.partTargeting !== 'boolean') {
     err('gates.partTargeting', 'must be a boolean');
   }
-  if (gates.tier1 === undefined) return;
-  if (!Array.isArray(gates.tier1)) {
+  if (gates.tier1 !== undefined && !Array.isArray(gates.tier1)) {
     err('gates.tier1', 'must be an array of layers');
     return;
   }
   const seen = new Set();
-  gates.tier1.forEach((layer, i) => {
+  (gates.tier1 ?? []).forEach((layer, i) => {
     const at = (key) => `gates.tier1[${i}].${key}`;
     if (!isPlainObject(layer)) {
       err(`gates.tier1[${i}]`, 'must be an object');
@@ -211,6 +221,61 @@ function validateGates(gates, commands, err) {
       }
     }
     if (typeof layer.name === 'string') seen.add(layer.name);
+  });
+  validateConcurrencyGroups(gates, seen, err);
+}
+
+// The layers this project lets hold the machine together (ADR-0047). Every
+// rule below refuses a config that would buy nothing or mean two things, and
+// none of them decides anything about the machine: the harness runs what the
+// project named and measures none of it.
+//
+// A group of one is the sequence, so it is a typo rather than a statement. A
+// name no layer answers to is a group that would silently never form. A name
+// in two groups has no answer to which group it runs in. A layer that `needs`
+// another layer of its own group is a contradiction on the face of it: the
+// prerequisite has to have settled before the dependent starts.
+function validateConcurrencyGroups(gates, layerNames, err) {
+  const groups = gates.concurrencyGroups;
+  if (groups === undefined) return;
+  if (!Array.isArray(groups)) {
+    err('gates.concurrencyGroups', 'must be an array of layer-name groups');
+    return;
+  }
+  const needs = new Map();
+  for (const layer of gates.tier1 ?? []) {
+    if (isPlainObject(layer) && typeof layer.name === 'string') {
+      needs.set(layer.name, isStringList(layer.needs) ? layer.needs : []);
+    }
+  }
+  const claimed = new Map();
+  groups.forEach((group, i) => {
+    const at = `gates.concurrencyGroups[${i}]`;
+    if (!isStringList(group)) {
+      err(at, 'must be an array of non-empty layer names');
+      return;
+    }
+    if (group.length < 2) {
+      err(at, 'must name at least two layers; a group of one is the sequence');
+      return;
+    }
+    const members = new Set(group);
+    group.forEach((name, j) => {
+      if (!layerNames.has(name)) {
+        err(`${at}[${j}]`, `must name a gates.tier1 layer: ${name}`);
+        return;
+      }
+      const owner = claimed.get(name);
+      if (owner !== undefined) {
+        err(`${at}[${j}]`, `layer ${name} is already in group ${owner}`);
+        return;
+      }
+      claimed.set(name, i);
+      const blocked = (needs.get(name) ?? []).filter((need) => members.has(need));
+      for (const need of blocked) {
+        err(`${at}[${j}]`, `layer ${name} needs ${need}, so the two cannot run together`);
+      }
+    });
   });
 }
 

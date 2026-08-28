@@ -15,6 +15,7 @@ import {
 import { cloneDir } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 import { stackEnv } from '../isolation/stacks.mjs';
+import { RUN_CACHE_ENV, runCacheDir } from '../isolation/worktrees.mjs';
 
 export const ACTOR = 'daemon';
 export const GIST_MAX = 120;
@@ -43,19 +44,29 @@ export function readConstitution(worktree, config) {
 }
 
 /**
- * The run's stack env: the same derivation the stack rose from at provision.
- * Every project-config command and every seat spawned inside the run gets it,
- * so a host-run suite can find the stack it belongs to (no fixed host ports —
- * the project resolves published ports from the compose project name).
- * Undefined when the project has no stack.
+ * The environment every project-config command and every seat of a run is
+ * given.
+ *
+ * Two things ride it. The run's stack env is the same derivation the stack
+ * rose from at provision, so a host-run suite can find the stack it belongs to
+ * (no fixed host ports: the project resolves published ports from the compose
+ * project name). The run's cache directory (ADR-0048) is where a command that
+ * builds something expensive puts it, so the cycle after this one reuses it;
+ * it lives in the worktree and dies with the run, so a new run starts cold.
+ *
+ * Undefined when the project has no stack and turns the cache off, which is
+ * what every caller saw before either existed.
  */
 export function runEnv(ctx, config) {
-  if (!config.stack) return undefined;
-  return stackEnv({
-    runId: ctx.runId,
-    worktree: ctx.payload.worktree,
-    extra: config.stack.env,
-  });
+  const stack = config.stack
+    ? stackEnv({ runId: ctx.runId, worktree: ctx.payload.worktree, extra: config.stack.env })
+    : null;
+  const cache =
+    config.runCache !== false && ctx.payload.worktree
+      ? { [RUN_CACHE_ENV]: runCacheDir(ctx.payload.worktree) }
+      : null;
+  if (!stack && !cache) return undefined;
+  return { ...stack, ...cache };
 }
 
 export function runEvents(ctx) {

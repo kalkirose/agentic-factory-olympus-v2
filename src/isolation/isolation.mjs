@@ -12,8 +12,28 @@ import { pathHolders, sweepPathHolders } from '../engine/processes.mjs';
 import { git } from './git.mjs';
 import { cloneDir, ensureBareClone, fetchClone, branchSha, readBlobFromBranch } from './clones.mjs';
 import { removeTree, removeWithRetry } from './removal.mjs';
-import { addRunWorktree, removeRunWorktrees, workspaceRoot } from './worktrees.mjs';
+import {
+  addRunWorktree,
+  excludeRunCache,
+  removeRunWorktrees,
+  workspaceRoot,
+} from './worktrees.mjs';
 import { stackUp, stackDown } from './stacks.mjs';
+
+/**
+ * How long one step of a run's setup took, in whole milliseconds. Every step
+ * provisioning performs is timed, and the timings ride the run's own launch
+ * stamp (ADR-0049). Measurement only: nothing reads these to decide anything.
+ */
+function stepTimer() {
+  let mark = Date.now();
+  return () => {
+    const now = Date.now();
+    const spent = now - mark;
+    mark = now;
+    return spent;
+  };
+}
 
 export class RunIsolation {
   /**
@@ -72,16 +92,31 @@ export class RunIsolation {
    *   defaultBranch: string, configPath: string, baseCommit?: string}} opts
    */
   async provision({ runId, project, repoUrl, defaultBranch, configPath, baseCommit }) {
+    // Every step below is timed. The clone lock is one of them: a run that
+    // waited on another run's provisioning spent that wall before it fetched
+    // anything, and a setup record that started at the fetch would not show it
+    // (ADR-0049).
+    const startedAt = Date.now();
+    const step = stepTimer();
+    const setup = {};
     const { clone, blob, projectConfig, baseSha, worktree, branch } = await this.withClone(
       project,
       async () => {
+        setup.lockMs = step();
         const dir = await ensureBareClone(this.paths, project, repoUrl, defaultBranch);
         await fetchClone(dir);
+        setup.cloneMs = step();
         const source = `${project} ${defaultBranch}:${configPath}`;
         const { blob, text } = await readBlobFromBranch(dir, defaultBranch, configPath);
         const config = parseProjectConfig(text, source, { launch: true });
         const sha = await branchSha(dir, defaultBranch);
+        setup.configMs = step();
         const added = await addRunWorktree(dir, this.paths, runId, baseCommit ?? defaultBranch);
+        // The run's cache directory, created and hidden from git before
+        // anything can commit it (ADR-0048). Inside the clone lock, because it
+        // writes the clone's own exclude file.
+        if (config.runCache !== false) excludeRunCache(dir, added.path);
+        setup.worktreeMs = step();
         return {
           clone: dir,
           blob,
@@ -106,6 +141,11 @@ export class RunIsolation {
           runner: this.composeRunner,
         });
         stack = { name, composeFile: projectConfig.stack.composeFile };
+        // The stack's own boot, image pulls included: compose pulls what it
+        // does not hold as part of bringing the stack up, and the harness does
+        // not ask it to do that separately, so the pull is inside this figure
+        // rather than beside it (ADR-0049).
+        setup.stackMs = step();
       } catch (error) {
         await this.withClone(project, () =>
           removeRunWorktrees(clone, this.paths, runId),
@@ -123,6 +163,7 @@ export class RunIsolation {
       configPath,
       configBlob: blob,
       stack,
+      setup: { ...setup, totalMs: Date.now() - startedAt },
     };
     const runDir = join(this.paths.runs, runId);
     mkdirSync(runDir, { recursive: true });

@@ -139,10 +139,26 @@ export function mark(name) {
 
 // A Tier-1 layer that reads the tree and passes. It is the layer the targeted
 // cycle carries forward, and the one the confirmation sweep re-runs.
-const LINT_GATE = `import { readdirSync } from 'node:fs';
+//
+// It is also the fixture's cache consumer (ADR-0048): it keeps a file in the
+// directory the harness named it, and marks whether it found one there. The
+// first execution of a run marks it cold and every later one marks it warm, so
+// the scenario proves the cache survives a cycle and that the tree the run
+// ships never holds it.
+const LINT_GATE = `import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { mark } from './mark.mjs';
 
 mark('lint');
+const cache = process.env.OLYMPUS_CACHE_DIR;
+if (cache) {
+  const kept = join(cache, 'lint-cache');
+  mark(existsSync(kept) ? 'cache-warm' : 'cache-cold');
+  mkdirSync(cache, { recursive: true });
+  writeFileSync(kept, 'kept between cycles\\n');
+} else {
+  mark('cache-absent');
+}
 const files = readdirSync('src').filter((name) => name.endsWith('.mjs'));
 console.log(\`lint: \${files.length} source file(s)\`);
 `;
@@ -548,6 +564,14 @@ export function diagnostics(fx, runId = null) {
 /** A ref in the fixture origin, for proving the merge landed. */
 export function originSha(fx, ref) {
   return git(['rev-parse', ref], fx.origin).trim();
+}
+
+/** Every path a ref of the fixture origin holds. */
+export function originTree(fx, ref) {
+  return git(['ls-tree', '-r', '--name-only', ref], fx.origin)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
 }
 
 // -- shared assertions -------------------------------------------------------

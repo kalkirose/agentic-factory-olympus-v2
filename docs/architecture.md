@@ -128,7 +128,9 @@ Two levels; the ownership test decides placement.
   surfaces each must be wired on, the label rules a
   request's diff is measured against (`labels`), the workflow files the daemon
   watches on the default branch (`watchedWorkflows`), the tripwire registry,
-  and the optional close-out extras (`closeout`).
+  the optional close-out extras (`closeout`), the gate layers that may hold
+  the machine together (`gates.concurrencyGroups`), and whether a run's
+  commands are offered a cache directory (`runCache`).
   The daemon reads it from `main` in its bare clone at each run launch, so
   config changes ship through the same PR path as the code they describe.
 
@@ -628,6 +630,28 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - **Run stacks.** Each run launches its own compose project, named by run id,
   from the project's compose template. No fixed host ports; connection
   strings derive from the run's env. No bus is shared between runs.
+- **Run cache** (ADR-0048). The run workspace holds one directory its commands
+  may cache in, `<worktree>/.olympus-cache`, named to every command and every
+  seat in `OLYMPUS_CACHE_DIR`. It is created at provision and dies with the
+  workspace, so a cycle reuses what the cycle before it built and a new run
+  starts cold. Git cannot see it: the provision writes the exclusion into the
+  clone's own `info/exclude`, because the candidate capture commits the
+  worktree with `git add -A`. `runCache: false` offers none.
+- **Setup measurement** (ADR-0049). Provisioning times every step it performs:
+  the clone lock, the fetch, the config read, the worktree, the stack coming
+  up. The timings ride the run's own `run-launched` stamp as `setup`.
+  Additive, and nothing reads them.
+- **Concurrent gate layers** (ADR-0047). A project may name groups of Tier-1
+  layers in `gates.concurrencyGroups`; the layers of one group run together,
+  the groups run in order, and a project that names none runs the strict
+  sequence. Batching merges neighbours and never reorders, so every `needs`
+  still points at a layer that settled earlier, and a layer never runs beside
+  a layer it needs. Each layer keeps its own stamps, parts, log and resource
+  reading, and a concurrent one carries `concurrentWith` onto its stamps, its
+  result and the verdict record, because two spans that overlap are not two
+  spans that followed each other. The field names the batch-mates that
+  executed, never one that carried a green or could not run: the batch is
+  decided whole before any of it is dispatched.
 - **Slots.** The slot cap is an instance-config value per project, counting
   active runs of any lane. Parked runs free their slot. Scale-down to width 1
   is a number, never idle machinery.

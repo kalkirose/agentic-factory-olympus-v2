@@ -75,6 +75,7 @@ import {
   withReplayRounds,
 } from './replay.mjs';
 import { runSpectrum, persistentReds, cyclePlan } from './spectrum.mjs';
+import { configuredGroups } from './schedule.mjs';
 import { PARTS_ENV, partPlan } from './parts.mjs';
 import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview } from './review.mjs';
@@ -315,6 +316,10 @@ async function runCycle(ctx, base, mode, { cycle }) {
     // What each layer needs of the host, so a red the host explains is
     // attributed by the runner rather than guessed at by a seat (ADR-0042).
     credentials: base.config.credentials ?? [],
+    // The layers this project lets hold the machine together. Absent is the
+    // strict sequence, and arming, tuning and reverting the concurrency are
+    // all edits of this one config field (ADR-0047).
+    groups: configuredGroups(base.config),
     cycle,
     sha,
   };

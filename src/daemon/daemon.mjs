@@ -466,6 +466,10 @@ export class Daemon {
             budget: ws.projectConfig.budgets[lane],
           }),
           ...(ws.stack && { stack: ws.stack.name }),
+          // What the run spent before it existed: the clone lock, the fetch,
+          // the config read, the worktree, the stack. Measurement only, on the
+          // one stamp that is already about the launch (ADR-0049).
+          ...(ws.setup && { setup: ws.setup }),
           ...payload,
         });
       } catch (error) {

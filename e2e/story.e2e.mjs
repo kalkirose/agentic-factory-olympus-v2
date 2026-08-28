@@ -28,6 +28,7 @@ import {
   gateMarks,
   instanceEvents,
   originSha,
+  originTree,
   pollFor,
   runDir,
   runEvents,
@@ -304,6 +305,22 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
     marks.filter((m) => m === 'suite').length >= 4,
     `the suite command ran ${marks.filter((m) => m === 'suite').length} times`,
   );
+  // The run's cache directory reached the gate commands, kept what one of them
+  // left in it, and never reached the tree that shipped (ADR-0048).
+  assert.ok(!marks.includes('cache-absent'), 'a gate command was offered no cache directory');
+  assert.equal(marks.filter((m) => m === 'cache-cold').length, 1, 'the cache did not survive');
+  assert.ok(marks.includes('cache-warm'), 'the second execution found a cold cache');
+  assert.deepEqual(
+    originTree(fx, 'refs/heads/main').filter((path) => path.startsWith('.olympus-cache')),
+    [],
+    'the run cache was committed',
+  );
+  // What the run spent before it existed, on the stamp that is about the
+  // launch (ADR-0049). Measurement only, and nothing reads it.
+  const setup = events.find((e) => e.event === 'run-launched').setup;
+  for (const step of ['lockMs', 'cloneMs', 'configMs', 'worktreeMs', 'totalMs']) {
+    assert.equal(typeof setup[step], 'number', `the setup record holds no ${step}`);
+  }
 
   // -- what the run spent, and what its seats were handed -------------------
   assert.ok(runCost(events) > 0, 'no cost reached the ledger from the seat stream');

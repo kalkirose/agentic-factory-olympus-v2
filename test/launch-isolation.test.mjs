@@ -8,7 +8,13 @@ import { join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath } from '../src/daemon/home.mjs';
 import { writeControlCommand } from '../src/daemon/control.mjs';
-import { workspaceRoot } from '../src/isolation/worktrees.mjs';
+import {
+  RUN_CACHE_ENV,
+  runCacheDir,
+  workspaceRoot,
+} from '../src/isolation/worktrees.mjs';
+import { changedFiles, commitAll, filesAt } from '../src/isolation/tree.mjs';
+import { runEnv } from '../src/lanes/shared.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import {
   tempDir,
@@ -250,4 +256,109 @@ test('a launch the daemon refuses is stamped, not only left in a reason file', a
   // The console's own feedback is untouched.
   assert.ok(readdirSync(paths.controlRejected).some((f) => f.endsWith(`${name}.reason.txt`)));
   assert.ok(!readEvents(paths.instanceLedger).some((e) => e.event === 'launch'));
+});
+
+// -- the run cache and the setup measurement ---------------------------------
+
+test('a run gets a cache directory git cannot see, and its commands are told where', async (t) => {
+  // ADR-0048. The cache lives in the worktree so it survives every cycle of
+  // the run and dies with it, and the candidate capture commits that worktree
+  // with `git add -A`: a cache git could see would be committed to the run
+  // branch and pushed in the request.
+  const gate = deferred();
+  let seenCtx = null;
+  const lanes = {
+    solo: {
+      stages: ['work'],
+      handlers: {
+        work: async (ctx) => {
+          seenCtx = ctx;
+          await gate.promise;
+          return { close: { state: 'shipped' } };
+        },
+      },
+    },
+  };
+  const { paths, daemon } = fixture(t, { lanes, composeRunner: fakeComposeRunner() });
+  await daemon.start();
+  const { runId, worktree, projectConfig } = await daemon.launchRun({
+    project: 'alpha',
+    lane: 'solo',
+  });
+  const cache = runCacheDir(worktree);
+  assert.ok(existsSync(cache), 'the run cache directory was not created');
+  await waitFor(() => seenCtx, { label: 'stage handler entered' });
+  // Every command and every seat of the run is told where it is.
+  assert.equal(runEnv(seenCtx, projectConfig)[RUN_CACHE_ENV], cache);
+  // What a cycle leaves in it is invisible to the tree the capture commits.
+  writeFileSync(join(cache, 'transform-abc'), 'cached');
+  assert.deepEqual(await changedFiles(worktree), []);
+  const sha = await commitAll(worktree, 'nothing to commit');
+  assert.equal(
+    (await filesAt(worktree, sha, [])).filter((f) => f.startsWith('.olympus-cache')).length,
+    0,
+    'the cache reached a commit',
+  );
+  gate.resolve();
+  await waitFor(() => !existsSync(workspaceRoot(paths, runId)), { label: 'worktree removed' });
+  // The next run starts cold: the cache went with the workspace.
+  assert.ok(!existsSync(cache));
+});
+
+test('a project may refuse the cache, and then nothing offers one', async (t) => {
+  const lanes = {
+    solo: { stages: ['work'], handlers: { work: async () => ({ close: { state: 'shipped' } }) } },
+  };
+  const { origin, daemon } = fixture(t, { lanes, composeRunner: fakeComposeRunner() });
+  await daemon.start();
+  commitTree(origin, { [CONFIG_PATH]: projectConfigJson({ runCache: false }) }, 'no cache');
+  const { worktree, projectConfig } = await daemon.launchRun({ project: 'alpha', lane: 'solo' });
+  assert.ok(!existsSync(runCacheDir(worktree)));
+  const env = runEnv({ runId: 'r', payload: { worktree } }, projectConfig);
+  assert.equal(env[RUN_CACHE_ENV], undefined);
+});
+
+test('the launch stamp carries what every step of the setup cost', async (t) => {
+  // ADR-0049. Measurement only: nothing reads these figures to decide
+  // anything, and every step provisioning performs is one of them.
+  const lanes = {
+    solo: { stages: ['work'], handlers: { work: async () => ({ close: { state: 'shipped' } }) } },
+  };
+  const { paths, daemon } = fixture(t, { lanes, composeRunner: fakeComposeRunner() });
+  await daemon.start();
+  const { runId } = await daemon.launchRun({ project: 'alpha', lane: 'solo' });
+  await waitFor(() => existsSync(archivedRunLedgerPath(paths, runId)), { label: 'run archived' });
+  const launched = readEvents(archivedRunLedgerPath(paths, runId)).find(
+    (e) => e.event === 'run-launched',
+  );
+  for (const step of ['lockMs', 'cloneMs', 'configMs', 'worktreeMs', 'stackMs', 'totalMs']) {
+    assert.equal(typeof launched.setup[step], 'number', step);
+    assert.ok(launched.setup[step] >= 0, step);
+  }
+  // The whole is at least the sum of the parts it holds.
+  const steps = ['lockMs', 'cloneMs', 'configMs', 'worktreeMs', 'stackMs'];
+  const sum = steps.reduce((total, step) => total + launched.setup[step], 0);
+  assert.ok(launched.setup.totalMs >= sum, `${launched.setup.totalMs} < ${sum}`);
+  // The workspace record keeps the same reading, so a run whose ledger is
+  // archived and a run whose workspace is read answer alike.
+  const record = JSON.parse(
+    readFileSync(join(paths.archivedRuns, runId, 'workspace.json'), 'utf8'),
+  );
+  assert.deepEqual(record.setup, launched.setup);
+});
+
+test('a project with no stack stamps no stack duration', async (t) => {
+  const lanes = {
+    solo: { stages: ['work'], handlers: { work: async () => ({ close: { state: 'shipped' } }) } },
+  };
+  const { origin, paths, daemon } = fixture(t, { lanes, composeRunner: fakeComposeRunner() });
+  await daemon.start();
+  commitTree(origin, { [CONFIG_PATH]: projectConfigJson({ stack: null }) }, 'no stack');
+  const { runId } = await daemon.launchRun({ project: 'alpha', lane: 'solo' });
+  await waitFor(() => existsSync(archivedRunLedgerPath(paths, runId)), { label: 'run archived' });
+  const launched = readEvents(archivedRunLedgerPath(paths, runId)).find(
+    (e) => e.event === 'run-launched',
+  );
+  assert.equal(launched.setup.stackMs, undefined);
+  assert.equal(typeof launched.setup.worktreeMs, 'number');
 });

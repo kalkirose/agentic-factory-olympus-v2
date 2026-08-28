@@ -598,3 +598,272 @@ test('a layer command that cannot run at all reports an error, not a verdict', a
   assert.equal(outcome.results, undefined);
   assert.ok(!events(ctx).some((e) => e.event === 'layer-result'));
 });
+
+// -- concurrency groups (ADR-0047) -------------------------------------------
+
+/**
+ * A layer command that holds the machine for a while and writes down when it
+ * started and when it stopped. The two spans are what "ran together" and "ran
+ * one after the other" are read from, so the proof is a fact the commands
+ * recorded and never a stopwatch on the test.
+ */
+function spanCmd(file, ms = 300) {
+  return [
+    'node',
+    '-e',
+    `const {writeFileSync}=require('fs');const s=Date.now();` +
+      `setTimeout(()=>{writeFileSync(${JSON.stringify(file)},` +
+      `JSON.stringify({s,e:Date.now()}));process.exit(0);},${ms});`,
+  ];
+}
+
+function spanOf(file) {
+  return JSON.parse(readFileSync(file, 'utf8'));
+}
+
+const overlaps = (x, y) => x.s < y.e && y.s < x.e;
+
+/**
+ * `ms` is how long each command holds. A test that proves layers did NOT
+ * overlap needs no particular figure: the runner awaits them in turn and the
+ * spans cannot meet whatever they hold for. A test that proves they DID
+ * overlap needs a hold longer than the machine's own spawn latency, so those
+ * tests ask for a generous one.
+ */
+function spanFixture(t, ms = 300) {
+  const { root, ctx } = fixture(t);
+  const files = { a: join(root, 'a.json'), b: join(root, 'b.json'), c: join(root, 'c.json') };
+  const gates = {
+    layers: [
+      { name: 'a', command: 'a' },
+      { name: 'b', command: 'b' },
+      { name: 'c', command: 'c' },
+    ],
+    commands: { a: spanCmd(files.a, ms), b: spanCmd(files.b, ms), c: spanCmd(files.c, ms) },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'sha1',
+  };
+  return { ctx, files, gates };
+}
+
+test('with no concurrency group declared, no two layers ever overlap', async (t) => {
+  const { ctx, files, gates } = spanFixture(t);
+  const { results } = await runSpectrum(ctx, gates);
+  assert.deepEqual(
+    results.map((r) => [r.layer, r.status, r.concurrentWith]),
+    [
+      ['a', 'green', undefined],
+      ['b', 'green', undefined],
+      ['c', 'green', undefined],
+    ],
+  );
+  const spans = [spanOf(files.a), spanOf(files.b), spanOf(files.c)];
+  assert.ok(!overlaps(spans[0], spans[1]), 'a and b overlapped without a group');
+  assert.ok(!overlaps(spans[1], spans[2]), 'b and c overlapped without a group');
+  // Nothing on the ledger claims a concurrency that did not happen.
+  assert.ok(!events(ctx).some((e) => e.concurrentWith !== undefined));
+});
+
+test('a declared group runs together, and every layer of it keeps its own record', async (t) => {
+  const { ctx, files, gates } = spanFixture(t, 1500);
+  const { results } = await runSpectrum(ctx, { ...gates, groups: [['a', 'b']] });
+  assert.deepEqual(
+    results.map((r) => [r.layer, r.status, r.mode, r.concurrentWith]),
+    [
+      ['a', 'green', 'run', ['b']],
+      ['b', 'green', 'run', ['a']],
+      ['c', 'green', 'run', undefined],
+    ],
+  );
+  const spans = { a: spanOf(files.a), b: spanOf(files.b), c: spanOf(files.c) };
+  assert.ok(overlaps(spans.a, spans.b), 'the grouped layers did not run together');
+  // The groups themselves stay in order: the layer after the group starts
+  // after every layer of the group has finished.
+  assert.ok(spans.c.s >= spans.a.e && spans.c.s >= spans.b.e, 'a later batch started early');
+  // Each layer answers for itself: its own start stamp, its own result, its
+  // own attempt, and its own name on both.
+  const stamps = events(ctx).filter(
+    (e) => e.event === 'layer-started' || e.event === 'layer-result',
+  );
+  for (const layer of ['a', 'b']) {
+    const peer = layer === 'a' ? 'b' : 'a';
+    assert.deepEqual(
+      stamps.filter((e) => e.layer === layer).map((e) => [e.event, e.attempt, e.concurrentWith]),
+      [
+        ['layer-started', 1, [peer]],
+        ['layer-result', 1, [peer]],
+      ],
+    );
+  }
+  assert.ok(stamps.filter((e) => e.layer === 'c').every((e) => e.concurrentWith === undefined));
+});
+
+test('the revert is the field: removing it returns the strict sequence', async (t) => {
+  const { ctx, files, gates } = spanFixture(t, 1500);
+  const together = await runSpectrum(ctx, { ...gates, groups: [['a', 'b']] });
+  assert.ok(overlaps(spanOf(files.a), spanOf(files.b)));
+  // The same layers, the same commands, the same cycle inputs, with the field
+  // gone: the engine keeps the capability and does nothing with it.
+  const second = spanFixture(t);
+  const apart = await runSpectrum(second.ctx, second.gates);
+  assert.ok(!overlaps(spanOf(second.files.a), spanOf(second.files.b)));
+  // And the decision the cycle reports is the same one either way.
+  assert.deepEqual(
+    apart.results.map((r) => [r.layer, r.status, r.mode]),
+    together.results.map((r) => [r.layer, r.status, r.mode]),
+  );
+});
+
+test('a concurrent layer keeps its own parts, its own log and its own resources', async (t) => {
+  const { ctx } = fixture(t);
+  // The measurement seam: two layers whose readings differ, so a result that
+  // took the other layer's reading would be visible.
+  const measured = {
+    a: { peakRssMb: 111, samples: 4, intervalMs: 250, source: 'test' },
+    b: { peakRssMb: 222, samples: 4, intervalMs: 250, source: 'test' },
+  };
+  const exec = async (argv) => ({
+    code: 0,
+    output: '',
+    truncated: false,
+    parts: [
+      { name: `${argv[0]}-part`, failed: false, ok: true, output: '', inputs: [`src/${argv[0]}`] },
+    ],
+    log: { path: `${argv[0]}.log`, bytes: 1, truncated: false },
+    resources: measured[argv[0]],
+  });
+  const { results } = await runSpectrum(ctx, {
+    layers: [
+      { name: 'a', command: 'a', memoryCeilingMb: 500 },
+      { name: 'b', command: 'b', memoryCeilingMb: 900 },
+    ],
+    commands: { a: ['a'], b: ['b'] },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'sha1',
+    groups: [['a', 'b']],
+    exec,
+  });
+  assert.deepEqual(
+    results.map((r) => [r.layer, r.resources.peakRssMb, r.resources.ceilingMb]),
+    [
+      ['a', 111, 500],
+      ['b', 222, 900],
+    ],
+  );
+  assert.deepEqual(
+    results.map((r) => r.parts.map((p) => [p.name, p.status, p.inputs])),
+    [[['a-part', 'green', ['src/a']]], [['b-part', 'green', ['src/b']]]],
+  );
+});
+
+test('a concurrent batch reports a command error in declared order', async (t) => {
+  const { ctx } = fixture(t);
+  const { results, error } = await runSpectrum(ctx, {
+    layers: [
+      { name: 'a', command: 'missing' },
+      { name: 'b', command: 'missing' },
+    ],
+    commands: { missing: ['definitely-not-a-real-binary-xyz'] },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 's',
+    groups: [['a', 'b']],
+  });
+  assert.ok(error);
+  assert.equal(results, undefined);
+  assert.ok(!events(ctx).some((e) => e.event === 'layer-result'));
+});
+
+test('a group whose member is not runnable still runs the rest of the group', async (t) => {
+  const { ctx } = fixture(t);
+  const { results } = await runSpectrum(ctx, {
+    layers: [
+      { name: 'root', command: 'red' },
+      { name: 'a', command: 'green', needs: ['root'] },
+      { name: 'b', command: 'green' },
+    ],
+    commands: { green: GREEN, red: RED },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 's',
+    groups: [['a', 'b']],
+  });
+  assert.deepEqual(
+    results.map((r) => [r.layer, r.status, r.attributedTo, r.concurrentWith]),
+    [
+      ['root', 'red', undefined, undefined],
+      // A layer that never started spent no wall beside anything, and it held
+      // the machine for none of what its batch-mate spent, so neither of them
+      // claims the other.
+      ['a', 'not-runnable', 'root', undefined],
+      ['b', 'green', undefined, undefined],
+    ],
+  );
+});
+
+test('a batch-mate that carries held the machine for none of it, and is not named', async (t) => {
+  const { ctx } = fixture(t);
+  const { results } = await runSpectrum(ctx, {
+    layers: [
+      { name: 'a', command: 'green' },
+      { name: 'b', command: 'green' },
+    ],
+    commands: { green: GREEN },
+    cwd: process.cwd(),
+    cycle: 2,
+    sha: 'sha2',
+    groups: [['a', 'b']],
+    run: new Set(['a']),
+    prior: priorOf({ a: 'red', b: 'green' }),
+  });
+  assert.deepEqual(
+    results.map((r) => [r.layer, r.mode, r.concurrentWith]),
+    [
+      ['a', 'run', undefined],
+      ['b', 'carried', undefined],
+    ],
+  );
+  assert.ok(!events(ctx).some((e) => e.concurrentWith !== undefined));
+});
+
+test('a batch that throws waits for its siblings and throws in declared order', async (t) => {
+  const { ctx } = fixture(t);
+  let finished = false;
+  const exec = async (argv) => {
+    if (argv[0] === 'a') throw new Error('a threw');
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    finished = true;
+    if (argv[0] === 'b') throw new Error('b threw');
+    return { code: 0, output: '', truncated: false, parts: [], log: null, resources: null };
+  };
+  await assert.rejects(
+    () =>
+      runSpectrum(ctx, {
+        layers: [
+          { name: 'a', command: 'a' },
+          { name: 'b', command: 'b' },
+        ],
+        commands: { a: ['a'], b: ['b'] },
+        cwd: process.cwd(),
+        cycle: 1,
+        sha: 's',
+        groups: [['a', 'b']],
+        exec,
+      }),
+    // The first layer in declared order, never the first one in time.
+    /a threw/,
+  );
+  assert.ok(finished, 'the runner left a sibling still running');
+  // Both attempts stamped their own ending before anything left the runner.
+  assert.deepEqual(
+    events(ctx)
+      .filter((e) => e.event === 'layer-abandoned')
+      .map((e) => [e.layer, e.reason]),
+    [
+      ['a', 'runner-error'],
+      ['b', 'runner-error'],
+    ],
+  );
+});

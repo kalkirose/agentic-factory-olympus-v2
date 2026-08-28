@@ -126,8 +126,10 @@ test('the repair lane ships a ticketed fix through the assembled binaries', asyn
   );
 
   // The repair lane runs the same command table, without the card lint the
-  // story lane's readiness owns.
-  assert.deepEqual(gateMarks(fx), ['lint', 'suite', 'smoke']);
+  // story lane's readiness owns. The cache directory reaches this lane's gate
+  // commands too, and this run is one cycle, so it is cold once and never
+  // warm (ADR-0048).
+  assert.deepEqual(gateMarks(fx), ['lint', 'cache-cold', 'suite', 'smoke']);
 
   const seats = seatCalls(fx);
   for (const call of seats) assertSeatArgv(assert, call);

@@ -4,9 +4,27 @@
 //                                detached at a named sha
 // Seats receive absolute paths. The whole <runId> root goes away at run
 // close; a disposable goes away when its wave reaches verdict.
-import { join, resolve, sep } from 'node:path';
+import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve, sep } from 'node:path';
 import { git } from './git.mjs';
 import { removeTree } from './removal.mjs';
+
+/**
+ * The directory a run's commands keep a cache in, at the top of the run
+ * worktree (ADR-0048). One per run, so a cycle reuses what the cycle before it
+ * built and a new run starts cold: the worktree is created at provision and
+ * deleted at close, and the cache has exactly that life without anything
+ * sweeping it.
+ */
+export const RUN_CACHE_DIRNAME = '.olympus-cache';
+
+/** The environment variable the commands of a run read that directory from. */
+export const RUN_CACHE_ENV = 'OLYMPUS_CACHE_DIR';
+
+/** @param {string} worktree the run worktree */
+export function runCacheDir(worktree) {
+  return join(worktree, RUN_CACHE_DIRNAME);
+}
 
 /** @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths */
 export function workspaceRoot(paths, runId) {
@@ -30,6 +48,40 @@ export async function addRunWorktree(clone, paths, runId, base) {
   const path = runWorktreePath(paths, runId);
   await git(['worktree', 'add', '-b', runBranch(runId), path, base], { cwd: clone });
   return { path, branch: runBranch(runId) };
+}
+
+// The line the clone's own exclude file carries, anchored at the top of a
+// worktree so it can only ever name the harness's own directory.
+const CACHE_EXCLUDE = `/${RUN_CACHE_DIRNAME}/`;
+
+/**
+ * Makes the run cache invisible to git, and creates it (ADR-0048).
+ *
+ * The cache lives inside the worktree, and the candidate capture commits that
+ * worktree with `git add -A`: without this the first cycle's cache would be
+ * committed to the run branch and pushed in the request. The exclusion goes in
+ * the clone's own `info/exclude`, which every worktree of that clone reads and
+ * which is the harness's file in the harness's clone, so nothing in the
+ * project repository is touched and no commit is needed to hold it. Idempotent,
+ * and the caller holds the clone lock.
+ *
+ * @param {string} clone the bare clone
+ * @param {string} worktree the run worktree
+ */
+export function excludeRunCache(clone, worktree) {
+  const exclude = join(clone, 'info', 'exclude');
+  mkdirSync(dirname(exclude), { recursive: true });
+  let held = '';
+  try {
+    held = readFileSync(exclude, 'utf8');
+  } catch {
+    // No exclude file yet: the append below writes the first line of one.
+  }
+  if (!held.split(/\r?\n/).includes(CACHE_EXCLUDE)) {
+    appendFileSync(exclude, (held === '' || held.endsWith('\n') ? '' : '\n') + CACHE_EXCLUDE + '\n');
+  }
+  mkdirSync(runCacheDir(worktree), { recursive: true });
+  return runCacheDir(worktree);
 }
 
 /** Creates a disposable worktree, detached at a sha. */

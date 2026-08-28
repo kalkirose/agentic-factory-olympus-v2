@@ -455,3 +455,67 @@ test('underEntry: glob semantics match git :(glob) pathspec magic', () => {
   // Literal dots never widen the match.
   assert.ok(!underEntry('src/aXtest.ts', 'src/a.test.ts'));
 });
+
+// -- concurrency groups and the run cache ------------------------------------
+
+test('a project may let gate layers hold the machine together', () => {
+  // ADR-0047. Absent is the strict sequence, and a group is the project
+  // saying which of its own layers may run at the same time. The arming, the
+  // tuning and the revert are edits of this one field.
+  const config = valid();
+  config.commands.smoke = ['run-smoke'];
+  config.gates.tier1.push({ name: 'smoke', command: 'smoke' });
+  config.gates.concurrencyGroups = [['test', 'smoke']];
+  assert.deepEqual(validateProjectConfig(config), []);
+  assert.deepEqual(withProjectDefaults(config).gates.concurrencyGroups, [['test', 'smoke']]);
+  // A project that says nothing keeps the sequence and gets no default.
+  assert.equal(withProjectDefaults(valid()).gates.concurrencyGroups, undefined);
+});
+
+test('a concurrency group is refused when it would mean nothing or two things', () => {
+  const at = (mutate) => {
+    const config = valid();
+    config.commands.smoke = ['run-smoke'];
+    config.gates.tier1.push({ name: 'smoke', command: 'smoke' });
+    mutate(config.gates);
+    return errorPaths(config);
+  };
+  // Not a list of groups at all.
+  assert.deepEqual(at((g) => (g.concurrencyGroups = 'lint,test')), ['gates.concurrencyGroups']);
+  assert.deepEqual(at((g) => (g.concurrencyGroups = [['lint'], 5])), [
+    'gates.concurrencyGroups[0]',
+    'gates.concurrencyGroups[1]',
+  ]);
+  // A layer nothing declares: the group would silently never form.
+  assert.deepEqual(at((g) => (g.concurrencyGroups = [['test', 'ghost']])), [
+    'gates.concurrencyGroups[0][1]',
+  ]);
+  // One layer, two groups: no answer to which group it runs in. The same
+  // rule catches a name repeated inside one group.
+  assert.deepEqual(at((g) => (g.concurrencyGroups = [['test', 'smoke'], ['smoke', 'lint']])), [
+    'gates.concurrencyGroups[1][0]',
+  ]);
+  assert.deepEqual(at((g) => (g.concurrencyGroups = [['smoke', 'smoke']])), [
+    'gates.concurrencyGroups[0][1]',
+  ]);
+  // A prerequisite cannot run beside the layer that needs it.
+  assert.deepEqual(at((g) => (g.concurrencyGroups = [['lint', 'test']])), [
+    'gates.concurrencyGroups[0][1]',
+  ]);
+});
+
+test('a project may turn the per-run cache off, and only with a boolean', () => {
+  // The fallback path of ADR-0048: `false` offers a run's commands no cache
+  // directory, and every one of them transforms and builds from zero.
+  const off = valid();
+  off.runCache = false;
+  assert.deepEqual(validateProjectConfig(off), []);
+  assert.equal(withProjectDefaults(off).runCache, false);
+  for (const bad of ['no', 0, null]) {
+    const wrong = valid();
+    wrong.runCache = bad;
+    assert.deepEqual(errorPaths(wrong), ['runCache'], String(bad));
+  }
+  // A project that says nothing gets the cache.
+  assert.equal(withProjectDefaults(valid()).runCache, true);
+});

@@ -227,6 +227,7 @@ function verdictFixture(t, opts) {
     stack = null,
     composeCommand = undefined,
     partTargeting = undefined,
+    concurrencyGroups = undefined,
     laneConfig = { story: { suiteCommand: 'suite' } },
   } = opts;
   const root = tempDir();
@@ -234,7 +235,11 @@ function verdictFixture(t, opts) {
     [CONFIG_PATH]: projectConfigJson({
       repo,
       commands,
-      gates: { tier1: gates, ...(partTargeting !== undefined && { partTargeting }) },
+      gates: {
+        tier1: gates,
+        ...(partTargeting !== undefined && { partTargeting }),
+        ...(concurrencyGroups !== undefined && { concurrencyGroups }),
+      },
       lanes: laneConfig,
       stack,
       ...(review && { review }),
@@ -3142,4 +3147,98 @@ test('a project that turns the decision off parks every collision, card or no ca
       .find((c) => c.seat === 'verdict-triage')
       .prompt.includes('does the card'),
   );
+});
+
+// -- concurrency groups reach the cycle (ADR-0047) ---------------------------
+
+/** A gate command that writes down the span it held the machine for. */
+function spanGate(file, ms = 400) {
+  return [
+    'node',
+    '-e',
+    `const {writeFileSync}=require('fs');const s=Date.now();` +
+      `setTimeout(()=>{writeFileSync(${JSON.stringify(file)},` +
+      `JSON.stringify({s,e:Date.now()}));process.exit(0);},${ms});`,
+  ];
+}
+
+function concurrencyScenario(t, { concurrencyGroups, ms = 400 }) {
+  const root = tempDir('olympus-groups-lane-');
+  t.after(() => removeDir(root));
+  const files = { left: join(root, 'left.json'), right: join(root, 'right.json') };
+  const fx = verdictFixture(t, {
+    seats: {
+      dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+      ...furyClean(),
+    },
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'left', command: 'left' },
+      { name: 'right', command: 'right' },
+    ],
+    commands: { suite: SUITE_CMD, left: spanGate(files.left, ms), right: spanGate(files.right, ms) },
+    ...(concurrencyGroups !== undefined && { concurrencyGroups }),
+  });
+  return {
+    fx,
+    spans: () => ({
+      left: JSON.parse(readFileSync(files.left, 'utf8')),
+      right: JSON.parse(readFileSync(files.right, 'utf8')),
+    }),
+  };
+}
+
+const overlapping = (x, y) => x.s < y.e && y.s < x.e;
+
+test('a cycle runs a declared group together, and the record says which layers overlapped', async (t) => {
+  const { fx, spans } = concurrencyScenario(t, { concurrencyGroups: [['left', 'right']], ms: 1500 });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const { left, right } = spans();
+  assert.ok(overlapping(left, right), 'the grouped layers did not run together');
+  // Each layer keeps its own result, and each says what it ran beside, so a
+  // duration read off this ledger is never mistaken for a serial one.
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'layer-result')
+      .map((e) => [e.layer, e.status, e.concurrentWith]),
+    [
+      ['unit', 'green', undefined],
+      ['left', 'green', ['right']],
+      ['right', 'green', ['left']],
+    ],
+  );
+  const record = readRecord(fx.paths, runId, 1);
+  assert.deepEqual(
+    record.spectrum.map((r) => [r.layer, r.concurrentWith]),
+    [
+      ['unit', undefined],
+      ['left', ['right']],
+      ['right', ['left']],
+    ],
+  );
+});
+
+test('the same lane with the field absent runs the strict sequence', async (t) => {
+  // The revert of ADR-0047, through the whole lane: one config field goes,
+  // and the engine keeps the capability and does nothing with it.
+  const { fx, spans } = concurrencyScenario(t, { concurrencyGroups: undefined });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const { left, right } = spans();
+  assert.ok(!overlapping(left, right), 'the layers overlapped with no group declared');
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'layer-result')
+      .map((e) => [e.layer, e.status, e.concurrentWith]),
+    [
+      ['unit', 'green', undefined],
+      ['left', 'green', undefined],
+      ['right', 'green', undefined],
+    ],
+  );
+  const record = readRecord(fx.paths, runId, 1);
+  assert.ok(record.spectrum.every((r) => r.concurrentWith === undefined));
 });
