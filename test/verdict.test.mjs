@@ -1860,7 +1860,12 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
   assert.equal(renders[0].verdict, 'green');
   const record = readRecord(fx.paths, runId, 1);
   assert.equal(record.sweep, 'full');
-  assert.deepEqual(record.spectrum, [{ layer: 'unit', status: 'green', mode: 'run' }]);
+  // What the layer cost the machine rides the record too (ADR-0045) and is
+  // asserted where it belongs; this is about what the spectrum decided.
+  assert.deepEqual(
+    record.spectrum.map(({ resources, exhaustion, ...decision }) => decision),
+    [{ layer: 'unit', status: 'green', mode: 'run' }],
+  );
   assert.deepEqual(record.findings, []);
 });
 

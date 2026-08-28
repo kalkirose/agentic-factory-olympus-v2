@@ -38,6 +38,16 @@ function events(ctx) {
   return readEvents(runLedgerPath(ctx.paths, ctx.runId));
 }
 
+/**
+ * What the spectrum decided about each layer, with what the layer cost the
+ * machine taken off. The peak of a process tree is an additive fact about the
+ * host and it is asserted where it belongs (ADR-0045); these tests are about
+ * the decisions, and a reading that varies by machine is not one.
+ */
+function decided(results) {
+  return results.map(({ resources, exhaustion, ...decision }) => decision);
+}
+
 test('a not-runnable layer attributes to the root red through the needs chain', async (t) => {
   const { ctx } = fixture(t);
   const { results } = await runSpectrum(ctx, {
@@ -273,7 +283,7 @@ test('a red that turns green on the re-run stamps a flake, never a finding', asy
     cycle: 1,
     sha: 'sha1',
   });
-  assert.deepEqual(results, [{ layer: 'flaky', status: 'green', mode: 'run' }]);
+  assert.deepEqual(decided(results), [{ layer: 'flaky', status: 'green', mode: 'run' }]);
   const flakes = events(ctx).filter((e) => e.event === 'flake');
   assert.equal(flakes.length, 1);
   assert.equal(flakes[0].layer, 'flaky');
@@ -357,7 +367,7 @@ test('a stamped layer is never re-run in the same cycle', async (t) => {
     cycle: 1,
     sha: 's',
   });
-  assert.deepEqual(results, [{ layer: 'a', status: 'green', mode: 'run' }]);
+  assert.deepEqual(decided(results), [{ layer: 'a', status: 'green', mode: 'run' }]);
   assert.ok(!existsSync(boom), 'the stamped layer ran again');
 });
 
@@ -378,7 +388,7 @@ test('the run env reaches every layer command', async (t) => {
     cycle: 1,
     sha: 's',
   });
-  assert.deepEqual(results, [{ layer: 'a', status: 'green', mode: 'run' }]);
+  assert.deepEqual(decided(results), [{ layer: 'a', status: 'green', mode: 'run' }]);
   assert.deepEqual(JSON.parse(readFileSync(capture, 'utf8')), { p: 'oly-r1', s: 'static-1' });
 });
 
@@ -534,7 +544,7 @@ test('a layer stamped in this cycle reports run whatever the plan left out', asy
     run: new Set(),
     prior: priorOf({ confirmed: 'green' }),
   });
-  assert.deepEqual(results, [{ layer: 'confirmed', status: 'red', mode: 'run' }]);
+  assert.deepEqual(decided(results), [{ layer: 'confirmed', status: 'red', mode: 'run' }]);
 });
 
 test('the confirmation sweep runs what the cycle carried and marks its stamps', async (t) => {

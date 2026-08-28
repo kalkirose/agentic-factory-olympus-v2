@@ -356,8 +356,8 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   its own last line, and stamps `log.truncated`.
 - **A layer's memory is measured, classed and forecast** (ADR-0045). Every
   layer attempt records what its process tree peaked at — Windows peak working
-  set, Linux `VmHWM`, sampled every 2 seconds from outside the command, with
-  the interval on the record as the floor of what it could see. An attempt that
+  set, Linux `VmHWM`, sampled from outside the command, with the interval on
+  the record as the floor of what it could see. An attempt that
   failed on exit 134 and its kin, on a heap-abort signature in its output, or
   at the ceiling the project declared for the layer, is stamped
   `resource-exhaustion` — a closed gate-integrity kind naming the layer and the

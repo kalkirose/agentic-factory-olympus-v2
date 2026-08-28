@@ -85,8 +85,17 @@ test('a host with no source for the reading answers nothing, and says so by abse
   assert.equal(await startPeakSampler(-1, { platform: 'linux' }).stop(), null);
 });
 
-test('the default sampling floor is stated once, in one place', () => {
-  assert.equal(SAMPLE_INTERVAL_MS, 2000);
+test('the sampling floor is stated once per platform, and it is on the record', async () => {
+  // Two floors, because the two reads cost different things: a process-table
+  // query is 75 ms of a core and a `/proc` walk is a few milliseconds. Neither
+  // number is guessed at by a reader — whichever applied rides the reading.
+  assert.equal(SAMPLE_INTERVAL_MS.win32, 2000);
+  assert.equal(SAMPLE_INTERVAL_MS.linux, 250);
+  const sampler = startPeakSampler(10, {
+    platform: 'linux',
+    readTree: () => [proc(10, 1, 30)],
+  });
+  assert.equal((await sampler.stop()).intervalMs, SAMPLE_INTERVAL_MS.linux);
 });
 
 // -- the tree walk ------------------------------------------------------------

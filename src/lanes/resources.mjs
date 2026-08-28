@@ -40,11 +40,21 @@ import { readFileSync, readdirSync } from 'node:fs';
 /**
  * How often the tree is read, and therefore the floor of what the reading can
  * see: a process whose whole life falls inside one interval is invisible to
- * it. Two seconds is chosen against the thing being measured — a gate command
- * runs for minutes to an hour, and its heap grows over that whole time — and
- * it is carried on every record so no reader has to assume it.
+ * it. The floor differs by platform because the read does, and whichever one
+ * applied is carried on every record — no reader has to assume a number.
  */
-export const SAMPLE_INTERVAL_MS = 2000;
+export const SAMPLE_INTERVAL_MS = {
+  // One process-table query costs 75 ms of a core here (measured on a
+  // 342-process host), so the interval is set against the thing being
+  // measured: a gate command runs for minutes to an hour, and its heap grows
+  // over that whole time.
+  win32: 2000,
+  // A `/proc` walk costs a few milliseconds and spawns nothing, so the floor
+  // is an eighth of the Windows one for the same fraction of a core. It has to
+  // be: the first sample of a command is taken before the command has done
+  // anything, and on Linux there is no sampler start-up delay to hide that.
+  linux: 250,
+};
 
 const MIB = 1024 * 1024;
 
@@ -93,7 +103,8 @@ const WIN_SAMPLE = /^(\d+) (\d+) (\d+) (.*)$/;
  *   and answers the record, or `null` where nothing could be measured.
  */
 export function startPeakSampler(pid, opts = {}) {
-  const { platform = process.platform, intervalMs = SAMPLE_INTERVAL_MS } = opts;
+  const { platform = process.platform } = opts;
+  const intervalMs = opts.intervalMs ?? SAMPLE_INTERVAL_MS[platform] ?? SAMPLE_INTERVAL_MS.win32;
   if (!Number.isInteger(pid) || pid <= 0) return idleSampler();
   try {
     // A stated table is the seam, and it decides before the platform does: a

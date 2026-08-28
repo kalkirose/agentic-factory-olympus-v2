@@ -65,8 +65,15 @@ a sample is not a hope of catching the spike. Measured on Windows against a real
 tree: a process that allocates 600 MB and gives it back reports a 62 MB working
 set and a 648 MB peak, and the peak is what this records. **The floor is
 therefore a whole process, not a spike** — one born and dead inside a single
-interval takes its peak with it. The default interval is 2 seconds and it is
-carried on every record as `intervalMs`, so a reader never has to assume it.
+interval takes its peak with it.
+
+The interval differs by platform because the read does: 2 seconds on Windows,
+where one process-table query costs 75 ms of a core, and 250 ms on Linux, where
+a `/proc` walk costs a few milliseconds and spawns nothing. The Linux floor has
+to be the lower one for a second reason — the first sample of a command is taken
+before the command has done anything, and on Linux there is no sampler start-up
+delay to hide that. Whichever floor applied is carried on every record as
+`intervalMs`, so a reader never has to assume it.
 
 The tree total is a **sum of high-water marks**, which is an upper bound on the
 simultaneous footprint rather than an estimate of it. For a forecast whose job is
@@ -117,6 +124,17 @@ and nobody has fixed it.
 
 The attribution also leads the triage brief, exactly as the credential-absent
 attribution does (ADR-0042). The seat is told, never asked.
+
+**One death, two endings.** A heap abort reaches the harness as an exit code on
+Windows (134) and as `SIGABRT` with no code on POSIX. The spectrum has always
+read those differently — an exit code is a verdict it judges, a signal is a
+child something took, which it abandons as `terminated` rather than reading as
+a red (ADR-0034) — so the same abort produces a red on one host and a parked
+`command-error` on the other. That split predates this decision and this
+decision does not close it: what it does is make the two endings carry the same
+word, the same peak and the same loud record, so a reader of either ledger sees
+the same class. Whether a memory death should route as a red at all is the open
+routing question below.
 
 ### 3. Forecast
 
@@ -186,10 +204,11 @@ treats an absent `resources` as "nothing known" — which is what it means for
 every ledger written before this shipped. Reversal cost: one word, no record
 shape change.
 
-**The sampling interval.** `SAMPLE_INTERVAL_MS` is one constant, and the floor it
-sets is carried on every record. It moves in either direction without a consumer
-change. Trigger: a host where the query cost matters, or a layer whose helpers
-are short-lived enough to be missed. Reversal cost: one constant.
+**The sampling interval.** `SAMPLE_INTERVAL_MS` is one table, one entry per
+platform, and the floor it sets rides every record. Either entry moves in either
+direction with no consumer change. Trigger: a host where the query cost matters,
+or a layer whose helpers are short-lived enough to be missed. Reversal cost: one
+number.
 
 **The classification.** The signature set and the exit codes are one table in
 `resources.mjs`, and `exhaustionOf` is pure. A signature that proves too broad —

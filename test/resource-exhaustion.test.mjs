@@ -69,48 +69,66 @@ function seam(outcome) {
 
 test('a command that outgrows a small ceiling records its peak, dies, and is named', async (t) => {
   const { ctx } = fixture(t);
-  const { results } = await runSpectrum(ctx, {
-    ...oneLayer(150),
-    commands: { suite: RUNAWAY },
-    exec: undefined,
-  });
+  await runSpectrum(ctx, { ...oneLayer(150), commands: { suite: RUNAWAY }, exec: undefined });
 
-  // The red is a red: the layer did not judge the tree.
-  assert.equal(results[0].status, 'red');
-  // And it is not a generic one. The attribution is on the result, decided from
-  // the exit and the measurement, before any seat read a line of the output.
-  assert.equal(results[0].exhaustion.evidence, 'abort-exit');
-  assert.equal(results[0].exhaustion.ceilingMb, 150);
+  // A heap abort is one death and two endings, because the two platforms report
+  // it differently: Windows hands the harness exit code 134, and POSIX hands it
+  // `SIGABRT` with no code at all. The first is a red the spectrum judges, the
+  // second is a child a signal took, which the spectrum has always abandoned
+  // rather than read as a verdict (ADR-0034). What must not differ is the
+  // attribution, and it does not.
+  const terminal = events(ctx).find(
+    (e) => e.event === 'layer-result' || e.event === 'layer-abandoned',
+  );
+  assert.ok(terminal.exhaustion, 'the death was recorded as a plain red');
+  assert.ok(
+    ['abort-exit', 'abort-signal'].includes(terminal.exhaustion.evidence),
+    `a heap abort read as ${terminal.exhaustion.evidence}`,
+  );
+  assert.equal(terminal.exhaustion.ceilingMb, 150);
 
-  const result = events(ctx).find((e) => e.event === 'layer-result');
-  assert.equal(result.status, 'red');
-  assert.equal(result.exhaustion.evidence, 'abort-exit');
   // The peak the layer's own process tree reached, on the record that says it
   // died. Measured, on the hosts that can measure: elsewhere the class is still
   // named, from the exit alone.
   if (process.platform === 'win32' || process.platform === 'linux') {
-    assert.ok(result.resources, 'a measurable host recorded no peak for the death');
+    assert.ok(terminal.resources, 'a measurable host recorded no peak for the death');
     assert.ok(
-      result.resources.peakRssMb > 150,
-      `peak ${result.resources.peakRssMb} MB did not clear the 150 MB ceiling`,
+      terminal.resources.peakRssMb > 150,
+      `peak ${terminal.resources.peakRssMb} MB did not clear the 150 MB ceiling`,
     );
-    assert.equal(result.resources.ceilingMb, 150);
-    assert.equal(result.exhaustion.peakRssMb, result.resources.peakRssMb);
+    assert.equal(terminal.resources.ceilingMb, 150);
+    assert.equal(terminal.exhaustion.peakRssMb, terminal.resources.peakRssMb);
   }
 
   // One loud record, naming the layer and what it held — not one per attempt.
-  // The flake filter gives every red a second death, and both of them are the
-  // same piece of news.
+  // The flake filter gives a red a second death, and both are the same news.
   const loud = loudRecords(ctx);
   assert.equal(loud.length, 1, 'the same ceiling was reported twice');
   assert.equal(loud[0].layer, 'acceptance');
   assert.equal(loud[0].cycle, 1);
   assert.equal(loud[0].ceilingMb, 150);
   assert.match(loud[0].gist, /^acceptance died of memory at /);
-  // Both attempts died of it, and both records say so.
-  const abandoned = events(ctx).find((e) => e.event === 'layer-abandoned');
-  assert.equal(abandoned.reason, 'superseded-by-rerun');
-  assert.equal(abandoned.exhaustion.evidence, 'abort-exit');
+});
+
+test('a heap abort on either platform is the same class, whatever ends the attempt', async (t) => {
+  // The two endings, both staged, so the platform this suite happens to run on
+  // decides nothing. On Windows the flake filter also gives the red a second
+  // death, and the second one adds no second record.
+  for (const [name, outcome] of [
+    ['exit code', { code: 134, output: '' }],
+    ['signal', { code: null, signal: 'SIGABRT', output: '' }],
+  ]) {
+    const { ctx } = fixture(t);
+    await runSpectrum(ctx, {
+      ...oneLayer(150),
+      commands: { suite: GREEN },
+      exec: seam({ ...outcome, resources: { peakRssMb: 400, samples: 4, intervalMs: 250 } }),
+    });
+    const loud = loudRecords(ctx);
+    assert.equal(loud.length, 1, `${name}: one death, ${loud.length} records`);
+    assert.equal(loud[0].layer, 'acceptance');
+    assert.equal(loud[0].peakRssMb, 400);
+  }
 });
 
 test('the layer that dies of memory in a runner that survives it is still named', async (t) => {
