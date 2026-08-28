@@ -2644,7 +2644,7 @@ test("a collision the card covers is superseded with no park, on the card's own 
     'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
   };
   const fx = pinFixture(t, { card: SUPERSEDE_CARD, seats });
-  const { runId, worktree } = await fx.launch({ card: 'cards/alpha.md' });
+  const { runId } = await fx.launch({ card: 'cards/alpha.md' });
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   // Zero parks. The card answered the question before the run could ask it.
@@ -2661,9 +2661,12 @@ test("a collision the card covers is superseded with no park, on the card's own 
   assert.equal(stamps[0].clause, 'scope-boundary');
   assert.equal(stamps[0].card, 'cards/alpha.md');
   assert.equal(stamps[0].finding, events.find((e) => e.event === 'finding').id);
-  // Verbatim means verbatim: the quote is in the card, whitespace apart.
-  const card = readFileSync(join(worktree, 'cards/alpha.md'), 'utf8').replace(/\s+/g, ' ');
-  assert.ok(card.includes(stamps[0].cardQuote.replace(/\s+/g, ' ')));
+  // Verbatim means verbatim: the quote is in the card the run was given,
+  // whitespace apart. The card is read from the fixture and not from the
+  // worktree, which the close released.
+  assert.ok(
+    SUPERSEDE_CARD.replace(/\s+/g, ' ').includes(stamps[0].cardQuote.replace(/\s+/g, ' ')),
+  );
   // The citation rode the re-freeze route the human ruling rides, and says so.
   const refreeze = events.filter((e) => e.event === 're-freeze');
   assert.equal(refreeze.length, 1);
