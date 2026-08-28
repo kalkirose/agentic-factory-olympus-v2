@@ -107,15 +107,23 @@ test('a red layer that ran in parts records the failing part with its own output
   });
   const [red] = results;
   assert.equal(red.status, 'red');
-  assert.deepEqual(red.parts.map((p) => p.name), ['unit suite']);
-  assert.match(red.parts[0].output, /expected 4 to equal 5/);
+  // The whole part table is recorded; the output rides the failing part alone.
+  assert.deepEqual(
+    red.parts.map((p) => [p.name, p.status, p.output !== undefined]),
+    [
+      ['preflight', 'unknown', false],
+      ['unit suite', 'red', true],
+      ['e2e suite', 'unknown', false],
+    ],
+  );
+  assert.match(red.parts[1].output, /expected 4 to equal 5/);
   // The failing part is in the middle, so the tail alone is the part after it.
   assert.ok(!red.output.includes('expected 4 to equal 5'), 'the tail held the failure after all');
   assert.match(red.output, /\.\.\./);
   // The record carries what the results carry, and no marker line survives it.
   const stamped = events(ctx).find((e) => e.event === 'layer-result');
   assert.deepEqual(stamped.parts, red.parts);
-  assert.ok(!stamped.parts[0].output.includes('::olympus'));
+  assert.ok(!stamped.parts[1].output.includes('::olympus'));
   assert.ok(!stamped.output.includes('::olympus'));
 });
 
@@ -263,7 +271,10 @@ test('a red that named its failing part carries the evidence, and no defect', as
     sha: 'sha1',
   });
   const stamped = events(ctx).find((e) => e.event === 'layer-result');
-  assert.deepEqual(stamped.parts.map((p) => p.name), ['unit suite']);
+  assert.deepEqual(
+    stamped.parts.filter((p) => p.output !== undefined).map((p) => p.name),
+    ['unit suite'],
+  );
   assert.equal(stamped.kind, undefined);
 });
 

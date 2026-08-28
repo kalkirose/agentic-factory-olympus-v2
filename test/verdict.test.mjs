@@ -17,6 +17,7 @@ import { ackFingerprint, findingFingerprint, standingAcksFor } from '../src/ledg
 import { writeControlCommand } from '../src/daemon/control.mjs';
 import { openLoud } from '../src/telemetry/readers.mjs';
 import { OWNER_PIN_MARKER } from '../src/lanes/supersede.mjs';
+import { PARTS_ENV } from '../src/lanes/parts.mjs';
 import {
   tempDir,
   removeDir,
@@ -225,6 +226,7 @@ function verdictFixture(t, opts) {
     exclusions = [],
     stack = null,
     composeCommand = undefined,
+    partTargeting = undefined,
     laneConfig = { story: { suiteCommand: 'suite' } },
   } = opts;
   const root = tempDir();
@@ -232,7 +234,7 @@ function verdictFixture(t, opts) {
     [CONFIG_PATH]: projectConfigJson({
       repo,
       commands,
-      gates: { tier1: gates },
+      gates: { tier1: gates, ...(partTargeting !== undefined && { partTargeting }) },
       lanes: laneConfig,
       stack,
       ...(review && { review }),
@@ -647,6 +649,271 @@ test('a repair cycle runs the reds and their dependents, carries the rest, and c
       ['build', 'run'],
     ],
   );
+});
+
+// -- part-level targeting inside a layer (ADR-0046) ---------------------------
+
+const PART_TABLE = [
+  { name: 'alpha', file: 'src/alpha.txt', inputs: ['src/alpha.txt'] },
+  { name: 'beta', file: 'src/beta.txt', inputs: ['src/beta.txt'] },
+  { name: 'gamma', file: 'src/gamma.txt', inputs: ['src/gamma.txt'] },
+];
+
+/**
+ * A gate command that runs in parts, honours the caller's narrowing, and
+ * appends the parts it actually ran to a file outside the worktree — the
+ * fixture's own record of what each invocation cost.
+ */
+function partsGate(logFile) {
+  const body = [
+    "const fs = require('fs');",
+    `const table = ${JSON.stringify(PART_TABLE)};`,
+    `const only = (process.env.${PARTS_ENV} || '').split(',').filter(Boolean);`,
+    'const ran = [];',
+    'let bad = 0;',
+    'for (const part of table) {',
+    '  if (only.length > 0 && !only.includes(part.name)) continue;',
+    '  ran.push(part.name);',
+    "  console.log('::olympus part ' + part.name);",
+    "  console.log('::olympus part-inputs ' + part.inputs.join(' '));",
+    "  const ok = fs.readFileSync(part.file, 'utf8').trim() === 'ok';",
+    "  console.log(part.name + (ok ? ' passed' : ' failed'));",
+    "  console.log('::olympus part-' + (ok ? 'ok' : 'failed') + ' ' + part.name);",
+    '  if (!ok) bad = 1;',
+    '}',
+    `fs.appendFileSync(${JSON.stringify(logFile)}, JSON.stringify(ran) + '\\n');`,
+    'process.exitCode = bad;',
+  ].join('\n');
+  return ['node', '-e', body];
+}
+
+/**
+ * A triage behavior that raises one finding per failing PART, over the part
+ * lines the red evidence carries. The layer stays red across both rounds, so
+ * a layer-keyed triage would read a repair that fixed one part as a round
+ * that closed nothing.
+ */
+function partTriageSeat() {
+  return ({ prompt }) => {
+    const failing = [...prompt.matchAll(/^ {2}part (.+):$/gm)].map((m) => m[1]);
+    const prior = [...prompt.matchAll(/- \[(F\d+)\] \[[^\]]+\] broken part (\S+)/g)].map((m) => ({
+      id: m[1],
+      part: m[2],
+    }));
+    const persisting = prior.filter((p) => failing.includes(p.part));
+    const covered = new Set(persisting.map((p) => p.part));
+    return {
+      report: {
+        findings: failing
+          .filter((part) => !covered.has(part))
+          .map((part) => ({
+            class: 'code-defect',
+            layers: ['acceptance'],
+            summary: `broken part ${part}`,
+            evidence: `red output of part ${part}`,
+          })),
+        persisting: persisting.map((p) => p.id),
+        summary: 'triaged',
+      },
+    };
+  };
+}
+
+/** One scenario: two seeded part reds, repaired one at a time. */
+function partsScenario(t, { partTargeting } = {}) {
+  const root = tempDir('olympus-parts-lane-');
+  t.after(() => removeDir(root));
+  const logFile = join(root, 'parts.log');
+  writeFileSync(logFile, '');
+  const seats = {
+    dev: () => ({
+      files: {
+        'src/feature.mjs': GOOD_FEATURE,
+        'src/alpha.txt': 'bad\n',
+        'src/beta.txt': 'ok\n',
+        'src/gamma.txt': 'bad\n',
+      },
+      report: { summary: 'implemented' },
+    }),
+    'verdict-triage': partTriageSeat(),
+    ...furyClean(),
+    'repair-dev': ({ label }) =>
+      label === 'repair-dev-1'
+        ? { files: { 'src/alpha.txt': 'ok\n' }, report: { summary: 'fixed alpha' } }
+        : { files: { 'src/gamma.txt': 'ok\n' }, report: { summary: 'fixed gamma' } },
+    'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'acceptance', command: 'acceptance' },
+    ],
+    commands: { suite: SUITE_CMD, acceptance: partsGate(logFile) },
+    ...(partTargeting !== undefined && { partTargeting }),
+  });
+  return {
+    fx,
+    ran: () =>
+      readFileSync(logFile, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line)),
+  };
+}
+
+test('a repair that reaches one part re-runs that part alone; the final cycle runs them all', async (t) => {
+  const { fx, ran } = partsScenario(t);
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.deepEqual(
+    events.filter((e) => e.event === 'verdict-rendered').map((e) => [e.cycle, e.sweep, e.verdict]),
+    [
+      [1, 'full', 'red'],
+      [2, 'targeted', 'red'],
+      [3, 'targeted', 'green'],
+    ],
+  );
+  assert.deepEqual(ran(), [
+    // Cycle 1 proves nothing yet, so every part runs — twice, because two of
+    // them are red and the flake filter owes the layer one re-run.
+    ['alpha', 'beta', 'gamma'],
+    ['alpha', 'beta', 'gamma'],
+    // Cycle 2 judges a diff that touched src/alpha.txt alone. Beta's green is
+    // out of that diff's reach and carries; the two reds re-run whatever the
+    // diff says, and gamma is still red, so the filter runs the pair twice.
+    ['alpha', 'gamma'],
+    ['alpha', 'gamma'],
+    // Cycle 3 judges a diff that touched src/gamma.txt alone.
+    ['gamma'],
+    // The cycle that turns green runs every part at this sha, whatever any
+    // cycle before it carried.
+    ['alpha', 'beta', 'gamma'],
+  ]);
+  // The red record states the carry, so no green in it is silent.
+  const record2 = readRecord(fx.paths, runId, 2);
+  assert.deepEqual(
+    record2.spectrum.find((r) => r.layer === 'acceptance').parts,
+    [
+      { name: 'alpha', status: 'green', mode: 'run' },
+      { name: 'gamma', status: 'red', mode: 'run' },
+      { name: 'beta', status: 'green', mode: 'carried', carriedFrom: 1 },
+    ],
+  );
+  // The repair seat reads the same fact on the layer's own line.
+  const repair2 = fx.calls.find((c) => c.label === 'repair-dev-2');
+  assert.ok(
+    repair2.prompt.includes('- acceptance: red (1 of 3 parts carried from cycle 1, not re-run)'),
+    repair2.prompt,
+  );
+  // The green record rests on nothing carried.
+  const record3 = readRecord(fx.paths, runId, 3);
+  assert.equal(record3.verdict, 'green');
+  assert.deepEqual(
+    record3.spectrum.find((r) => r.layer === 'acceptance').parts.map((p) => p.mode),
+    ['run', 'run', 'run'],
+  );
+});
+
+test('a diff that touches a path no part claims re-runs every part', async (t) => {
+  const root = tempDir('olympus-parts-blind-');
+  t.after(() => removeDir(root));
+  const logFile = join(root, 'parts.log');
+  writeFileSync(logFile, '');
+  const seats = {
+    dev: () => ({
+      files: {
+        'src/feature.mjs': GOOD_FEATURE,
+        'src/alpha.txt': 'bad\n',
+        'src/beta.txt': 'ok\n',
+        'src/gamma.txt': 'ok\n',
+      },
+      report: { summary: 'implemented' },
+    }),
+    'verdict-triage': triageSeat(() => ({ class: 'code-defect' })),
+    ...furyClean(),
+    // The repair reaches alpha, and a lockfile beside it. No part claims a
+    // lockfile, so the narrowing that alpha alone would have earned is off.
+    'repair-dev': () => ({
+      files: { 'src/alpha.txt': 'ok\n', 'package-lock.json': 'two\n' },
+      report: { summary: 'fixed alpha and re-locked' },
+    }),
+    'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'acceptance', command: 'acceptance' },
+    ],
+    commands: { suite: SUITE_CMD, acceptance: partsGate(logFile) },
+    originFiles: { 'package-lock.json': 'one\n' },
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const ran = readFileSync(logFile, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(ran, [
+    // Cycle 1, twice: the flake filter owes the red layer a re-run.
+    ['alpha', 'beta', 'gamma'],
+    ['alpha', 'beta', 'gamma'],
+    // Cycle 2 narrows nothing, goes green, and carries nothing — so the
+    // confirmation sweep has a full result at this sha already and re-runs
+    // no layer at all.
+    ['alpha', 'beta', 'gamma'],
+  ]);
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'layer-result' && e.cycle === 2 && e.layer === 'acceptance')
+      .flatMap((e) => e.parts.filter((p) => p.carriedFrom !== undefined)),
+    [],
+  );
+});
+
+test('gates.partTargeting false runs every layer whole, whatever its parts say', async (t) => {
+  const { fx, ran } = partsScenario(t, { partTargeting: false });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The same three cycles, and every invocation pays for every part. There
+  // are five and not six: with nothing carried, the confirmation sweep has a
+  // full result at this sha and re-runs nothing.
+  assert.deepEqual(
+    ran().map((parts) => parts.length),
+    [3, 3, 3, 3, 3],
+  );
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'layer-result' && e.layer === 'acceptance')
+      .flatMap((e) => (e.parts ?? []).filter((p) => p.carriedFrom !== undefined)),
+    [],
+  );
+  // The seat brief drops the line with the mechanism it describes. (The gate
+  // command's own argv is quoted in that brief and mentions the variable, so
+  // the test reads the sentence and not the name.)
+  const dev = fx.calls.find((c) => c.seat === 'dev');
+  assert.ok(
+    !dev.prompt.includes('Check your own work with the parts your diff can reach'),
+    'the brief offered a narrowing nothing honours',
+  );
+});
+
+test('the dev and repair briefs name the mapping the cycle uses', async (t) => {
+  const { fx } = partsScenario(t);
+  const { runId } = await fx.launch();
+  await waitClosed(fx.paths, runId);
+  for (const seat of ['dev', 'repair-dev']) {
+    const prompt = fx.calls.find((c) => c.seat === seat).prompt;
+    assert.match(prompt, new RegExp(`${PARTS_ENV}=<comma-separated part names>`), seat);
+    assert.match(prompt, /a part is affected unless your diff falls entirely outside its input set/, seat);
+    assert.match(prompt, /its own test sources and the source trees it exercises/, seat);
+    assert.match(prompt, /A path no part claims \(a lockfile, a shared package, a migration, a config file\) reaches every part/, seat);
+    assert.match(prompt, /The verdict runs every part of every layer before it ships a green\./, seat);
+  }
 });
 
 test('a red the confirmation sweep turns up enters triage like any other', async (t) => {

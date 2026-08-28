@@ -25,7 +25,9 @@ export function defaultProjectConfig() {
     repo: { testPaths: [], uiPaths: [] },
     // command name → argv; the single home for every runnable command
     commands: {},
-    // deterministic gate layers; `command` names a key in `commands`
+    // deterministic gate layers; `command` names a key in `commands`.
+    // `partTargeting: false` turns off part-level carrying inside a layer
+    // (ADR-0046); absent leaves it on.
     gates: { tier1: [] },
     // one convention per line; prompt assembly consumes these
     conventions: [],
@@ -160,6 +162,12 @@ function validateGates(gates, commands, err) {
   if (!isPlainObject(gates)) {
     err('gates', 'must be an object');
     return;
+  }
+  // The fallback path of ADR-0046: `false` returns every gate layer to a
+  // whole re-run per cycle, whatever its command says about its own parts.
+  // Absent is the decision, which is that a part a diff cannot reach carries.
+  if (gates.partTargeting !== undefined && typeof gates.partTargeting !== 'boolean') {
+    err('gates.partTargeting', 'must be a boolean');
   }
   if (gates.tier1 === undefined) return;
   if (!Array.isArray(gates.tier1)) {

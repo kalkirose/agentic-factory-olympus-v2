@@ -28,15 +28,32 @@
 // and the caller records the failing part under its name instead of the
 // minutes of green that followed it.
 //
-// The protocol is two lines a command may print, on their own:
+// The protocol is four lines a command may print, on their own:
 //
 //   ::olympus part <name>          what follows belongs to <name>
 //   ::olympus part-failed <name>   <name> failed; its own output is evidence
+//   ::olympus part-ok <name>       <name> finished and passed
+//   ::olympus part-inputs <e> …    the current part's input set: repo-relative
+//                                  path entries, whitespace-separated
 //
-// Nothing changes for a command that prints neither: the parts are empty and
-// the tail is the tail it always was. Marker lines are consumed, never kept —
-// the file holds them, because the file is the stream as the command printed
-// it.
+// Nothing changes for a command that prints none of them: the parts are empty
+// and the tail is the tail it always was. Marker lines are consumed, never
+// kept — the file holds them, because the file is the stream as the command
+// printed it.
+//
+// `part-ok` and `part-inputs` are what make a part carryable between cycles
+// (ADR-0046). A part the caller may skip next cycle has to say two things
+// this stream did not say before: that it passed on its own, rather than
+// being covered by an exit code that spoke for the whole sequence, and which
+// files could change its answer. `part-inputs` binds to the part the last
+// `part` line opened, so a part declares its own input set as it runs, and a
+// part that did not run declares nothing. Opening a part twice is opening the
+// same part.
+//
+// The caller's half of the protocol is one environment variable
+// (`OLYMPUS_PARTS`, see parts.mjs): the parts it asks for, by name. A command
+// that ignores it runs everything, which costs time and never correctness —
+// what the record holds is what the stream said ran.
 //
 // A caller may also ask what the command cost the machine. The measurement is
 // the same additive shape the file is: an option to ask for it, a field on the
@@ -51,12 +68,20 @@ import { resolveArgv } from '../engine/executable.mjs';
 import { startPeakSampler } from './resources.mjs';
 
 const PART_PREFIX = '::olympus ';
-const PART_MARKER = /^::olympus (part|part-failed)[ \t]+(.+?)[ \t]*$/;
+const PART_MARKER = /^::olympus (part|part-failed|part-ok|part-inputs)[ \t]+(.+?)[ \t]*$/;
 // Per part, and how many parts a run holds: a bound the longest sequence a
 // project runs stays under, and small enough that a command with no markers
-// costs nothing and one with thousands cannot grow the daemon.
+// costs nothing and one with thousands cannot grow the daemon. The count is
+// generous because the table is now read as well as displayed: a part is
+// carryable only while the record still holds it (ADR-0046), and an evicted
+// part is a part that re-runs.
 const PART_OUTPUT = 4000;
-const PART_LIMIT = 24;
+const PART_LIMIT = 64;
+// The input entries one part may declare, and how long an entry may be. A
+// path set is a statement about a repository, so both bounds are far above any
+// honest one and exist for the command that has lost its mind.
+const PART_INPUTS = 64;
+const PART_INPUT_LENGTH = 200;
 // A marker is one line. Text this long with no newline in it is not a marker,
 // and holding it back to look for one would only grow a buffer.
 const LINE_LIMIT = 65536;
@@ -191,7 +216,8 @@ function openCommandLog(path, cap) {
  *   worth nothing for a forge read that runs for a second (ADR-0045).
  * @returns {Promise<{code: number|null, signal?: string|null, output: string,
  *   truncated: boolean,
- *   parts: Array<{name: string, failed: boolean, output: string}>,
+ *   parts: Array<{name: string, failed: boolean, ok: boolean, output: string,
+ *     inputs: string[]}>,
  *   log: {path: string, bytes: number, truncated: boolean, removed?: boolean,
  *     error?: string}|null,
  *   resources: {peakRssMb: number, peakProcess?: {name: string, rssMb: number},
@@ -200,7 +226,11 @@ function openCommandLog(path, cap) {
  *   `code` is null when the command could not run at all (spawn error) —
  *   an environment defect, never a verdict about the tree under test.
  *   `parts` is what the command said about its own parts, in the order it
- *   opened them; empty for a command that said nothing.
+ *   opened them; empty for a command that said nothing. `failed` and `ok` are
+ *   what it said about each one; a part with neither said nothing about
+ *   itself, and the caller decides what the exit code makes of that.
+ *   `inputs` is the part's declared input set, empty for a part that declared
+ *   none.
  *   `truncated` says the stream outgrew the in-memory bound, so `output` is a
  *   tail. It is not a statement that anything was lost: `log` says what the
  *   harness still holds. `log.truncated` is the loss — the file hit its cap —
@@ -276,13 +306,29 @@ export function runCommand(
       const known = parts.find((p) => p.name === name);
       if (known) return known;
       if (parts.length >= PART_LIMIT) {
-        // A part that reported a failure outlives one that did not.
-        const spare = parts.findIndex((p) => !p.failed);
+        // A part that said how it ended outlives one that did not, and a
+        // failure outlives a pass: the record is evidence first, and a pass
+        // is worth keeping only because a later cycle may carry it.
+        const silent = parts.findIndex((p) => !p.failed && !p.ok);
+        const spare = silent === -1 ? parts.findIndex((p) => !p.failed) : silent;
         parts.splice(spare === -1 ? 0 : spare, 1);
       }
-      const part = { name, failed: false, output: '' };
+      const part = { name, failed: false, ok: false, output: '', inputs: [] };
       parts.push(part);
       return part;
+    };
+
+    // The current part's declared input set, grown by every `part-inputs`
+    // line it prints. Bounded, deduplicated, and dropped entirely for a
+    // command with no part open: an entry with no part to belong to is a
+    // statement about nothing.
+    const declareInputs = (part, text) => {
+      if (!part) return;
+      for (const entry of text.split(/[ \t]+/)) {
+        if (entry === '' || entry.length > PART_INPUT_LENGTH) continue;
+        if (part.inputs.length >= PART_INPUTS) return;
+        if (!part.inputs.includes(entry)) part.inputs.push(entry);
+      }
     };
 
     const hold = (text) => {
@@ -304,8 +350,13 @@ export function runCommand(
           hold(line);
           continue;
         }
+        if (marker[1] === 'part-inputs') {
+          declareInputs(current, marker[2]);
+          continue;
+        }
         const part = openPart(marker[2]);
         if (marker[1] === 'part-failed') part.failed = true;
+        else if (marker[1] === 'part-ok') part.ok = true;
         else current = part;
       }
     };

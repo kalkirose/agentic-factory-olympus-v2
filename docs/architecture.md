@@ -343,7 +343,25 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   that failed — and then the red record keeps a bounded tail per part under
   its name, beside the tail it always kept. Triage reads the failing part; the
   verdict record names it. A command that prints neither line is recorded
-  exactly as before.
+  exactly as before. Two more lines make a part carryable: `::olympus part-ok
+  <name>` says a part finished and passed, and `::olympus part-inputs <entry>
+  …` names the paths that could change what the part in flight decides
+  (ADR-0046).
+- **Part-level targeted re-runs** (ADR-0046). Inside a layer that runs in
+  parts, a cycle re-runs the parts its diff could have reached and carries the
+  rest. A part is affected unless the diff falls fully outside its declared
+  input set; a part that declared none is affected by everything; a changed
+  path no part claims — a lockfile, a shared package, a migration, a config
+  file — makes every part of that layer affected. A part that was not proven
+  green never carries. The parts a cycle wants are named in `OLYMPUS_PARTS` on
+  the command's environment, and a command that ignores it runs everything and
+  is recorded for everything it ran. `layer-result.parts[]` is the layer's
+  whole part table, and a carried part carries `carriedFrom` — the cycle whose
+  execution earned its green — into the verdict record and into the repair
+  seat's layer line. A re-freeze invalidates every carry, and the confirmation
+  sweep refuses a result that carried anything, so the cycle whose green ships
+  runs every part at its own sha. `gates.partTargeting: false` returns every
+  layer to a whole re-run per cycle.
 - **A command's output is a file; the tail is the summary** (ADR-0043). Every
   command the harness runs streams its whole output to a file while it runs —
   a layer attempt, the suite, the lint, a replay probe. A caller with a run

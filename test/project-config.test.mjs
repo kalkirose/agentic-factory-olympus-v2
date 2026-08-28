@@ -87,6 +87,23 @@ test('a gate layer may declare what its process tree is allowed to hold', () => 
   assert.equal(withProjectDefaults(valid()).gates.tier1[0].memoryCeilingMb, undefined);
 });
 
+test('a project may turn part-level carrying off, and only with a boolean', () => {
+  // The fallback path of ADR-0046. Absent is the decision — the harness
+  // carries a part a diff cannot reach — and `false` returns every layer to a
+  // whole re-run per cycle. A value that is not a boolean would read as a
+  // switch and be one, so it is refused.
+  const off = valid();
+  off.gates.partTargeting = false;
+  assert.deepEqual(validateProjectConfig(off), []);
+  assert.equal(withProjectDefaults(off).gates.partTargeting, false);
+  for (const bad of ['no', 0, null]) {
+    const wrong = valid();
+    wrong.gates.partTargeting = bad;
+    assert.deepEqual(errorPaths(wrong), ['gates.partTargeting'], String(bad));
+  }
+  assert.equal(withProjectDefaults(valid()).gates.partTargeting, undefined);
+});
+
 test('duplicate layer names and tripwire ids are refused', () => {
   const config = valid();
   config.gates.tier1.push({ name: 'lint', command: 'lint' });

@@ -14,6 +14,15 @@
 // carries the remaining greens forward. A carried result is marked `carried`,
 // so no result of an older sha reads as a fresh proof.
 //
+// Inside a layer that runs in parts, the same carrying goes one level finer
+// (ADR-0046). A caller may hand this runner a per-layer part plan: the parts
+// this cycle must execute, and the parts whose green it may carry. The
+// narrowing is passed to the command in `OLYMPUS_PARTS` and the carried parts
+// ride the layer's own `layer-result`, each naming the cycle that earned it.
+// The confirmation sweep will not accept a result that carried anything: the
+// cycle whose green the verdict ships on runs every part of every layer, so
+// no carry ever reaches a shipped record unproven at its own sha.
+//
 // Each execution stamps its start as well: a layer is one process that can
 // hold a run for an hour, and before that stamp the ledger said nothing
 // between the route that ordered the cycle and the first result, so a run
@@ -49,6 +58,7 @@
 import { commandLogPath } from '../daemon/home.mjs';
 import { assertDefectKind, assertAbandonReason } from '../ledger/registry.mjs';
 import { runCommand } from './exec.mjs';
+import { PARTS_ENV, carriedParts, mergeCarried } from './parts.mjs';
 import { exhaustionOf } from './resources.mjs';
 import { absentCredentials } from './replay.mjs';
 import { runEvents, ACTOR } from './shared.mjs';
@@ -60,7 +70,9 @@ const OUTPUT_TAIL = 1500;
 // triage as the green minutes that followed it. A command that says where its
 // parts begin (`::olympus part`, see exec.mjs) gets the failing part recorded
 // under its own name. The budget is the whole record's, shared between the
-// parts kept, and never cut below the floor.
+// parts kept, and never cut below the floor. The other parts are recorded
+// too, and without output: the record is the layer's part table as well as
+// its evidence, and the table is what a later cycle carries from (ADR-0046).
 //
 // A red whose stream outgrew the tail and named no part is the case the parts
 // exist to answer: the record holds whatever ran last and the failure may not
@@ -86,9 +98,14 @@ const ATTEMPTS = 2;
  *   commands: Record<string, string[]>, cwd: string, env?: object,
  *   cycle: number, sha: string, run?: Set<string>|null,
  *   prior?: Map<string, object>|null, confirmation?: boolean,
+ *   parts?: Map<string, {run: string[], carry: Array<object>}>|null,
  *   credentials?: Array<object>, exec?: typeof runCommand}} opts
  *   `run` names the layers this cycle executes; every other layer carries its
  *   `prior` green forward. Both absent means the full spectrum.
+ *   `parts` narrows a layer that runs in parts to the parts a diff could have
+ *   reached, and names the greens it carries instead (ADR-0046). Absent for
+ *   every layer it does not mention, and absent altogether for a cycle that
+ *   targets nothing.
  *   `credentials` is the project's credential declaration; a layer it names
  *   that this host cannot supply has its red attributed to the missing
  *   variable, on the result itself.
@@ -98,7 +115,12 @@ const ATTEMPTS = 2;
  * @returns {Promise<{results?: Array<{layer: string, status: string,
  *   mode: string, attributedTo?: string, output?: string, log?: string,
  *   credentialAbsent?: string[], resources?: object, exhaustion?: object,
- *   parts?: Array<{name: string, output: string}>}>, error?: string}>}
+ *   parts?: Array<{name: string, status: string, inputs?: string[],
+ *     output?: string, carriedFrom?: number}>}>, error?: string}>}
+ *   `parts` is the whole part table of a layer that runs in parts: what each
+ *   part decided, what could change that, and — on a part this cycle did not
+ *   run — the cycle whose execution earned its green. Only the parts that are
+ *   evidence for a red carry `output`.
  *   `log` is the file holding that layer's whole output, for the red that has
  *   one: the tail and the parts are the summary, the file is the text.
  *   `resources` is what the layer's process tree peaked at, and `exhaustion`
@@ -119,6 +141,7 @@ export async function runSpectrum(
     run = null,
     prior = null,
     confirmation = false,
+    parts = null,
     credentials = [],
     exec = runCommand,
   },
@@ -133,6 +156,14 @@ export async function runSpectrum(
   const results = [];
   for (const layer of layers) {
     let record = stamped.get(layer.name);
+    // The confirmation sweep is the cycle whose green the verdict ships on,
+    // and it will not stand on a part nothing ran at this sha. A result this
+    // cycle already stamped that carried a part is therefore not a result the
+    // sweep can reuse: the layer runs again, whole, and the stamp it leaves
+    // carries nothing (ADR-0046). Idempotent by construction — the re-run's
+    // own stamp is the last one, and a daemon that comes back reads it and
+    // stops.
+    if (record && confirmation && carriedParts(record).length > 0) record = undefined;
     let mode = 'run';
     if (!record) {
       const carried = carriedResult(layer, run, prior);
@@ -162,6 +193,9 @@ export async function runSpectrum(
             sha,
             mark,
             exec,
+            // What this layer runs of itself, and what it carries instead.
+            // Never in a confirmation sweep: that pass runs everything.
+            target: confirmation ? null : (parts?.get(layer.name) ?? null),
             // Read before the layer runs, so the attribution is a fact about
             // the host this attempt started on rather than one about the host
             // at the moment somebody read the record.
@@ -205,20 +239,25 @@ function carriedResult(layer, run, prior) {
  * filter is the loop: a first red is never the layer's answer, so it is
  * replaced by one red-only re-run and stamped as the replaced attempt it is.
  */
-async function runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark, exec, absent }) {
+async function runLayer(ctx, { layer, commands, cwd, env, cycle, sha, mark, exec, absent, target }) {
   const argv = commands[layer.command];
+  // The narrowing the command is asked for, on the environment it runs in. A
+  // command that does not read it runs everything and is recorded for
+  // everything it ran (ADR-0046).
+  const layerEnv = target ? { ...env, [PARTS_ENV]: target.run.join(',') } : env;
   let previous = null;
   for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
     const settled = await runAttempt(ctx, {
       argv,
       layer,
       cwd,
-      env,
+      env: layerEnv,
       cycle,
       sha,
       mark,
       exec,
       absent,
+      carry: target?.carry ?? [],
       attempt,
       // Retry provenance: an attempt above the first names the attempt it
       // replaced and what spawned it, so a replacement is never silent.
@@ -300,8 +339,8 @@ function attemptLogFile(ctx, { cycle, layer, attempt }) {
  * is a filter that can lose it.
  */
 function settle(ctx, spec, made) {
-  const { layer, cycle, sha, mark, attempt, absent } = spec;
-  const disposition = dispositionOf(made, attempt, layer.memoryCeilingMb ?? null);
+  const { layer, cycle, sha, mark, attempt, absent, carry } = spec;
+  const disposition = dispositionOf(made, attempt, layer.memoryCeilingMb ?? null, carry);
   made.disposition = disposition;
   const identity = { cycle, layer: layer.name, attempt, sha };
   if (disposition.event === 'layer-result') {
@@ -402,8 +441,12 @@ function stampExhaustion(ctx, { layer, cycle, sha, mark }, exhaustion) {
  * absent for every layer that declares nothing: the classification then rests
  * on the exit and the output alone, and the forecast reads the trend instead
  * of a fraction (ADR-0045).
+ *
+ * `carry` is what the caller's part plan let this layer skip. It rides the
+ * result and only the result: an attempt that judged nothing carries nothing
+ * forward, because it proved nothing to carry it to (ADR-0046).
  */
-function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null) {
+function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, carry = []) {
   if (thrown) {
     return { event: 'layer-abandoned', reason: 'runner-error', detail: thrown.message };
   }
@@ -465,7 +508,17 @@ function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null) {
         };
   }
   if (outcome.code === 0) {
-    return { event: 'layer-result', status: 'green', evidence: {}, ...cost };
+    // A green records its parts too, and they are the whole part table rather
+    // than an evidence subset: a later cycle carries a part only if a record
+    // says it passed and says what could change that (ADR-0046). No output
+    // rides them — a green says all it has to say in the tail.
+    const parts = mergeCarried(recordedParts(outcome.parts, { green: true }), carry);
+    return {
+      event: 'layer-result',
+      status: 'green',
+      evidence: { ...(parts.length > 0 && { parts }) },
+      ...cost,
+    };
   }
   if (attempt < ATTEMPTS) {
     // The flake filter owes this red a re-run, so this attempt judges nothing.
@@ -480,7 +533,8 @@ function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null) {
       ...cost,
     };
   }
-  const parts = recordedParts(outcome.parts);
+  const ran = recordedParts(outcome.parts, { green: false });
+  const parts = mergeCarried(ran, carry);
   return {
     event: 'layer-result',
     status: 'red',
@@ -491,8 +545,10 @@ function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null) {
       ...(parts.length > 0 && { parts }),
       // The defect is output the harness cannot produce. A file that holds the
       // whole stream is not that, whatever the tail lost; a stream that
-      // outgrew the file's cap, or an attempt with no file at all, is.
-      ...(parts.length === 0 &&
+      // outgrew the file's cap, or an attempt with no file at all, is. The
+      // test is over what this attempt printed and never over what it
+      // carried: a carried part printed nothing here by design.
+      ...(ran.length === 0 &&
         !whole &&
         (outcome.truncated || (outcome.output?.length ?? 0) > OUTPUT_TAIL) && {
           kind: assertDefectKind('layer-log-truncated'),
@@ -502,21 +558,41 @@ function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null) {
 }
 
 /**
- * The parts of a red layer's run the record keeps, each with a bounded tail of
- * its own. A command that named the parts that failed gets those; a command
- * that only said where its parts begin gets all of them, because the red is in
- * one of them and the stream does not say which; a command that surfaced no
- * parts at all gets none, and the record keeps the tail alone as it always did.
- * @param {Array<{name: string, failed: boolean, output: string}>} [parts]
+ * What one attempt's record says about the parts it ran: every part the
+ * command opened, what it decided about each, and what could change that
+ * answer. Output rides the evidence subset alone, and that subset is the one
+ * this record always kept — a command that named the parts that failed gets
+ * those; a command that only said where its parts begin gets all of them,
+ * because the red is in one of them and the stream does not say which; a
+ * command that surfaced no parts at all gets none, and the record keeps the
+ * tail alone as it always did. A green carries no output at all.
+ *
+ * A part's status is what the part said about itself, and never what the
+ * layer's exit code said for it — with one reading of that code: a command
+ * that exited 0 passed everything it ran, so a part it opened and did not
+ * fail passed. A part inside a failure that said nothing about itself is
+ * `unknown`, which never carries.
+ * @param {Array<{name: string, failed: boolean, ok: boolean, output: string,
+ *   inputs: string[]}>} [parts]
+ * @param {{green: boolean}} state whether the attempt itself passed
  */
-function recordedParts(parts = []) {
+function recordedParts(parts = [], { green = false } = {}) {
   if (parts.length === 0) return [];
-  const failed = parts.filter((p) => p.failed);
-  let kept = failed.length > 0 ? failed : parts;
-  const room = Math.floor(PART_TAIL / PART_FLOOR);
-  if (kept.length > room) kept = kept.slice(-room);
-  const each = Math.max(PART_FLOOR, Math.floor(PART_TAIL / kept.length));
-  return kept.map((p) => ({ name: p.name, output: p.output.slice(-each) }));
+  const evidence = new Map();
+  if (!green) {
+    const failed = parts.filter((p) => p.failed);
+    let kept = failed.length > 0 ? failed : parts;
+    const room = Math.floor(PART_TAIL / PART_FLOOR);
+    if (kept.length > room) kept = kept.slice(-room);
+    const each = Math.max(PART_FLOOR, Math.floor(PART_TAIL / kept.length));
+    for (const p of kept) evidence.set(p.name, p.output.slice(-each));
+  }
+  return parts.map((p) => ({
+    name: p.name,
+    status: p.failed ? 'red' : p.ok || green ? 'green' : 'unknown',
+    ...(p.inputs?.length > 0 && { inputs: p.inputs }),
+    ...(evidence.has(p.name) && { output: evidence.get(p.name) }),
+  }));
 }
 
 /**

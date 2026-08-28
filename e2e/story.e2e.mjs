@@ -331,6 +331,20 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
   // never spawns and the security lens rides the operational seat.
   assert.ok(!seats.includes('fury-code-shape'), 'the cut lenses spawned a seat');
   assert.ok(!seats.includes('fury-security'), 'a standalone security seat ran');
+  // Every seat that writes code is told to check its work with the parts of a
+  // layer its diff can reach, and told the same mapping the cycle uses
+  // (ADR-0046). The seats spend from the same clock the cycles do.
+  for (const seat of ['dev', 'repair-dev']) {
+    const brief = calls.find((c) => c.seat === seat).prompt;
+    assert.ok(
+      brief.includes('Check your own work with the parts your diff can reach'),
+      `the ${seat} seat was not told which parts its diff reaches`,
+    );
+    assert.ok(
+      brief.includes('OLYMPUS_PARTS=<comma-separated part names>'),
+      `the ${seat} seat was not told how to run a narrowed layer`,
+    );
+  }
   const operational = calls.find((c) => c.seat === 'fury-operational').prompt;
   assert.ok(operational.includes('- security: authorization on every entry point'));
   // The adversary waves carry the same dimensions into the suite.

@@ -75,6 +75,7 @@ import {
   withReplayRounds,
 } from './replay.mjs';
 import { runSpectrum, persistentReds, cyclePlan } from './spectrum.mjs';
+import { PARTS_ENV, partPlan } from './parts.mjs';
 import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview } from './review.mjs';
 import { panelLenses } from './lenses.mjs';
@@ -317,9 +318,12 @@ async function runCycle(ctx, base, mode, { cycle }) {
     cycle,
     sha,
   };
-  // What this cycle runs, and what it carries (ADR-0022).
+  // What this cycle runs, and what it carries (ADR-0022) — then, inside each
+  // layer it does run, which parts of it the diff since that layer's standing
+  // result could have reached (ADR-0046).
   const plan = cyclePlan(startEvents, { cycle, pass, layers: base.layers });
-  let spectrum = await runSpectrum(ctx, { ...gates, run: plan.run, prior: plan.prior });
+  const parts = await partTargets(base, startEvents, { plan, sha });
+  let spectrum = await runSpectrum(ctx, { ...gates, run: plan.run, prior: plan.prior, parts });
   if (spectrum.error) return { directive: gateCommandError(ctx, spectrum.error) };
   let reds = persistentReds(spectrum.results);
 
@@ -432,11 +436,15 @@ async function runCycle(ctx, base, mode, { cycle }) {
     // red on the surface they cover is explained, not mysterious.
     ...(dropped.length > 0 && { dropped }),
     // The record is a summary: the output stays in the ledger. What it does
-    // carry is the name of every part a red layer reported, so a red inside a
-    // sequence reads here as the part that failed and not as the layer alone.
-    spectrum: spectrum.results.map(({ output, parts, ...r }) => ({
+    // carry is every part a layer that runs in parts reported — so a red
+    // inside a sequence reads here as the part that failed and not as the
+    // layer alone, and a part this cycle did not run says which cycle earned
+    // its green. A carried green is evidence a reader can see (ADR-0046).
+    spectrum: spectrum.results.map(({ output, parts: layerParts, ...r }) => ({
       ...r,
-      ...(parts?.length > 0 && { parts: parts.map((p) => p.name) }),
+      ...(layerParts?.length > 0 && {
+        parts: layerParts.map((part) => partSummary(part, r.mode)),
+      }),
     })),
     flakes: runEvents(ctx)
       .filter((e) => e.event === 'flake' && e.cycle === cycle)
@@ -469,6 +477,61 @@ async function runCycle(ctx, base, mode, { cycle }) {
     record: recordPath,
   });
   return {};
+}
+
+/**
+ * The part plan of every layer this cycle runs: which parts of it the diff
+ * since that layer's standing result could have reached, and which greens it
+ * carries instead (ADR-0046). Null for a cycle that targets nothing.
+ *
+ * Every clause here re-runs on doubt. A cycle that runs the full spectrum
+ * targets no parts. A layer with no part table has none to narrow. A range
+ * git cannot answer, a result with no sha, a result older than the last
+ * re-freeze — each drops the layer out of the map and the layer runs whole.
+ *
+ * A re-freeze invalidates every carry because it moves the suite the parts
+ * were judged against: a part's green is a statement about a pair of shas,
+ * and the amendment changed the half this derivation cannot see in a diff of
+ * the candidate tree.
+ */
+export async function partTargets(base, events, { plan, sha }) {
+  if (plan.sweep !== 'targeted' || base.config?.gates?.partTargeting === false) return null;
+  const refrozen = events.filter((e) => e.event === 're-freeze').pop()?.seq ?? -1;
+  const diffs = new Map();
+  const targets = new Map();
+  for (const layer of base.layers) {
+    if (!plan.run?.has(layer.name)) continue;
+    const prior = plan.prior?.get(layer.name);
+    if (!prior?.parts?.length || !prior.sha || prior.seq < refrozen) continue;
+    if (!diffs.has(prior.sha)) {
+      diffs.set(
+        prior.sha,
+        await changedInRange(base.worktree, prior.sha, sha).catch(() => null),
+      );
+    }
+    const changed = diffs.get(prior.sha);
+    if (changed === null) continue;
+    const narrowed = partPlan(prior, changed);
+    if (narrowed) targets.set(layer.name, narrowed);
+  }
+  return targets.size > 0 ? targets : null;
+}
+
+/**
+ * One part, as the verdict record states it: what it decided, whether this
+ * cycle ran it, and — where the part itself was carried — the cycle whose
+ * execution earned the green. A layer the cycle carried whole carried every
+ * part in it, whatever the part's own record says, and the layer's line
+ * states where that one came from.
+ */
+function partSummary(part, layerMode) {
+  const carried = layerMode === 'carried' || part.carriedFrom !== undefined;
+  return {
+    name: part.name,
+    ...(part.status && { status: part.status }),
+    mode: carried ? 'carried' : 'run',
+    ...(part.carriedFrom !== undefined && { carriedFrom: part.carriedFrom }),
+  };
 }
 
 /** A gate command that could not run at all: an environment defect. */
@@ -1533,6 +1596,32 @@ function gateCommandLines(base) {
   return [
     'The Tier-1 gate commands this work is judged by:',
     ...base.layers.map((l) => `- ${l.name}: ${(base.commands[l.command] ?? []).join(' ')}`),
+    ...affectedPartsLines(base),
+  ];
+}
+
+/**
+ * The one line that rides item 1 (ADR-0046). A seat that reaches for a gate
+ * command reaches for the whole battery, and on the reference project the
+ * acceptance layer alone is forty minutes of it. The cycle that judges the
+ * seat already narrows that layer to the parts a diff can reach, so a seat
+ * spending the same clock is told the same mapping and left to use it.
+ *
+ * Told, never required. The verdict runs the full set whatever the seat did,
+ * so this is a saving the seat may take and never a check it owes — the ban
+ * on verification scaffolding in this module settles the wording.
+ */
+function affectedPartsLines(base) {
+  if (base.config?.gates?.partTargeting === false) return [];
+  return [
+    'A layer command that names its parts takes ' +
+      `${PARTS_ENV}=<comma-separated part names> and runs those parts alone. ` +
+      'Check your own work with the parts your diff can reach: a part is affected ' +
+      'unless your diff falls entirely outside its input set — its own test sources ' +
+      'and the source trees it exercises, as that command declares them. A path no ' +
+      'part claims (a lockfile, a shared package, a migration, a config file) reaches ' +
+      'every part, so narrow nothing when you have touched one. The verdict runs every ' +
+      'part of every layer before it ships a green.',
   ];
 }
 
@@ -1567,6 +1656,7 @@ function repairRole(base, open, record, brief = null, recaptured = []) {
     ...open.map((f) => `- ${findingLine(f)}`),
     'Tier-1 verdict:',
     ...(record?.spectrum ?? []).map((r) => `- ${r.layer}: ${r.status}${layerNote(r)}`),
+    ...gateCommandLines(base),
     ...takenBackLines(record?.dropped, recaptured),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
@@ -1696,9 +1786,13 @@ function redEvidence(r) {
   const whole = r.log
     ? [`  the whole output of this layer is at ${r.log} — read it when the evidence below does not name the failure.`]
     : [];
-  if (!r.parts?.length) return [...whole, tail];
+  // The parts that are evidence, and not the layer's whole part table: a part
+  // that passed, and a part this cycle carried, printed nothing here and
+  // reading them out would bury the one that failed (ADR-0046).
+  const evidence = (r.parts ?? []).filter((p) => p.output !== undefined);
+  if (evidence.length === 0) return [...whole, tail];
   return [
-    ...r.parts.flatMap((p) => [`  part ${p.name}:`, p.output || '(no output)']),
+    ...evidence.flatMap((p) => [`  part ${p.name}:`, p.output || '(no output)']),
     '  the layer, at the end of its run:',
     tail,
     ...whole,
@@ -1783,7 +1877,17 @@ function stallBrief(open) {
 function layerNote(r) {
   if (r.credentialAbsent?.length) return ` (credential absent: ${r.credentialAbsent.join(', ')})`;
   if (r.attributedTo) return ` (attributed to ${r.attributedTo})`;
-  return r.mode === 'carried' ? ' (carried from an earlier cycle, not re-run)' : '';
+  if (r.mode === 'carried') return ' (carried from an earlier cycle, not re-run)';
+  // A layer that ran, of which some parts did not. The count is on the line
+  // because the alternative is a green that reads as a whole layer's proof
+  // when it is a proof of part of one (ADR-0046).
+  const carried = (r.parts ?? []).filter((p) => p.mode === 'carried');
+  if (carried.length === 0) return '';
+  const from = [...new Set(carried.map((p) => p.carriedFrom))].sort((a, b) => a - b);
+  return (
+    ` (${carried.length} of ${r.parts.length} parts carried from ` +
+    `cycle ${from.join(', ')}, not re-run)`
+  );
 }
 
 function findingLine(f) {
