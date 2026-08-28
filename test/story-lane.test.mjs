@@ -12,6 +12,7 @@ import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
 import { storyLane } from '../src/lanes/story.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
+import { OWNER_PIN_MARKER } from '../src/lanes/supersede.mjs';
 import {
   tempDir,
   removeDir,
@@ -1492,4 +1493,201 @@ test('the stack env reaches the compose up, the lint command, and the seats', as
   assert.ok(up.env.OLYMPUS_WORKTREE.length > 0, 'compose up got no worktree');
   assert.deepEqual(JSON.parse(readFileSync(lintCapture, 'utf8')), expected);
   assert.deepEqual(JSON.parse(readFileSync(seatCapture, 'utf8')), expected);
+});
+
+// -- the card authorizes a supersede at the gate (ADR-0044) -------------------
+
+// A card whose scope boundary already sanctions the extension the story needs.
+// The gate meets the collision before the suite is frozen, against the pin an
+// earlier story left in the repository.
+const SUPERSEDE_CARD = `---
+key: alpha-1
+title: Alpha feature
+---
+
+## Goal
+
+Provide f(x) that doubles x in src/feature.mjs.
+
+## Scope boundary
+
+This story adds a second published export to the feature module; the export
+set an earlier story closed is extended here, not replaced.
+${FIXTURE_ACCEPTANCE}`;
+
+const SILENT_CARD = `---
+key: alpha-1
+title: Alpha feature
+---
+
+## Goal
+
+Provide f(x) that doubles x in src/feature.mjs.
+
+## Scope boundary
+
+Registration is another story's work. Nothing here reaches the export set.
+${FIXTURE_ACCEPTANCE}`;
+
+const GATE_COVERING_LINE =
+  'This story adds a second published export to the feature module; the export ' +
+  'set an earlier story closed is extended here, not replaced.';
+
+const REPO_PIN = `import test from 'node:test';
+import assert from 'node:assert/strict';
+test('the export set is closed', async () => {
+  const mod = await import('../src/feature.mjs');
+  assert.deepEqual(Object.keys(mod).sort(), ['f']);
+});
+`;
+
+const GATE_CLAIM = {
+  supersedes: 'tests/pinned.test.mjs',
+  supersedeAssertion: 'the published export set is exactly ["f"]',
+  supersedeQuote: GATE_COVERING_LINE,
+  supersedeClause: 'scope-boundary',
+};
+
+/** The gate seats of the collision scenario: round 1 collides, round 2 is clean. */
+function collidingGate(claim) {
+  return ({ label }) =>
+    label === 'spec-gate-1'
+      ? {
+          report: {
+            findings: [],
+            summary: 'collision',
+            intentConflict: {
+              conflict: true,
+              detail: 'The frozen pin closes the export set AC-1 extends.',
+              ...claim,
+            },
+          },
+        }
+      : {
+          report: {
+            findings: [],
+            summary: 'clean',
+            intentConflict: { conflict: false, detail: 'None on intent.' },
+          },
+        };
+}
+
+function collisionSeats(gate) {
+  return {
+    'spec-birth': amendingBirth(),
+    'spec-gate': gate,
+    suite: () => ({
+      files: { 'tests/feature.test.mjs': STRONG_TEST },
+      report: {
+        suiteFiles: ['tests/feature.test.mjs'],
+        reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        summary: 'authored',
+      },
+    }),
+    adversary: () => ({ report: { approach: 'absent', wrongness: 'no implementation' } }),
+  };
+}
+
+test('the gate supersedes a collision the card covers, and never asks', async (t) => {
+  const fx = storyFixture(t, {
+    card: SUPERSEDE_CARD,
+    seats: collisionSeats(collidingGate(GATE_CLAIM)),
+    files: { 'tests/pinned.test.mjs': REPO_PIN },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.deepEqual(
+    events.filter((e) => e.event === 'park').map((e) => e.type),
+    [],
+  );
+  const stamp = events.find((e) => e.event === 'supersede-authorized');
+  assert.equal(stamp.site, 'spec-gate');
+  assert.equal(stamp.test, 'tests/pinned.test.mjs');
+  assert.equal(stamp.clause, 'scope-boundary');
+  assert.equal(stamp.cardQuote, GATE_COVERING_LINE);
+  assert.equal(stamp.card, 'stories/alpha.md');
+  // The amendment ran on the card's own words, and burned no counted round.
+  const amend = fx.calls.find((c) => c.label === 'spec-birth-2');
+  assert.ok(amend.prompt.includes('the intent card authorizes the supersede'));
+  assert.ok(amend.prompt.includes(GATE_COVERING_LINE));
+  assert.ok(amend.prompt.includes('tests/pinned.test.mjs'));
+  const rounds = events.filter((e) => e.event === 'spec-gate-round');
+  assert.deepEqual(
+    rounds.map((e) => [e.round, e.verdict]),
+    [[1, 'pass']],
+  );
+  // The gate seat was told to classify before it reported.
+  assert.ok(fx.calls[1].prompt.includes("does the card's scope cover this collision"));
+});
+
+test('the gate parks a collision the card is silent on, and refuses a fabricated quote', async (t) => {
+  const fx = storyFixture(t, {
+    card: SILENT_CARD,
+    // The card carries no such line; the seat quotes it anyway.
+    seats: collisionSeats(collidingGate(GATE_CLAIM)),
+    files: { 'tests/pinned.test.mjs': REPO_PIN },
+  });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'intent-conflict');
+  assert.ok(park.question.includes('The card did not settle it'));
+  assert.ok(park.question.includes('not in the card section the claim names'));
+  assert.equal(
+    readEvents(runLedgerPath(fx.paths, runId)).filter((e) => e.event === 'supersede-authorized')
+      .length,
+    0,
+  );
+  fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'Keep the closed set.' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.filter((e) => e.event === 'supersede-authorized').length, 0);
+});
+
+test('an owner-pinned test in the repository parks the gate, covering card or not', async (t) => {
+  const fx = storyFixture(t, {
+    card: SUPERSEDE_CARD,
+    seats: collisionSeats(collidingGate(GATE_CLAIM)),
+    files: {
+      'tests/pinned.test.mjs': `// ${OWNER_PIN_MARKER}: the closed set is the owner's call.\n${REPO_PIN}`,
+    },
+  });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'intent-conflict');
+  assert.ok(park.question.includes('carries the owner pin'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'Granted; extend the set.' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.filter((e) => e.event === 'supersede-authorized').length, 0);
+});
+
+test('the freeze records which frozen tests are pinned to the owner', async (t) => {
+  const seats = {
+    'spec-birth': ({ prompt }) => ({
+      files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
+      report: { outcome: 'spec-born', summary: 'born' },
+    }),
+    'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
+    suite: () => ({
+      files: {
+        'tests/feature.test.mjs': STRONG_TEST,
+        'tests/pinned.test.mjs': `// ${OWNER_PIN_MARKER}\n${REPO_PIN}`,
+      },
+      report: {
+        suiteFiles: ['tests/feature.test.mjs', 'tests/pinned.test.mjs'],
+        reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        summary: 'authored',
+      },
+    }),
+    adversary: () => ({ report: { approach: 'absent', wrongness: 'no implementation' } }),
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const freeze = events.find((e) => e.event === 'freeze');
+  assert.equal(freeze.pins, 1);
+  const record = JSON.parse(
+    readFileSync(join(fx.paths.archivedRuns, runId, 'freeze.json'), 'utf8'),
+  );
+  assert.deepEqual(record.ownerPinned, ['tests/pinned.test.mjs']);
 });

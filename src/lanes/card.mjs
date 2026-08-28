@@ -66,6 +66,39 @@ export function parseIntentCard(text) {
 }
 
 /**
+ * The prose of every section whose heading matches `pattern`, in card order. A
+ * section runs to the next heading of its own level or shallower, so a deeper
+ * sub-heading stays inside it.
+ *
+ * Every other reader here wants a list or a label. This one wants the sentences
+ * a human wrote, because a supersede authorization rests on a line of the card
+ * and the check that the line is really there reads the section it claims to
+ * come from (ADR-0044). It lives with the parser for the reason the file says:
+ * a card reads the same everywhere it is read.
+ * @param {string} text the whole card, frontmatter included
+ * @param {RegExp} pattern matched against the heading text
+ * @returns {string[]} one entry per matching section; empty when there is none
+ */
+export function cardSections(text, pattern) {
+  const { body } = splitFrontmatter(text);
+  const lines = body.split(/\r?\n/);
+  const sections = [];
+  for (let i = 0; i < lines.length; i++) {
+    const heading = HEADING.exec(lines[i]);
+    if (!heading || !pattern.test(heading[2])) continue;
+    const level = heading[1].length;
+    const section = [];
+    for (const line of lines.slice(i + 1)) {
+      const next = HEADING.exec(line);
+      if (next && next[1].length <= level) break;
+      section.push(line);
+    }
+    sections.push(section.join('\n'));
+  }
+  return sections;
+}
+
+/**
  * The card's acceptance criteria, in card order. A criterion carries its own
  * id when the line it opens starts with one, and takes its position as its id
  * when the card labels nothing. Every card therefore names an ordered id set,

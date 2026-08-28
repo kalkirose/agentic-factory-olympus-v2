@@ -231,9 +231,11 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - **Spec gate**: one fresh-context round on the born spec (grounding
   spot-checks, scope against the card, AC encodability), evidence-cited. The
   birth seat amends; the gate re-checks amended sections only. Cap 2 rounds.
-  An intent conflict escalates instead of burning a round. Findings carry a
-  severity: blocking findings hold the spec; notes do not, and travel to the
-  suite seat as obligations to prove against running code. An omitted
+  An intent conflict the card does not cover escalates instead of burning a
+  round; one the card's scope does cover is superseded on the card's own words
+  and buys one amendment, which burns no round either (ADR-0044). Findings
+  carry a severity: blocking findings hold the spec; notes do not, and travel
+  to the suite seat as obligations to prove against running code. An omitted
   severity is blocking.
 - **Gate convergence** (ADR-0020): every round past the first is a re-check.
   Its scope is computed, not declared — the round's spec copy diffed against
@@ -260,11 +262,11 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   pre-implementation tree, and the freeze report classes every red as
   feature-absence. Any other cause is a suite defect to fix before freeze.
 - **Freeze record**: suite file set at a SHA, kill count, survivor
-  dispositions, red-state record, born-spec ref, and the frozen exclusions —
-  the test-path files the spec assigned to the implementing pass. The
-  exclusions leave the dev seats' deny rules and every story-mode restore;
-  the adversary's restore still covers them. The valid record is the
-  completion signal.
+  dispositions, red-state record, born-spec ref, the frozen exclusions — the
+  test-path files the spec assigned to the implementing pass — and the frozen
+  tests pinned to the owner. The exclusions leave the dev seats' deny rules and
+  every story-mode restore; the adversary's restore still covers them. The
+  valid record is the completion signal.
 
 ## Verdict machinery
 
@@ -382,6 +384,19 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   makes it spent — one ruling, one amendment. Without that route an answer
   could only reach the spec, the unchanged suite would render the same finding
   next cycle, and the run would park on the same question forever.
+- **The card is the first ruling** (ADR-0044). A frozen-surface collision the
+  story's card already covers is an authorized supersede, not a question: the
+  seat that finds it quotes the card line its authority rests on, the quote is
+  checked against the named card section word for word, and the citation rides
+  the re-freeze route as the ruling, with `source: 'card'` on the stamp. A
+  collision the card is silent on parks as it always did, and so does one on a
+  test the owner pinned (`olympus:owner-pinned` in the test file, recorded at
+  the freeze). Both classification sites work this way: the spec gate before
+  the freeze, the verdict ladder after it. The amendment nobody was asked about
+  is read by the panel's spec lens on the cycle behind it, and every
+  authorization is a `supersede-authorized` stamp the eval review counts.
+  `lanes.story.cardAuthorizedSupersede: false` restores the always-park
+  default.
 - **Repair progress is a closed finding, never a smaller open set.** A repair
   round is a stall when it closed none of the findings the render before it
   left open; a round that closes one while the review surfaces another is
@@ -543,6 +558,11 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - Close-out: watch merge-commit checks to terminal states, run the card
   sweep, run the reconciliation judgment, run the learning artifact if the
   project configured one, close the run ledger.
+- **The card sweep is where a supersede goes home** (ADR-0044). A run that
+  amended a frozen test on its card's authority hands the sweep every executed
+  supersede, and the sweep records them on that story's card under a
+  `## Supersedes` heading. The run ledger archives with the run; the card is
+  what the next story reads.
 - **Reconciliation judgment** (ADR-0026): a fresh-context seat judges
   whether the shipped diff implements or contradicts any decision record.
   Owed writes a reconciliation ticket and stamps `reconciliation-judged`;

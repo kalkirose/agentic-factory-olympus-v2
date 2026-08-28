@@ -157,6 +157,18 @@ export function freezeSuiteFiles(paths, runId) {
 }
 
 /**
+ * The frozen tests the freeze found pinned to the owner. The pin lives in the
+ * test file and the freeze writes down which files carried it, so the answer is
+ * fixed where the frozen set is fixed. An absent or older record names none,
+ * and the reader of it re-reads the file rather than treating that as "no pin"
+ * (ADR-0044).
+ */
+export function freezeOwnerPins(paths, runId) {
+  const record = readJson(join(paths.runs, runId, 'freeze.json'));
+  return Array.isArray(record?.ownerPinned) ? record.ownerPinned : [];
+}
+
+/**
  * A park directive. The site declares what the park will take back: the
  * options it offers, the free-text slot it wants, or both. `text` is the label
  * for that slot and says what the text is for. The engine adds `abandon` and

@@ -190,6 +190,14 @@ export const RUN_EVENTS = new Set([
   'repair-round',
   'stall',
   'fresh-pass',
+  // A frozen-surface collision the story's own card sanctioned: the test, the
+  // assertion that changes, the card line the authorization rests on, and the
+  // section it came from. Quiet, because the card answered the question before
+  // the run asked it — but never silent, because the run amended a frozen test
+  // on a document's authority and nobody was asked. It is the record a reviewer
+  // checks the card against, and the count of them is what an outlier window is
+  // read from (ADR-0044).
+  'supersede-authorized',
   're-freeze',
   'operational-fix',
   // The gate answered itself on a standing acknowledgment: every finding it

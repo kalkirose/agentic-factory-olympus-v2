@@ -80,6 +80,15 @@ import { furyRound, generalistReview } from './review.mjs';
 import { panelLenses } from './lenses.mjs';
 import { freezeAnchor } from './resume.mjs';
 import { parseIntentCard } from './card.mjs';
+import {
+  SUPERSEDE_BRIEF_LINES,
+  SUPERSEDE_CLAIM_PROPERTIES,
+  authorizeSupersede,
+  authorizedSupersedes,
+  refusalLine,
+  supersedeClaim,
+  supersedeRuling,
+} from './supersede.mjs';
 import { SUITE_SCHEMA, SPEC_AMEND_SCHEMA, specLintDefects } from './story.mjs';
 import {
   ACTOR,
@@ -89,6 +98,7 @@ import {
   runEvents,
   answeredPark,
   freezeExclusions,
+  freezeOwnerPins,
   freezeSuiteFiles,
   seatReportAfter,
   seatFailureAfter,
@@ -184,6 +194,9 @@ export const TRIAGE_SCHEMA = {
           layers: { type: 'array', items: { type: 'string' } },
           summary: { type: 'string' },
           evidence: { type: 'string' },
+          // An intent-depth finding may carry the card's own authorization for
+          // the amendment it needs. Four facts or nothing (ADR-0044).
+          ...SUPERSEDE_CLAIM_PROPERTIES,
         },
         required: ['class', 'layers', 'summary', 'evidence'],
       },
@@ -335,6 +348,11 @@ async function runCycle(ctx, base, mode, { cycle }) {
   const newTree = !prevRender || prevRender.pass !== pass;
   const repaired =
     prevRender && eventsAfter(events, prevRender.seq).some((e) => e.event === 'repair-round');
+  const cardRuled = prevRender
+    ? eventsAfter(events, prevRender.seq).find(
+        (e) => e.event === 're-freeze' && e.ruling?.source === 'card' && e.baseSha,
+      )
+    : null;
   const priorConfirmed = priorOpen.filter((f) => f.confirmed);
   let reviewOpen = priorConfirmed;
   if (newTree) {
@@ -348,6 +366,19 @@ async function runCycle(ctx, base, mode, { cycle }) {
     reviewOpen = round.confirmed;
   } else if (repaired) {
     const diffText = await diffRange(base.worktree, impl.baseSha, impl.sha);
+    const round = await generalistReview(ctx, base, { cycle, diffText, priorConfirmed });
+    if (round.fail) return { directive: round.fail };
+    reviewOpen = [
+      ...priorConfirmed.filter((f) => !round.resolved.includes(f.id)),
+      ...round.confirmed,
+    ];
+  } else if (cardRuled) {
+    // A re-freeze behind a human ruling was judged by the human who ruled. A
+    // re-freeze on the card's authority was judged by nobody: the quote check
+    // proves the words are in the card, and whether the words reach the
+    // assertion that changed is a judgment. So the panel reads that amendment's
+    // own diff — one seat, only where nobody was asked (ADR-0044).
+    const diffText = await diffRange(base.worktree, cardRuled.baseSha, cardRuled.sha);
     const round = await generalistReview(ctx, base, { cycle, diffText, priorConfirmed });
     if (round.fail) return { directive: round.fail };
     reviewOpen = [
@@ -382,6 +413,13 @@ async function runCycle(ctx, base, mode, { cycle }) {
   const confirmation = runEvents(ctx).some(
     (e) => e.event === 'layer-result' && e.cycle === cycle && e.confirmation,
   );
+  const supersedes = authorizedSupersedes(runEvents(ctx)).map((e) => ({
+    test: e.test,
+    assertion: e.assertion,
+    cardQuote: e.cardQuote,
+    clause: e.clause,
+    site: e.site,
+  }));
   const record = {
     runId: ctx.runId,
     cycle,
@@ -408,6 +446,11 @@ async function runCycle(ctx, base, mode, { cycle }) {
       ...resolvedNow.map((f) => ({ ...f, status: 'resolved' })),
     ],
     open: openIds,
+    // Every supersede this run has taken on the card's authority, with the card
+    // line each one rests on. A reviewer reads the record and the card side by
+    // side; nobody has to reconstruct which frozen test was amended and why
+    // (ADR-0044).
+    ...(supersedes.length > 0 && { supersedes }),
     verdict,
   };
   const recordPath = join(ctx.paths.runs, ctx.runId, `verdict-${cycle}.json`);
@@ -511,6 +554,9 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
   let nextId = 1 + runEvents(ctx).filter((e) => e.event === 'finding').length;
   const fresh = [];
   for (const f of report.findings) {
+    // The card claim rides the finding to the ladder, which is where the checks
+    // run and the authorization is either stamped or refused (ADR-0044).
+    const claim = supersedeClaim(f);
     const finding = {
       id: `F${nextId++}`,
       source: 'triage',
@@ -519,6 +565,7 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
       layers: f.layers,
       summary: f.summary,
       evidence: f.evidence,
+      ...(claim && { supersede: claim }),
     };
     // A finding about the artifacts the capture classed re-capturable is a
     // finding about a handled case. The capture made that call at the revert,
@@ -655,21 +702,34 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
   // this run has already carried into a re-freeze is spent: it rides one
   // amendment and one only, and the re-freeze that carried it says so on the
   // record.
+  //
+  // The card rules first. Every intent finding whose claim clears the checks is
+  // an authorized supersede, and a render whose intent set is authorized end to
+  // end needs no human: the citation becomes the ruling and rides the same
+  // re-freeze route (ADR-0044). One finding the card does not settle sends the
+  // whole set to the owner, because a park that carried half a conflict would
+  // ask a question the run had already half answered.
   let intentAnswer = null;
   if (intent.length > 0) {
-    const park = answeredPark(events, 'intent-conflict');
-    if (!park?.answer || park.answer.seq < last.seq) {
-      return parkDirective('intent-conflict', {
-        question:
-          'Verdict triage found an intent-level suite conflict:\n' +
-          intent.map((f) => `- ${f.summary} (evidence: ${f.evidence})`).join('\n'),
-        text:
-          'the decision the amendment must follow. Name the frozen test file to ' +
-          'amend when the ruling reaches the suite',
-        refs: [last.record],
-      });
+    const card = cardSupersedes(ctx, base, { intent, last });
+    if (card.ruling) intentAnswer = rulingCarried(events, card.ruling) ? null : card.ruling;
+    else {
+      const park = answeredPark(events, 'intent-conflict');
+      if (!park?.answer || park.answer.seq < last.seq) {
+        return parkDirective('intent-conflict', {
+          question:
+            'Verdict triage found an intent-level suite conflict:\n' +
+            intent.map((f) => `- ${f.summary} (evidence: ${f.evidence})`).join('\n') +
+            '\n\nThe card did not settle it:\n' +
+            card.refusals.map((r) => `- ${r}`).join('\n'),
+          text:
+            'the decision the amendment must follow. Name the frozen test file to ' +
+            'amend when the ruling reaches the suite',
+          refs: [last.record],
+        });
+      }
+      intentAnswer = rulingCarried(events, park.answer) ? null : park.answer;
     }
-    intentAnswer = rulingCarried(events, park.answer) ? null : park.answer;
   }
 
   // Env / harness → operational fix; a finding that persists after its fix
@@ -984,6 +1044,52 @@ export function refreezeOwed(events, renders, last, mode) {
 }
 
 /**
+ * The card's answer to a render's intent findings: a ruling when the card
+ * authorizes every one of them, and the refusals when it does not.
+ *
+ * The stamping is idempotent by render. The ladder re-enters a render whose
+ * later arm parked, and a second stamp would mint a second ruling seq: the
+ * re-freeze that already spent the first would read as unspent, and the suite
+ * would be amended twice for one collision.
+ *
+ * @returns {{ruling: object|null, refusals: string[]}}
+ */
+function cardSupersedes(ctx, base, { intent, last }) {
+  const refusals = [];
+  const stamped = [];
+  for (const finding of intent) {
+    const events = runEvents(ctx);
+    const already = authorizedSupersedes(events, { after: last.seq }).find(
+      (e) => e.finding === finding.id,
+    );
+    if (already) {
+      stamped.push(already);
+      continue;
+    }
+    const claim = finding.supersede ?? null;
+    const { event, refused } = authorizeSupersede(ctx.store, {
+      actor: ACTOR,
+      site: 'verdict',
+      claim,
+      findingId: finding.id,
+      cardText: base.cardText,
+      cardPath: base.cardPath,
+      worktree: base.worktree,
+      testPaths: base.testPaths,
+      frozen: base.frozenSuiteFiles,
+      pins: base.ownerPins,
+      enabled: base.cardAuthorizedSupersede,
+    });
+    if (event) stamped.push(event);
+    else refusals.push(`[${finding.id}] ${refusalLine(refused, claim)}`);
+  }
+  if (refusals.length > 0 || stamped.length !== intent.length) {
+    return { ruling: null, refusals };
+  }
+  return { ruling: supersedeRuling(stamped), refusals };
+}
+
+/**
  * Whether a re-freeze of this run already carried a ruling into the suite. The
  * amendment is where a ruling becomes a change to the frozen tests, and it
  * happens once: a second delivery of the same answer would re-brief a seat
@@ -1123,6 +1229,9 @@ async function runDevSeat(ctx, base, mode, { seat, buildRole, pass = null, phase
 
 async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
   const events = runEvents(ctx);
+  // The tree the amendment starts from. It rides the stamp so a later reader
+  // can diff what the amendment changed without guessing at a parent commit.
+  const baseSha = await headSha(base.worktree);
   // The frozen tests the ruling names. A conflict the owner settles against the
   // suite is settled nowhere else: the spec can say the criterion supersedes a
   // pin, and the pin still fails the run until the file itself changes. So the
@@ -1186,16 +1295,21 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
   });
   ctx.store.append('re-freeze', {
     actor: ACTOR,
+    baseSha,
     sha,
     files: report.suiteFiles,
     findings: findings.map((f) => f.id),
     // What the amendment carried, where it carried one. The ruling is spent
-    // here, and the record is what says so to every later reader.
+    // here, and the record is what says so to every later reader. `source`
+    // names which of the two authorities it came from: a human's answer to a
+    // park, or the story's own card (ADR-0044). A record written before the
+    // second source existed carries no `source` and reads as an answer.
     ...(intentAnswer && {
       ruling: {
-        park: intentAnswer.parkSeq,
+        ...(intentAnswer.parkSeq != null && { park: intentAnswer.parkSeq }),
         answer: intentAnswer.seq,
         actor: intentAnswer.actor,
+        ...(intentAnswer.source === 'card' && { source: 'card' }),
         files: ruled,
       },
     }),
@@ -1500,6 +1614,13 @@ function triageRole(base, reds, priorOpen, brief, dropped = [], recaptured = [],
     'A suite-defect finding also carries a depth: "test" (the test mis-encodes the spec), "spec" (the spec is wrong), or "intent" (the conflict reaches the intent).',
     'Classify only; fix nothing.',
     `The spec: ${base.specRef}`,
+    ...(base.cardAuthorizedSupersede && base.cardPath
+      ? [
+          `The intent card: ${base.cardPath} (in your working directory).`,
+          'On an intent-depth finding, classify the collision before you report it:',
+          ...SUPERSEDE_BRIEF_LINES,
+        ]
+      : []),
   ];
   if (priorOpen.length > 0) {
     lines.push('Prior open findings — list the ids that persist in "persisting"; report only new findings in "findings":');
@@ -1565,7 +1686,10 @@ function refreezeRole(base, findings, record, intentAnswer, ruled, brief) {
   ];
   if (intentAnswer) {
     lines.push(
-      'An intent conflict was escalated and answered. The ruling is the authority for this amendment:',
+      intentAnswer.source === 'card'
+        ? 'The intent card authorizes this amendment. Its own words are the authority, and the ' +
+            'amendment reaches exactly as far as they do:'
+        : 'An intent conflict was escalated and answered. The ruling is the authority for this amendment:',
       `- ${intentAnswer.option ?? intentAnswer.answer} (${intentAnswer.actor})`,
     );
     if (ruled.length > 0) {
@@ -1599,7 +1723,9 @@ function specAmendRole(base, findings, intentAnswer, ruled = [], defects = null)
   ];
   if (intentAnswer) {
     lines.push(
-      'An intent conflict was escalated and answered; honor the answer:',
+      intentAnswer.source === 'card'
+        ? 'The intent card authorizes a supersede; state it in the spec on the card\'s own words:'
+        : 'An intent conflict was escalated and answered; honor the answer:',
       `- ${intentAnswer.option ?? intentAnswer.answer} (${intentAnswer.actor})`,
     );
     if (ruled.length > 0) {
@@ -1672,6 +1798,13 @@ async function verdictBase(ctx, mode) {
       // nowhere else — the rest of the test paths stay the frozen suite.
       frozenExclusions: freezeExclusions(ctx.paths, ctx.runId),
       card: worktreeCard(worktree, ctx.payload.card),
+      // The card as written, beside the card as parsed. A supersede
+      // authorization rests on a line of prose, so the check reads the text
+      // rather than the fields the parser keeps (ADR-0044).
+      cardPath: typeof ctx.payload.card === 'string' ? ctx.payload.card : null,
+      cardText: worktreeCardText(worktree, ctx.payload.card),
+      ownerPins: freezeOwnerPins(ctx.paths, ctx.runId),
+      cardAuthorizedSupersede: config.lanes?.story?.cardAuthorizedSupersede !== false,
       tier: laneDiffPolicy(config, 'story'),
       specRef: join(ctx.paths.runs, ctx.runId, 'spec.md'),
       // The tree the spec was written against. Every post-freeze amendment is
@@ -1730,9 +1863,15 @@ async function verdictBase(ctx, mode) {
  * against, so this answers null rather than an empty card.
  */
 function worktreeCard(worktree, cardPath) {
+  const text = worktreeCardText(worktree, cardPath);
+  return text === null ? null : parseIntentCard(text).card;
+}
+
+/** The card's text, or null. A card nothing can read authorizes nothing. */
+function worktreeCardText(worktree, cardPath) {
   if (typeof cardPath !== 'string' || cardPath.length === 0) return null;
   try {
-    return parseIntentCard(readFileSync(join(worktree, cardPath), 'utf8')).card;
+    return readFileSync(join(worktree, cardPath), 'utf8');
   } catch {
     return null;
   }
@@ -1840,6 +1979,10 @@ function findingFromEvent(e) {
     evidence: e.evidence,
     ...(e.confirmed !== undefined && { confirmed: e.confirmed }),
     ...(e.approach && { approach: true }),
+    // The ladder re-derives every finding from the ledger, so a claim the
+    // triage seat made has to survive the round trip or the collision it
+    // settled reads as silence on the next entry (ADR-0044).
+    ...(e.supersede && { supersede: e.supersede }),
   };
 }
 

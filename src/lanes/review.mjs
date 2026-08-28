@@ -20,6 +20,7 @@
 // lane seats never reach it — they judge a diff (ADR-0042).
 import { runReportPath } from '../daemon/home.mjs';
 import { LENS_CRITERIA, furyPanel } from './lenses.mjs';
+import { authorizedSupersedes, supersedeLines } from './supersede.mjs';
 import {
   PROBE_REQUEST_PROPERTY,
   asksForProbe,
@@ -102,6 +103,7 @@ export const VERIFIER_SCHEMA = {
  */
 export async function furyRound(ctx, base, { cycle, diffText, diffFiles }) {
   const panel = furyPanel(base.lenses);
+  const supersedes = authorizedSupersedes(runEvents(ctx));
   const seats = Object.keys(panel).filter(
     (seat) =>
       seat !== 'fury-interface' ||
@@ -113,7 +115,7 @@ export async function furyRound(ctx, base, { cycle, diffText, diffFiles }) {
         seat,
         label: `${seat}-c${cycle}`,
         schema: reviewSchema(panel[seat]),
-        roleBlock: furyRole(panel[seat], base, diffText),
+        roleBlock: furyRole(panel[seat], base, diffText, supersedes),
         cwd: base.worktree,
         env: base.env,
         constitution: base.constitution,
@@ -139,7 +141,7 @@ export async function generalistReview(ctx, base, { cycle, diffText, priorConfir
     seat: 'generalist-review',
     label: `generalist-review-c${cycle}`,
     schema: reviewSchema(base.lenses),
-    roleBlock: generalistRole(base, diffText),
+    roleBlock: generalistRole(base, diffText, authorizedSupersedes(runEvents(ctx))),
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
@@ -344,7 +346,7 @@ function verifierCoverageDefects(items, results) {
 
 // -- role blocks -------------------------------------------------------------
 
-function furyRole(lenses, base, diffText) {
+function furyRole(lenses, base, diffText, supersedes = []) {
   return [
     `Review the candidate implementation diff through these lenses, and label every finding with its lens:`,
     ...lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
@@ -352,12 +354,13 @@ function furyRole(lenses, base, diffText) {
     'Judge the diff only. Do not fix anything; do not widen into unchanged code.',
     'Severity HIGH means the finding must block the ship. Cite evidence (file and line, or spec section) for every finding.',
     'Set "approach": true only when the finding names the implementation structure as wrong against the spec.',
+    ...(lenses.includes('spec') ? supersedeDutyLines(base, supersedes) : []),
     'Diff:',
     diffText,
   ].join('\n');
 }
 
-function generalistRole(base, diffText) {
+function generalistRole(base, diffText, supersedes = []) {
   return [
     'Review the diff below through these lenses, and label every finding with its lens:',
     ...base.lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
@@ -365,9 +368,30 @@ function generalistRole(base, diffText) {
     'Judge the diff only. Do not fix anything; do not widen into unchanged code.',
     'Severity HIGH means the finding must block the ship. Cite evidence (file and line, or spec section) for every finding.',
     'Set "approach": true only when the finding names the implementation structure as wrong against the spec.',
+    ...(base.lenses.includes('spec') ? supersedeDutyLines(base, supersedes) : []),
     'Diff:',
     diffText,
   ].join('\n');
+}
+
+/**
+ * The verification duty the spec lens carries when a run amended a frozen test
+ * on the card's authority. The quote check is mechanical and proves only that
+ * the words are in the card; whether the words REACH the collision is a
+ * judgment, and this is the seat that already judges the diff against the
+ * validated spec. A stretched authorization is a HIGH, and confirm-to-block
+ * does the rest (ADR-0044).
+ */
+function supersedeDutyLines(base, supersedes) {
+  if (supersedes.length === 0) return [];
+  return [
+    'This run amended frozen tests on the intent card\'s authority, without asking the owner.',
+    `The card: ${base.cardPath ?? '(the run names none)'}`,
+    'Verify every one of these against the card: the quoted line is in the card, and the scope it ' +
+      'states genuinely covers the assertion that changed.',
+    ...supersedeLines(supersedes),
+    'An authorization whose card line does not reach the change is a HIGH finding on the spec lens.',
+  ];
 }
 
 function verifierRole(base, items, brief, probe = null) {

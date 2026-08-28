@@ -63,6 +63,12 @@ of them is a design decision, not an implementation detail.
 - **Closed touchpoint catalog.** Only a named, closed set of park events may
   wait on the human. A new park state enters only through a design-level
   decision, never ad hoc from a seat.
+- **Never ask what a document already answers.** Where the answer is
+  arithmetic between two artifacts the harness holds, the harness does the
+  arithmetic and records what it did, with the source quoted. The human's
+  touch belongs where the intent is written, once, not at every run that meets
+  its consequence. What derives from a document survives a dead run, because
+  the document does.
 - **Pull, not push.** Notifications are two ledger streams (queued, loud)
   read by console sessions. No push channel.
 

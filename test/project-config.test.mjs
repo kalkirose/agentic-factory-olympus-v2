@@ -354,6 +354,21 @@ test('a raised adversary wave count is a positive integer or an error', () => {
   }
 });
 
+test('the card-authorized supersede switch is a boolean or an error', () => {
+  // The fallback path of ADR-0044: `false` returns every frozen-surface
+  // collision to the owner. Absent is the decision itself.
+  for (const value of [true, false]) {
+    const config = valid();
+    config.lanes.story.cardAuthorizedSupersede = value;
+    assert.deepEqual(validateProjectConfig(config), []);
+  }
+  for (const value of ['false', 0, null]) {
+    const bad = valid();
+    bad.lanes.story.cardAuthorizedSupersede = value;
+    assert.deepEqual(errorPaths(bad), ['lanes.story.cardAuthorizedSupersede'], String(value));
+  }
+});
+
 test('glob test paths validate clean', () => {
   const config = valid();
   config.repo.testPaths = ['test/', 'src/**/*.test.ts', '**/*.spec.ts'];

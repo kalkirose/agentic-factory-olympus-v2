@@ -41,6 +41,14 @@ import { runCommand } from './exec.mjs';
 import { probeCredentials } from './probes.mjs';
 import { readInheritance } from './resume.mjs';
 import {
+  SUPERSEDE_BRIEF_LINES,
+  SUPERSEDE_CLAIM_PROPERTIES,
+  authorizeSupersede,
+  ownerPinnedFiles,
+  refusalLine,
+  supersedeClaim,
+} from './supersede.mjs';
+import {
   SPEC_LINE_CAP,
   amendedSections,
   frozenExclusions,
@@ -163,12 +171,17 @@ export const SPEC_GATE_SCHEMA = {
     },
     // A conflict says so with a boolean. A field whose only "no" is emptiness
     // gets prose that means "no conflict" and parks the run for a human.
+    //
+    // The claim beside it says the card already settled the conflict, and it is
+    // the other way round: four facts or nothing, because the direction that
+    // skips the owner is the one that has to be earned (ADR-0044).
     intentConflict: {
       type: 'object',
       additionalProperties: false,
       properties: {
         conflict: { type: 'boolean' },
         detail: { type: 'string' },
+        ...SUPERSEDE_CLAIM_PROPERTIES,
       },
       required: ['conflict', 'detail'],
     },
@@ -742,6 +755,10 @@ async function specGate(ctx) {
     if (rounds.length === 0) {
       const r = await gateRound(ctx, base, { round: 1 });
       if (r.directive) return r.directive;
+      if (r.amend) {
+        const amend = await amendSpec(ctx, base, r.amend);
+        if (amend.fail) return amend.fail;
+      }
       continue;
     }
     // Convergence. Every counted round past the first must close something the
@@ -804,6 +821,13 @@ async function specGate(ctx) {
     }
     const r = await gateRound(ctx, base, { round: rounds.length + 1 });
     if (r.directive) return r.directive;
+    // The card settled a collision this round found. The amendment runs on the
+    // card's authority, exactly where an answered ruling's amendment runs, and
+    // the conflict burns no counted round either way (ADR-0044).
+    if (r.amend) {
+      const amend = await amendSpec(ctx, base, r.amend);
+      if (amend.fail) return amend.fail;
+    }
   }
 }
 
@@ -833,9 +857,30 @@ async function gateRound(ctx, base, { round }) {
   if (!result.ok) return { directive: seatFail(ctx, 'spec-gate', result) };
   const conflict = result.report.intentConflict;
   if (conflict?.conflict === true) {
+    const detail = conflict.detail?.trim() || result.report.summary;
+    // The card decides first. A collision its scope covers is an authorized
+    // supersede: the amendment runs on the card's own words, the stamp records
+    // which words, and the owner is never asked what the card already says
+    // (ADR-0044). Everything the checks refuse parks, with the refusal named.
+    const claim = supersedeClaim(conflict);
+    const { event, refused } = authorizeSupersede(ctx.store, {
+      actor: ACTOR,
+      site: 'spec-gate',
+      claim,
+      cardText: base.cardText,
+      cardPath: base.cardPath,
+      worktree: base.worktree,
+      testPaths: base.testPaths,
+      pins: [],
+      authorized: events
+        .filter((e) => e.event === 'supersede-authorized')
+        .map((e) => e.test),
+      enabled: base.cardAuthorizedSupersede,
+    });
+    if (event) return { amend: supersedeBrief(detail, event) };
     return {
       directive: parkDirective('intent-conflict', {
-        question: conflict.detail?.trim() || result.report.summary,
+        question: `${detail}\n\nThe card did not settle it: ${refusalLine(refused, claim)}`,
         text: 'the decision the amendment must follow',
         refs: [base.cardPath],
       }),
@@ -1308,6 +1353,11 @@ function freezeHandler(nextStage) {
     // is fixed, and every reader after it takes the two apart from one record
     // (ADR-0019). Everything else under the test paths is the frozen suite.
     const exclusions = frozenExclusions(readFileSync(base.specPath, 'utf8'), base.testPaths);
+    // The pins: frozen tests that carry the owner marker. They are read where
+    // the frozen set is fixed, for the reason the exclusions are — a later
+    // reader takes both off one record — and a pinned test's collision parks
+    // whatever the card says (ADR-0044).
+    const pinned = ownerPinnedFiles(base.worktree, suiteFiles);
     const record = {
       runId: ctx.runId,
       project: ctx.project,
@@ -1317,6 +1367,7 @@ function freezeHandler(nextStage) {
       suiteSha: sha,
       suiteFiles,
       frozenExclusions: exclusions,
+      ownerPinned: pinned,
       waves: initial.map((e) => ({ round: e.round, wave: e.wave, result: e.result, sha: e.sha })),
       killCount,
       amendmentKills,
@@ -1333,6 +1384,7 @@ function freezeHandler(nextStage) {
       dispositions: dispositions.length,
       files: suiteFiles.length,
       exclusions: exclusions.length,
+      ...(pinned.length > 0 && { pins: pinned.length }),
       record: recordPath,
     });
     return { next: nextStage };
@@ -1424,6 +1476,22 @@ function conflictBrief(conflict) {
   ].join('\n');
 }
 
+/**
+ * The brief of a collision the card settled. It carries the card's own line, so
+ * the amendment is written against the words the authorization rests on and the
+ * supersede clause the spec gains quotes the same source (ADR-0044).
+ */
+function supersedeBrief(detail, event) {
+  return [
+    'A frozen-surface collision was found, and the intent card authorizes the supersede.',
+    `Collision: ${detail}`,
+    `The card's ${event.clause} section says: "${event.cardQuote}"`,
+    `The frozen test ${event.test} pins: ${event.assertion}`,
+    'Amend the spec so the criterion states the supersede and names that test file in its ' +
+      'Supersedes clause. Go exactly as far as the quoted card line reaches and no further.',
+  ].join('\n');
+}
+
 function findingsBrief(findings) {
   return [
     'The spec gate found birth defects. Fix each finding:',
@@ -1449,7 +1517,11 @@ function gateRole(base, { scope, priorFindings }) {
     '- "note": prose the suite can prove against running code — a count of occurrences in the tree, the size of a pattern set, a name the code carries. A note does not hold the spec. It travels to the suite seat, which proves it with a test or reports it as unprovable.',
     'Never use "note" to pass a finding you cannot defend as suite-provable. When you are unsure which one a finding is, class it "blocking". An omitted severity counts as blocking.',
     'Report "intentConflict" on every pass: {"conflict": false, "detail": ""} when the spec and the card agree.',
-    'Set "conflict": true only when the spec and the card\'s intent disagree, and put the disagreement in "detail"; do not list it as a finding. A true value stops the run and waits for a human, so a note, an observation, or the word "none" belongs in the summary instead.',
+    'Set "conflict": true only when the spec and the card\'s intent disagree, and put the disagreement in "detail"; do not list it as a finding.',
+    base.cardAuthorizedSupersede
+      ? 'A conflict the card does not settle stops the run and waits for a human, so a note, an observation, or the word "none" belongs in the summary instead.'
+      : 'A true value stops the run and waits for a human, so a note, an observation, or the word "none" belongs in the summary instead.',
+    ...(base.cardAuthorizedSupersede ? SUPERSEDE_BRIEF_LINES : []),
   ];
   if (!scope) {
     lines.push('Review the whole spec.');
@@ -1608,6 +1680,10 @@ async function laneBase(ctx) {
     // a spec cannot plan a path the capture would refuse.
     tier: laneDiffPolicy(config, 'story'),
     adversaryWaves: story.adversaryWaves ?? DEFAULT_ADVERSARY_WAVES,
+    // The card decides a frozen-surface collision unless the project says
+    // otherwise. `false` restores the old default, where every collision is an
+    // owner question (ADR-0044).
+    cardAuthorizedSupersede: story.cardAuthorizedSupersede !== false,
     suiteArgv: config.commands[story.suiteCommand],
     env: runEnv(ctx, config),
     specPath: join(ctx.paths.runs, ctx.runId, 'spec.md'),

@@ -79,6 +79,7 @@ import { attemptOrder, noLogReason, PartialLogRefusal } from '../ship/forge.mjs'
 import { derivedLabels } from '../ship/labels.mjs';
 import { takeShipToken } from '../ship/token.mjs';
 import { parseIntentCard } from './card.mjs';
+import { authorizedSupersedes, supersedeLines } from './supersede.mjs';
 import { probeCredentials } from './probes.mjs';
 import { SUITE_SCHEMA } from './story.mjs';
 import {
@@ -1757,13 +1758,18 @@ async function cardSweep(ctx, base, merged) {
   await fetchClone(clone);
   await resetHard(base.worktree, merged.mergeSha);
   const cardDir = dirname(base.cardPath);
+  // The supersedes this run executed on the card's authority. The card is their
+  // durable home — a run ledger archives with its run, and the next story reads
+  // the card — and this sweep is the one mechanism already allowed to write a
+  // card on the default branch (ADR-0044).
+  const supersedes = authorizedSupersedes(runEvents(ctx));
   let brief = null;
   let report = null;
   for (let attempt = 1; ; attempt++) {
     const n = invocationCount(runEvents(ctx), 'card-sweep') + 1;
     const result = await ctx.runSeat({
       seat: 'card-sweep',
-      roleBlock: sweepRole(base, cardDir, brief),
+      roleBlock: sweepRole(base, cardDir, brief, supersedes),
       reportPath: runReportPath(ctx.paths, ctx.runId, `card-sweep-${n}`),
       schema: CARD_SWEEP_SCHEMA,
       cwd: base.worktree,
@@ -2121,7 +2127,7 @@ function testConflictRole(base, conflicts, brief) {
   ].join('\n');
 }
 
-function sweepRole(base, cardDir, brief) {
+function sweepRole(base, cardDir, brief, supersedes = []) {
   return [
     `The story ${base.storyKey ?? ''} shipped; sweep the intent cards.`,
     `The shipped spec: ${base.specRef}`,
@@ -2129,6 +2135,15 @@ function sweepRole(base, cardDir, brief) {
     'Update Blocked-by edges, sources, and open decisions so every card matches the repository as shipped.',
     "When the shipped work invalidates a card's goal or scope boundary, do not rewrite the card: list it under invalidated with the reason.",
     'List every card you edited under updatedCards.',
+    ...(supersedes.length > 0
+      ? [
+          'This run amended frozen tests on this card\'s own authority. Record each one on this ' +
+            `story's card (${base.cardPath}) under a "## Supersedes" heading, creating the heading ` +
+            'when the card has none. One line each: the test file, the assertion that changed, and ' +
+            'the card line the authorization rested on. Record them; do not re-judge them.',
+          ...supersedeLines(supersedes),
+        ]
+      : []),
     ...briefLines(brief),
   ].join('\n');
 }

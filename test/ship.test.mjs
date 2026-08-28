@@ -359,7 +359,7 @@ function furyClean() {
 }
 
 /** Seeds the freeze boundary: suite committed, spec written, freeze stamped. */
-function seedHandler() {
+function seedHandler(seedExtra = null) {
   return async (ctx) => {
     const worktree = ctx.payload.worktree;
     const full = join(worktree, 'tests/feature.test.mjs');
@@ -368,6 +368,7 @@ function seedHandler() {
     const sha = await commitAll(worktree, 'suite: seed');
     writeFileSync(join(ctx.paths.runs, ctx.runId, 'spec.md'), '# Spec\n\nf(x) returns 2*x.\n');
     ctx.store.append('freeze', { actor: 'daemon', sha, killCount: 3, amendmentKills: 0 });
+    if (seedExtra) await seedExtra(ctx);
     return { next: 'implementation' };
   };
 }
@@ -404,6 +405,7 @@ function shipFixture(
     // route requires: `--lane repair` is the only lane a ticket and an escape
     // reach, so a test of that route needs the real close-out behind it.
     repairShips = false,
+    seedExtra = null,
   } = {},
 ) {
   const root = tempDir();
@@ -455,7 +457,7 @@ function shipFixture(
     },
   };
   const lanes = {
-    story: { stages: ['seed', ...post.stages], handlers: { seed: seedHandler(), ...post.handlers } },
+    story: { stages: ['seed', ...post.stages], handlers: { seed: seedHandler(seedExtra), ...post.handlers } },
     repair: repairShips ? repairship : repairLane({ afterVerdict: done }),
     repairship,
   };
@@ -3055,4 +3057,50 @@ test('a run state the forge will not answer for leaves the log fetch as it was',
   const { runner } = checkOutputRunner({ log: 'assertion failed\n', runStatus: null });
   const out = await gitHubForge({ repo: 'acme/widgets', runner }).checkOutput('sha1', 'build-api');
   assert.match(out, /assertion failed/);
+});
+
+test('the close-out sweep records the supersedes the run executed on the card', async (t) => {
+  // The run ledger archives with the run. The card outlives it, and the sweep
+  // is the one mechanism allowed to write a card on the default branch, so the
+  // supersedes go home there (ADR-0044).
+  const fx = shipFixture(t, {
+    seedExtra: async (ctx) => {
+      ctx.store.append('supersede-authorized', {
+        actor: 'daemon',
+        site: 'verdict',
+        finding: 'F1',
+        test: 'tests/pinned.test.mjs',
+        assertion: 'the published export set is exactly ["f"]',
+        cardQuote: 'the export set an earlier story closed is extended here',
+        clause: 'scope-boundary',
+        card: 'stories/alpha.md',
+      });
+    },
+    seats: {
+      'card-sweep': () => ({
+        files: { 'stories/alpha.md': DEFAULT_CARD + '\n## Supersedes\n\n- tests/pinned.test.mjs\n' },
+        report: { updatedCards: ['stories/alpha.md'], invalidated: [], summary: 'swept' },
+      }),
+    },
+  });
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const sweep = fx.calls.find((c) => c.seat === 'card-sweep').prompt;
+  assert.ok(sweep.includes('on this card\'s own authority'));
+  assert.ok(sweep.includes('## Supersedes'));
+  assert.ok(sweep.includes('tests/pinned.test.mjs'));
+  assert.ok(sweep.includes('the export set an earlier story closed is extended here'));
+  assert.match(gitSync(['show', 'main:stories/alpha.md'], fx.origin), /## Supersedes/);
+});
+
+test('a run that superseded nothing tells the sweep nothing about supersedes', async (t) => {
+  const fx = shipFixture(t);
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  await waitClosed(fx.paths, runId);
+  assert.ok(!fx.calls.find((c) => c.seat === 'card-sweep').prompt.includes('## Supersedes'));
 });

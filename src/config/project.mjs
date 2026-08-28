@@ -229,6 +229,12 @@ function validateStoryLane(lane, commands, err) {
       err('lanes.story.adversaryWaves', 'must be a positive integer wave count');
     }
   }
+  // The fallback path of ADR-0044: `false` returns the lane to the old default,
+  // where every frozen-surface collision is an owner question. Absent is the
+  // decision, which is that the card settles what its scope covers.
+  if (lane.cardAuthorizedSupersede !== undefined && typeof lane.cardAuthorizedSupersede !== 'boolean') {
+    err('lanes.story.cardAuthorizedSupersede', 'must be a boolean');
+  }
 }
 
 // The judgment panel: the lenses the Fury round and the generalist seat carry.

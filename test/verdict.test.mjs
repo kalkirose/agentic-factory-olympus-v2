@@ -16,7 +16,16 @@ import { INSTANCE_EVENTS } from '../src/ledger/registry.mjs';
 import { ackFingerprint, findingFingerprint, standingAcksFor } from '../src/ledger/acks.mjs';
 import { writeControlCommand } from '../src/daemon/control.mjs';
 import { openLoud } from '../src/telemetry/readers.mjs';
-import { tempDir, removeDir, waitFor, initOriginRepo, projectConfigJson } from './helpers.mjs';
+import { OWNER_PIN_MARKER } from '../src/lanes/supersede.mjs';
+import {
+  tempDir,
+  removeDir,
+  waitFor,
+  initOriginRepo,
+  projectConfigJson,
+  FIXTURE_ACCEPTANCE,
+  FIXTURE_SPEC,
+} from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
 
@@ -216,6 +225,7 @@ function verdictFixture(t, opts) {
     exclusions = [],
     stack = null,
     composeCommand = undefined,
+    laneConfig = { story: { suiteCommand: 'suite' } },
   } = opts;
   const root = tempDir();
   const origin = initOriginRepo(join(root, 'origin'), {
@@ -223,7 +233,7 @@ function verdictFixture(t, opts) {
       repo,
       commands,
       gates: { tier1: gates },
-      lanes: { story: { suiteCommand: 'suite' } },
+      lanes: laneConfig,
       stack,
       ...(review && { review }),
       ...(diffPolicy && { diffPolicy }),
@@ -2518,5 +2528,343 @@ test('the repair lane keeps its regression test and answers its own tiers', asyn
   assert.match(
     fx.calls.find((c) => c.label === 'dev-2').prompt,
     /\.olympus\/cards\/invented\.md: the diff policy denies this path/,
+  );
+});
+
+// -- the card authorizes a supersede (ADR-0044) -------------------------------
+
+// The collision of the run that paid for this decision: the story's criterion
+// needs a second export, an earlier story's frozen pin says the set is closed,
+// and the card's own scope boundary already says the extension is this story's
+// work. The card is the ruling; nobody is asked.
+const SUPERSEDE_CARD = `---
+key: alpha-1
+title: Alpha feature
+---
+
+## Goal
+
+Publish g beside f in src/feature.mjs.
+
+## Scope boundary
+
+This story adds a second published export to the feature module; the export
+set an earlier story closed is extended here, not replaced.
+${FIXTURE_ACCEPTANCE}`;
+
+// The same card with the covering line gone: the scope says nothing about the
+// closed set, so the collision is a question again.
+const SILENT_CARD = `---
+key: alpha-1
+title: Alpha feature
+---
+
+## Goal
+
+Publish g beside f in src/feature.mjs.
+
+## Scope boundary
+
+Registration is another story's work. Nothing here reaches the export set.
+${FIXTURE_ACCEPTANCE}`;
+
+// The card line as a seat copies it: one line where the card wraps it over two.
+const COVERING_LINE =
+  'This story adds a second published export to the feature module; the export ' +
+  'set an earlier story closed is extended here, not replaced.';
+
+const PINNED_ASSERTION = 'the published export set is exactly ["f"]';
+
+// The same pin, with the owner's marker on it: a legal gate, a money path, or
+// anything else whose change is the owner's call and no seat's.
+const PINNED_OWNER_PINNED = `// ${OWNER_PIN_MARKER}: the closed export set is the owner's call.\n${PINNED_CLOSED}`;
+
+const COVERING_CLAIM = {
+  supersedes: 'tests/pinned.test.mjs',
+  supersedeAssertion: PINNED_ASSERTION,
+  supersedeQuote: COVERING_LINE,
+  supersedeClause: 'scope-boundary',
+};
+
+/** A triage behavior that reports the pin collision, with or without a claim. */
+function pinTriage(claim) {
+  return () => ({
+    report: {
+      findings: [
+        {
+          class: 'suite-defect',
+          depth: 'intent',
+          layers: ['unit'],
+          summary: 'the frozen pin closes the export set the criterion extends',
+          evidence: 'tests/pinned.test.mjs pins the set closed',
+          ...claim,
+        },
+      ],
+      persisting: [],
+      summary: 'triaged',
+    },
+  });
+}
+
+/** The suite seat of the pin scenario: it amends the file the ruling names. */
+function pinSuite() {
+  return ({ prompt }) =>
+    prompt.includes('tests/pinned.test.mjs')
+      ? {
+          files: { 'tests/pinned.test.mjs': PINNED_EXTENDED },
+          report: {
+            suiteFiles: ['tests/pinned.test.mjs'],
+            reds: [],
+            summary: 'the pin now admits the extension',
+          },
+        }
+      : {
+          files: { 'tests/pair.test.mjs': PAIR_TEST },
+          report: { suiteFiles: ['tests/pair.test.mjs'], reds: [], summary: 'nothing amended' },
+        };
+}
+
+function pinFixture(t, { card, seats, pinnedTest = PINNED_CLOSED, laneConfig }) {
+  return verdictFixture(t, {
+    seats,
+    specText: FIXTURE_SPEC,
+    originFiles: { 'cards/alpha.md': card },
+    suiteFiles: { 'tests/pair.test.mjs': PAIR_TEST, 'tests/pinned.test.mjs': pinnedTest },
+    ...(laneConfig && { laneConfig }),
+  });
+}
+
+test("a collision the card covers is superseded with no park, on the card's own words", async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': PAIR_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': pinTriage(COVERING_CLAIM),
+    ...furyClean(),
+    'spec-birth': () => ({ report: { amendedSections: ['AC-1'], summary: 'amended' } }),
+    suite: pinSuite(),
+    'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+  };
+  const fx = pinFixture(t, { card: SUPERSEDE_CARD, seats });
+  const { runId, worktree } = await fx.launch({ card: 'cards/alpha.md' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // Zero parks. The card answered the question before the run could ask it.
+  assert.deepEqual(
+    events.filter((e) => e.event === 'park').map((e) => e.type),
+    [],
+  );
+  // The record: the test, the assertion, the clause, and the card line verbatim.
+  const stamps = events.filter((e) => e.event === 'supersede-authorized');
+  assert.equal(stamps.length, 1);
+  assert.equal(stamps[0].site, 'verdict');
+  assert.equal(stamps[0].test, 'tests/pinned.test.mjs');
+  assert.equal(stamps[0].assertion, PINNED_ASSERTION);
+  assert.equal(stamps[0].clause, 'scope-boundary');
+  assert.equal(stamps[0].card, 'cards/alpha.md');
+  assert.equal(stamps[0].finding, events.find((e) => e.event === 'finding').id);
+  // Verbatim means verbatim: the quote is in the card, whitespace apart.
+  const card = readFileSync(join(worktree, 'cards/alpha.md'), 'utf8').replace(/\s+/g, ' ');
+  assert.ok(card.includes(stamps[0].cardQuote.replace(/\s+/g, ' ')));
+  // The citation rode the re-freeze route the human ruling rides, and says so.
+  const refreeze = events.filter((e) => e.event === 're-freeze');
+  assert.equal(refreeze.length, 1);
+  assert.equal(refreeze[0].ruling.source, 'card');
+  assert.equal(refreeze[0].ruling.actor, 'card');
+  assert.equal(refreeze[0].ruling.park, undefined);
+  assert.equal(refreeze[0].ruling.answer, stamps[0].seq);
+  assert.deepEqual(refreeze[0].ruling.files, ['tests/pinned.test.mjs']);
+  // The suite seat was told the card is the authority, and which file it reaches.
+  const refrozen = fx.calls.filter((c) => c.seat === 'suite');
+  assert.equal(refrozen.length, 1);
+  assert.ok(refrozen[0].prompt.includes('The intent card authorizes this amendment'));
+  assert.ok(refrozen[0].prompt.includes('- tests/pinned.test.mjs'));
+  assert.ok(refrozen[0].prompt.includes(COVERING_LINE));
+  // The verdict record carries the supersede for the reviewer who reads it.
+  const record = readRecord(fx.paths, runId, 2);
+  assert.deepEqual(record.supersedes, [
+    {
+      test: 'tests/pinned.test.mjs',
+      assertion: PINNED_ASSERTION,
+      cardQuote: COVERING_LINE,
+      clause: 'scope-boundary',
+      site: 'verdict',
+    },
+  ]);
+  // And a judgment seat read the amendment nobody was asked about, with the
+  // verification duty and the executed supersede in its brief.
+  const review = fx.calls.filter((c) => c.seat === 'generalist-review');
+  assert.equal(review.length, 1);
+  assert.ok(review[0].prompt.includes('without asking the owner'));
+  assert.ok(review[0].prompt.includes('tests/pinned.test.mjs'));
+  assert.ok(review[0].prompt.includes('is a HIGH finding on the spec lens'));
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.deepEqual(
+    renders.map((e) => [e.cycle, e.verdict]),
+    [
+      [1, 'red'],
+      [2, 'green'],
+    ],
+  );
+});
+
+test('the same collision on a card that does not cover it parks, exactly as before', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': PAIR_FEATURE }, report: { summary: 'implemented' } }),
+    // The seat read the card and found nothing that reaches the collision, so
+    // it makes no claim. Silence is the owner's question.
+    'verdict-triage': pinTriage({}),
+    ...furyClean(),
+    'spec-birth': () => ({ report: { amendedSections: ['AC-1'], summary: 'amended' } }),
+    suite: pinSuite(),
+  };
+  const fx = pinFixture(t, { card: SILENT_CARD, seats });
+  const { runId } = await fx.launch({ card: 'cards/alpha.md' });
+  const park = await waitParked(fx.paths, runId, 'intent-conflict');
+  assert.ok(park.question.includes('The card did not settle it'));
+  assert.ok(park.question.includes('the card is silent on it'));
+  fx.daemon.engine.answer({
+    runId,
+    actor: 'operator',
+    answer: 'AC-1 supersedes the closed set. Amend tests/pinned.test.mjs to admit g.',
+  });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // Nothing was authorized, and the human ruling took the route it always took.
+  assert.equal(events.filter((e) => e.event === 'supersede-authorized').length, 0);
+  const refreeze = events.find((e) => e.event === 're-freeze');
+  assert.equal(refreeze.ruling.source, undefined);
+  assert.equal(refreeze.ruling.actor, 'operator');
+  assert.equal(refreeze.ruling.park, park.seq);
+  // A ruling a human gave was judged by that human; no review seat re-reads it.
+  assert.ok(!fx.calls.some((c) => c.seat === 'generalist-review'));
+});
+
+test('an owner-pinned test parks even with a covering card line', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': PAIR_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': pinTriage(COVERING_CLAIM),
+    ...furyClean(),
+    'spec-birth': () => ({ report: { amendedSections: ['AC-1'], summary: 'amended' } }),
+    suite: pinSuite(),
+  };
+  const fx = pinFixture(t, { card: SUPERSEDE_CARD, seats, pinnedTest: PINNED_OWNER_PINNED });
+  const { runId } = await fx.launch({ card: 'cards/alpha.md' });
+  const park = await waitParked(fx.paths, runId, 'intent-conflict');
+  assert.ok(park.question.includes('carries the owner pin'));
+  assert.ok(park.question.includes('parks whatever'));
+  fx.daemon.engine.answer({
+    runId,
+    actor: 'operator',
+    answer: 'Granted. Amend tests/pinned.test.mjs to admit g.',
+  });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.filter((e) => e.event === 'supersede-authorized').length, 0);
+  assert.equal(events.find((e) => e.event === 're-freeze').ruling.actor, 'operator');
+});
+
+test('a fabricated quote fails at the stamp site and the run parks on it', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': PAIR_FEATURE }, report: { summary: 'implemented' } }),
+    // The card says nothing of the kind; the claim quotes it anyway.
+    'verdict-triage': pinTriage(COVERING_CLAIM),
+    ...furyClean(),
+    'spec-birth': () => ({ report: { amendedSections: ['AC-1'], summary: 'amended' } }),
+    suite: pinSuite(),
+  };
+  const fx = pinFixture(t, { card: SILENT_CARD, seats });
+  const { runId } = await fx.launch({ card: 'cards/alpha.md' });
+  const park = await waitParked(fx.paths, runId, 'intent-conflict');
+  assert.ok(park.question.includes('not in the card section the claim names'));
+  // Nothing was stamped: the run parked rather than proceed on the claim.
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  assert.equal(live.filter((e) => e.event === 'supersede-authorized').length, 0);
+  fx.daemon.engine.answer({
+    runId,
+    actor: 'operator',
+    answer: 'Granted anyway. Amend tests/pinned.test.mjs to admit g.',
+  });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.filter((e) => e.event === 'supersede-authorized').length, 0);
+});
+
+test('a stretched authorization surfaces as a confirmed HIGH on the spec lens', async (t) => {
+  let reviewed = 0;
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': PAIR_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': pinTriage(COVERING_CLAIM),
+    ...furyClean(),
+    'spec-birth': () => ({ report: { amendedSections: ['AC-1'], summary: 'amended' } }),
+    suite: pinSuite(),
+    // The quote is in the card, so the mechanical check passes it. Whether the
+    // line REACHES the assertion that changed is the judgment this seat makes.
+    'generalist-review': () =>
+      reviewed++ === 0
+        ? {
+            report: {
+              findings: [
+                {
+                  lens: 'spec',
+                  severity: 'HIGH',
+                  finding: 'the scope line covers a second export, not the closed-set shape the amendment dropped',
+                  evidence: 'tests/pinned.test.mjs',
+                },
+              ],
+              summary: 'the authorization is stretched',
+            },
+          }
+        : { report: { findings: [], summary: 'clean' } },
+    'fury-verifier': verifierSeat((item) =>
+      item.mode === 'confirm' ? { verdict: 'confirmed' } : { verdict: 'resolved' },
+    ),
+    'repair-dev': () => ({
+      files: { 'src/feature.mjs': PAIR_FEATURE },
+      report: { summary: 'narrowed' },
+    }),
+  };
+  const fx = pinFixture(t, { card: SUPERSEDE_CARD, seats });
+  const { runId } = await fx.launch({ card: 'cards/alpha.md' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const high = events.find((e) => e.event === 'finding' && e.lens === 'spec');
+  assert.equal(high.severity, 'HIGH');
+  assert.equal(high.confirmed, true);
+  assert.equal(high.advisory, undefined);
+  // It blocked the cycle behind the amendment, and the repair round closed it.
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.deepEqual(renders[1].open, [high.id]);
+  assert.equal(renders[2].verdict, 'green');
+  assert.equal(events.filter((e) => e.event === 'repair-round').length, 1);
+});
+
+test('a project that turns the decision off parks every collision, card or no card', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': PAIR_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': pinTriage(COVERING_CLAIM),
+    ...furyClean(),
+    'spec-birth': () => ({ report: { amendedSections: ['AC-1'], summary: 'amended' } }),
+    suite: pinSuite(),
+  };
+  const fx = pinFixture(t, {
+    card: SUPERSEDE_CARD,
+    seats,
+    laneConfig: { story: { suiteCommand: 'suite', cardAuthorizedSupersede: false } },
+  });
+  const { runId } = await fx.launch({ card: 'cards/alpha.md' });
+  const park = await waitParked(fx.paths, runId, 'intent-conflict');
+  assert.ok(park.question.includes('turned card-authorized supersedes off'));
+  fx.daemon.engine.answer({
+    runId,
+    actor: 'operator',
+    answer: 'Granted. Amend tests/pinned.test.mjs to admit g.',
+  });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.filter((e) => e.event === 'supersede-authorized').length, 0);
+  // The triage seat was never given the classification duty either.
+  assert.ok(
+    !fx.calls
+      .find((c) => c.seat === 'verdict-triage')
+      .prompt.includes('does the card'),
   );
 });
