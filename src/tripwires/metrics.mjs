@@ -38,7 +38,7 @@ export async function evaluateMetric(metric, input) {
 const IMPLEMENTATIONS = {
   'escapes-window': async ({ paths, project, window }) => {
     const ships = listShips(paths).filter((s) => s.project === project);
-    const escapes = readEscapeSet(paths.escapesLedger);
+    const escapes = projectEscapes(paths, project);
     const w = escapesWindow({ ships, escapes, windowSize: window });
     return {
       value: w.rate,
@@ -49,13 +49,7 @@ const IMPLEMENTATIONS = {
 
   'fast-path-escapes': async ({ paths, project, window }) => {
     const ships = listShips(paths).filter((s) => s.project === project);
-    // The escapes ledger is instance-scoped, and this reading is about one
-    // project's trade. Without the filter a second project's fast-path defects
-    // breach this project's band and propose turning this project's flag off.
-    // Every record the harness writes carries the project on its refs.
-    const escapes = readEscapeSet(paths.escapesLedger).filter(
-      (e) => e.refs?.project === project,
-    );
+    const escapes = projectEscapes(paths, project);
     const w = fastPathEscapesWindow({ ships, escapes, windowSize: window });
     return {
       value: w.counted,
@@ -230,7 +224,7 @@ const IMPLEMENTATIONS = {
     const frontier = computeFrontier({
       cards: source.cards,
       phases: source.config.graph.phases,
-      runs: storyRunsByKey(paths),
+      runs: storyRunsByKey(paths, { project }),
     });
     const minUnshipped = params?.minUnshipped ?? 5;
     return {
@@ -367,6 +361,22 @@ function climbingTail(readings, { growth, floorMb }) {
 }
 
 // -- shared collectors --------------------------------------------------------
+
+/**
+ * The escapes of one project. The escapes ledger is instance-scoped and every
+ * metric over it is a reading about one project, so the filter belongs here
+ * rather than at each call: without it a second project's defects breach this
+ * project's band, and the answer the breach hands over names this project's
+ * config line for a defect that is not in this project's repository.
+ *
+ * Every record the harness writes carries the project on its refs. One that
+ * does not is older than the ref and belongs to no project this can name, so it
+ * counts for none; a defect nothing can attribute is not evidence against a
+ * project the reader happened to ask about.
+ */
+function projectEscapes(paths, project) {
+  return readEscapeSet(paths.escapesLedger).filter((e) => e.refs?.project === project);
+}
 
 /**
  * Workspace releases of one project, in ledger order. A release with no

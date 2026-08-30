@@ -215,14 +215,18 @@ function semaphoreView(config, open, instanceEvents) {
 
 function mergedRoadmap(paths, sources) {
   const roadmap = new Map();
-  const parkedCards = new Set(openCardParks(paths).map((p) => p.card).filter(Boolean));
-  for (const source of sources.values()) {
+  for (const [project, source] of sources) {
     if (!source?.graph) continue;
     const frontier = computeFrontier({
       cards: source.graph.cards,
       phases: source.graph.config.graph.phases,
       runs: new Map(),
-      parkedCards,
+      // This project's parks and no other project's. A card path is a
+      // project's own word, and a shared set blocks a card here for a decision
+      // left open in another repository.
+      parkedCards: new Set(
+        openCardParks(paths, { project }).map((p) => p.card).filter(Boolean),
+      ),
     });
     for (const [key, position] of roadmapPositions(frontier)) {
       if (!roadmap.has(key)) roadmap.set(key, position);
@@ -246,12 +250,17 @@ function answeredToday(instanceEvents, allRuns, now) {
 
 function projectHealth(paths, project, ships, escapes, instanceEvents, source) {
   const projectShips = ships.filter((s) => s.project === project);
+  // The ships are this project's and the escapes have to be too. The escapes
+  // ledger is instance-scoped, so an unfiltered count reads a second project's
+  // defects as this project's quality bar and shows this project in breach for
+  // work in another repository. The instance-wide count is the tile above.
+  const projectEscapes = escapes.filter((e) => e.refs?.project === project);
   const registry = source?.config?.tripwires?.map(withTripwireDefaults) ?? null;
   const ceiling =
     registry?.find((t) => t.metric === 'escapes-window')?.breach?.value ?? 0.5;
   const window = escapesWindow({
     ships: projectShips,
-    escapes,
+    escapes: projectEscapes,
     windowSize: SHIPS_WINDOW,
     ceiling,
   });
@@ -267,7 +276,7 @@ function projectHealth(paths, project, ships, escapes, instanceEvents, source) {
     killRate: lastFreezeKillRate(paths, project),
     fury: { window: BASELINE_WINDOW, ...furyYieldBaseline(paths, project) },
     tripwires: tripwireBoard(instanceEvents, project, registry),
-    frontier: frontierView(paths, source),
+    frontier: frontierView(paths, project, source),
   };
 }
 
@@ -312,13 +321,15 @@ function tripwireBoard(instanceEvents, project, registry) {
   return { registryRead: registry !== null, wires };
 }
 
-function frontierView(paths, source) {
+function frontierView(paths, project, source) {
   if (!source?.graph) return null;
   const frontier = computeFrontier({
     cards: source.graph.cards,
     phases: source.graph.config.graph.phases,
-    runs: storyRunsByKey(paths),
-    parkedCards: new Set(openCardParks(paths).map((p) => p.card).filter(Boolean)),
+    runs: storyRunsByKey(paths, { project }),
+    parkedCards: new Set(
+      openCardParks(paths, { project }).map((p) => p.card).filter(Boolean),
+    ),
   });
   return {
     width: frontier.width,

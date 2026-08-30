@@ -209,8 +209,10 @@ if (command === 'status') {
     const frontier = computeFrontier({
       cards: source.cards,
       phases: source.config.graph.phases,
-      runs: storyRunsByKey(paths),
-      parkedCards: new Set(openCardParks(paths).map((p) => p.card).filter(Boolean)),
+      runs: storyRunsByKey(paths, { project }),
+      parkedCards: new Set(
+        openCardParks(paths, { project }).map((p) => p.card).filter(Boolean),
+      ),
     });
     console.log(renderFrontier(project, frontier));
   }

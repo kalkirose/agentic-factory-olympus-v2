@@ -119,6 +119,7 @@ test('escapes-window counts escapes after the oldest ship of the project', async
       defectLine: 'before the ship',
       detectionSource: 'human-report',
       attribution: 'unattributed',
+      refs: { project: 'p' },
     }),
     ...[2, 3, 4, 5, 6, 7].map((seq) =>
       line(seq, `2026-08-03T0${seq}:00:00Z`, 'escape-recorded', {
@@ -126,11 +127,22 @@ test('escapes-window counts escapes after the oldest ship of the project', async
         defectLine: `escape ${seq}`,
         detectionSource: 'human-report',
         attribution: 'unattributed',
+        refs: { project: 'p' },
       }),
     ),
+    // Another project's defect, inside p's window. The quality bar is a
+    // reading about one repository, and a breach here would name p's ceiling
+    // for work that is not in p.
+    line(8, '2026-08-04T00:00:00Z', 'escape-recorded', {
+      category: 'product-escape',
+      defectLine: 'a defect in q',
+      detectionSource: 'human-report',
+      attribution: 'unattributed',
+      refs: { project: 'q' },
+    }),
   ]);
   const result = await evaluateMetric('escapes-window', { paths, project: 'p', window: 10 });
-  // five counted (the chore and the pre-ship record stay out) over window 10
+  // five counted (the chore, the pre-ship record and q's defect stay out)
   assert.equal(result.value, 0.5);
   assert.equal(result.eligible, true);
   assert.deepEqual(result.detail, { ships: 1, counted: 5 });
@@ -551,6 +563,36 @@ test('frontier-width breaches only while enough stories remain', async (t) => {
   assert.equal(graphless.eligible, false);
 });
 
+test('the frontier width reads one project\'s run history', async (t) => {
+  // A story key is a project's own word. `q` shipped its own `s1`; `p` has
+  // shipped nothing, so every card of `p` is still unfinished and its first
+  // card is still the only launchable one. A history read across projects
+  // would take `s1` off p's frontier and widen the reading to the two cards
+  // behind it.
+  const paths = home(t);
+  writeLedger(runLedgerPath(paths, 'q1'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', {
+      project: 'q',
+      lane: 'story',
+      storyKey: 's1',
+    }),
+    line(2, '2026-08-02T00:00:00Z', 'run-closed', { state: 'shipped' }),
+  ]);
+  const cards = Array.from({ length: 7 }, (_, i) => ({
+    key: `s${i + 1}`,
+    path: `s${i + 1}.md`,
+    phase: null,
+    blockedBy: i > 0 ? ['s1'] : [],
+  }));
+  const width = await evaluateMetric('frontier-width', {
+    paths,
+    project: 'p',
+    readSource: async () => ({ config: { graph: { phases: [{ name: 'launch' }] } }, cards }),
+  });
+  assert.equal(width.value, 1);
+  assert.equal(width.detail.unfinished, 7);
+});
+
 // -- the watcher --------------------------------------------------------------
 
 function escapesFixture(paths, { counted }) {
@@ -566,6 +608,7 @@ function escapesFixture(paths, { counted }) {
         defectLine: `escape ${i + 1}`,
         detectionSource: 'human-report',
         attribution: 'unattributed',
+        refs: { project: 'p' },
       }),
     ),
   );

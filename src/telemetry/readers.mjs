@@ -200,12 +200,19 @@ export function fastPathShipOf(paths, { project, pr, mergeSha } = {}) {
  * classifies cards from this: `shipped` counts runs closed shipped, `spent`
  * counts runs closed failed or killed, `open` counts the rest. A run whose
  * key never landed (no `storyKey` payload, no freeze) matches no card.
+ *
+ * `project` narrows the history to one repository, and every caller that
+ * judges one project's cards has to pass it. A story key is a project's own
+ * word: two projects may both call a card `alpha-1`, and without the narrowing
+ * one project's shipped run marks the other project's card shipped, which
+ * takes that card off the frontier and launches nothing for it ever again.
  * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ * @param {{project?: string}} [scope] absent reads every project
  * @returns {Map<string, {open: number, shipped: number, spent: number, runIds: string[]}>}
  */
-export function storyRunsByKey(paths) {
+export function storyRunsByKey(paths, { project } = {}) {
   const map = new Map();
-  for (const { runId, events } of listRunEvents(paths, { lane: 'story' })) {
+  for (const { runId, events } of listRunEvents(paths, { lane: 'story', project })) {
     const launch = events.find((e) => e.event === 'run-launched');
     const key = launch.storyKey ?? events.find((e) => e.event === 'freeze')?.storyKey ?? null;
     if (!key) continue;

@@ -12,13 +12,28 @@ import { ledgerPathFor } from './readers.mjs';
  * Unanswered instance-ledger parks: card-invalidated and card-decision, both
  * from ship-time sweeps.
  * The frontier blocks these cards; the queue presents them.
+ *
+ * `project` narrows them to one repository, and the frontier passes it. A card
+ * path is a project's own word: two projects may both hold
+ * `.olympus/cards/alpha-1.md`, and without the narrowing one project's open
+ * decision blocks the other project's card, which is a card nobody can launch
+ * and no answer can unblock. A park stamped before the project rode these
+ * records matches no project and blocks nothing, which is the safe direction:
+ * the queue below still presents it, because the queue is instance-wide.
+ * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ * @param {{project?: string}} [scope] absent reads every project
  */
-export function openCardParks(paths) {
+export function openCardParks(paths, { project } = {}) {
   const events = readEvents(paths.instanceLedger);
   const answered = new Set(
     events.filter((e) => e.event === 'answer').map((e) => e.parkSeq),
   );
-  return events.filter((e) => e.event === 'park' && !answered.has(e.seq));
+  return events.filter(
+    (e) =>
+      e.event === 'park' &&
+      !answered.has(e.seq) &&
+      (project === undefined || e.project === project),
+  );
 }
 
 /**

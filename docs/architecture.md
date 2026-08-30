@@ -894,6 +894,21 @@ tripwire's trigger events re-evaluates it. A breach opens once, stays open
 until resolved, re-arms at resolution. Wall-clock as trigger stays banned;
 durations are legal metric data.
 
+Every metric reads ONE project. The ledgers are instance-scoped: the run
+ledgers hold every project's runs, the escapes ledger holds every project's
+defects, and the instance ledger holds every project's records. A metric is
+evaluated for a named project, its band comes from that project's config, and
+its breach answer names that project's config line, so a count that reaches
+across projects reports one repository in breach for work in another. Run-side
+metrics narrow through `listRunEvents({project})`; escape-side metrics narrow on
+the project the record carries on its refs. The same rule binds every
+ledger-derived reading that is presented per project, not metrics alone: the
+frontier reads one project's story-run history and one project's card parks,
+because a story key and a card path are each a project's own word and two
+projects may hold the same one. Instance-wide readings stay instance-wide and
+say so: the escalation queue, the center's open-escape tile and ship stats, and
+the eval review, which counts ships across the whole instance by design.
+
 One tripwire stands outside the registry, because it watches the harness and
 not a project's quality: stage duration. Its key is the heartbeat a stage in
 progress stamps — a poll beat or the engine's stage beat, so every stage keys

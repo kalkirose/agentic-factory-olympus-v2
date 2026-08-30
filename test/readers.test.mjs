@@ -16,6 +16,7 @@ import {
   listShips,
   listFastPathShips,
   fastPathShipOf,
+  storyRunsByKey,
 } from '../src/telemetry/readers.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
@@ -189,4 +190,35 @@ test('a fast-path ship is found by its request number or by its merge commit', (
   assert.equal(fastPathShipOf(paths, {}), null);
   // A project filter is a project filter.
   assert.equal(fastPathShipOf(paths, { project: 'q', pr: 7 }), null);
+});
+
+test('story-run history is read per project, because a story key is a project word', (t) => {
+  // Two projects may both call a card `alpha-1`. Without the narrowing, one
+  // project's shipped run marks the other project's card shipped, the frontier
+  // drops that card, and nothing launches for it again.
+  const paths = home(t);
+  const line = (seq, ts, event, extra = {}) => ({ seq, ts, event, actor: 'daemon', ...extra });
+  writeLedger(runLedgerPath(paths, 'p1'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', {
+      project: 'p',
+      lane: 'story',
+      storyKey: 'alpha-1',
+    }),
+  ]);
+  writeLedger(archivedRunLedgerPath(paths, 'q1'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', {
+      project: 'q',
+      lane: 'story',
+      storyKey: 'alpha-1',
+    }),
+    line(2, '2026-08-02T00:00:00Z', 'run-closed', { state: 'shipped' }),
+  ]);
+  const p = storyRunsByKey(paths, { project: 'p' });
+  assert.deepEqual(p.get('alpha-1'), { open: 1, shipped: 0, spent: 0, runIds: ['p1'] });
+  const q = storyRunsByKey(paths, { project: 'q' });
+  assert.deepEqual(q.get('alpha-1'), { open: 0, shipped: 1, spent: 0, runIds: ['q1'] });
+  // Unscoped still reads every project, for a caller that owns none.
+  const all = storyRunsByKey(paths);
+  assert.equal(all.get('alpha-1').open, 1);
+  assert.equal(all.get('alpha-1').shipped, 1);
 });

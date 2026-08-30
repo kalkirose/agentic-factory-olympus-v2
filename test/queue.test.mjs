@@ -83,6 +83,56 @@ test('parks and breaches join the queue and leave on answer / resolve', (t) => {
   instance.close();
 });
 
+test('the frontier reads one project\'s card parks, the queue reads them all', (t) => {
+  // A card path is a project's own word. Two projects can hold the same one,
+  // and an open decision in `q` may not block the card of that name in `p`:
+  // that card would be unlaunchable, and no answer inside `p` could clear it.
+  const paths = home(t);
+  const instance = openInstanceStore(paths);
+  instance.append('park', {
+    actor: 'daemon',
+    type: 'card-decision',
+    card: '.olympus/cards/alpha-1.md',
+    runId: 'q1',
+    project: 'q',
+    question: 'The ship of q left a decision open.',
+    gist: 'card-decision in q',
+  });
+  instance.append('park', {
+    actor: 'daemon',
+    type: 'card-invalidated',
+    card: '.olympus/cards/beta-2.md',
+    runId: 'p1',
+    project: 'p',
+    question: 'The ship of p invalidated beta-2.',
+    gist: 'card-invalidated in p',
+  });
+  assert.deepEqual(
+    openCardParks(paths, { project: 'p' }).map((e) => e.card),
+    ['.olympus/cards/beta-2.md'],
+  );
+  assert.deepEqual(
+    openCardParks(paths, { project: 'q' }).map((e) => e.card),
+    ['.olympus/cards/alpha-1.md'],
+  );
+  // Unscoped is the queue's own reading, and it stays instance-wide: an
+  // operator answers both from one list.
+  assert.equal(openCardParks(paths).length, 2);
+  // A park older than the project ref names no project, so it blocks no
+  // project's frontier while the queue still presents it.
+  instance.append('park', {
+    actor: 'daemon',
+    type: 'card-decision',
+    card: '.olympus/cards/gamma-3.md',
+    runId: 'r1',
+    question: 'An older park.',
+    gist: 'card-decision, no project',
+  });
+  assert.equal(openCardParks(paths, { project: 'p' }).length, 1);
+  assert.equal(openCardParks(paths).length, 3);
+  instance.close();
+});
+
 test('a pointer ahead of its record is nothing, and the queue answers the rest', (t) => {
   const paths = home(t);
   const run = openRunStore(paths, 'r1');

@@ -129,8 +129,10 @@ export class FrontierLauncher {
     const frontier = computeFrontier({
       cards: source.cards,
       phases: source.config.graph.phases,
-      runs: storyRunsByKey(d.paths),
-      parkedCards: new Set(openCardParks(d.paths).map((p) => p.card).filter(Boolean)),
+      runs: storyRunsByKey(d.paths, { project }),
+      parkedCards: new Set(
+        openCardParks(d.paths, { project }).map((p) => p.card).filter(Boolean),
+      ),
     });
     for (const card of frontier.launchable) {
       if (!d.running || !this.isArmed(project) || !d.engine.hasFreeSlot(project)) break;
@@ -242,7 +244,7 @@ export class FrontierLauncher {
       this.noteStarvation(project, failure);
       return;
     }
-    const runs = storyRunsByKey(d.paths);
+    const runs = storyRunsByKey(d.paths, { project });
     const unfinished = source.cards.filter(
       (card) => !card.key || !(runs.get(card.key)?.shipped > 0),
     ).length;

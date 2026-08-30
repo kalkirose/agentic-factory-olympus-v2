@@ -1946,6 +1946,10 @@ async function cardSweep(ctx, base, merged) {
       type: 'card-invalidated',
       card: inv.card,
       runId: ctx.runId,
+      // The repository the card belongs to. A card path is a project's own
+      // word, and the frontier that blocks on this park judges one project's
+      // cards (ADR-0008).
+      project: ctx.project,
       question: `The ship of ${base.storyKey ?? ctx.runId} invalidated ${inv.card}: ${inv.reason}`,
       // The one park with no run behind it, so the one park that offers no
       // abandon: the answer unblocks the card, and there is nothing to close
@@ -1975,6 +1979,7 @@ async function cardSweep(ctx, base, merged) {
       card: open.card,
       decision: open.question,
       runId: ctx.runId,
+      project: ctx.project,
       question:
         `The ship of ${base.storyKey ?? ctx.runId} left a decision open on ${open.card}: ` +
         open.question,

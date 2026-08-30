@@ -4,10 +4,10 @@
 // survives a restart, and a spent card never auto-relaunches.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
-import { scaffoldHome } from '../src/daemon/home.mjs';
+import { scaffoldHome, runLedgerPath } from '../src/daemon/home.mjs';
 import { writeControlCommand } from '../src/daemon/control.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { readStreamIndex } from '../src/telemetry/streams.mjs';
@@ -118,6 +118,36 @@ test('a multi-card fixture launches in roadmap order under the slot cap', async 
   assert.equal(arming[0].actor, 'human');
   // Every card shipped: the factory ran dry quietly, no starvation.
   assert.equal(starvations(paths).length, 0);
+});
+
+test('another project\'s shipped story key never takes a card off this frontier', async (t) => {
+  // A story key is a project's own word. `beta` shipped its own `s1`; alpha's
+  // `s1` is untouched and has to launch. A run history read across projects
+  // would mark alpha's card shipped and launch nothing for it, ever.
+  const { paths, daemon, launched } = fixture(t, {
+    cards: { s1: {}, s2: { blockedBy: ['s1'] } },
+    slotCap: 1,
+  });
+  const line = (seq, ts, event, extra = {}) => ({ seq, ts, event, actor: 'daemon', ...extra });
+  const foreign = runLedgerPath(paths, 'beta-1');
+  mkdirSync(dirname(foreign), { recursive: true });
+  writeFileSync(
+    foreign,
+    [
+      line(1, '2026-08-01T00:00:00Z', 'run-launched', {
+        project: 'beta',
+        lane: 'story',
+        storyKey: 's1',
+      }),
+      line(2, '2026-08-02T00:00:00Z', 'run-closed', { state: 'shipped' }),
+    ]
+      .map((l) => JSON.stringify(l))
+      .join('\n') + '\n',
+  );
+  await daemon.start();
+  writeControlCommand(paths, { command: 'arm', actor: 'human', project: 'alpha' });
+  await waitFor(() => launched.length === 2, { attempts: 300, label: 'both cards launched' });
+  assert.deepEqual(launched, ['s1', 's2']);
 });
 
 test('a park frees its slot, starvation lands loud once, an answer resumes', async (t) => {

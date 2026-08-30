@@ -124,12 +124,24 @@ function seededHome(t, { withClone = false } = {}) {
     category: 'product-escape',
     defectLine: 'checkout drops the coupon',
     detectionSource: 'human-report',
+    refs: { project: 'alpha' },
   });
   recordEscape(escapes, {
     actor: ACTOR,
     category: 'chore',
     defectLine: 'flaky harness fixture',
     detectionSource: 'harness-self',
+    refs: { project: 'alpha' },
+  });
+  // A second project's defect. The instance tile counts it; alpha's quality
+  // bar may not, because a breach there names alpha's ceiling for work that is
+  // in another repository.
+  recordEscape(escapes, {
+    actor: ACTOR,
+    category: 'product-escape',
+    defectLine: 'the other project loses a row',
+    detectionSource: 'human-report',
+    refs: { project: 'beta' },
   });
   fixEscape(escapes, {
     actor: ACTOR,
@@ -194,11 +206,14 @@ test('snapshot derives every section from the files alone', async (t) => {
   assert.equal(parkedRun.parkType, 'intent-conflict');
 
   // health
-  assert.equal(s.health.openEscapes, 1);
+  // The instance tile counts every open escape of the home, both projects.
+  assert.equal(s.health.openEscapes, 2);
   assert.equal(s.health.gateIntegrityOpen, 1);
   const health = s.health.byProject[0];
   assert.equal(health.project, 'alpha');
-  // Both escapes fall inside the 2-ship window; only product-escape counts.
+  // All three escapes fall inside the 2-ship window. Only alpha's
+  // product-escape counts: the chore is not a counted category, and the third
+  // is another project's defect.
   assert.equal(health.escapes.counted, 1);
   assert.equal(health.escapes.rate, 0.1);
   assert.deepEqual(
