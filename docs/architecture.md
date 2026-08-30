@@ -832,6 +832,17 @@ duration reading, and the stage beat keeps saying `waitingOn: hold` so the quiet
 reads as intentional. A pause governs entry and a hold governs progression; the
 two are independent, and both together are the full freeze (ADR-0040).
 
+`hold --run <id>` is the third scope. It settles at the same boundary and it
+lives in that run's ledger, as the `run-hold-changed` stamp the start folds back
+with the rest of the run's state. The widest standing hold governs: a project
+release lifts the project's hold and leaves a run somebody held by name held,
+and a per-run release under a project hold is refused with the hold that is
+actually stopping the run. `status` names who took a per-run hold and when, so a
+forgotten one is visible rather than silent. The scope is what an operator
+staggers a queue with: release one finished run, let it ship, then release the
+next, and each re-proves itself once against the base it will merge onto
+(ADR-0057).
+
 ## Frontier auto-launch
 
 The daemon fills a free slot from the story-graph frontier in roadmap order,

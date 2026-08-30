@@ -109,8 +109,13 @@ export function renderStatus(paths) {
     const flags = [
       ...(run.parked ? [`parked:${run.parkRecord?.type}`] : []),
       // The stage the run did not enter, because that is what a release will
-      // start and what the operator is deciding about.
-      ...(run.held ? [`held:${run.deferred}`] : []),
+      // start and what the operator is deciding about. A hold taken over this
+      // run alone also names who took it and when, standing or still settling:
+      // a per-run hold is the one an operator can forget, and a forgotten hold
+      // has to be visible rather than silent (ADR-0057). A project hold reads
+      // on the project line, so nothing repeats it here.
+      ...(run.held ? [`held:${run.deferred}${heldBy(run)}`] : []),
+      ...(!run.held && run.ownHold ? [`holding${heldBy(run)}`] : []),
       ...(run.violated ? ['violated'] : []),
     ];
     const budget = run.payload?.budget;
@@ -168,6 +173,11 @@ export function renderStatus(paths) {
     );
   }
   return lines.join('\n');
+}
+
+/** Who took this run's own hold and when, or nothing when no hold is its own. */
+function heldBy(run) {
+  return run.ownHold ? ` by ${run.ownHold.actor} at ${run.ownHold.ts}` : '';
 }
 
 /** The full queue, one answerable record per item. */

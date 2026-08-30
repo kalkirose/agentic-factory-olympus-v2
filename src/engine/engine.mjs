@@ -54,8 +54,9 @@ export class RunEngine {
    *   probePolicy is the machine's own statement about its credentials, read
    *   the same way: which of them a judgment seat's replay probe may carry,
    *   and which names this host calls secret at all (ADR-0042). isHeld
-   *   is the operator hold, read at every stage chain: a held project's runs
-   *   settle the stage they are in and stop at the boundary (ADR-0040).
+   *   is the operator hold over a project, read at every stage chain: a held
+   *   project's runs settle the stage they are in and stop at the boundary
+   *   (ADR-0040). A run's own hold rides the run itself (ADR-0057).
    *   onEvent fires on every run-store append, project-attributed and carrying
    *   its source ledger — the event key every in-daemon observer reads.
    *   archiveIo is the archive's filesystem seam, read at every call.
@@ -179,6 +180,10 @@ export class RunEngine {
       held: false,
       deferred: null,
       deferredResume: false,
+      // The hold this run carries alone, taken with `hold --run`: the actor and
+      // the instant, or null. It is a second, narrower statement beside the
+      // project hold, and a project release does not end it (ADR-0057).
+      ownHold: null,
       seats: new Set(),
       lastAnswer: null,
       pulse: null,
@@ -210,12 +215,38 @@ export class RunEngine {
   }
 
   /**
+   * Whether this run may not enter its next stage. Two statements can say so
+   * and the widest one governs: the hold over the run's project or the
+   * instance, and the run's own hold. Either alone holds the run, so a project
+   * release leaves an individually held run standing (ADR-0057).
+   */
+  runHeld(run) {
+    return run.ownHold !== null || this.isHeld(run.project);
+  }
+
+  /**
+   * Takes or lifts one run's own hold. The stamp is the state: the run's ledger
+   * carries it, a start folds it back, and nothing but another stamp changes
+   * it. Idempotent, so a second hold on a held run is not news.
+   * @returns {boolean} whether this call changed the run
+   */
+  setRunHold(runId, held, actor) {
+    const run = this.runs.get(runId);
+    if (!run || run.closed) throw new Error(`no open run: ${runId}`);
+    if (typeof actor !== 'string' || actor.length === 0) throw new Error('a hold requires an actor');
+    if ((run.ownHold !== null) === held) return false;
+    const line = run.store.append('run-hold-changed', { actor, held });
+    run.ownHold = held ? { actor, ts: line.ts } : null;
+    return true;
+  }
+
+  /**
    * The one place stages chain, and so the one place an operator hold is read.
    * A hold interrupts nothing: whatever ran has run, and the run stops here
    * rather than entering what comes next (ADR-0040).
    */
   chainStage(run, next) {
-    if (this.isHeld(run.project)) this.holdAt(run, next);
+    if (this.runHeld(run)) this.holdAt(run, next);
     else this.enterStage(run, next);
   }
 
@@ -243,16 +274,16 @@ export class RunEngine {
   }
 
   /**
-   * Enters the deferred stage of every run this release frees. A run whose
-   * project is still held by another scope stays where it is: the instance
-   * hold and a project hold are separate statements, and a release ends the
-   * one it names.
+   * Enters the deferred stage of every run this release frees. A run any other
+   * hold still covers stays where it is: the instance hold, a project hold and
+   * a run's own hold are separate statements, and a release ends the one it
+   * names.
    * @returns {string[]} the runs that entered their deferred stage
    */
   releaseHeldRuns() {
     const released = [];
     for (const run of [...this.runs.values()]) {
-      if (!run.held || run.closed || this.isHeld(run.project)) continue;
+      if (!run.held || run.closed || this.runHeld(run)) continue;
       // The flag drops before the stage runs, so a stage that settles inside
       // this call chains as any stage does and the release enters once.
       const { deferred, deferredResume } = run;
@@ -553,7 +584,7 @@ export class RunEngine {
     // human gives it — the wait on the human is over. Re-entering the stage is
     // the step the hold stops, so the run holds at the boundary it is already
     // standing at and the resumed stage runs at the release (ADR-0040).
-    if (this.isHeld(run.project)) this.holdAt(run, run.stage, { resumed: true });
+    if (this.runHeld(run)) this.holdAt(run, run.stage, { resumed: true });
     else this.executeStage(run);
   }
 
@@ -828,6 +859,7 @@ export class RunEngine {
       run.held = state.held;
       run.deferred = state.deferred;
       run.deferredResume = state.deferredResume;
+      run.ownHold = state.ownHold;
       // Before the run does anything else: a gate-layer attempt the dead
       // instance left open is closed here, and it has to be closed before the
       // stage re-enters, because a re-entered verdict stage stamps a fresh

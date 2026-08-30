@@ -200,13 +200,24 @@ export class Daemon {
     // stops the stage chain, and the runs drain themselves to their boundaries.
     // Auto-launch is the other lever and stays independent of this one: pause
     // governs entry, a hold governs progression (ADR-0040).
+    // A hold names one run, one project or the instance, and the widest one
+    // standing governs: a project release never lifts a hold an operator took
+    // over one run by hand (ADR-0057).
     this.registerCommand('hold', async (command) => {
-      this.hold.set({ project: command.project, all: command.all }, true, command.actor);
+      this.hold.set(
+        { runId: command.runId, project: command.project, all: command.all },
+        true,
+        command.actor,
+      );
     });
     this.registerCommand('release', async (command) => {
-      this.hold.set({ project: command.project, all: command.all }, false, command.actor);
-      // Every run this release frees, and no other: a run whose project is
-      // still held by the scope the release did not name stays where it is.
+      this.hold.set(
+        { runId: command.runId, project: command.project, all: command.all },
+        false,
+        command.actor,
+      );
+      // Every run this release frees, and no other: a run any hold the release
+      // did not name still covers stays where it is.
       this.engine.releaseHeldRuns();
     });
     this.registerCommand('launch', async (command) => {

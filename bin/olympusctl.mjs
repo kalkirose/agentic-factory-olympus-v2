@@ -9,8 +9,8 @@
 //   olympusctl answer   --home <dir> (--run <id> | --seq <n>) (--option <o> | --text <t>)
 //   olympusctl arm      --home <dir> --project <name>
 //   olympusctl pause    --home <dir> --project <name>
-//   olympusctl hold     --home <dir> (--project <name> | --all)
-//   olympusctl release  --home <dir> (--project <name> | --all)
+//   olympusctl hold     --home <dir> (--run <id> | --project <name> | --all)
+//   olympusctl release  --home <dir> (--run <id> | --project <name> | --all)
 //   olympusctl launch   --home <dir> --project <name> [--lane <name>]
 //                       [--card <path>] [--ticket <path>] [--escape <n>]
 //                       [--resume-from <runId>]
@@ -42,9 +42,13 @@
 // moment with no live seat. `release` enters the deferred stage of every run
 // the release frees. A hold survives a restart, which is what makes it the
 // restart recipe: hold, wait for the runs to reach a boundary or a park, stop,
-// start, release. --all holds the instance; a project hold and the instance
-// hold are separate statements, and a release ends the one it names. `status`
-// marks a held run with the stage it did not enter.
+// start, release. --all holds the instance, --project one project and --run one
+// run; the three are separate statements, the widest one standing governs, and
+// a release ends the one it names. So a project release leaves a run somebody
+// held by hand held, and a per-run release under a project hold is refused with
+// the hold that is actually stopping the run. `status` marks a held run with
+// the stage it did not enter, and names who held it and when when the hold is
+// the run's own.
 // The intake ticket is the repair lane's spec: --lane repair requires
 // --ticket, and no other lane accepts one. A repo-relative ticket path names
 // a ticket committed in the run worktree; an absolute path names a ticket in
@@ -163,9 +167,10 @@ if (!command) {
       '       answer: (--run <id> | --seq <n>) (--option <o> | --text <t>)\n' +
       '               queue prints the forms each park accepts; every run park\n' +
       '               takes --option abandon, which closes the run\n' +
-      '       hold:   (--project <name> | --all)\n' +
+      '       hold:   (--run <id> | --project <name> | --all)\n' +
       '               every run finishes its current stage and stops there;\n' +
       '               release enters the stage each held run did not enter\n' +
+      '               a project release leaves a run held with --run held\n' +
       '       launch: --project <name> [--lane <name>] [--card <path>] [--ticket <path>]\n' +
       '               [--escape <n>] [--resume-from <runId>]\n' +
       '       --lane repair requires --ticket; no other lane accepts one\n' +
@@ -229,19 +234,26 @@ if (command === 'status') {
 } else if (command === 'arm' || command === 'pause') {
   queueCommand(paths, { command, actor, project: need(opts, 'project') });
 } else if (command === 'hold' || command === 'release') {
-  // One scope per command. `--all` is the instance and `--project` is one
-  // project; naming both would leave the operator guessing which of the two
-  // the daemon acted on, and the two are not the same statement.
+  // One scope per command. `--all` is the instance, `--project` is one project
+  // and `--run` is one run; naming two would leave the operator guessing which
+  // of them the daemon acted on, and no two of them are the same statement.
   if (opts.all === true && opts.project !== undefined) {
     fail('--all holds the instance; drop --project');
   }
-  if (opts.all !== true && opts.project === undefined) {
-    fail(`${command} takes --project <name> or --all`);
+  if (opts.run !== undefined && (opts.project !== undefined || opts.all === true)) {
+    fail('--run holds one run; drop --project and --all');
+  }
+  if (opts.all !== true && opts.project === undefined && opts.run === undefined) {
+    fail(`${command} takes --run <id>, --project <name> or --all`);
   }
   queueCommand(paths, {
     command,
     actor,
-    ...(opts.all === true ? { all: true } : { project: opts.project }),
+    ...(opts.run !== undefined
+      ? { runId: opts.run }
+      : opts.all === true
+        ? { all: true }
+        : { project: opts.project }),
   });
 } else if (command === 'launch') {
   const project = need(opts, 'project');

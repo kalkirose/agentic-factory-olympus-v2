@@ -251,10 +251,12 @@ function writeTree(dir, files) {
  *
  * `tree` amends the project tree the origin is born with, path by path. Every
  * fixture builds its own temporary directory, so one scenario's amendment
- * reaches nothing but that scenario.
- * @param {{prefix: string, scenario: object, tree?: Record<string, string>}} opts
+ * reaches nothing but that scenario. `slotCap` is the project's slot cap: one
+ * run at a time unless a scenario is about two of them side by side.
+ * @param {{prefix: string, scenario: object, tree?: Record<string, string>,
+ *   slotCap?: number}} opts
  */
-export function buildFixture({ prefix, scenario, tree = {} }) {
+export function buildFixture({ prefix, scenario, tree = {}, slotCap = 1 }) {
   const root = mkdtempSync(join(tmpdir(), prefix));
   const seed = join(root, 'seed');
   const origin = join(root, 'origin.git');
@@ -289,7 +291,7 @@ export function buildFixture({ prefix, scenario, tree = {} }) {
             repoUrl: REPO_URL,
             defaultBranch: 'main',
             projectConfigPath: '.olympus/project.json',
-            slotCap: 1,
+            slotCap,
           },
         },
       },

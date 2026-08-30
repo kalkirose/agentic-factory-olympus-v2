@@ -21,6 +21,12 @@ export function deriveRunState(events) {
     held: false,
     deferred: null,
     deferredResume: false,
+    // The hold this run carries in its own right, taken with `hold --run`:
+    // the actor who took it and the instant they did, or null. A project hold
+    // is not this. A project hold lives in the instance ledger and covers every
+    // run of the project, so a project release leaves this one standing
+    // (ADR-0057).
+    ownHold: null,
     lastAnswer: null,
     closed: null,
   };
@@ -52,6 +58,9 @@ export function deriveRunState(events) {
         state.held = false;
         state.deferred = null;
         state.deferredResume = false;
+        break;
+      case 'run-hold-changed':
+        state.ownHold = e.held === true ? { actor: e.actor, ts: e.ts } : null;
         break;
       case 'park':
         state.parkSeq = e.seq;

@@ -49,7 +49,7 @@ test('an operator hold stops the stage chain and survives a restart', async (t) 
   // A scope is settled at the console, before anything reaches the inbox.
   const refused = ctlRefused(fx, ['hold']);
   assert.equal(refused.status, 2);
-  assert.match(refused.stderr, /hold takes --project <name> or --all/);
+  assert.match(refused.stderr, /hold takes --run <id>, --project <name> or --all/);
   const both = ctlRefused(fx, ['hold', '--project', PROJECT, '--all']);
   assert.equal(both.status, 2);
   assert.match(both.stderr, /--all holds the instance; drop --project/);

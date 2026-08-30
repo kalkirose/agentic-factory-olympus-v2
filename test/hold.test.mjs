@@ -265,7 +265,7 @@ test('a hold names one project or the instance, and only a transition stamps', (
   const { paths, hold } = holdFixture(t);
   assert.throws(() => hold.set({ project: 'alpha' }, true, ''), /actor/);
   assert.throws(() => hold.set({}, true, 'human'), /--project.*--all/);
-  assert.throws(() => hold.set({ project: 'alpha', all: true }, true, 'human'), /never both/);
+  assert.throws(() => hold.set({ project: 'alpha', all: true }, true, 'human'), /never two of them/);
   assert.throws(() => hold.set({ project: 'nope' }, true, 'human'), /unknown project: nope/);
   assert.throws(() => hold.set({ project: INSTANCE_SCOPE }, true, 'human'), /hold it with --all/);
 
@@ -306,12 +306,15 @@ test('a hold state is folded back from the ledger', (t) => {
 
 // -- the assembled daemon ----------------------------------------------------
 
-function daemonHome(t) {
+function daemonHome(t, { slotCap } = {}) {
   const home = tempDir();
   const paths = scaffoldHome(home);
   writeFileSync(
     paths.instanceConfig,
-    JSON.stringify({ version: 1, projects: { proj: { repoUrl: 'file:///fixture' } } }) + '\n',
+    JSON.stringify({
+      version: 1,
+      projects: { proj: { repoUrl: 'file:///fixture', ...(slotCap !== undefined && { slotCap }) } },
+    }) + '\n',
   );
   t.after(() => removeDir(home));
   return { home, paths };
@@ -454,6 +457,351 @@ function rejectedReasons(paths) {
     .filter((name) => name.endsWith('.reason.txt'))
     .map((name) => readFileSync(join(paths.controlRejected, name), 'utf8'));
 }
+
+// -- one run at a time -------------------------------------------------------
+// A hold over one run is the third scope. What is under test here is that it
+// settles at the same boundary, that the three scopes resolve in one direction
+// only, and that a run's own hold outlives the process that took it (ADR-0057).
+
+/** A two-stage lane whose first stage waits for the test to let it finish. */
+function gatedLane(ran) {
+  const gate = { release: null };
+  const lane = {
+    stages: ['work', 'ship'],
+    handlers: {
+      work: async () => {
+        ran.push('work');
+        await new Promise((resolve) => {
+          gate.release = resolve;
+        });
+        return { next: 'ship' };
+      },
+      ship: () => {
+        ran.push('ship');
+        return { close: { state: 'shipped' } };
+      },
+    },
+  };
+  return { gate, lane };
+}
+
+/** An operator hold over a real engine: the pair a per-run hold needs. */
+function runHoldFixture(t, projects = { proj: {} }) {
+  const home = tempDir();
+  const paths = scaffoldHome(home);
+  const ledger = openInstanceStore(paths);
+  const engine = new RunEngine(paths, {
+    getSlotCap: () => 3,
+    isHeld: (project) => hold.isHeld(project),
+  });
+  const hold = new OperatorHold({ paths, ledger, config: { projects }, engine });
+  t.after(async () => {
+    await engine.stop();
+    ledger.close();
+    removeDir(home);
+  });
+  return { paths, engine, hold };
+}
+
+function runHoldStamps(paths, runId) {
+  return events(paths, runId).filter((e) => e.event === 'run-hold-changed');
+}
+
+test('a hold over one run names that run and no other scope', (t) => {
+  const { engine, hold } = runHoldFixture(t);
+  engine.registerLane('story', {
+    stages: ['work'],
+    handlers: { work: () => ({ park: { type: 'open-decisions', question: 'q', options: ['a'] } }) },
+  });
+  engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+
+  assert.throws(() => hold.set({ runId: 'r1' }, true, ''), /actor/);
+  assert.throws(
+    () => hold.set({ runId: 'r1', project: 'proj' }, true, 'human'),
+    /never two of them/,
+  );
+  assert.throws(() => hold.set({ runId: 'r1', all: true }, true, 'human'), /never two of them/);
+  assert.throws(() => hold.set({ runId: '' }, true, 'human'), /--run <id>/);
+  assert.throws(() => hold.set({ runId: 'ghost' }, true, 'human'), /unknown open run: ghost/);
+
+  // Only a transition stamps, here as everywhere.
+  assert.equal(hold.set({ runId: 'r1' }, true, 'human'), true);
+  assert.equal(hold.set({ runId: 'r1' }, true, 'human'), false);
+  assert.equal(hold.set({ runId: 'r1' }, false, 'human'), true);
+});
+
+test('a hold over one run settles at the boundary and leaves its neighbour alone', async (t) => {
+  const { paths, engine, hold } = runHoldFixture(t);
+  const ran = [];
+  const { gate, lane } = gatedLane(ran);
+  engine.registerLane('story', lane);
+  engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+  await waitFor(() => gate.release !== null, { label: 'the first stage to be running' });
+
+  // The hold lands while the stage is running: it takes the boundary behind
+  // this handler, exactly as a project hold does, and it interrupts nothing.
+  hold.set({ runId: 'r1' }, true, 'human');
+  gate.release();
+  await waitFor(() => events(paths, 'r1').some((e) => e.event === 'stage-held'), { label: 'held' });
+  assert.deepEqual(ran, ['work']);
+  assert.deepEqual(names(paths, 'r1'), [
+    'run-launched',
+    'stage-entered',
+    'run-hold-changed',
+    'stage-held',
+  ]);
+  const stamp = runHoldStamps(paths, 'r1')[0];
+  assert.equal(stamp.held, true);
+  assert.equal(stamp.actor, 'human');
+  // A held run is not inert, and it keeps its slot: a per-run hold is the same
+  // operational statement a project hold is.
+  assert.equal(engine.activeCount('proj'), 1);
+  assert.deepEqual(engine.checkLiveness(), []);
+  // And the project is untouched, so nothing else of the project is held.
+  assert.equal(hold.isHeld('proj'), false);
+
+  hold.set({ runId: 'r1' }, false, 'human');
+  assert.deepEqual(engine.releaseHeldRuns(), ['r1']);
+  await waitFor(() => ran.includes('ship'), { label: 'the deferred stage ran' });
+  assert.equal(events(paths, 'r1').filter((e) => e.event === 'stage-released').length, 1);
+});
+
+test('two runs held one at a time release one at a time, in either order', async (t) => {
+  for (const first of ['r1', 'r2']) {
+    const { paths, engine, hold } = runHoldFixture(t);
+    const ran = { r1: [], r2: [] };
+    const second = first === 'r1' ? 'r2' : 'r1';
+    engine.registerLane('story', {
+      stages: ['work', 'ship'],
+      handlers: {
+        work: (ctx) => {
+          ran[ctx.runId].push('work');
+          return { next: 'ship' };
+        },
+        ship: (ctx) => {
+          ran[ctx.runId].push('ship');
+          return { close: { state: 'shipped' } };
+        },
+      },
+    });
+    // Both runs launch into a project hold, so both stop at the same boundary
+    // without a race, and each then takes a hold of its own.
+    hold.set({ project: 'proj' }, true, 'human');
+    engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+    engine.launch({ runId: 'r2', project: 'proj', lane: 'story' });
+    await waitFor(
+      () => ['r1', 'r2'].every((id) => events(paths, id).some((e) => e.event === 'stage-held')),
+      { label: 'both runs to hold' },
+    );
+    hold.set({ runId: 'r1' }, true, 'human');
+    hold.set({ runId: 'r2' }, true, 'human');
+
+    // The project release lifts the project's hold and nothing else: neither
+    // run moves, because each is still held in its own right.
+    hold.set({ project: 'proj' }, false, 'human');
+    assert.deepEqual(engine.releaseHeldRuns(), []);
+    assert.deepEqual(ran, { r1: ['work'], r2: ['work'] });
+
+    hold.set({ runId: first }, false, 'human');
+    assert.deepEqual(engine.releaseHeldRuns(), [first]);
+    await waitFor(() => ran[first].includes('ship'), { label: `${first} to enter its next stage` });
+    assert.deepEqual(ran[second], ['work'], `${second} moved on ${first}'s release`);
+
+    hold.set({ runId: second }, false, 'human');
+    assert.deepEqual(engine.releaseHeldRuns(), [second]);
+    await waitFor(() => ran[second].includes('ship'), { label: `${second} to enter its next stage` });
+  }
+});
+
+test('a per-run release under a wider hold is refused and names it', (t) => {
+  const { paths, engine, hold } = runHoldFixture(t);
+  engine.registerLane('story', {
+    stages: ['work'],
+    handlers: { work: () => ({ park: { type: 'open-decisions', question: 'q', options: ['a'] } }) },
+  });
+  engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+
+  // A hold is never refused. A wide hold is a reason for a run to stand still;
+  // it is no reason to refuse a narrower statement that it stands still too.
+  hold.set({ project: 'proj' }, true, 'human');
+  assert.equal(hold.set({ runId: 'r1' }, true, 'human'), true);
+
+  assert.throws(
+    () => hold.set({ runId: 'r1' }, false, 'human'),
+    /run r1 is held by the proj project hold; release --project proj before this run/,
+  );
+  hold.set({ all: true }, true, 'human');
+  assert.throws(
+    () => hold.set({ runId: 'r1' }, false, 'human'),
+    /run r1 is held by the instance hold; release --all before this run/,
+  );
+  // The refusals stamped nothing and changed nothing.
+  assert.equal(runHoldStamps(paths, 'r1').length, 1);
+  assert.notEqual(engine.runs.get('r1').ownHold, null);
+
+  // With the wider scopes lifted the same release lands.
+  hold.set({ all: true }, false, 'human');
+  hold.set({ project: 'proj' }, false, 'human');
+  assert.equal(hold.set({ runId: 'r1' }, false, 'human'), true);
+});
+
+test("a run's own hold comes back from its own ledger", async (t) => {
+  const home = tempDir();
+  const paths = scaffoldHome(home);
+  const ledger = openInstanceStore(paths);
+  t.after(() => {
+    ledger.close();
+    removeDir(home);
+  });
+  const ran = [];
+  const { gate, lane } = gatedLane(ran);
+  const config = { projects: { proj: {} } };
+
+  const first = new RunEngine(paths, { getSlotCap: () => 3, isHeld: (p) => firstHold.isHeld(p) });
+  const firstHold = new OperatorHold({ paths, ledger, config, engine: first });
+  first.registerLane('story', lane);
+  first.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+  await waitFor(() => gate.release !== null, { label: 'the first stage to be running' });
+  firstHold.set({ runId: 'r1' }, true, 'human');
+  gate.release();
+  await waitFor(() => events(paths, 'r1').some((e) => e.event === 'stage-held'), { label: 'held' });
+  await first.stop();
+
+  const state = deriveRunState(events(paths, 'r1'));
+  assert.equal(state.held, true);
+  assert.equal(state.ownHold.actor, 'human');
+  assert.equal(typeof state.ownHold.ts, 'string');
+
+  const second = new RunEngine(paths, { getSlotCap: () => 3, isHeld: (p) => secondHold.isHeld(p) });
+  const secondHold = new OperatorHold({ paths, ledger, config, engine: second });
+  t.after(async () => {
+    await second.stop();
+  });
+  second.registerLane('story', lane);
+  assert.deepEqual(second.resumeOpenRuns(), ['r1']);
+  // The restart lost no work and crossed nothing, and the hold is still the
+  // run's own: a project release would not lift it now either.
+  assert.deepEqual(ran, ['work']);
+  assert.deepEqual(second.releaseHeldRuns(), []);
+  secondHold.set({ project: 'proj' }, false, 'human');
+  assert.deepEqual(second.releaseHeldRuns(), []);
+
+  secondHold.set({ runId: 'r1' }, false, 'human');
+  assert.deepEqual(second.releaseHeldRuns(), ['r1']);
+  await waitFor(() => ran.includes('ship'), { label: 'the deferred stage ran after the restart' });
+});
+
+test('a ledger written before per-run holds existed reads as a run with none', () => {
+  const state = deriveRunState([
+    { seq: 1, ts: '2026-08-26T00:00:00.000Z', event: 'run-launched', project: 'proj', lane: 'story' },
+    { seq: 2, ts: '2026-08-26T00:00:00.000Z', event: 'stage-entered', stage: 'work' },
+    { seq: 3, ts: '2026-08-26T00:10:00.000Z', event: 'stage-held', stage: 'work', next: 'ship' },
+  ]);
+  assert.equal(state.held, true);
+  assert.equal(state.ownHold, null);
+});
+
+test('the console holds one run, and status says who held it and when', async (t) => {
+  const { home, paths } = daemonHome(t, { slotCap: 2 });
+  const ran = { r1: [], r2: [] };
+  const lanes = {
+    story: {
+      stages: ['build', 'ship'],
+      handlers: {
+        build: (ctx) => {
+          ran[ctx.runId].push('build');
+          return { next: 'ship' };
+        },
+        ship: (ctx) => {
+          ran[ctx.runId].push('ship');
+          return { close: { state: 'shipped' } };
+        },
+      },
+    },
+  };
+  const first = new Daemon(home, { lanes });
+  await first.start();
+  await command(paths, { command: 'hold', actor: 'operator', project: 'proj' }, () =>
+    first.hold.isHeld('proj'),
+  );
+  first.engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+  first.engine.launch({ runId: 'r2', project: 'proj', lane: 'story' });
+  await waitFor(
+    () => ['r1', 'r2'].every((id) => events(paths, id).some((e) => e.event === 'stage-held')),
+    { label: 'both runs to hold' },
+  );
+
+  await command(paths, { command: 'hold', actor: 'console:ana', runId: 'r1' }, () =>
+    runHoldStamps(paths, 'r1').length === 1,
+  );
+  const stamp = runHoldStamps(paths, 'r1')[0];
+  assert.equal(stamp.held, true);
+  assert.equal(stamp.actor, 'console:ana');
+  // A run held by hand names the hand and the hour; a run the project stopped
+  // reads exactly as it did before.
+  const status = renderStatus(paths);
+  assert.match(status, new RegExp(`r1 story @ build .*\\[held:ship by console:ana at ${stamp.ts}\\]`));
+  assert.match(status, /r2 story @ build .*\[held:ship\]/);
+
+  // Lifting the project hold frees the run the project held, and leaves the
+  // one an operator stopped by name exactly where it is.
+  await command(paths, { command: 'release', actor: 'operator', project: 'proj' }, () =>
+    events(paths, 'r2').some((e) => e.event === 'stage-released'),
+  );
+  await waitFor(() => ran.r2.includes('ship'), { label: 'r2 to enter its deferred stage' });
+  assert.deepEqual(ran.r1, ['build']);
+
+  // The restart the hold outlives.
+  await first.stop();
+  const second = new Daemon(home, { lanes });
+  t.after(async () => {
+    await second.stop();
+  });
+  await second.start();
+  assert.deepEqual(ran.r1, ['build']);
+  assert.match(renderStatus(paths), /r1 story @ build .*\[held:ship by console:ana/);
+
+  await command(paths, { command: 'release', actor: 'console:ana', runId: 'r1' }, () =>
+    events(paths, 'r1').some((e) => e.event === 'stage-released'),
+  );
+  await waitFor(() => ran.r1.includes('ship'), { label: 'r1 to enter its deferred stage' });
+  assert.equal(runHoldStamps(paths, 'r1').length, 2);
+});
+
+test('the daemon refuses a per-run release under a project hold', async (t) => {
+  const { home, paths } = daemonHome(t);
+  const ran = [];
+  const lanes = {
+    story: {
+      stages: ['build', 'ship'],
+      handlers: {
+        build: () => {
+          ran.push('build');
+          return { next: 'ship' };
+        },
+        ship: () => ({ close: { state: 'shipped' } }),
+      },
+    },
+  };
+  const daemon = new Daemon(home, { lanes });
+  t.after(async () => {
+    await daemon.stop();
+  });
+  await daemon.start();
+  await command(paths, { command: 'hold', actor: 'operator', project: 'proj' }, () =>
+    daemon.hold.isHeld('proj'),
+  );
+  daemon.engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+  await waitFor(() => events(paths, 'r1').some((e) => e.event === 'stage-held'), { label: 'held' });
+
+  writeControlCommand(paths, { command: 'release', actor: 'operator', runId: 'r1' });
+  const reason = await waitFor(() => rejectedReasons(paths).find((text) => text.includes('r1')), {
+    label: 'the refusal',
+  });
+  assert.match(reason, /release --project proj before this run/);
+  assert.deepEqual(ran, ['build']);
+  assert.deepEqual(runHoldStamps(paths, 'r1'), []);
+});
 
 // -- what a hold is worth in a reading ---------------------------------------
 

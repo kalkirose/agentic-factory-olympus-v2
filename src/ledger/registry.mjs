@@ -104,6 +104,13 @@ export const RUN_EVENTS = new Set([
   // opened, so the two bound a span every duration reading takes out of the
   // run's work (ADR-0040).
   'stage-released',
+  // One operator hold taken over this run alone, or lifted from it. The whole
+  // store of a per-run hold: it is folded at every daemon start, so the hold
+  // outlives the instance that took it exactly as a project hold does, and it
+  // carries the actor and the instant a reader needs to see who stopped this
+  // run and when. A ledger written before this event existed folds to no
+  // per-run hold, which is what those runs had (ADR-0057).
+  'run-hold-changed',
   // What a stage that runs no seat says while it polls: what it waits on, the
   // poll outcomes behind the stamp, and its time in the stage. One stamp per
   // batch of poll outcomes, so a stage that settles quickly stamps none and a

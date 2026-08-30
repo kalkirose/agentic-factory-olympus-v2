@@ -4,16 +4,22 @@
 // factory drains itself down to boundaries and parks and then stands still
 // until somebody releases it (ADR-0040).
 //
-// The state is a per-scope flag and nothing else. A scope is one project, or
-// the instance — `hold --all`, which is what a restart takes. The two are
-// separate statements and a run is held while either stands: a release ends
-// the one it names, never both, because an operator who held the instance and
-// then released one project asked for one project, and the instance hold is
-// still the reason the rest of the factory is quiet.
+// There are three scopes and they are three separate statements: one run
+// (`hold --run`), one project (`hold --project`), and the instance
+// (`hold --all`, which is what a restart takes). A run is held while any of
+// them stands, so the widest hold governs and a release ends the one it names.
+// An operator who held the instance and then released one project asked for one
+// project, and the instance hold is still the reason the rest of the factory is
+// quiet; an operator who released a project never asked to free the one run
+// they had stopped by hand, so that run stays stopped (ADR-0057).
 //
-// Nothing is held in memory that the ledger does not say. Every transition
-// stamps `hold-changed`, and a start folds the stamps back, so a hold survives
-// the restart it was taken for — which is the whole point of it.
+// The two wide scopes are flags in the instance ledger. A run's own hold is a
+// stamp in that run's ledger, where the run's other state already lives, so it
+// travels with the run and needs no index of its own.
+//
+// Nothing is held in memory that a ledger does not say. Every transition
+// stamps, and a start folds the stamps back, so a hold survives the restart it
+// was taken for, which is the whole point of it.
 import { readEvents } from '../ledger/ledger.mjs';
 
 /** The scope of a hold over every project of the instance. */
@@ -44,21 +50,25 @@ export class OperatorHold {
   /**
    * Applies a hold/release command. Idempotent: only a transition stamps, so a
    * second `hold` on a held project is not news and answers false.
-   * @param {{project?: string, all?: boolean}} target
+   * @param {{runId?: string, project?: string, all?: boolean}} target
    * @param {boolean} held
    * @param {string} actor
    * @returns {boolean} whether this call changed the state
    */
-  set({ project, all }, held, actor) {
+  set({ runId, project, all }, held, actor) {
     if (typeof actor !== 'string' || actor.length === 0) {
       throw new Error('a hold requires an actor');
     }
-    if (all !== true && (typeof project !== 'string' || project.length === 0)) {
-      throw new Error('a hold names one project (--project) or the instance (--all)');
+    const named = [runId !== undefined, project !== undefined, all === true].filter(Boolean);
+    if (named.length > 1) {
+      throw new Error('a hold names one run, one project or the instance, never two of them');
     }
-    if (all === true && project !== undefined) {
-      throw new Error('a hold names one project or the instance, never both');
+    if (named.length === 0) {
+      throw new Error(
+        'a hold names one run (--run), one project (--project) or the instance (--all)',
+      );
     }
+    if (runId !== undefined) return this.setRun(runId, held, actor);
     if (all !== true && project === INSTANCE_SCOPE) {
       // The instance scope is a key in the same fold, so a project of that
       // name would hold everything under a command that named one thing.
@@ -76,6 +86,40 @@ export class OperatorHold {
       ...(all === true ? { all: true } : { project }),
     });
     return true;
+  }
+
+  /**
+   * One run's own hold. The stamp lands in that run's ledger, through the
+   * engine that owns it, so a per-run hold reads and replays exactly where the
+   * rest of the run's state does.
+   *
+   * A release is refused while a wider hold stands. Lifting the narrow one
+   * under the wide one would answer the operator with a run that still cannot
+   * move, and the operator would read the release as a release; the refusal
+   * names the hold that is actually stopping the run, so the next command is
+   * the right one (ADR-0057).
+   * @returns {boolean} whether this call changed the run
+   */
+  setRun(runId, held, actor) {
+    if (typeof runId !== 'string' || runId.length === 0) {
+      throw new Error('a run hold names one run (--run <id>)');
+    }
+    const run = this.daemon.engine?.runs.get(runId);
+    if (!run || run.closed) throw new Error(`unknown open run: ${runId}`);
+    if (!held) {
+      if (this.isScopeHeld(INSTANCE_SCOPE)) {
+        throw new Error(
+          `run ${runId} is held by the instance hold; release --all before this run`,
+        );
+      }
+      if (this.isScopeHeld(run.project)) {
+        throw new Error(
+          `run ${runId} is held by the ${run.project} project hold; ` +
+            `release --project ${run.project} before this run`,
+        );
+      }
+    }
+    return this.daemon.engine.setRunHold(runId, held, actor);
   }
 }
 

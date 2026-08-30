@@ -40,7 +40,8 @@ inbox like every command, with the usual done/rejected trace. The instance
 scope and a project scope are separate statements, and a run is held while
 either stands: a release ends the one it names. An operator who held the
 instance and then released one project asked for one project, and the instance
-hold is still the reason the rest of the factory is quiet.
+hold is still the reason the rest of the factory is quiet. A third scope, one
+run, was added on the same rule (ADR-0057).
 
 **A hold survives a restart, because that is what it is for.** The state is an
 instance-ledger event, `hold-changed`, folded at every daemon start the way
