@@ -198,7 +198,23 @@ test('the run worktree is created over its own residue, branch included', async 
   // directory, and `worktree add -b` refuses a branch that exists.
   writeFileSync(join(first.path, 'src', 'app.txt'), 'half a run\n');
   gitSync(['add', '-A'], first.path);
-  gitSync(['-c', 'commit.gpgsign=false', 'commit', '-m', 'half a run'], first.path);
+  // The identity rides the command. This worktree belongs to the harness's own
+  // bare clone, which carries no identity of its own, and a host that has no
+  // global one would refuse the commit.
+  gitSync(
+    [
+      '-c',
+      'user.email=harness@test.invalid',
+      '-c',
+      'user.name=Harness Test',
+      '-c',
+      'commit.gpgsign=false',
+      'commit',
+      '-m',
+      'half a run',
+    ],
+    first.path,
+  );
   assert.notEqual(gitSync(['rev-parse', 'run/r1'], clone).trim(), base);
 
   const again = await addRunWorktree(clone, paths, 'r1', 'main');
