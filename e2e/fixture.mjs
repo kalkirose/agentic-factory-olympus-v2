@@ -55,7 +55,9 @@ export const SMOKE_HELD_MB = 48;
 export const SMOKE_CEILING_MB = 512;
 const SMOKE_HOLD_MS = 1400;
 
-const PROJECT_CONFIG = {
+/** The project config the origin is born with. Exported so a scenario that
+ * needs a different section can amend that one and keep the rest. */
+export const PROJECT_CONFIG = {
   version: 1,
   repo: { testPaths: ['tests'], uiPaths: [] },
   commands: {
@@ -246,9 +248,13 @@ function writeTree(dir, files) {
  * Builds one fixture: a bare origin holding the project tree, a daemon home
  * with an instance config that points at the two stubs, and the scenario file
  * the stub seat reads.
- * @param {{prefix: string, scenario: object}} opts
+ *
+ * `tree` amends the project tree the origin is born with, path by path. Every
+ * fixture builds its own temporary directory, so one scenario's amendment
+ * reaches nothing but that scenario.
+ * @param {{prefix: string, scenario: object, tree?: Record<string, string>}} opts
  */
-export function buildFixture({ prefix, scenario }) {
+export function buildFixture({ prefix, scenario, tree = {} }) {
   const root = mkdtempSync(join(tmpdir(), prefix));
   const seed = join(root, 'seed');
   const origin = join(root, 'origin.git');
@@ -259,7 +265,7 @@ export function buildFixture({ prefix, scenario }) {
   git(['init', '-b', 'main', '.'], seed);
   git(['config', 'user.email', 'fixture@olympus.invalid'], seed);
   git(['config', 'user.name', 'Olympus Fixture'], seed);
-  writeTree(seed, fixtureTree());
+  writeTree(seed, { ...fixtureTree(), ...tree });
   git(['add', '-A'], seed);
   git(['-c', 'commit.gpgsign=false', 'commit', '-m', 'init'], seed);
   git(['clone', '--bare', '--quiet', seed, origin]);

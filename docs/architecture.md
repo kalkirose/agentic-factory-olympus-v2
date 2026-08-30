@@ -494,6 +494,22 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   here, before any request, and takes the merge round it always took.
   `UPDATE_CAP` bounds the updates per implementation pass; past it the run
   falls through to the ship-stage update.
+- **The clean-rebase fast path** (ADR-0056), config-gated on
+  `gates.fastPathShip` and off by default. With the flag on, a moved tree may
+  keep the certification it already earned when two mechanical checks agree
+  that the incoming work and the story cannot interact: the story's own diff is
+  byte-identical before and after the merge, and every file the default branch
+  gained is disjoint from the story's own diff, from every declared suite input
+  of the certified verdict (ADR-0046), from the suite files and from the
+  project's shared breadth list (`gates.breadthGround`). An undeclared suite, an
+  intersection, a change the harness cannot read as a file of this repository,
+  and any error inside the check itself all take the full re-verdict: the path
+  removes work and never blocks a ship. A taken fast path stamps
+  `fast-path-ship` with the commits examined, the declaration version and the
+  certification it reuses, and the close carries `fastPath`. The cost of the
+  trade is counted under the `fast-path-escape` defect kind and watched by the
+  `fast-path-escapes` tripwire, whose answer is the one config line that
+  reverts it.
 - **The restore anchor** (ADR-0033) is the sha every story-mode restore of the
   test paths checks out from: the freeze commit until the tree merges the
   default branch, the merge commit after that, and the commit a fresh pass was
@@ -585,7 +601,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   bounded tail with no part carrying the failure and no file holding the whole
   stream either — a stream that outgrew the file's own cap, or an attempt with
   no file at all (ADR-0043) — and `capture-takeback` on both take-back
-  records. Those two add no alert and answer to nobody — the
+  records, and `fast-path-escape` on an escape that came in through a ship
+  which carried its certification over a moved base (ADR-0056), attributed to
+  that ship from the ledgers rather than from the report. Those three add no
+  alert and answer to nobody — the
   record they ride already has whatever loudness it is owed, and the word is
   there so a class that recurs after its fix is a count.
 - **One red regime.** CI reds get one automatic re-run of failed jobs, then
@@ -827,7 +846,10 @@ escapes that have no repair run before it looks at the story frontier
 goes loud instead, and the stamp resolves when the repairs launch or the
 escapes it names are fixed some other way.
 
-An escape ends by a repair run's close-out (`escape-fixed`, with the run, the
+An escape begins at a red-merge conversion, or at the console with
+`olympusctl escape`: one post-merge defect, the request or the merge commit it
+came in on, and the harness's own attribution of that merge. It ends by a
+repair run's close-out (`escape-fixed`, with the run, the
 PR and the merge behind it) or by an operator's fixed-mark
 (`escape-marked-fixed`, `olympusctl fixed`, with the required evidence it
 stands on). The owed set retires on either; the ledger says which happened.
@@ -874,6 +896,12 @@ worst run of the last five judged, and the longest ship-token queue wait of the
 last five runs that queued. All four were set from the ledgers that showed the
 condition, and all take the machinery's ordinary escalation — a queued breach,
 open until a human answers it (ADR-0010).
+
+One standing tripwire watches a trade rather than a defect: fast-path escapes
+over the last ten ships (ADR-0056). Two of them breach, and the answer it
+carries is the one config line that turns the fast path off. It is the whole
+measurement of a guarantee the owner thinned on purpose, so it is the one
+tripwire whose answer is a reversal rather than a repair.
 
 Standing quality bar (written by the runs themselves, never mined from
 outside): escaped defects per story (ceiling 0.5, rolling 10 ships),

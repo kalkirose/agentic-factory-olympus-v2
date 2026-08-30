@@ -104,6 +104,29 @@ test('a project may turn part-level carrying off, and only with a boolean', () =
   assert.equal(withProjectDefaults(valid()).gates.partTargeting, undefined);
 });
 
+test('the fast path is off unless a project says otherwise, in a boolean', () => {
+  // ADR-0056. Absent is the decision: a moved base costs the full re-verdict
+  // it always cost, and the one-line revert is this flag going back to false.
+  assert.equal(withProjectDefaults(valid()).gates.fastPathShip, undefined);
+  const on = valid();
+  on.gates.fastPathShip = true;
+  on.gates.breadthGround = ['package-lock.json', 'db/migrations'];
+  assert.deepEqual(validateProjectConfig(on), []);
+  assert.equal(withProjectDefaults(on).gates.fastPathShip, true);
+  for (const bad of ['yes', 1, null]) {
+    const wrong = valid();
+    wrong.gates.fastPathShip = bad;
+    assert.deepEqual(errorPaths(wrong), ['gates.fastPathShip'], String(bad));
+  }
+  // The breadth list is path entries, in the same vocabulary as every other
+  // path section. A list of something else would be read as ground and be none.
+  for (const bad of ['src', [''], [2], {}]) {
+    const wrong = valid();
+    wrong.gates.breadthGround = bad;
+    assert.deepEqual(errorPaths(wrong), ['gates.breadthGround'], JSON.stringify(bad));
+  }
+});
+
 test('duplicate layer names and tripwire ids are refused', () => {
   const config = valid();
   config.gates.tier1.push({ name: 'lint', command: 'lint' });

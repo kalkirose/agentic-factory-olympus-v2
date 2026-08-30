@@ -17,6 +17,16 @@ export const TRIPWIRE_METRICS = {
     defaultWindow: 10,
     defaultTriggers: ['escape-recorded', 'escape-fixed', 'merged'],
   },
+  // Defects that reached the default branch through a ship which carried its
+  // certification over a moved base (ADR-0056), counted over the last N
+  // shipped story-lane runs. The reading is what turns the owner's
+  // speed-over-residual-safety trade into a number, and the band is where the
+  // trade stops paying.
+  'fast-path-escapes': {
+    unit: 'ships',
+    defaultWindow: 10,
+    defaultTriggers: ['escape-recorded', 'merged'],
+  },
   // Adversary kill rate at freeze: kills over initial waves, summed across
   // the last N freeze records. The band is a floor set from the baseline.
   'kill-rate': {
@@ -131,6 +141,19 @@ export function standingTripwires() {
       window: 10,
       breach: { op: '>', value: 0.5 },
       answer: 'restore the gate cut behind the escapes; keeping it is a recorded human exception',
+    },
+    // The one-line revert, proposed by the machine that measures the trade.
+    // Two escapes in ten ships is the reading that says the fast path is
+    // carrying defects the certification would have caught, and the answer is
+    // the config line that turns it off (ADR-0056).
+    {
+      id: 'fast-path-escapes',
+      metric: 'fast-path-escapes',
+      window: 10,
+      breach: { op: '>', value: 1 },
+      answer:
+        'set gates.fastPathShip to false: the fast path is carrying defects ' +
+        'past the certification, and the trade it was turned on for is losing',
     },
     {
       id: 'ci-critical-path-p50',

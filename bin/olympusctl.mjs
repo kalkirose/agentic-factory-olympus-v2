@@ -20,6 +20,9 @@
 //                       --fix <ref> [--note <text>]
 //   olympusctl fixed    --home <dir> --escape <n> --evidence <text>
 //                       [--note <text>]
+//   olympusctl escape   --home <dir> --project <name> --defect <text>
+//                       [--category <c>] [--source <s>] [--pr <n>]
+//                       [--merge <sha>] [--note <text>]
 // --home falls back to OLYMPUSD_HOME; --actor defaults to
 // console:<os user>:<session>, where the session half separates two operator
 // sessions on one login (src/console/identity.mjs; OLYMPUS_CONSOLE_ID names
@@ -52,6 +55,12 @@
 // that file. `fixed` is the other route: it marks an escape fixed out of band,
 // takes the evidence it stands on, and stamps an event of its own — an
 // operator's statement is never filed as a repair run's fix-back.
+// `escape` is the intake at the other end: one defect somebody found in the
+// product after it shipped, recorded so a ticket and a repair can be written
+// against it. --pr or --merge names the merge it came in on; when that merge
+// was a ship which carried its certification over a moved base, the record is
+// filed under the closed fast-path kind and attributed to that run, which is
+// what the standing fast-path tripwire counts.
 // --resume-from names a prior story run whose freeze the new run inherits:
 // story lane only, and the prior run supplies the card, so --card is refused
 // beside it.
@@ -89,6 +98,11 @@ function parseArgs(argv) {
     ['--note', 'note'],
     ['--fingerprint', 'fingerprint'],
     ['--fix', 'fix'],
+    ['--defect', 'defect'],
+    ['--category', 'category'],
+    ['--source', 'source'],
+    ['--pr', 'pr'],
+    ['--merge', 'merge'],
   ]);
   // The one option that carries no value: a scope is the instance or it is not.
   const switches = new Map([['--all', 'all']]);
@@ -124,6 +138,15 @@ function escapeSeq(value) {
   return seq;
 }
 
+/** A request is named by the number the forge gave it. */
+function prNumber(value) {
+  const pr = Number(value);
+  if (!Number.isInteger(pr) || pr < 1) {
+    fail(`--pr takes the request number the forge gave it (got: ${value})`);
+  }
+  return pr;
+}
+
 function queueCommand(paths, command) {
   const file = writeControlCommand(paths, command);
   // The stamp is printed because it is derived: this is where an operator
@@ -136,7 +159,7 @@ function queueCommand(paths, command) {
 const { command, opts } = parseArgs(process.argv.slice(2));
 if (!command) {
   fail(
-    'usage: olympusctl <status|queue|frontier|answer|arm|pause|hold|release|launch|kill|resolve|revoke|fixed> --home <dir>\n' +
+    'usage: olympusctl <status|queue|frontier|answer|arm|pause|hold|release|launch|kill|resolve|revoke|fixed|escape> --home <dir>\n' +
       '       answer: (--run <id> | --seq <n>) (--option <o> | --text <t>)\n' +
       '               queue prints the forms each park accepts; every run park\n' +
       '               takes --option abandon, which closes the run\n' +
@@ -152,7 +175,11 @@ if (!command) {
       '       revoke: --project <name> --fingerprint <f> --fix <ref> [--note <text>]\n' +
       '               ends the one acknowledgment its fingerprint names; status lists them\n' +
       '       fixed:  --escape <n> --evidence <text> [--note <text>]\n' +
-      '               marks an escape fixed out of band; the evidence is required',
+      '               marks an escape fixed out of band; the evidence is required\n' +
+      '       escape: --project <name> --defect <text> [--category <c>] [--source <s>]\n' +
+      '               [--pr <n>] [--merge <sha>] [--note <text>]\n' +
+      '               records one post-merge defect; --pr or --merge names the\n' +
+      '               merge it came in on, and a fast-path ship is attributed',
   );
 }
 if (!opts.home) fail('--home (or OLYMPUSD_HOME) is required');
@@ -276,6 +303,24 @@ if (command === 'status') {
     actor,
     escape: escapeSeq(need(opts, 'escape')),
     evidence,
+    ...(opts.note !== undefined && { note: opts.note }),
+  });
+} else if (command === 'escape') {
+  // The intake for a defect the factory did not catch. The category and the
+  // detection source have the defaults a human report almost always wants, and
+  // both stay statable: an escape a nightly run found is not a human report,
+  // and the ledger has to be able to say so.
+  const defect = need(opts, 'defect');
+  if (defect.trim().length === 0) fail('--defect cannot be empty');
+  queueCommand(paths, {
+    command: 'escape',
+    actor,
+    project: need(opts, 'project'),
+    defectLine: defect,
+    ...(opts.category !== undefined && { category: opts.category }),
+    ...(opts.source !== undefined && { detectionSource: opts.source }),
+    ...(opts.pr !== undefined && { pr: prNumber(opts.pr) }),
+    ...(opts.merge !== undefined && { mergeSha: opts.merge }),
     ...(opts.note !== undefined && { note: opts.note }),
   });
 } else if (command === 'resolve') {

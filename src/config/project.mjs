@@ -29,7 +29,10 @@ export function defaultProjectConfig() {
     // `partTargeting: false` turns off part-level carrying inside a layer
     // (ADR-0046); absent leaves it on. `concurrencyGroups` names the layers
     // that may hold the machine together (ADR-0047); absent is the strict
-    // sequence.
+    // sequence. `fastPathShip: true` lets a ship carry its certification over
+    // a provably disjoint merge, and `breadthGround` names the ground every
+    // suite depends on whatever it declared (ADR-0056); both absent is
+    // today's behaviour.
     gates: { tier1: [] },
     // one convention per line; prompt assembly consumes these
     conventions: [],
@@ -179,6 +182,17 @@ function validateGates(gates, commands, err) {
   // Absent is the decision, which is that a part a diff cannot reach carries.
   if (gates.partTargeting !== undefined && typeof gates.partTargeting !== 'boolean') {
     err('gates.partTargeting', 'must be a boolean');
+  }
+  // The clean-rebase fast path (ADR-0056). Off is the default and absent is
+  // off: a ship whose incoming default branch moved takes the full re-verdict
+  // exactly as it always has. `breadthGround` is the ground that belongs to
+  // every suite whatever any suite declared, and the fast path refuses to fire
+  // for a project that declares none.
+  if (gates.fastPathShip !== undefined && typeof gates.fastPathShip !== 'boolean') {
+    err('gates.fastPathShip', 'must be a boolean');
+  }
+  if (gates.breadthGround !== undefined && !isStringList(gates.breadthGround)) {
+    err('gates.breadthGround', 'must be an array of path entries');
   }
   if (gates.tier1 !== undefined && !Array.isArray(gates.tier1)) {
     err('gates.tier1', 'must be an array of layers');

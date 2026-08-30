@@ -138,6 +138,40 @@ test('escapes-window counts escapes after the oldest ship of the project', async
   assert.equal(empty.eligible, false);
 });
 
+test('fast-path-escapes counts only the kind, only inside the window', async (t) => {
+  const paths = home(t);
+  writeLedger(runLedgerPath(paths, 'f1'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-02T00:00:00Z', 'fast-path-ship', { taken: true, commits: ['abc'] }),
+    line(3, '2026-08-02T01:00:00Z', 'merged', { pr: 7, sha: 'aaa', mergeSha: 'mmm' }),
+  ]);
+  const escape = (seq, ts, extra) =>
+    line(seq, ts, 'escape-recorded', {
+      category: 'product-escape',
+      defectLine: `escape ${seq}`,
+      detectionSource: 'human-report',
+      attribution: 'unattributed',
+      ...extra,
+    });
+  writeLedger(paths.escapesLedger, [
+    // Before the window's oldest ship: outside the reading, like every other
+    // recency-based window here.
+    escape(1, '2026-07-01T00:00:00Z', { kind: 'fast-path-escape' }),
+    // An ordinary escape of the same window. It is a defect and it is not this
+    // metric's defect: the flag is not what let it through.
+    escape(2, '2026-08-03T00:00:00Z', {}),
+    escape(3, '2026-08-03T01:00:00Z', { kind: 'fast-path-escape' }),
+    escape(4, '2026-08-03T02:00:00Z', { kind: 'fast-path-escape' }),
+  ]);
+  const result = await evaluateMetric('fast-path-escapes', { paths, project: 'p', window: 10 });
+  assert.equal(result.value, 2);
+  assert.equal(result.eligible, true);
+  assert.deepEqual(result.detail, { ships: 1, counted: 2, escapes: [3, 4] });
+  // A project that never shipped has no window, so it has no reading.
+  const quiet = await evaluateMetric('fast-path-escapes', { paths, project: 'r', window: 10 });
+  assert.equal(quiet.eligible, false);
+});
+
 test('kill-rate sums kills over waves across the freeze window', async (t) => {
   const paths = home(t);
   freezeRun(paths, 'k1', 'p', '2026-08-01T00:00:00Z', { kills: 2 });

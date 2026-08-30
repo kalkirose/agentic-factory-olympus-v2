@@ -145,6 +145,57 @@ export function listShips(paths) {
 }
 
 /**
+ * Merged ships that carried their certification over a moved base instead of
+ * earning it again (ADR-0056), live and archived, in ship order. Each entry
+ * names the run, the request and the merge commit, the fast-path record's own
+ * seq, the default-branch commits it examined, and the declaration version it
+ * was decided under.
+ *
+ * A run whose fast-path record is a refusal is not one of these: it took the
+ * full re-verdict, like every ship before the flag existed.
+ * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ */
+export function listFastPathShips(paths, { project } = {}) {
+  const ships = [];
+  for (const { runId, archived, project: owner, events } of listRunEvents(paths, { project })) {
+    const fast = events.filter((e) => e.event === 'fast-path-ship' && e.taken === true).pop();
+    if (!fast) continue;
+    const merged = events.filter((e) => e.event === 'merged').pop();
+    if (!merged) continue;
+    ships.push({
+      runId,
+      project: owner,
+      archived,
+      ts: merged.ts,
+      seq: fast.seq,
+      pr: merged.pr ?? null,
+      mergeSha: merged.mergeSha ?? null,
+      commits: fast.commits ?? [],
+      declaration: fast.declaration ?? null,
+    });
+  }
+  return ships.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+}
+
+/**
+ * The fast-path ship one merge came from, or null. A request number and a
+ * merge commit are the two names an operator reporting a defect can hold, and
+ * either one is enough: the attribution is derived from the ledgers, never
+ * from what the operator believed about the ship.
+ * @param {{project?: string, pr?: number, mergeSha?: string}} named
+ */
+export function fastPathShipOf(paths, { project, pr, mergeSha } = {}) {
+  const ships = listFastPathShips(paths, { project });
+  return (
+    ships.find(
+      (ship) =>
+        (pr !== undefined && pr !== null && ship.pr === pr) ||
+        (typeof mergeSha === 'string' && mergeSha.length > 0 && ship.mergeSha === mergeSha),
+    ) ?? null
+  );
+}
+
+/**
  * Story-lane run history per story key, live and archived. The frontier
  * classifies cards from this: `shipped` counts runs closed shipped, `spent`
  * counts runs closed failed or killed, `open` counts the rest. A run whose

@@ -14,6 +14,8 @@ import {
   openLoud,
   openBreaches,
   listShips,
+  listFastPathShips,
+  fastPathShipOf,
 } from '../src/telemetry/readers.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
@@ -140,4 +142,51 @@ test('listShips returns shipped story-lane runs in ship order, live and archived
     { runId: 'b', project: 'p', ts: '2026-08-01T12:00:00Z', archived: true },
     { runId: 'a', project: 'p', ts: '2026-08-02T00:00:00Z', archived: false },
   ]);
+});
+
+test('a fast-path ship is found by its request number or by its merge commit', (t) => {
+  const paths = home(t);
+  const line = (seq, ts, event, extra = {}) => ({ seq, ts, event, actor: 'daemon', ...extra });
+  // A ship that carried its certification (ADR-0056), archived.
+  writeLedger(archivedRunLedgerPath(paths, 'fast'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-02T00:00:00Z', 'fast-path-ship', {
+      taken: true,
+      commits: ['c1'],
+      declaration: { digest: 'abcdef012345' },
+    }),
+    line(3, '2026-08-02T01:00:00Z', 'merged', { pr: 7, sha: 'h1', mergeSha: 'm1' }),
+  ]);
+  // A ship whose fast path refused: it earned its verdict, so it is not one.
+  writeLedger(runLedgerPath(paths, 'full'), [
+    line(1, '2026-08-03T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-03T01:00:00Z', 'fast-path-ship', {
+      taken: false,
+      refusal: 'ground-intersects',
+    }),
+    line(3, '2026-08-03T02:00:00Z', 'merged', { pr: 8, sha: 'h2', mergeSha: 'm2' }),
+  ]);
+  // A fast path taken by a run that never merged: nothing was carried anywhere.
+  writeLedger(runLedgerPath(paths, 'open'), [
+    line(1, '2026-08-04T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-04T01:00:00Z', 'fast-path-ship', { taken: true, commits: ['c2'] }),
+  ]);
+  assert.deepEqual(
+    listFastPathShips(paths).map((s) => s.runId),
+    ['fast'],
+  );
+  const ship = fastPathShipOf(paths, { project: 'p', pr: 7 });
+  assert.equal(ship.runId, 'fast');
+  assert.equal(ship.seq, 2);
+  assert.equal(ship.mergeSha, 'm1');
+  assert.deepEqual(ship.commits, ['c1']);
+  assert.equal(ship.declaration.digest, 'abcdef012345');
+  // Either name finds it, and a name from a ship that earned its verdict finds
+  // nothing at all.
+  assert.equal(fastPathShipOf(paths, { mergeSha: 'm1' }).runId, 'fast');
+  assert.equal(fastPathShipOf(paths, { pr: 8 }), null);
+  assert.equal(fastPathShipOf(paths, { mergeSha: 'm2' }), null);
+  assert.equal(fastPathShipOf(paths, {}), null);
+  // A project filter is a project filter.
+  assert.equal(fastPathShipOf(paths, { project: 'q', pr: 7 }), null);
 });

@@ -17,8 +17,13 @@ import {
   openRunStore,
   resolveClosedRun,
 } from '../telemetry/stores.mjs';
-import { openWorkspaceLeftovers } from '../telemetry/readers.mjs';
-import { markEscapeFixed as appendFixedMark, readEscapeSet } from '../telemetry/escapes.mjs';
+import { openWorkspaceLeftovers, fastPathShipOf } from '../telemetry/readers.mjs';
+import {
+  FAST_PATH_ESCAPE_KIND,
+  markEscapeFixed as appendFixedMark,
+  readEscapeSet,
+  recordEscape as appendEscape,
+} from '../telemetry/escapes.mjs';
 import { settleBreachOf } from '../telemetry/breaches.mjs';
 import { loadInstanceConfig, INSTANCE_CONFIG_FILE } from '../config/instance.mjs';
 import { RunEngine } from '../engine/engine.mjs';
@@ -214,6 +219,12 @@ export class Daemon {
     this.registerCommand('fixed', async (command) => {
       this.markEscapeFixed(command);
       this.frontier.queueSweepAll();
+    });
+    // A defect somebody found in the product after it shipped. The record is
+    // the intake: the repair launches from a ticket, and the ticket is written
+    // against the escape this stamps (ADR-0024).
+    this.registerCommand('escape', async (command) => {
+      this.recordEscapeReport(command);
     });
     // A resolve targets a loud item: an open run (through the engine, with
     // liveness recovery), a closed run's ledger, or the instance ledger.
@@ -665,6 +676,68 @@ export class Daemon {
     const entry = readEscapeSet(this.paths.escapesLedger).find((e) => e.seq === escape);
     if (entry) settleBreachOf(this.paths, entry);
     return line;
+  }
+
+  /**
+   * Records one post-merge defect an operator reports, and attributes it where
+   * the ledgers can.
+   *
+   * The attribution the harness owes itself is the fast path (ADR-0056): a
+   * defect that came in through a ship which carried its certification over a
+   * moved base is recorded under the closed `fast-path-escape` kind, with the
+   * run, the request and the merge that carried it. That word is what turns
+   * the owner's trade into a counted number, and the standing tripwire over a
+   * rolling window of it is what proposes switching the flag back off. The
+   * merge is named by its request number or by its commit; a defect that names
+   * neither, or names a ship that took the full re-verdict, is the ordinary
+   * escape it has always been.
+   * @param {{actor: string, project?: string, defectLine: string,
+   *   category?: string, detectionSource?: string, pr?: number,
+   *   mergeSha?: string, note?: string}} cmd
+   */
+  recordEscapeReport({
+    actor,
+    project,
+    defectLine,
+    category = 'product-escape',
+    detectionSource = 'human-report',
+    pr,
+    mergeSha,
+    note,
+  }) {
+    if (typeof actor !== 'string' || actor.length === 0) {
+      throw new Error('an escape record requires an actor');
+    }
+    if (typeof defectLine !== 'string' || defectLine.trim().length === 0) {
+      throw new Error('an escape record requires the defect line (--defect)');
+    }
+    const ship = fastPathShipOf(this.paths, { project, pr, mergeSha });
+    const store = openEscapesStore(this.paths, {
+      // The same hook the run-side store carries: a tripwire that counts these
+      // reads the append rather than a sweep that happens to come later.
+      onAppend: (line, ledger) => this.tripwires?.notify(project, line, ledger),
+    });
+    try {
+      return appendEscape(store, {
+        actor,
+        category,
+        defectLine,
+        detectionSource,
+        ...(ship && {
+          kind: FAST_PATH_ESCAPE_KIND,
+          attribution: ship.runId,
+          refs: {
+            runId: ship.runId,
+            fastPathSeq: ship.seq,
+            ...(ship.pr !== null && { pr: ship.pr }),
+            ...(ship.mergeSha !== null && { mergeSha: ship.mergeSha }),
+          },
+        }),
+        ...(note !== undefined && { note }),
+      });
+    } finally {
+      store.close();
+    }
   }
 
   // -- finding acknowledgments (ADR-0032) -----------------------------------

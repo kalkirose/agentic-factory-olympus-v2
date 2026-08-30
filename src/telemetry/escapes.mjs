@@ -225,6 +225,36 @@ export function openEscapes(path) {
 }
 
 /**
+ * The closed defect kind an escape carries when the ship that let it through
+ * carried its certification over a moved base rather than earning it again
+ * (ADR-0056). The word is assigned where the escape is recorded, from the
+ * ship's own ledger record, and this is the only name for it.
+ */
+export const FAST_PATH_ESCAPE_KIND = 'fast-path-escape';
+
+/**
+ * The cost of the fast-path trade, counted. Window = the most recent shipped
+ * story-lane runs; count = escapes recorded at or after the oldest ship of the
+ * window whose kind names the fast path. A count and not a rate: the owner
+ * turned the flag on knowing some defects would ship, and the question the
+ * tripwire asks is how many, not what share.
+ * @param {{ships: Array<{ts: string}>, escapes: ReturnType<typeof readEscapeSet>,
+ *   windowSize?: number}} input `ships` in ship order
+ */
+export function fastPathEscapesWindow({ ships, escapes, windowSize = 10 }) {
+  const window = ships.slice(-windowSize);
+  const oldest = window[0];
+  const counted = escapes.filter(
+    (e) => e.kind === FAST_PATH_ESCAPE_KIND && oldest && e.recordedTs >= oldest.ts,
+  );
+  return {
+    ships: window.length,
+    counted: counted.length,
+    escapes: counted.map((e) => e.seq),
+  };
+}
+
+/**
  * The quality-bar window math. Window = the most recent shipped story-lane
  * runs by ledger order; count = escapes with final category in the counted
  * set, recorded at or after the oldest ship in the window. Recency-based,

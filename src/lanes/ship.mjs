@@ -86,6 +86,7 @@ import {
   parseIntentCard,
 } from './card.mjs';
 import { authorizedSupersedes, supersedeLines } from './supersede.mjs';
+import { fastPathDecision } from './fastpath.mjs';
 import { runCommand } from './exec.mjs';
 import { probeCredentials } from './probes.mjs';
 import { SUITE_SCHEMA } from './story.mjs';
@@ -338,7 +339,51 @@ async function preVerdictUpdate(ctx, base) {
     mainSha: out.mainSha,
     ...(ran && { fromSha: out.fromSha, toSha: out.toSha }),
   });
-  return ran ? { next: 'verdict' } : { next: 'ship' };
+  if (!ran) return { next: 'ship' };
+  // The flag is the whole of the difference. Absent or false, the moved tree
+  // goes back to the verdict exactly as it always has, and nothing above or
+  // below this line reads differently (ADR-0056).
+  if (base.config?.gates?.fastPathShip !== true) return { next: 'verdict' };
+  return (await fastPathShip(ctx, base, out)) ? { next: 'ship' } : { next: 'verdict' };
+}
+
+/**
+ * The clean-rebase fast path over one moved base: the decision, the stamp,
+ * and nothing else. Returns true when the run may keep the certification it
+ * already earned and go straight to the request.
+ *
+ * Every ending of the check that is not a clean yes is a no, including the
+ * ones the check itself caused. A throw inside it is stamped as the closed
+ * internal-error refusal and the run takes the re-verdict it would have taken
+ * anyway: this path can remove work and can never block a ship.
+ */
+async function fastPathShip(ctx, base, out) {
+  const events = runEvents(ctx);
+  const pass = currentPass(events);
+  let decision;
+  try {
+    decision = await fastPathDecision(base, events, out);
+  } catch (error) {
+    decision = {
+      taken: false,
+      refusal: 'internal-error',
+      detail: gist(String(error?.message ?? error)),
+    };
+  }
+  ctx.store.append('fast-path-ship', {
+    actor: ACTOR,
+    pass,
+    mainSha: out.mainSha,
+    fromSha: out.fromSha,
+    toSha: out.toSha,
+    ...decision,
+  });
+  return decision.taken === true;
+}
+
+/** The taken fast-path record of this run, or undefined. */
+export function fastPathTaken(events) {
+  return [...events].reverse().find((e) => e.event === 'fast-path-ship' && e.taken === true);
 }
 
 // -- the ship stage ----------------------------------------------------------
@@ -1503,7 +1548,19 @@ function closeOutHandler({ forgeFor, pollMs, enqueueRepair }) {
       await learningLesson(ctx, base, merged);
     }
     if (Number.isInteger(ctx.payload.escapeSeq)) fixEscapeBack(ctx, merged);
-    return { close: { state: 'shipped', pr: merged.pr, mergeSha: merged.mergeSha } };
+    // A ship that carried its certification over a moved base is marked at the
+    // close as well as where it was decided. The close record is what a reader
+    // of one line of `run-closed` sees, and the trade the flag makes is worth
+    // seeing there (ADR-0056).
+    const fast = fastPathTaken(runEvents(ctx));
+    return {
+      close: {
+        state: 'shipped',
+        pr: merged.pr,
+        mergeSha: merged.mergeSha,
+        ...(fast && { fastPath: true }),
+      },
+    };
   };
 }
 

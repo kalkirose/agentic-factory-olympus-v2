@@ -104,7 +104,10 @@ test('the vocabulary says which record carries each kind, and the two sets are d
       'triage-log-missing',
     ],
   );
-  assert.deepEqual([...OBSERVED_DEFECT_KINDS].sort(), ['capture-takeback', 'layer-log-truncated']);
+  assert.deepEqual(
+    [...OBSERVED_DEFECT_KINDS].sort(),
+    ['capture-takeback', 'fast-path-escape', 'layer-log-truncated'],
+  );
   for (const kind of GATE_INTEGRITY_KINDS) assert.ok(!OBSERVED_DEFECT_KINDS.has(kind));
   assert.deepEqual(
     [...DEFECT_KINDS].sort(),

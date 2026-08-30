@@ -29,6 +29,7 @@ import { openCardParks } from '../src/telemetry/queue.mjs';
 import { FORESEEN_HEADING, FORESEEN_MARKER } from '../src/lanes/card.mjs';
 import { RUN_EVENTS } from '../src/ledger/registry.mjs';
 import { recordEscape, ticketEscape, readEscapeSet } from '../src/telemetry/escapes.mjs';
+import { standingTripwires, withTripwireDefaults } from '../src/tripwires/registry.mjs';
 import { owedRepairs } from '../src/frontier/repairs.mjs';
 import { owedReconciliations, reconciliationLaunch } from '../src/frontier/reconciliations.mjs';
 import {
@@ -2318,6 +2319,315 @@ test('a conflict the pre-verdict update meets takes the merge round, before the 
   );
   assert.ok(conflictCall);
   assert.equal(gitSync(['show', 'main:src/feature.mjs'], fx.origin), GOOD_FEATURE);
+});
+
+// -- the clean-rebase fast path (ADR-0056) -----------------------------------
+//
+// The derivation has its own suite (fastpath.test.mjs). These are the lane:
+// the flag, the stamp, and the one thing that matters about every ending but
+// the clean yes, which is that the run takes the full re-verdict it would have
+// taken if this path had never existed.
+
+// A suite command that says what it depends on, in the part-targeting contract
+// the harness already consumes (ADR-0046). Without a declaration like this one
+// nothing can fast-path, which is the safety the default rests on.
+const DECLARING_SUITE = `import { spawnSync } from 'node:child_process';
+console.log('::olympus part feature');
+console.log('::olympus part-inputs src');
+const run = spawnSync(process.execPath, ['--test', 'tests/*.test.mjs'], { stdio: 'inherit' });
+console.log(run.status === 0 ? '::olympus part-ok feature' : '::olympus part-failed feature');
+process.exit(run.status ?? 1);
+`;
+
+/**
+ * A ship fixture whose one gate layer declares its ground. `gates` overrides
+ * the fast-path settings; everything else is the ordinary fixture.
+ */
+function fastPathFixture(t, { gates = {}, files = {}, ...rest } = {}) {
+  return shipFixture(t, {
+    ...rest,
+    files: { '.olympus/suite.mjs': DECLARING_SUITE, ...files },
+    config: {
+      commands: { suite: ['node', '.olympus/suite.mjs'] },
+      gates: {
+        tier1: [{ name: 'unit', command: 'suite' }],
+        fastPathShip: true,
+        breadthGround: ['package-lock.json'],
+        ...gates,
+      },
+    },
+  });
+}
+
+/** Runs a fast-path fixture to its close over one competing merge. */
+async function shipOverMerge(fx, tree, message) {
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'freeze', 'freeze');
+  const mainSha = commitTree(fx.origin, tree, message);
+  await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'pre-verdict-update' && e.ran,
+    'the pre-verdict update',
+  );
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  return { runId, mainSha, events: await waitClosed(fx.paths, runId) };
+}
+
+test('a merge onto ground no suite declares carries the certification it earned', async (t) => {
+  const fx = fastPathFixture(t);
+  const { mainSha, events } = await shipOverMerge(
+    fx,
+    { 'docs/note.md': 'unrelated main work\n' },
+    'docs: a note',
+  );
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const fast = events.find((e) => e.event === 'fast-path-ship');
+  assert.equal(fast.taken, true);
+  // The record names the commits it examined, the declarations it was checked
+  // against, and the certification it reuses.
+  assert.deepEqual(fast.commits, [mainSha]);
+  assert.equal(fast.commitCount, 1);
+  assert.equal(fast.mainSha, mainSha);
+  assert.match(fast.declaration.digest, /^[0-9a-f]{12}$/);
+  assert.deepEqual(fast.declaration.suites, ['unit/feature']);
+  const render = events.find((e) => e.event === 'verdict-rendered');
+  assert.equal(fast.declaration.sha, render.sha);
+  assert.equal(fast.certification.cycle, render.cycle);
+  assert.equal(fast.certification.record, render.record);
+  // One verdict, and the merged tree never went back for a second one.
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 1);
+  assert.ok(fast.seq > render.seq);
+  // The close says the ship carried rather than earned.
+  assert.equal(events.find((e) => e.event === 'run-closed').fastPath, true);
+  // Both sides landed.
+  assert.equal(gitSync(['show', 'main:src/feature.mjs'], fx.origin), GOOD_FEATURE);
+  assert.match(gitSync(['show', 'main:docs/note.md'], fx.origin), /unrelated main work/);
+});
+
+test('a defect that came in on a fast-path ship is counted as one', async (t) => {
+  const fx = fastPathFixture(t);
+  const { runId, events } = await shipOverMerge(
+    fx,
+    { 'docs/note.md': 'unrelated main work\n' },
+    'docs: a note',
+  );
+  const merged = events.find((e) => e.event === 'merged');
+  assert.equal(events.find((e) => e.event === 'fast-path-ship').taken, true);
+  // The tripwire that measures the trade the flag makes, armed at its standing
+  // band: two fast-path escapes in a window of ten ships.
+  fx.daemon.tripwires.setRegistry(
+    'proj',
+    standingTripwires()
+      .filter((entry) => entry.metric === 'fast-path-escapes')
+      .map(withTripwireDefaults),
+  );
+  // Two defects an operator found afterwards, named by the merge they came in
+  // on. Neither report says anything about the fast path; the attribution is
+  // derived from the ledgers.
+  for (const line of ['the total is off by one', 'the page loses the second row']) {
+    fx.daemon.recordEscapeReport({
+      actor: 'console:test',
+      project: 'proj',
+      defectLine: line,
+      pr: merged.pr,
+    });
+  }
+  const escapes = readEscapeSet(fx.paths.escapesLedger);
+  assert.equal(escapes.length, 2);
+  for (const escape of escapes) {
+    assert.equal(escape.kind, 'fast-path-escape');
+    assert.equal(escape.attribution, runId);
+    assert.equal(escape.refs.pr, merged.pr);
+    assert.equal(escape.refs.mergeSha, merged.mergeSha);
+  }
+  const breach = await waitFor(
+    () => readEvents(fx.paths.instanceLedger).find((e) => e.event === 'tripwire-breach'),
+    { label: 'the fast-path escapes to breach' },
+  );
+  assert.equal(breach.tripwire, 'fast-path-escapes');
+  assert.equal(breach.value, 2);
+  assert.match(breach.answer, /gates\.fastPathShip to false/);
+});
+
+test('an escape record refuses what it cannot file', async (t) => {
+  const fx = fastPathFixture(t);
+  await fx.daemon.start();
+  const report = { actor: 'console:test', project: 'proj', defectLine: 'the total is off' };
+  assert.throws(
+    () => fx.daemon.recordEscapeReport({ ...report, actor: '' }),
+    /requires an actor/,
+  );
+  for (const bad of [undefined, '', '   ']) {
+    assert.throws(
+      () => fx.daemon.recordEscapeReport({ ...report, defectLine: bad }),
+      /requires the defect line/,
+      String(bad),
+    );
+  }
+  assert.deepEqual(readEscapeSet(fx.paths.escapesLedger), []);
+});
+
+test('a defect from a ship that earned its verdict is the ordinary escape', async (t) => {
+  const fx = fastPathFixture(t, { gates: { fastPathShip: undefined } });
+  const { events } = await shipOverMerge(
+    fx,
+    { 'docs/note.md': 'unrelated main work\n' },
+    'docs: a note',
+  );
+  fx.daemon.recordEscapeReport({
+    actor: 'console:test',
+    project: 'proj',
+    defectLine: 'the total is off by one',
+    pr: events.find((e) => e.event === 'merged').pr,
+  });
+  const escape = readEscapeSet(fx.paths.escapesLedger)[0];
+  // No word for it, because the harness has no claim to make about this one.
+  assert.equal(escape.kind, null);
+  assert.equal(escape.attribution, 'unattributed');
+});
+
+test('one overlapping file takes the full re-verdict', async (t) => {
+  const fx = fastPathFixture(t);
+  // `src/base.mjs` is under the layer's declared input and the story never
+  // touched it, so the merge is clean and the ground is not.
+  const { events } = await shipOverMerge(
+    fx,
+    { 'src/base.mjs': 'export const base = 2;\n' },
+    'src: a competing edit',
+  );
+  const fast = events.find((e) => e.event === 'fast-path-ship');
+  assert.equal(fast.taken, false);
+  assert.equal(fast.refusal, 'ground-intersects');
+  assert.match(fast.detail, /src\/base\.mjs is a declared suite input/);
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 2);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.find((e) => e.event === 'run-closed').fastPath, undefined);
+});
+
+test('a merge onto the shared breadth list takes the full re-verdict', async (t) => {
+  const fx = fastPathFixture(t);
+  const { events } = await shipOverMerge(
+    fx,
+    { 'package-lock.json': '{"lockfileVersion": 3}\n' },
+    'deps: the lockfile moved',
+  );
+  const fast = events.find((e) => e.event === 'fast-path-ship');
+  assert.equal(fast.refusal, 'ground-intersects');
+  assert.match(fast.detail, /package-lock\.json is the shared breadth list/);
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 2);
+});
+
+test('one suite without a declaration takes the full re-verdict', async (t) => {
+  // The stock suite command prints no part markers, so the certified verdict
+  // says nothing about what its layer depends on.
+  const fx = shipFixture(t, {
+    config: {
+      gates: {
+        tier1: [{ name: 'unit', command: 'suite' }],
+        fastPathShip: true,
+        breadthGround: ['package-lock.json'],
+      },
+    },
+  });
+  const { events } = await shipOverMerge(
+    fx,
+    { 'docs/note.md': 'unrelated main work\n' },
+    'docs: a note',
+  );
+  const fast = events.find((e) => e.event === 'fast-path-ship');
+  assert.equal(fast.refusal, 'undeclared-suite');
+  assert.match(fast.detail, /reported no suite/);
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 2);
+});
+
+test('a project that declares no breadth ground never fast-paths', async (t) => {
+  const fx = fastPathFixture(t, { gates: { breadthGround: [] } });
+  const { events } = await shipOverMerge(
+    fx,
+    { 'docs/note.md': 'unrelated main work\n' },
+    'docs: a note',
+  );
+  assert.equal(events.find((e) => e.event === 'fast-path-ship').refusal, 'no-breadth-ground');
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 2);
+});
+
+test('a conflict the update resolved is never carried', async (t) => {
+  const fx = fastPathFixture(t);
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'freeze', 'freeze');
+  commitTree(fx.origin, { 'src/feature.mjs': ALT_FEATURE }, 'conflicting main work');
+  const round = await waitEvent(fx.paths, runId, (e) => e.event === 'merge-round', 'merge-round');
+  assert.equal(round.resolved, true);
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // A resolved conflict is a seat's edit to the tree under judgment. The text
+  // question sees it first: the story's own diff is no longer what it was, so
+  // no certification of the old tree can stand over the new one.
+  const fast = events.find((e) => e.event === 'fast-path-ship');
+  assert.equal(fast.taken, false);
+  assert.equal(fast.refusal, 'diff-changed');
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 2);
+  assert.equal(events.find((e) => e.event === 'run-closed').fastPath, undefined);
+});
+
+test('an error inside the check itself falls through, never blocks', async (t) => {
+  // A breadth entry the path vocabulary cannot compile. The classification
+  // throws where the ground question is asked, which is the whole class of
+  // failure inside the check: it is stamped, and the run takes the re-verdict
+  // it would have taken anyway.
+  const fx = fastPathFixture(t, { gates: { breadthGround: ['src/[z-a]lock.json'] } });
+  const { events } = await shipOverMerge(
+    fx,
+    { 'docs/note.md': 'unrelated main work\n' },
+    'docs: a note',
+  );
+  const fast = events.find((e) => e.event === 'fast-path-ship');
+  assert.equal(fast.taken, false);
+  assert.equal(fast.refusal, 'internal-error');
+  assert.match(fast.detail, /character class/);
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 2);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+});
+
+test('with the flag off the same ship is byte for byte what it always was', async (t) => {
+  // Every input of a firing fast path is present: the declarations, the
+  // breadth list, a merge onto ground nothing claims. The flag is the only
+  // thing missing, and the ship takes the second verdict.
+  const fx = fastPathFixture(t, { gates: { fastPathShip: undefined } });
+  const { events } = await shipOverMerge(
+    fx,
+    { 'docs/note.md': 'unrelated main work\n' },
+    'docs: a note',
+  );
+  assert.ok(!events.some((e) => e.event === 'fast-path-ship'));
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.equal(renders.length, 2);
+  assert.equal(renders.at(-1).verdict, 'green');
+  const update = events.find((e) => e.event === 'pre-verdict-update' && e.ran);
+  assert.equal(renders.at(-1).sha, update.toSha);
+  const closed = events.find((e) => e.event === 'run-closed');
+  assert.equal(closed.state, 'shipped');
+  assert.equal(closed.fastPath, undefined);
+});
+
+test('a base that did not move stamps no fast-path record at all', async (t) => {
+  const fx = fastPathFixture(t);
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.find((e) => e.event === 'pre-verdict-update').ran, false);
+  // There was no second certification to skip, so there is nothing to record.
+  assert.ok(!events.some((e) => e.event === 'fast-path-ship'));
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 1);
 });
 
 test('the update cap falls through to the ship-stage update', async (t) => {

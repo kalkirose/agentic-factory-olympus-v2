@@ -12,7 +12,7 @@ import {
   openWorkspaceLeftovers,
   storyRunsByKey,
 } from '../telemetry/readers.mjs';
-import { readEscapeSet, escapesWindow } from '../telemetry/escapes.mjs';
+import { readEscapeSet, escapesWindow, fastPathEscapesWindow } from '../telemetry/escapes.mjs';
 import { computeFrontier } from '../frontier/graph.mjs';
 import { ALL_LENSES } from '../lanes/lenses.mjs';
 
@@ -44,6 +44,20 @@ const IMPLEMENTATIONS = {
       value: w.rate,
       eligible: ships.length > 0,
       detail: { ships: w.ships, counted: w.counted },
+    };
+  },
+
+  'fast-path-escapes': async ({ paths, project, window }) => {
+    const ships = listShips(paths).filter((s) => s.project === project);
+    const escapes = readEscapeSet(paths.escapesLedger);
+    const w = fastPathEscapesWindow({ ships, escapes, windowSize: window });
+    return {
+      value: w.counted,
+      // The same eligibility the quality-bar window has: with no ship in the
+      // ledgers there is no window, and a count of zero over nothing is not a
+      // reading about anything.
+      eligible: ships.length > 0,
+      detail: { ships: w.ships, counted: w.counted, escapes: w.escapes },
     };
   },
 

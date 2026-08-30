@@ -21,11 +21,14 @@ export function gitArgv(args, platform = process.platform) {
 /**
  * Runs one git command and resolves its raw stdout.
  * @param {string[]} args
- * @param {{cwd?: string}} [opts]
+ * @param {{cwd?: string, maxBuffer?: number}} [opts] `maxBuffer` raises the
+ *   runner's own output cap for the few reads whose size follows the work
+ *   rather than the repository. Absent leaves the runner's default, which is
+ *   what every other caller has always had.
  * @returns {Promise<string>}
  */
-export function git(args, { cwd } = {}) {
-  return run(gitArgv(args), args, { cwd });
+export function git(args, { cwd, maxBuffer } = {}) {
+  return run(gitArgv(args), args, { cwd, maxBuffer });
 }
 
 /**
@@ -42,11 +45,15 @@ export function gitPlain(args, { cwd, env } = {}) {
   return run([...args], args, { cwd, env });
 }
 
-function run(argv, args, { cwd, env }) {
+function run(argv, args, { cwd, env, maxBuffer }) {
   return new Promise((resolve, reject) => {
     // The failure names the command the caller asked for, not the invocation
     // this module built around it.
-    const options = { cwd, ...(env !== undefined && { env }) };
+    const options = {
+      cwd,
+      ...(env !== undefined && { env }),
+      ...(maxBuffer !== undefined && { maxBuffer }),
+    };
     // `windowsHide` stands at the call, where the process starts and where a
     // reader looks for it, and after the caller's options so none can drop it.
     execFile('git', argv, { ...options, windowsHide: true }, (error, stdout, stderr) => {

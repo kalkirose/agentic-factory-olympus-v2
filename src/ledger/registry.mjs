@@ -247,6 +247,17 @@ export const RUN_EVENTS = new Set([
   // says so either way — and `capped` is the pass that stopped chasing a
   // moving base and left the update to the ship stage (ADR-0033).
   'pre-verdict-update',
+  // The clean-rebase fast path's answer about one moved base: whether the
+  // certification the run already earned stands over the tree the update
+  // built, and why (ADR-0056). A taken record carries the default-branch
+  // commits examined, the declaration version they were checked against, and
+  // the certification it reuses; a refusal carries the closed reason. Quiet:
+  // a refusal costs the run the re-verdict it would have taken anyway, and a
+  // ship is what the record follows either way. Never silent, because a ship
+  // that skipped a certifying pass has to say so, and because a flag that
+  // fires for nothing has to be readable as one. Stamped only where the flag
+  // is on: a project without it stamps nothing, as it always did.
+  'fast-path-ship',
   'pr-opened',
   // The labels the request carries, derived from its own diff by the project's
   // label rules and applied before auto-merge arms. Stamped at every open, the
@@ -558,6 +569,13 @@ export const OBSERVED_DEFECT_KINDS = new Set([
   // revert is the design (ADR-0017); the kind is what makes a surface that
   // keeps producing them countable. Stamped on both take-back records.
   'capture-takeback',
+  // A defect that reached the default branch through a ship that carried its
+  // certification over a moved base instead of earning it again (ADR-0056).
+  // The word is what makes the owner's speed-over-residual-safety trade a
+  // number rather than an anecdote: the kind is assigned where the escape is
+  // recorded, from the ship record alone, and the standing tripwire over a
+  // rolling window of it is what proposes switching the flag back off.
+  'fast-path-escape',
 ]);
 
 // The whole vocabulary. `escape-recorded` takes any of it: a defect the harness
