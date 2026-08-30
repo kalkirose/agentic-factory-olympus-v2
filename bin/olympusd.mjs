@@ -1,16 +1,25 @@
 #!/usr/bin/env node
 // olympusd — daemon entry point.
-//   olympusd start  --home <dir>   run the daemon in the foreground
+//   olympusd start  --home <dir>   start the daemon detached from this shell
+//   olympusd run    --home <dir>   run the daemon in the foreground
 //   olympusd stop   --home <dir>   request a clean stop via the control inbox
 //   olympusd status --home <dir>   report lock state and the ledger tail
-// The OS service manager owns daemonization and restarts (see
+// `run` is the form a service manager wires, because a service manager wants
+// the process it supervises in the foreground. `start` is the form a person
+// types: it detaches the daemon from the console that gave the command, so
+// closing that console cannot take the daemon down (ADR-0050, see
 // docs/service-wiring.md).
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { assembleLanes } from '../src/lanes/assemble.mjs';
 import { homePaths } from '../src/daemon/home.mjs';
 import { writeControlCommand } from '../src/daemon/control.mjs';
 import { readLock, pidAlive } from '../src/daemon/lock.mjs';
+import { awaitDaemonStart, logTail, spawnDetachedDaemon } from '../src/daemon/launch.mjs';
 import { tailEvents } from '../src/ledger/ledger.mjs';
+
+const ENTRY = fileURLToPath(import.meta.url);
 
 function parseArgs(argv) {
   const [command, ...rest] = argv;
@@ -18,11 +27,14 @@ function parseArgs(argv) {
   for (let i = 0; i < rest.length; i++) {
     if (rest[i] === '--home') home = rest[++i];
   }
-  return { command, home };
+  // Absolute from here on. The started daemon runs from the home rather than
+  // from the caller's directory, so a relative home would name a different
+  // place in the child than it did in the command.
+  return { command, home: home === null ? null : resolve(home) };
 }
 
 function usage() {
-  console.error('usage: olympusd <start|stop|status> --home <dir>');
+  console.error('usage: olympusd <start|run|stop|status> --home <dir>');
   process.exit(2);
 }
 
@@ -31,6 +43,22 @@ if (!command || !home) usage();
 const paths = homePaths(home);
 
 if (command === 'start') {
+  const held = readLock(paths.lock);
+  if (held && pidAlive(held.pid)) {
+    console.error(`olympusd: already running (pid ${held.pid}, home ${home})`);
+    process.exit(1);
+  }
+  const { pid, logs } = spawnDetachedDaemon(ENTRY, home, paths);
+  const started = await awaitDaemonStart({ lockPath: paths.lock, pid });
+  if (!started.ok) {
+    console.error(`olympusd: the daemon did not start (${started.reason})`);
+    const tail = logTail(logs.err);
+    if (tail !== '') console.error(tail);
+    process.exit(1);
+  }
+  console.log(`olympusd: started (pid ${pid}, home ${home})`);
+  console.log(`olympusd: output goes to ${logs.out}`);
+} else if (command === 'run') {
   // The reader closes over the daemon, whose config the start reads and every
   // live edit replaces; the lanes resolve each run's forge through it. A
   // breach hands its ticketed escapes to the frontier the same way: the sweep

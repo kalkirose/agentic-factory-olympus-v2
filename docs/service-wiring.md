@@ -1,9 +1,16 @@
 # Service wiring
 
-The daemon runs in the foreground; the OS service manager owns
-daemonization, at-boot start, and restart-on-failure. `olympusd stop` always
-requests a clean stop through the control inbox, so the daemon stamps
+`olympusd run` runs the daemon in the foreground, and that is the form a
+service manager wires: the service manager owns at-boot start and
+restart-on-failure, and it supervises the process it started. `olympusd stop`
+always requests a clean stop through the control inbox, so the daemon stamps
 `daemon-stopped` before exit.
+
+`olympusd start` is the form a person types. It starts the same daemon
+detached from the console that gave the command, so closing that console, or
+ending its process tree, cannot take the daemon down (ADR-0050). The daemon's
+own output goes to `<home>/logs/daemon.out.log` and `daemon.err.log`. Use it
+when no service manager is wired, or for a restart from a terminal.
 
 ## systemd (Linux)
 
@@ -15,7 +22,7 @@ Description=Olympus v2 orchestrator daemon
 After=network-online.target docker.service
 
 [Service]
-ExecStart=/usr/bin/node /opt/olympus-v2/bin/olympusd.mjs start --home /var/lib/olympusd
+ExecStart=/usr/bin/node /opt/olympus-v2/bin/olympusd.mjs run --home /var/lib/olympusd
 Restart=on-failure
 RestartSec=5
 User=olympus
@@ -36,7 +43,7 @@ failure and starts at boot. Example WinSW config:
   <id>olympusd</id>
   <name>Olympus v2 daemon</name>
   <executable>node</executable>
-  <arguments>C:\olympus-v2\bin\olympusd.mjs start --home C:\olympusd-home</arguments>
+  <arguments>C:\olympus-v2\bin\olympusd.mjs run --home C:\olympusd-home</arguments>
   <onfailure action="restart" delay="5 sec"/>
   <startmode>Automatic</startmode>
 </service>
@@ -57,6 +64,6 @@ wrapper is not wanted.
 - A stop mid-stage ends the seats it finds and the run re-enters that stage at
   the next start, so the work those children had done is spent again. The
   cheap restart takes the hold first: `olympusctl hold --all`, wait until
-  `olympusctl status` shows every run held or parked, `olympusd stop`, start,
-  then `olympusctl release --all`. The hold is in the instance ledger, so it is
-  still standing when the new instance comes up (ADR-0040).
+  `olympusctl status` shows every run held or parked, `olympusd stop`, start
+  again, then `olympusctl release --all`. The hold is in the instance ledger,
+  so it is still standing when the new instance comes up (ADR-0040).

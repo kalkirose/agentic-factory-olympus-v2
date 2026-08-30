@@ -21,9 +21,10 @@ Done when: CI is green on a trivial test.
 - Instance config: schema, validation, defaults; loaded from the daemon home;
   live edit pickup with a `config-changed` stamp; invalid edit keeps the old
   config.
-- Daemon lifecycle: `olympusd start|stop|status`; single-instance lock with
-  pid liveness; `daemon-started` (runs resumed) / `daemon-stopped` stamps;
-  clean shutdown on stop command and on signals.
+- Daemon lifecycle: `olympusd start|run|stop|status` (`start` detaches from
+  the calling console, `run` stays in the foreground for a service manager);
+  single-instance lock with pid liveness; `daemon-started` (runs resumed) /
+  `daemon-stopped` stamps; clean shutdown on stop command and on signals.
 - Control channel skeleton: file inbox in the daemon home; parse, validate,
   dispatch interface; concrete commands land with their milestones.
 - Service-manager wiring docs: systemd unit + Windows service examples.

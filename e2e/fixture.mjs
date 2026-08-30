@@ -293,9 +293,16 @@ export function buildFixture({ prefix, scenario }) {
   );
 
   const scenarioPath = join(root, 'scenario.json');
+  // `stallMarker` is where a stalled seat reports its own pid. A scenario that
+  // names no `stallSeat` never writes it.
+  const stallMarker = join(root, 'stall.pid');
   writeFileSync(
     scenarioPath,
-    JSON.stringify({ ...scenario, callDir: calls, secretName: SECRET_NAME }, null, 2) + '\n',
+    JSON.stringify(
+      { ...scenario, callDir: calls, secretName: SECRET_NAME, stallMarker },
+      null,
+      2,
+    ) + '\n',
   );
   const forgeState = join(root, 'forge.json');
   writeFileSync(
@@ -344,6 +351,7 @@ export function buildFixture({ prefix, scenario }) {
     calls,
     marks,
     scenarioPath,
+    stallMarker,
     forgeState,
     callLog,
     env,
@@ -354,15 +362,21 @@ export function buildFixture({ prefix, scenario }) {
 // -- the binaries ------------------------------------------------------------
 
 /**
- * Starts `olympusd start` and waits for the daemon-started stamp this start
- * writes. The count is taken first, so a second instance over the same home —
- * the restart a hold is taken for — waits for its own stamp rather than
- * reading the previous one's.
+ * Starts the daemon in the foreground and waits for the daemon-started stamp
+ * this start writes. The count is taken first, so a second instance over the
+ * same home (the restart a hold is taken for) waits for its own stamp rather
+ * than reading the previous one's.
+ *
+ * `run` and not `start`: `start` detaches the daemon on purpose (ADR-0050),
+ * and this suite supervises the daemon as its own child so that it can end it,
+ * read its streams and see how it exited. `run` is the same daemon and the
+ * same code path from the assembled binary; it is the form a service manager
+ * wires, and the detach itself is proven on the host in the unit suite.
  */
 export async function startDaemon(fx) {
   const started = () => instanceEvents(fx).filter((e) => e.event === 'daemon-started').length;
   const before = started();
-  const child = spawn(process.execPath, [OLYMPUSD, 'start', '--home', fx.home], {
+  const child = spawn(process.execPath, [OLYMPUSD, 'run', '--home', fx.home], {
     env: fx.env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -387,6 +401,48 @@ export async function stopDaemon(fx) {
     encoding: 'utf8',
   });
   await pollFor('the daemon process to exit', () => fx.daemon.exitCode !== null);
+}
+
+/**
+ * Ends the daemon the way a crash ends it: no control command, no signal it
+ * handles, nothing stamped. What the run left on disk is what a restart finds.
+ */
+export async function crashDaemon(fx) {
+  if (!fx.daemon || fx.daemon.exitCode !== null) return;
+  fx.daemon.kill('SIGKILL');
+  // A process a signal ended reports the signal, not an exit code: `exitCode`
+  // stays null for it, so a wait on that alone would never end.
+  await pollFor(
+    'the daemon process to die',
+    () => fx.daemon.exitCode !== null || fx.daemon.signalCode !== null,
+  );
+}
+
+/** Whether a pid names a live process. */
+export function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+/** Ends a process the fixture started indirectly, and waits for it to go. */
+export async function endProcess(pid) {
+  if (!alive(pid)) return;
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch {
+    // It went between the question and the signal.
+  }
+  await pollFor(`process ${pid} to exit`, () => !alive(pid));
+}
+
+/** Rewrites the scenario file the stub seat reads before its next call. */
+export function updateScenario(fx, patch) {
+  const held = JSON.parse(readFileSync(fx.scenarioPath, 'utf8'));
+  writeFileSync(fx.scenarioPath, JSON.stringify({ ...held, ...patch }, null, 2) + '\n');
 }
 
 /** Runs one olympusctl command and returns its stdout. */

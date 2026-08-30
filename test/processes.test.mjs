@@ -11,6 +11,7 @@ import {
   pathHolders,
 } from '../src/engine/processes.mjs';
 import { resolveArgv } from '../src/engine/executable.mjs';
+import { daemonSpawnOptions } from '../src/daemon/launch.mjs';
 import { tempDir, removeDir, waitFor } from './helpers.mjs';
 
 const ON_WINDOWS = process.platform === 'win32';
@@ -129,6 +130,13 @@ test('no seat is ever detached from a console', () => {
   }
 });
 
+test('the daemon takes the shape a seat may not: detached, and hidden', () => {
+  // The one deliberate exception, and the reason for it: a seat is waited on
+  // and killed as a tree, so it stays attached; the daemon must survive the
+  // console that started it, so it does not (ADR-0050).
+  assert.deepEqual(daemonSpawnOptions(), { detached: true, windowsHide: true });
+});
+
 // -- every place the harness starts a process ---------------------------------
 
 test('nothing the harness starts can put a window on screen', () => {
@@ -136,11 +144,18 @@ test('nothing the harness starts can put a window on screen', () => {
   for (const file of shippedFiles()) {
     for (const site of childStartSites(readFileSync(join(ROOT, file), 'utf8'))) {
       const where = `${file}: ${site.name}`;
-      // Either the site states it, or it takes the seat shape that does.
+      // Either the site states it, or it takes one of the two named shapes.
+      const daemonShape = /\.\.\.daemonSpawnOptions\(/.test(site.args);
       const hidden =
-        /windowsHide:\s*true/.test(site.args) || /\.\.\.seatSpawnOptions\(/.test(site.args);
+        /windowsHide:\s*true/.test(site.args) ||
+        /\.\.\.seatSpawnOptions\(/.test(site.args) ||
+        daemonShape;
       if (!hidden) offenders.push(`${where} does not hide its window`);
-      if (/\bdetached\b/.test(site.args)) offenders.push(`${where} detaches from its console`);
+      // Detaching is the daemon's shape and nothing else's. A site that spells
+      // it out for itself is a seat or a command escaping the rule.
+      if (/\bdetached\b/.test(site.args) && !daemonShape) {
+        offenders.push(`${where} detaches from its console`);
+      }
     }
   }
   assert.deepEqual(offenders, []);
@@ -155,6 +170,7 @@ test('the audit reads the sites it claims to read', () => {
     }
   }
   assert.deepEqual(found.sort(), [
+    'src/daemon/launch.mjs: spawnImpl',
     'src/daemon/notifier.mjs: spawnImpl',
     'src/engine/processes.mjs: execFile',
     'src/engine/supervise.mjs: spawn',

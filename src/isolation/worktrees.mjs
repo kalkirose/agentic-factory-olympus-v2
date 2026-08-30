@@ -4,7 +4,7 @@
 //                                detached at a named sha
 // Seats receive absolute paths. The whole <runId> root goes away at run
 // close; a disposable goes away when its wave reaches verdict.
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { git } from './git.mjs';
 import { removeTree } from './removal.mjs';
@@ -44,10 +44,26 @@ export function runBranch(runId) {
  * Creates the run worktree on a fresh run branch off `base` — the default
  * branch at launch, or the frozen commit a resumed run inherits.
  */
-export async function addRunWorktree(clone, paths, runId, base) {
+export async function addRunWorktree(clone, paths, runId, base, { io = {} } = {}) {
   const path = runWorktreePath(paths, runId);
-  await git(['worktree', 'add', '-b', runBranch(runId), path, base], { cwd: clone });
-  return { path, branch: runBranch(runId) };
+  const branch = runBranch(runId);
+  await addWorktree(clone, paths, runId, path, {
+    add: ['worktree', 'add', '-b', branch, path, base],
+    // Residue of this run's own crash carries the branch as well as the
+    // directory, and `-b` refuses a branch that exists. `-B` resets it to the
+    // base, which is what a recreation means.
+    recreate: ['worktree', 'add', '-B', branch, path, base],
+    io,
+  });
+  return { path, branch };
+}
+
+/** Creates a disposable worktree, detached at a sha. */
+export async function addDisposableWorktree(clone, paths, runId, tag, sha, { io = {} } = {}) {
+  const path = join(workspaceRoot(paths, runId), tag);
+  const argv = ['worktree', 'add', '--detach', path, sha];
+  await addWorktree(clone, paths, runId, path, { add: argv, recreate: argv, io });
+  return path;
 }
 
 // The line the clone's own exclude file carries, anchored at the top of a
@@ -84,11 +100,105 @@ export function excludeRunCache(clone, worktree) {
   return runCacheDir(worktree);
 }
 
-/** Creates a disposable worktree, detached at a sha. */
-export async function addDisposableWorktree(clone, paths, runId, tag, sha) {
-  const path = join(workspaceRoot(paths, runId), tag);
-  await git(['worktree', 'add', '--detach', path, sha], { cwd: clone });
+// -- creating a worktree over this run's own crash residue --------------------
+
+/**
+ * The bound on everything below. A recreation deletes a directory, so the only
+ * directory it may ever be pointed at is one this run made for itself: a path
+ * strictly inside the run's own workspace root. The shared checkout, the bare
+ * clone, another run's workspace and the workspace root itself are all outside
+ * that, and a caller that names one of them is refused before anything is read
+ * or deleted.
+ *
+ * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ * @param {string} runId
+ * @param {string} path
+ * @returns {string} the path, so callers can guard and use in one expression
+ */
+export function assertInRunWorkspace(paths, runId, path) {
+  const root = workspaceRoot(paths, runId);
+  if (!isStrictlyUnder(root, path)) {
+    throw new Error(`refusing to touch ${path}: it is not inside the run workspace ${root}`);
+  }
   return path;
+}
+
+// What git answers with when the path or the branch of a worktree it is asked
+// to create is already spoken for. Every one of them is a statement about
+// residue rather than about the request, and every one of them is cleared by
+// removing the directory and pruning the registration.
+const RESIDUE = [
+  'already exists',
+  'already registered',
+  'already used by worktree',
+  'already checked out',
+  'missing but locked worktree',
+];
+
+/**
+ * Whether a failed `worktree add` failed on residue rather than on the request
+ * itself.
+ * @param {unknown} error
+ */
+export function isWorktreeResidue(error) {
+  const text = String(error?.message ?? error ?? '').toLowerCase();
+  return RESIDUE.some((phrase) => text.includes(phrase));
+}
+
+/**
+ * Deletes one of this run's worktree paths and every trace git holds of it:
+ * the directory, and the registration that outlives a directory git did not
+ * remove itself. Bounded by `assertInRunWorkspace`.
+ */
+export async function clearWorktreeResidue(clone, paths, runId, path, io = {}) {
+  assertInRunWorkspace(paths, runId, path);
+  try {
+    await git(['worktree', 'remove', '--force', path], { cwd: clone });
+  } catch {
+    // git refuses a path it never registered, and it refuses removals the
+    // operating system performs without complaint (ADR-0004). The delete
+    // below is the answer to both, and the prune drops what git leaves.
+  }
+  await removeTree(path, io);
+  await git(['worktree', 'prune'], { cwd: clone });
+}
+
+/**
+ * Creates a worktree at a path inside the run's workspace, over whatever the
+ * run left there before.
+ *
+ * A stage step that crashed between creating its worktree and using it leaves
+ * a directory, a registration, or both. Neither is work: the tree was never
+ * read and nothing was written to it. So the retry of that step treats them as
+ * its own residue and clears them, and a crash stops being a wedge that only a
+ * person can clear. The clearing runs before the add as well as after a failed
+ * one: the state is readable, so the ordinary case never depends on matching
+ * the words of an error message, and the message match stays as the answer to
+ * a state that changed between the read and the add.
+ *
+ * Nothing outside the run's own workspace root can be reached from here.
+ */
+async function addWorktree(clone, paths, runId, path, { add, recreate, io = {} }) {
+  assertInRunWorkspace(paths, runId, path);
+  if (existsSync(path) || (await isRegisteredWorktree(clone, path))) {
+    await clearWorktreeResidue(clone, paths, runId, path, io);
+    await git(recreate, { cwd: clone });
+    return path;
+  }
+  try {
+    await git(add, { cwd: clone });
+  } catch (error) {
+    if (!isWorktreeResidue(error)) throw error;
+    await clearWorktreeResidue(clone, paths, runId, path, io);
+    await git(recreate, { cwd: clone });
+  }
+  return path;
+}
+
+/** Whether the clone holds a worktree registration for this exact path. */
+export async function isRegisteredWorktree(clone, path) {
+  const registered = await listWorktrees(clone);
+  return registered.some((held) => samePath(held, path));
 }
 
 /**
@@ -165,12 +275,25 @@ export async function listWorktrees(clone) {
     .map((line) => line.slice('worktree '.length).trim());
 }
 
+// Path comparison the way the host compares paths: Windows is case
+// insensitive, and git reports a worktree path in its own separator form.
+function comparable(path) {
+  const full = resolve(path);
+  return process.platform === 'win32' ? full.toLowerCase() : full;
+}
+
+function samePath(a, b) {
+  return comparable(a) === comparable(b);
+}
+
 function isUnder(root, path) {
-  let base = resolve(root);
-  let candidate = resolve(path);
-  if (process.platform === 'win32') {
-    base = base.toLowerCase();
-    candidate = candidate.toLowerCase();
-  }
+  const base = comparable(root);
+  const candidate = comparable(path);
   return candidate === base || candidate.startsWith(base + sep);
+}
+
+function isStrictlyUnder(root, path) {
+  const base = comparable(root);
+  const candidate = comparable(path);
+  return candidate !== base && candidate.startsWith(base + sep);
 }

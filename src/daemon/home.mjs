@@ -38,6 +38,10 @@ export function homePaths(home, config) {
     // path a second way — `isolation/worktrees.mjs` joins the run id onto this.
     worktrees: config?.worktreeRoot ?? join(home, 'worktrees'),
     evalReports: join(home, 'eval'),
+    // Where a detached daemon's own two streams go (ADR-0050). A foreground
+    // daemon writes them to the terminal the service manager gave it, so this
+    // directory stays empty on that wiring.
+    logs: join(home, 'logs'),
     lock: join(home, 'daemon.lock'),
   };
 }
@@ -62,6 +66,7 @@ export function scaffoldHome(home, config) {
     paths.tickets,
     paths.worktrees,
     paths.evalReports,
+    paths.logs,
   ]) {
     mkdirSync(dir, { recursive: true });
   }

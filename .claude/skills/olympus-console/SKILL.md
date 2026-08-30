@@ -75,5 +75,7 @@ old config live. Do not restart the daemon for config changes.
 ## Stop / start the daemon
 
 `node bin/olympusd.mjs stop --home <dir>` requests a clean stop;
-`... start --home <dir>` runs it in the foreground (the OS service manager
-normally owns this). A restart resumes every open run from its ledger.
+`... start --home <dir>` starts it again, detached from this console, so
+closing the console cannot take it down. `... run --home <dir>` is the
+foreground form a service manager wires. A restart resumes every open run
+from its ledger.
