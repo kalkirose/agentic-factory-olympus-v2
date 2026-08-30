@@ -130,11 +130,15 @@ test('no seat is ever detached from a console', () => {
   }
 });
 
-test('the daemon takes the shape a seat may not: detached, and hidden', () => {
+test('the daemon takes the shape a seat may not: separated from the shell', () => {
   // The one deliberate exception, and the reason for it: a seat is waited on
   // and killed as a tree, so it stays attached; the daemon must survive the
-  // console that started it, so it does not (ADR-0050).
-  assert.deepEqual(daemonSpawnOptions(), { detached: true, windowsHide: true });
+  // console that started it. On Windows that is one windowless console of its
+  // own (never DETACHED_PROCESS: a console-less daemon makes unhidden
+  // descendants allocate fresh, visible console sessions); elsewhere it is a
+  // session of its own (ADR-0050).
+  assert.deepEqual(daemonSpawnOptions('win32'), { windowsHide: true });
+  assert.deepEqual(daemonSpawnOptions('linux'), { detached: true });
 });
 
 // -- every place the harness starts a process ---------------------------------

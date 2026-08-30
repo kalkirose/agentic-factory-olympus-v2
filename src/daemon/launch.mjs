@@ -3,12 +3,13 @@
 // was given in, a tree kill aimed at the shell. All three reach the children
 // of that shell, so the daemon may not be one of them (ADR-0050).
 //
-// `start` therefore spawns the daemon and returns. The daemon is detached, so
-// it leads a session of its own and, on Windows, holds no console at all; its
-// starting process is gone a moment later, so a tree kill of the shell has
-// nothing left to walk to. The two streams a foreground daemon writes to the
-// terminal go to files under the home instead, which is where a failed start
-// reports from.
+// `start` therefore spawns the daemon and returns. Off Windows the daemon
+// leads a session of its own; on Windows it holds one windowless console of
+// its own, which its whole descendant tree inherits (see daemonSpawnOptions
+// for why it must not be console-less). Its starting process is gone a moment
+// later, so a tree kill of the shell has nothing left to walk to. The two
+// streams a foreground daemon writes to the terminal go to files under the
+// home instead, which is where a failed start reports from.
 import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -25,21 +26,30 @@ export function daemonLogPaths(paths) {
 
 /**
  * The spawn shape of the daemon process itself, and the one shape in the
- * harness that detaches. A seat takes the opposite shape for the opposite
- * reason (ADR-0016): a seat stays attached, because the daemon waits on it
- * and ends it as a tree, while the daemon detaches, because nothing that ends
- * the shell may reach it.
+ * harness that leaves the starting shell behind. A seat takes the opposite
+ * shape for the opposite reason (ADR-0016): a seat stays attached, because
+ * the daemon waits on it and ends it as a tree, while the daemon separates,
+ * because nothing that ends the shell may reach it.
  *
- * On Windows this is `DETACHED_PROCESS` with a new process group. It leaves
- * the daemon with no console, which is what makes a console control event
- * undeliverable to it. Nothing is lost by that: every child the daemon starts
- * carries `windowsHide`, so each is given a console of its own with no window
- * on it, and the daemon's own two streams are files. Off Windows it is
- * `setsid`: a new session and a new process group, so a signal addressed to
- * the shell's group does not name the daemon.
+ * On Windows this is `CREATE_NO_WINDOW` (`windowsHide`) WITHOUT
+ * `DETACHED_PROCESS`. The distinction is load-bearing and was learned live
+ * (2026-08-30): a `DETACHED_PROCESS` daemon holds no console, so every
+ * console-subsystem descendant that starts without the hide flag makes the
+ * system allocate a fresh console session, and a desktop whose default
+ * terminal is a windowed host puts each one ON SCREEN. `CREATE_NO_WINDOW`
+ * instead gives the daemon one console of its own with no window on it, and
+ * every descendant INHERITS that windowless console, so no depth of the tree
+ * can put a window on a screen. The shell-survival property is kept either
+ * way: the daemon's console is its own, not the shell's, so closing the
+ * starting terminal delivers no console control event to it, and the
+ * starting process exits a moment later, so a tree kill of the shell has
+ * nothing left to walk to. Off Windows it is `setsid` via `detached`: a new
+ * session and a new process group, so a signal addressed to the shell's
+ * group does not name the daemon.
  */
-export function daemonSpawnOptions() {
-  return { detached: true, windowsHide: true };
+export function daemonSpawnOptions(platform = process.platform) {
+  if (platform === 'win32') return { windowsHide: true };
+  return { detached: true };
 }
 
 /**

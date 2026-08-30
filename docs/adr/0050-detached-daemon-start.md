@@ -17,19 +17,29 @@ owns the restart. A person types `start`.
 The two forms share every line of the daemon. The only thing `start` adds is
 the spawn, the wait, and the two log files.
 
-- **The spawn shape.** `daemonSpawnOptions()` is `detached` plus
-  `windowsHide`, and it is the one shape in the harness that detaches. A seat
-  takes the opposite shape for the opposite reason (ADR-0016): a seat is
-  waited on and ended as a tree, so it stays attached, while the daemon must
-  outlive the shell, so it does not. `test/processes.test.mjs` reads every
-  child-process call site under `src/` and `bin/` and fails on a second one
-  that detaches.
-- **Windows.** `detached` is `DETACHED_PROCESS` with a new process group. The
-  daemon is left with no console at all, so a console control event cannot be
-  delivered to it, whoever raises it and whichever member of the group it
-  names. Nothing is lost by having no console: every child the daemon starts
-  carries `windowsHide`, so each is given a console of its own with no window
-  on it, and the daemon's own two streams are files.
+- **The spawn shape.** `daemonSpawnOptions()` is platform-split: `detached`
+  off Windows, `windowsHide` alone on Windows. It is the one shape in the
+  harness that separates from the shell. A seat takes the opposite shape for
+  the opposite reason (ADR-0016): a seat is waited on and ended as a tree, so
+  it stays attached, while the daemon must outlive the shell, so it does not.
+  `test/processes.test.mjs` reads every child-process call site under `src/`
+  and `bin/` and fails on a second one that separates.
+- **Windows: one windowless console, never no console (corrected
+  2026-08-30, learned live).** The first build used `DETACHED_PROCESS`,
+  which leaves the daemon with no console at all. That kept the shell's
+  console control events away, but it broke the silence property one level
+  down: a console-subsystem descendant that starts without the hide flag
+  then makes the system allocate a FRESH console session, and a desktop
+  whose default terminal is a windowed host puts every one of them on
+  screen. Operator desktops filled with terminal windows within the hour.
+  The corrected shape is `CREATE_NO_WINDOW` (`windowsHide`) without
+  `DETACHED_PROCESS`: the daemon holds one console of its own with no
+  window on it, and the whole descendant tree inherits that windowless
+  console, so no depth of the tree can put a window on a screen. The
+  shell-survival property is unchanged: the daemon's console is its own,
+  not the shell's, so closing the starting terminal delivers nothing to
+  it, and the starting process exits a moment later, so a tree kill of the
+  shell has nothing left to walk to.
 - **Off Windows.** `detached` is `setsid`. The daemon leads a new session and
   a new process group, so a signal addressed to the shell's group does not
   name it, and a terminal hangup does not reach it.

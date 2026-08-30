@@ -26,8 +26,17 @@ const ON_WINDOWS = process.platform === 'win32';
 
 // -- the start shape ----------------------------------------------------------
 
-test('the daemon spawn detaches and shows nothing on screen', () => {
-  assert.deepEqual(daemonSpawnOptions(), { detached: true, windowsHide: true });
+test('the daemon spawn separates from the shell and shows nothing on screen', () => {
+  // Windows: one windowless console of its own (CREATE_NO_WINDOW), which the
+  // whole descendant tree inherits. NEVER `detached` here: a console-less
+  // daemon makes every unhidden descendant allocate a fresh console session,
+  // and a desktop whose default terminal is a windowed host puts each one on
+  // screen (learned live 2026-08-30).
+  assert.deepEqual(daemonSpawnOptions('win32'), { windowsHide: true });
+  // Elsewhere: a session of its own, so the shell's group signal cannot name
+  // it. No console concept to manage.
+  assert.deepEqual(daemonSpawnOptions('linux'), { detached: true });
+  assert.deepEqual(daemonSpawnOptions('darwin'), { detached: true });
 });
 
 // -- what a start waits for ---------------------------------------------------
