@@ -11,6 +11,16 @@ Seats run as headless child processes; a child exit is the transition event.
 All run state lives in ledgers; a restart resumes every open run at its
 recorded stamp. "Nobody invoked the next phase" is impossible by construction.
 
+The daemon has two start forms (ADR-0050). `olympusd run` is the foreground
+form, which a service manager wires because a service manager supervises the
+process it starts. `olympusd start` is the form a person types: it spawns the
+same daemon detached, in a session of its own, with its two streams appended to
+files under the home, waits for the home's lock file to name the pid, and
+returns. The console that gave the command cannot end it. That spawn is the one
+detaching call site in the harness; a seat takes the opposite shape because a
+seat is waited on and ended as a tree (ADR-0016), and a test reads every
+child-process call site to keep it the only one.
+
 Around the daemon:
 
 - **Console sessions** — any Claude session is a cockpit: it reads the ledgers
@@ -626,9 +636,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   so its self-check ends by running the command the project names in
   `lanes.story.lintCommand` over what it wrote, in the sweep worktree. A red is
   a work-product defect: it re-briefs the seat on the same two-attempt loop and
-  nothing red is pushed. A sweep that wrote nothing runs no lint, and a command
-  that could not run at all fails no attempt. The `card-sweep` stamp carries
-  `lint` either way, so the reader can tell which of them happened.
+  nothing red is pushed. A command that could not run at all fails the attempt
+  the same way, because a push behind it is a push of cards no check read. A
+  sweep that wrote nothing runs no lint. The `card-sweep` stamp carries `lint`
+  every time, so the reader can tell which of them happened.
 - **Reconciliation judgment** (ADR-0026): a fresh-context seat judges
   whether the shipped diff implements or contradicts any decision record.
   Owed writes a reconciliation ticket and stamps `reconciliation-judged`;
@@ -648,6 +659,17 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - **Worktrees.** The daemon keeps one bare clone per project; at run launch
   it creates a fresh run worktree, seats receive the absolute path, at close
   it removes the worktree. No shared checkout exists.
+- **Recreate over residue** (ADR-0051). A worktree a run creates for itself is
+  created over whatever that run left at the same path before: the two creation
+  functions in `src/isolation/worktrees.mjs` clear the path and the clone's
+  registration for it first, and clear again after an add the clone refuses, so
+  no stage step carries a guard of its own. Clearing takes all three traces
+  (`worktree remove --force`, a direct delete in the extended-length path form,
+  `worktree prune`), and the run worktree resets its branch with `-B`, because
+  residue of a crash carries the branch as well as the directory. Every path is
+  refused unless it is strictly inside `<worktrees>/<runId>`, checked before
+  anything is read or deleted, so the bound is the run's own workspace and
+  never another run's, the clone store or the daemon home.
 - **Workspace release.** At close the release ends what is standing in the
   workspace — matched by command line, by image path, or by working directory,
   the last being the one that blocks an `rmdir` — removes the worktrees, and

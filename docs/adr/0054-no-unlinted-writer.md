@@ -25,10 +25,12 @@ the project's own card lint:
 - **A sweep that wrote nothing runs no lint.** The rule binds writes. The tree
   as it was merged is not this sweep's answer to give, and a red it inherited
   is not a defect the seat can repair.
-- **A command that could not run is not a red.** It fails no attempt. The
-  `card-sweep` stamp carries `lint` on every sweep (`green`, `red`, `unrun`,
-  `unwritten`, or `undeclared`), so the reader of a ledger can always tell
-  which of them happened.
+- **A command that could not run fails the attempt too.** It is not a red, but
+  it is not a green either, and a push behind it is a push of cards no check
+  read. It joins the defect list on the same loop, so nothing unlinted reaches
+  the default branch. The `card-sweep` stamp carries `lint` on every sweep
+  (`green`, `red`, `unrun`, `unwritten`, or `undeclared`), so the reader of a
+  ledger can always tell a refused card from a host that could not answer.
 - **The seat is told.** The role block says the lint runs over everything it
   writes, so the check is a condition of the work rather than a surprise at the
   end of it.
@@ -64,6 +66,13 @@ trade: a project whose default branch fails its own card lint is already
 holding every launch, and the sweep's silence is the smaller loss. The
 `unwritten` case keeps the common shape of this out of the loop entirely.
 
+An unrunnable command fails an attempt the seat cannot repair, and the re-brief
+tells it something it cannot act on. The sweep then loses that run's card
+writes. That is the accepted trade: a lint the host cannot start is a host the
+sweep cannot trust to check anything, and a card written past a check nobody
+ran is the exact defect this record exists to stop. The recorded miss names the
+spawn error, so the host defect is visible and fixable.
+
 The check costs one local command run per sweep attempt, seconds, on a path
 that has already merged a pull request.
 
@@ -74,6 +83,13 @@ sweep wrote: the command runs, and a red is a defect only when its output names
 a file the sweep touched. Trigger: a sweep failing on a red it inherited.
 Reversal cost: low, one filter in `cardLint`, at the price of depending on the
 command's output naming its files.
+
+If failing on an unrunnable command costs more card writes than it saves, the
+`unrun` case stops failing the attempt: the sweep pushes as it would with no
+lint declared, and the stamp carries `lint: 'unrun'` as the reason there is no
+green to report. Trigger: sweeps lost to a host defect the seat cannot repair,
+on a project whose lint is otherwise green. Reversal cost: trivial, one branch
+in `cardLint`, at the price of a push no check read.
 
 If a project wants the sweep to write without its lint, it removes
 `lanes.story.lintCommand`, and the sweep behaves exactly as it did before this

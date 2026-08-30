@@ -3313,7 +3313,7 @@ test('a card the project lint refuses fails the attempt and never reaches the br
   assert.equal(gitSync(['show', 'main:stories/alpha.md'], fx.origin), DEFAULT_CARD);
 });
 
-test('a lint the host cannot run stops no sweep and is recorded', async (t) => {
+test('a lint the host cannot run fails the sweep and pushes nothing', async (t) => {
   const fx = shipFixture(t, {
     config: {
       commands: { cardlint: ['olympus-no-such-binary-xyz'] },
@@ -3324,11 +3324,34 @@ test('a lint the host cannot run stops no sweep and is recorded', async (t) => {
   const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
   fx.forge.setChecks(opened.sha, [green()]);
   const events = await waitClosed(fx.paths, runId);
+  // The story shipped; the sweep spent both attempts and recorded the miss.
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   const sweep = events.find((e) => e.event === 'card-sweep');
-  assert.equal(sweep.ok, true);
+  assert.equal(sweep.ok, false);
+  assert.equal(sweep.cause, 'work-product-defect');
+  // The stamp keeps an unrunnable lint apart from a red one.
   assert.equal(sweep.lint, 'unrun');
-  assert.equal(sweep.pushed, true);
-  assert.equal(fx.calls.filter((c) => c.seat === 'card-sweep').length, 1);
+  assert.equal(sweep.pushed, undefined);
+  // Nothing unlinted reached the default branch: the card is as it was.
+  assert.equal(gitSync(['show', 'main:stories/alpha.md'], fx.origin), DEFAULT_CARD);
+});
+
+test('a lint the host cannot run re-briefs the sweep once, in its own words', async (t) => {
+  const fx = shipFixture(t, {
+    config: {
+      commands: { cardlint: ['olympus-no-such-binary-xyz'] },
+      lanes: { story: { suiteCommand: 'suite', lintCommand: 'cardlint' } },
+    },
+  });
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const attempts = fx.calls.filter((c) => c.seat === 'card-sweep');
+  assert.equal(attempts.length, 2);
+  assert.ok(attempts[1].prompt.includes('the card lint of this project could not run'));
+  const failure = events.find((e) => e.event === 'seat-failure' && e.seat === 'card-sweep');
+  assert.ok(failure.defects.some((d) => d.includes('could not run')));
 });
 
 test('a project that declares no card lint sweeps as it always did', async (t) => {

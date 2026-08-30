@@ -1986,10 +1986,12 @@ async function sweepChecks(ctx, base, cardDir, report) {
  *
  * A red is a work-product defect. It fails this attempt and re-briefs the seat
  * on the two-attempt loop the sweep already has, so nothing red is pushed. A
- * command that could not run at all is not a red and fails no attempt: it is
- * recorded on the sweep stamp, and the sweep carries on as it did before this
- * check existed. A sweep that wrote nothing is not a writer, and the lint of
- * the tree as it was merged is not this sweep's answer to give.
+ * command that could not run at all fails the attempt the same way: it is not
+ * a red, but it is not a green either, and a push behind it is a push of cards
+ * no check read. The stamp keeps the two apart, so a reader can tell a refused
+ * card from a host that could not answer. A sweep that wrote nothing is not a
+ * writer, and the lint of the tree as it was merged is not this sweep's answer
+ * to give.
  */
 async function cardLint(ctx, base, changed, defects) {
   const name = base.config.lanes?.story?.lintCommand;
@@ -2001,7 +2003,13 @@ async function cardLint(ctx, base, changed, defects) {
     env: base.env,
     log: commandLogPath(ctx.paths, ctx.runId, `card-sweep-lint-${n}`),
   });
-  if (run.code === null) return 'unrun';
+  if (run.code === null) {
+    defects.push(
+      'the card lint of this project could not run, so nothing read the cards you wrote; ' +
+        `the sweep pushes no card the lint did not pass:\n${run.error ?? run.output}`,
+    );
+    return 'unrun';
+  }
   if (run.code === 0) return 'green';
   defects.push(
     'the card lint of this project is red on what you wrote; repair the cards you edited ' +

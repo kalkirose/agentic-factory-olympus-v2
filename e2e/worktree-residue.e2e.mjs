@@ -43,7 +43,7 @@ Base sha: the launch base. Scope exclusions: none beyond the card boundary.
 f(x) answers twice the number it is given. The suite asserts it on one value.
 
 Test mapping:
-- tests/feature.test.mjs — f(2) is 4
+- tests/feature.test.mjs - f(2) is 4
 
 Named constants:
 - FACTOR = 2
@@ -54,8 +54,8 @@ Supersedes:
 ## Touched paths
 
 \`\`\`touched-paths
-src/feature.mjs — dev
-tests/feature.test.mjs — suite
+src/feature.mjs - dev
+tests/feature.test.mjs - suite
 \`\`\`
 
 ## Environment
