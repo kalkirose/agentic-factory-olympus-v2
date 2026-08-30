@@ -2782,8 +2782,23 @@ test('a merge this run never stamped is a merge the resume has to judge', async 
   // The merge the crash left behind, stamped nowhere.
   commitTree(fx.origin, { 'docs/late.md': 'a competing note\n' }, 'docs: a note');
   gitSync(['fetch', '--quiet', fx.origin, 'main'], worktree);
+  // The identity rides the invocation, as it does for every commit the harness
+  // makes in a run worktree: a run worktree carries none of its own, and a CI
+  // runner has none globally either.
   gitSync(
-    ['-c', 'commit.gpgsign=false', 'merge', '--no-ff', '-m', 'merge main', 'FETCH_HEAD'],
+    [
+      '-c',
+      'commit.gpgsign=false',
+      '-c',
+      'user.name=Harness Test',
+      '-c',
+      'user.email=harness@test.invalid',
+      'merge',
+      '--no-ff',
+      '-m',
+      'merge main',
+      'FETCH_HEAD',
+    ],
     worktree,
   );
   const head = gitSync(['rev-parse', 'HEAD'], worktree).trim();
