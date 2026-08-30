@@ -12,8 +12,9 @@ import {
   parseProjectConfig,
   underEntry,
 } from '../config/project.mjs';
-import { cloneDir } from '../isolation/clones.mjs';
+import { branchSha, cloneDir, fetchClone } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
+import { changedFiles, headSha, resetHard } from '../isolation/tree.mjs';
 import { stackEnv } from '../isolation/stacks.mjs';
 import { RUN_CACHE_ENV, runCacheDir } from '../isolation/worktrees.mjs';
 
@@ -282,6 +283,89 @@ export function withAbandonGuard(handlers) {
       return [stage, guarded];
     }),
   );
+}
+
+// -- the tree a retry runs against (ADR-0055) --------------------------------
+
+const REFRESHED = Symbol('tree-refresh');
+
+/**
+ * Wraps a lane's handlers with the tree refresh: before a stage re-runs on a
+ * bought retry, the run's tree is brought to the default branch head.
+ *
+ * A `stage-blocked` park is the class of failure the run cannot repair itself,
+ * so the repair lands where the operator can write: on the default branch. The
+ * run's tree is pinned at launch, so the retry that asked for that repair ran
+ * against a tree the repair never reached, and the same park came back for
+ * ever. The refresh is what makes the retry answerable.
+ *
+ * It goes inside the abandon guard, so a run being closed refreshes nothing.
+ * A composed lane wraps its continuation's handlers again; the guard is
+ * idempotent through the ledger, so a second wrap costs a read and changes
+ * nothing.
+ * @param {Record<string, Function>} handlers
+ */
+export function withTreeRefresh(handlers) {
+  return Object.fromEntries(
+    Object.entries(handlers).map(([stage, handler]) => {
+      if (handler[REFRESHED]) return [stage, handler];
+      const refreshed = async (ctx) => {
+        await refreshForRetry(ctx);
+        return handler(ctx);
+      };
+      refreshed[REFRESHED] = true;
+      return [stage, refreshed];
+    }),
+  );
+}
+
+/**
+ * Brings the run's tree to the default branch head for one answered
+ * `stage-blocked` park, and stamps what it did. Returns the stamp, or null
+ * where there is nothing to do.
+ *
+ * The reach is exactly the tree the run has written nothing to: a clean tree
+ * whose HEAD the default branch already holds. A tree with the run's own work
+ * in it keeps that work, because a reset would take what a verdict is owed,
+ * and the stamp says so. One stamp per park, so the tree moves once per answer
+ * and every later entry of the stage reads the ledger and stops.
+ *
+ * The refresh never fails a stage. A fetch or a reset that throws is recorded
+ * with its cause, and the stage runs against the tree it already had, exactly
+ * as it did before this guard existed.
+ */
+export async function refreshForRetry(ctx) {
+  const events = runEvents(ctx);
+  const asked = lastPark(events);
+  if (!asked?.answer || asked.park.type !== 'stage-blocked') return null;
+  if (isAbandon(asked.answer)) return null;
+  if (events.some((e) => e.event === 'tree-refreshed' && e.park === asked.park.seq)) return null;
+  const worktree = ctx.payload.worktree;
+  const branch = ctx.payload.defaultBranch ?? 'main';
+  const stamp = (fields) =>
+    ctx.store.append('tree-refreshed', { actor: ACTOR, park: asked.park.seq, branch, ...fields });
+  let from = null;
+  try {
+    await fetchClone(cloneDir(ctx.paths, ctx.project));
+    const to = await branchSha(cloneDir(ctx.paths, ctx.project), branch);
+    from = await headSha(worktree);
+    const own = await ownWork(worktree, to);
+    if (own) return stamp({ from, to, moved: false, cause: own });
+    if (from === to) return stamp({ from, to, moved: false });
+    await resetHard(worktree, to);
+    return stamp({ from, to, moved: true });
+  } catch (error) {
+    return stamp({ ...(from && { from }), moved: false, cause: error.message });
+  }
+}
+
+/** What the run has of its own in its tree, in one sentence, or null. */
+async function ownWork(worktree, to) {
+  const dirty = await changedFiles(worktree);
+  if (dirty.length > 0) return `the tree holds ${dirty.length} uncommitted change(s)`;
+  const ahead = (await git(['rev-list', '--count', `${to}..HEAD`], { cwd: worktree })).trim();
+  if (ahead !== '0') return `the tree holds ${ahead} commit(s) of its own`;
+  return null;
 }
 
 // What free text says at a recovery park: the operator repaired something and

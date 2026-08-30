@@ -49,6 +49,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
   ciEvidenceDir,
+  commandLogPath,
   repairTicketPath,
   reconcileTicketPath,
   runReportPath,
@@ -85,6 +86,7 @@ import {
   parseIntentCard,
 } from './card.mjs';
 import { authorizedSupersedes, supersedeLines } from './supersede.mjs';
+import { runCommand } from './exec.mjs';
 import { probeCredentials } from './probes.mjs';
 import { SUITE_SCHEMA } from './story.mjs';
 import {
@@ -1801,6 +1803,7 @@ async function cardSweep(ctx, base, merged) {
   const supersedes = authorizedSupersedes(runEvents(ctx));
   let brief = null;
   let report = null;
+  let lint = null;
   for (let attempt = 1; ; attempt++) {
     const n = invocationCount(runEvents(ctx), 'card-sweep') + 1;
     const result = await ctx.runSeat({
@@ -1817,7 +1820,9 @@ async function cardSweep(ctx, base, merged) {
       ctx.store.append('card-sweep', { actor: ACTOR, ok: false, cause: 'seat-failure' });
       return;
     }
-    const defects = await sweepChecks(base, cardDir, result.report);
+    const checked = await sweepChecks(ctx, base, cardDir, result.report);
+    const defects = checked.defects;
+    lint = checked.lint;
     if (defects.length === 0) {
       report = result.report;
       break;
@@ -1829,7 +1834,12 @@ async function cardSweep(ctx, base, merged) {
         reason: 'work-product-defect',
         defects,
       });
-      ctx.store.append('card-sweep', { actor: ACTOR, ok: false, cause: 'work-product-defect' });
+      ctx.store.append('card-sweep', {
+        actor: ACTOR,
+        ok: false,
+        cause: 'work-product-defect',
+        ...(lint && { lint }),
+      });
       return;
     }
     brief = defects;
@@ -1910,15 +1920,24 @@ async function cardSweep(ctx, base, merged) {
     // classification duty ran at all.
     foreseen: (report.foreseen ?? []).length,
     decisions: (report.decisions ?? []).length,
+    // What the project's own card lint said about the writes this sweep is
+    // pushing: green, or the reason there is no green to report (ADR-0054).
+    ...(lint && { lint }),
     pushed,
     ...(sha && { sha }),
     ...(pushError && { error: pushError }),
   });
 }
 
-async function sweepChecks(base, cardDir, report) {
+/**
+ * The sweep's self-check on its own work product: what the seat wrote, and
+ * where. It returns the defects that re-brief the attempt, and what the
+ * project's card lint said (ADR-0054).
+ */
+async function sweepChecks(ctx, base, cardDir, report) {
   const defects = [];
-  for (const file of await changedFiles(base.worktree)) {
+  const changed = await changedFiles(base.worktree);
+  for (const file of changed) {
     if (!underAny(file, [cardDir])) defects.push(`change outside the card directory: ${file}`);
   }
   for (const card of report.updatedCards) {
@@ -1950,7 +1969,45 @@ async function sweepChecks(base, cardDir, report) {
       defects.push(`open decision on a card outside the card directory: ${open.card}`);
     }
   }
-  return defects;
+  return { defects, lint: await cardLint(ctx, base, changed, defects) };
+}
+
+/**
+ * The project's own card lint, run over what the sweep wrote, before any of it
+ * is pushed.
+ *
+ * The sweep is the one writer in the harness that lands text on the default
+ * branch without a request behind it, so it is the one writer whose output no
+ * gate reads. The command is the project's, named in its own config, and it is
+ * the same command the launch gate runs over the same files: an automated
+ * writer passes every mechanical check that binds the equivalent human path,
+ * because a card the project's check refuses parks every launch behind it
+ * (ADR-0054).
+ *
+ * A red is a work-product defect. It fails this attempt and re-briefs the seat
+ * on the two-attempt loop the sweep already has, so nothing red is pushed. A
+ * command that could not run at all is not a red and fails no attempt: it is
+ * recorded on the sweep stamp, and the sweep carries on as it did before this
+ * check existed. A sweep that wrote nothing is not a writer, and the lint of
+ * the tree as it was merged is not this sweep's answer to give.
+ */
+async function cardLint(ctx, base, changed, defects) {
+  const name = base.config.lanes?.story?.lintCommand;
+  if (!name) return 'undeclared';
+  if (changed.length === 0) return 'unwritten';
+  const n = invocationCount(runEvents(ctx), 'card-sweep');
+  const run = await runCommand(base.config.commands[name], {
+    cwd: base.worktree,
+    env: base.env,
+    log: commandLogPath(ctx.paths, ctx.runId, `card-sweep-lint-${n}`),
+  });
+  if (run.code === null) return 'unrun';
+  if (run.code === 0) return 'green';
+  defects.push(
+    'the card lint of this project is red on what you wrote; repair the cards you edited ' +
+      `until it passes:\n${run.output}`,
+  );
+  return 'red';
 }
 
 /**
@@ -2243,6 +2300,13 @@ function sweepRole(base, cardDir, brief, supersedes = []) {
     'Update Blocked-by edges, sources, and open decisions so every card matches the repository as shipped.',
     "When the shipped work invalidates a card's goal or scope boundary, do not rewrite the card: list it under invalidated with the reason.",
     'List every card you edited under updatedCards.',
+    ...(base.config.lanes?.story?.lintCommand
+      ? [
+          "The project's own card lint runs over everything you write, before any of it is " +
+            'pushed. A card it refuses fails this attempt, so keep every card you edit inside ' +
+            'the conventions the lint enforces.',
+        ]
+      : []),
     ...foreseenLines(cardDir),
     ...(supersedes.length > 0
       ? [

@@ -3236,3 +3236,109 @@ test('a choice the later card leaves open parks that card at close-out, not the 
   // Nothing was written onto the card: a question is asked, never planted.
   assert.ok(!gitSync(['show', 'main:stories/beta.md'], fx.origin).includes(FORESEEN_MARKER));
 });
+
+// -- the sweep passes the project's own card lint (ADR-0054) -----------------
+
+// The lint a project puts in front of every human who edits a card: a card
+// carries frontmatter. The sweep is a writer like any other, so it clears the
+// same check before it pushes.
+const CARD_LINT = `import { readdirSync, readFileSync } from 'node:fs';
+
+let checked = 0;
+for (const name of readdirSync('stories')) {
+  if (!name.endsWith('.md')) continue;
+  if (!readFileSync(\`stories/\${name}\`, 'utf8').startsWith('---')) {
+    console.error(\`card lint: \${name} carries no frontmatter\`);
+    process.exit(1);
+  }
+  checked++;
+}
+console.log(\`card lint: \${checked} card(s)\`);
+`;
+
+const LINTED = {
+  config: {
+    commands: { cardlint: ['node', 'scripts/cardlint.mjs'] },
+    lanes: { story: { suiteCommand: 'suite', lintCommand: 'cardlint' } },
+  },
+  files: { 'scripts/cardlint.mjs': CARD_LINT },
+};
+
+test('the sweep runs the project card lint over what it wrote, and says so', async (t) => {
+  const fx = shipFixture(t, LINTED);
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const sweep = events.find((e) => e.event === 'card-sweep');
+  assert.equal(sweep.ok, true);
+  assert.equal(sweep.lint, 'green');
+  assert.equal(sweep.pushed, true);
+  // One attempt: a green lint costs the sweep nothing.
+  assert.equal(fx.calls.filter((c) => c.seat === 'card-sweep').length, 1);
+  // The seat was told the lint binds what it writes.
+  const prompt = fx.calls.find((c) => c.seat === 'card-sweep').prompt;
+  assert.ok(prompt.includes("The project's own card lint runs over everything you write"));
+});
+
+test('a card the project lint refuses fails the attempt and never reaches the branch', async (t) => {
+  const fx = shipFixture(t, {
+    ...LINTED,
+    seats: {
+      'card-sweep': () => ({
+        files: { 'stories/alpha.md': 'A card the project lint refuses.\n' },
+        report: { updatedCards: ['stories/alpha.md'], invalidated: [], summary: 'swept' },
+      }),
+    },
+  });
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  // The story shipped; the sweep spent both attempts and recorded the miss.
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const sweep = events.find((e) => e.event === 'card-sweep');
+  assert.equal(sweep.ok, false);
+  assert.equal(sweep.cause, 'work-product-defect');
+  assert.equal(sweep.lint, 'red');
+  assert.equal(sweep.pushed, undefined);
+  // The red is in the brief of the second attempt, with the lint's own words.
+  const attempts = fx.calls.filter((c) => c.seat === 'card-sweep');
+  assert.equal(attempts.length, 2);
+  assert.ok(attempts[1].prompt.includes('the card lint of this project is red'));
+  assert.ok(attempts[1].prompt.includes('carries no frontmatter'));
+  const failure = events.find((e) => e.event === 'seat-failure' && e.seat === 'card-sweep');
+  assert.ok(failure.defects.some((d) => d.includes('card lint')));
+  // Nothing red reached the default branch: the card is as it was.
+  assert.equal(gitSync(['show', 'main:stories/alpha.md'], fx.origin), DEFAULT_CARD);
+});
+
+test('a lint the host cannot run stops no sweep and is recorded', async (t) => {
+  const fx = shipFixture(t, {
+    config: {
+      commands: { cardlint: ['olympus-no-such-binary-xyz'] },
+      lanes: { story: { suiteCommand: 'suite', lintCommand: 'cardlint' } },
+    },
+  });
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const sweep = events.find((e) => e.event === 'card-sweep');
+  assert.equal(sweep.ok, true);
+  assert.equal(sweep.lint, 'unrun');
+  assert.equal(sweep.pushed, true);
+  assert.equal(fx.calls.filter((c) => c.seat === 'card-sweep').length, 1);
+});
+
+test('a project that declares no card lint sweeps as it always did', async (t) => {
+  const fx = shipFixture(t, {});
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const sweep = events.find((e) => e.event === 'card-sweep');
+  assert.equal(sweep.ok, true);
+  assert.equal(sweep.lint, 'undeclared');
+  assert.ok(!fx.calls.find((c) => c.seat === 'card-sweep').prompt.includes('card lint'));
+});

@@ -108,6 +108,7 @@ import {
   parkDirective,
   GATE_FORMS,
   withAbandonGuard,
+  withTreeRefresh,
   attemptLimit,
   answeredPath,
   blocked,
@@ -156,11 +157,16 @@ export function repairLane({ afterVerdict }) {
   requireContinuation(afterVerdict, 'repairLane');
   return {
     stages: ['fix', 'verdict', ...afterVerdict.stages],
-    handlers: withAbandonGuard({
-      fix: implementationHandler('repair'),
-      verdict: verdictHandler('repair', afterVerdict.stages[0]),
-      ...afterVerdict.handlers,
-    }),
+    // A lane root carries both stage-entry guards: the abandon route out of
+    // any park (ADR-0015), and, inside it, the tree refresh a bought retry on
+    // a stage-blocked park is owed (ADR-0055).
+    handlers: withAbandonGuard(
+      withTreeRefresh({
+        fix: implementationHandler('repair'),
+        verdict: verdictHandler('repair', afterVerdict.stages[0]),
+        ...afterVerdict.handlers,
+      }),
+    ),
   };
 }
 

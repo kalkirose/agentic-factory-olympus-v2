@@ -300,6 +300,17 @@ export const RUN_EVENTS = new Set([
   'park',
   'answer',
   'resume',
+  // The run's tree, brought to the default branch head for one answered
+  // `stage-blocked` park: the park it belongs to, the branch, the sha the tree
+  // stood at and the sha it now stands at. A retry on that park asks the
+  // operator for a repair the run cannot make, and the repair lands on the
+  // default branch, so the retry has to meet a tree that holds it. Quiet,
+  // because the stage runs as it always did, but never silent, because the
+  // inputs of a run moved between two attempts, and provenance is what says by
+  // how much.
+  // Stamped for the refusals too: a tree with the run's own work in it keeps
+  // it, and the stamp carries the cause (ADR-0055).
+  'tree-refreshed',
   // liveness (loud)
   'liveness-violation',
   // paired resolution append for loud items and breaches

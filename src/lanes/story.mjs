@@ -69,6 +69,7 @@ import {
   readJson,
   parkDirective,
   withAbandonGuard,
+  withTreeRefresh,
   seatWithChecks,
   blocked,
   commandError,
@@ -107,15 +108,20 @@ export function storyLane({ afterFreeze, forgeFor = null }) {
   const postFreeze = afterFreeze.stages[0];
   return {
     stages: [...PRE_FREEZE_STAGES, ...afterFreeze.stages],
-    handlers: withAbandonGuard({
-      readiness: readinessHandler(postFreeze, forgeFor),
-      'spec-birth': specBirth,
-      'spec-gate': specGate,
-      suite: suiteStage,
-      adversary,
-      freeze: freezeHandler(postFreeze),
-      ...afterFreeze.handlers,
-    }),
+    // The lane root carries both stage-entry guards: the abandon route the
+    // human takes out of any park (ADR-0015), and, inside it, the tree refresh
+    // a bought retry is owed (ADR-0055).
+    handlers: withAbandonGuard(
+      withTreeRefresh({
+        readiness: readinessHandler(postFreeze, forgeFor),
+        'spec-birth': specBirth,
+        'spec-gate': specGate,
+        suite: suiteStage,
+        adversary,
+        freeze: freezeHandler(postFreeze),
+        ...afterFreeze.handlers,
+      }),
+    ),
   };
 }
 

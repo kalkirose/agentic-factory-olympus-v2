@@ -621,6 +621,14 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   context is fresh: it holds that card's next launch, offers no abandon, and
   never holds the run that shipped. A note the report claims and the card does
   not carry fails the sweep attempt and re-briefs the seat.
+- **The sweep passes the project's own card lint** (ADR-0054). The sweep is the
+  one writer that lands text on the default branch with no request behind it,
+  so its self-check ends by running the command the project names in
+  `lanes.story.lintCommand` over what it wrote, in the sweep worktree. A red is
+  a work-product defect: it re-briefs the seat on the same two-attempt loop and
+  nothing red is pushed. A sweep that wrote nothing runs no lint, and a command
+  that could not run at all fails no attempt. The `card-sweep` stamp carries
+  `lint` either way, so the reader can tell which of them happened.
 - **Reconciliation judgment** (ADR-0026): a fresh-context seat judges
   whether the shipped diff implements or contradicts any decision record.
   Owed writes a reconciliation ticket and stamps `reconciliation-judged`;
@@ -716,6 +724,14 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   `finding-ack` / `finding-ack-revoked` pairs in the instance ledger so a
   restart clears none, and end one at a time through `olympusctl revoke`,
   which carries the fix it stands on (ADR-0032).
+- **A retry on a blocked stage meets the repair** (ADR-0055). A `stage-blocked`
+  park is the class the run cannot repair itself, and the repair lands on the
+  default branch. An answer that is not `abandon` therefore brings the run's
+  tree to the branch head before the stage runs again, and stamps
+  `tree-refreshed` with the park, the branch, and the sha the tree left and the
+  sha it now stands at. The reach is exactly the tree the run has written
+  nothing to: a clean tree the branch already holds. A tree with the run's own
+  work keeps it, and the stamp carries the cause. The refresh fails no stage.
 - **Escalation queue**: always open, answerable from the record alone,
   presented FIFO with roadmap-order tiebreak, answered in any order.
 - **One park, one answer, and the record names the session that gave it.** A

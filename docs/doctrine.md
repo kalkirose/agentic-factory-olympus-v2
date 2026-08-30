@@ -53,6 +53,13 @@ of them is a design decision, not an implementation detail.
 - **A failed seat leaves evidence.** Every seat failure records a bounded
   tail of what the seat emitted. Nothing that runs unattended may die in a
   way that only a human at a terminal can diagnose.
+- **No unlinted writer.** An automated writer passes every mechanical check
+  that binds the equivalent human path, before the write leaves the machine.
+  The check is the project's own command, not a rule the harness holds about
+  somebody else's document. A writer that skips a check a person passes turns
+  a private mistake into a public block: the output sits where the next reader
+  meets it, and the gate that would have caught it runs for everybody except
+  the machine that wrote it (ADR-0054).
 
 ## The human
 
