@@ -60,11 +60,12 @@
 // takes the evidence it stands on, and stamps an event of its own — an
 // operator's statement is never filed as a repair run's fix-back.
 // `escape` is the intake at the other end: one defect somebody found in the
-// product after it shipped, recorded so a ticket and a repair can be written
-// against it. --pr or --merge names the merge it came in on; when that merge
-// was a ship which carried its certification over a moved base, the record is
-// filed under the closed fast-path kind and attributed to that run, which is
-// what the standing fast-path tripwire counts.
+// product after it shipped. The record carries the project it is in and a
+// repair ticket of its own, so the next sweep owes the repair, exactly as it
+// does for a defect the harness found itself. --pr or --merge names the merge
+// it came in on; when that merge was a ship which carried its certification
+// over a moved base, the record is filed under the closed fast-path kind and
+// attributed to that run, which is what the standing fast-path tripwire counts.
 // --resume-from names a prior story run whose freeze the new run inherits:
 // story lane only, and the prior run supplies the card, so --card is refused
 // beside it.

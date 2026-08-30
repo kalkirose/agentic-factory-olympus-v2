@@ -21,14 +21,16 @@ export function gitArgv(args, platform = process.platform) {
 /**
  * Runs one git command and resolves its raw stdout.
  * @param {string[]} args
- * @param {{cwd?: string, maxBuffer?: number}} [opts] `maxBuffer` raises the
- *   runner's own output cap for the few reads whose size follows the work
- *   rather than the repository. Absent leaves the runner's default, which is
- *   what every other caller has always had.
+ * @param {{cwd?: string, maxBuffer?: number, timeout?: number}} [opts]
+ *   `maxBuffer` raises the runner's own output cap for the few reads whose size
+ *   follows the work rather than the repository. `timeout` bounds the call in
+ *   milliseconds, for the callers that hold something another run is waiting
+ *   for; the process is killed and the promise rejects. Both absent leave the
+ *   runner's defaults, which is what every other caller has always had.
  * @returns {Promise<string>}
  */
-export function git(args, { cwd, maxBuffer } = {}) {
-  return run(gitArgv(args), args, { cwd, maxBuffer });
+export function git(args, { cwd, maxBuffer, timeout } = {}) {
+  return run(gitArgv(args), args, { cwd, maxBuffer, timeout });
 }
 
 /**
@@ -45,7 +47,7 @@ export function gitPlain(args, { cwd, env } = {}) {
   return run([...args], args, { cwd, env });
 }
 
-function run(argv, args, { cwd, env, maxBuffer }) {
+function run(argv, args, { cwd, env, maxBuffer, timeout }) {
   return new Promise((resolve, reject) => {
     // The failure names the command the caller asked for, not the invocation
     // this module built around it.
@@ -53,12 +55,18 @@ function run(argv, args, { cwd, env, maxBuffer }) {
       cwd,
       ...(env !== undefined && { env }),
       ...(maxBuffer !== undefined && { maxBuffer }),
+      ...(timeout !== undefined && { timeout }),
     };
     // `windowsHide` stands at the call, where the process starts and where a
     // reader looks for it, and after the caller's options so none can drop it.
     execFile('git', argv, { ...options, windowsHide: true }, (error, stdout, stderr) => {
       if (error) {
-        reject(new Error(`git ${args.join(' ')} failed: ${String(stderr).trim() || error.message}`));
+        // A killed call is the timeout, and it says so. git's own stderr is
+        // empty for one, so without this the reader gets a signal name.
+        const why = error.killed
+          ? `timed out after ${timeout}ms`
+          : String(stderr).trim() || error.message;
+        reject(new Error(`git ${args.join(' ')} failed: ${why}`));
       } else {
         resolve(stdout);
       }

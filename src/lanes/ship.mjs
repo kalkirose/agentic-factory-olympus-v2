@@ -60,7 +60,13 @@ import { budgetOpen, ciFlakes, deterministicRed, FLAKE_LIMIT } from '../ledger/c
 import { instanceParkForms } from '../ledger/parks.mjs';
 import { openEscapesStore } from '../telemetry/stores.mjs';
 import { stageHeartbeat } from '../telemetry/heartbeat.mjs';
-import { recordEscape, ticketEscape, fixEscape, readEscapeSet } from '../telemetry/escapes.mjs';
+import {
+  recordEscape,
+  ticketEscape,
+  fixEscape,
+  readEscapeSet,
+  FAST_PATH_ESCAPE_KIND,
+} from '../telemetry/escapes.mjs';
 import { settleBreachOf } from '../telemetry/breaches.mjs';
 import { cloneDir, fetchClone, branchSha } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
@@ -1583,12 +1589,18 @@ async function breachFlow(ctx, base, merged, enqueueRepair) {
       .filter((e) => e.event === 'escape-recorded' && e.refs?.runId === ctx.runId)
       .map((e) => e.seq);
     if (entries.length === 0) {
-      const attribution = base.storyKey ?? ctx.runId;
+      // A ship that carried a certification it did not earn over this merge is
+      // the trade ADR-0056 made, and every defect that comes in behind one is
+      // what the trade costs. The word and the attribution are the ship's, not
+      // the story's: the standing tripwire counts this kind, and it can only
+      // count what the harness writes here.
+      const fast = fastPathTaken(events);
+      const attribution = fast ? ctx.runId : (base.storyKey ?? ctx.runId);
       // The word this run already used for its own defect, where it named one.
       // The escape is that same defect arriving in the product, so it is
       // recorded under the same closed kind rather than described again in a
       // second sentence nobody can count with the first (ADR-0024).
-      const kind = namedDefect(events, merged.pr);
+      const kind = fast ? FAST_PATH_ESCAPE_KIND : namedDefect(events, merged.pr);
       const lines =
         open.length > 0
           ? open.map((f) => ({
@@ -1619,6 +1631,9 @@ async function breachFlow(ctx, base, merged, enqueueRepair) {
               // defect shipped to.
               project: ctx.project,
               pr: merged.pr,
+              // The record that carried the certification, so a reader of the
+              // escape reaches the decision behind it in one step.
+              ...(fast && { fastPathSeq: fast.seq, mergeSha: merged.mergeSha }),
               ...(line.findingId && { findingId: line.findingId }),
             },
           }).seq,

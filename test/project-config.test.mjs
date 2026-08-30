@@ -111,6 +111,7 @@ test('the fast path is off unless a project says otherwise, in a boolean', () =>
   const on = valid();
   on.gates.fastPathShip = true;
   on.gates.breadthGround = ['package-lock.json', 'db/migrations'];
+  on.gates.inertGround = ['docs'];
   assert.deepEqual(validateProjectConfig(on), []);
   assert.equal(withProjectDefaults(on).gates.fastPathShip, true);
   for (const bad of ['yes', 1, null]) {
@@ -124,6 +125,13 @@ test('the fast path is off unless a project says otherwise, in a boolean', () =>
     const wrong = valid();
     wrong.gates.breadthGround = bad;
     assert.deepEqual(errorPaths(wrong), ['gates.breadthGround'], JSON.stringify(bad));
+  }
+  // The inert list is the other side of the same claim and takes the same
+  // vocabulary: the ground the project states no suite of it can reach.
+  for (const bad of ['docs', [''], [2], {}]) {
+    const wrong = valid();
+    wrong.gates.inertGround = bad;
+    assert.deepEqual(errorPaths(wrong), ['gates.inertGround'], JSON.stringify(bad));
   }
 });
 

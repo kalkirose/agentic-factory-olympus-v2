@@ -141,6 +141,10 @@ const CONFIG = {
     ...PROJECT_CONFIG.gates,
     fastPathShip: true,
     breadthGround: ['package-lock.json', 'db/migrations'],
+    // The ground this project states no suite of it can reach. A change the
+    // branch gains outside this list is ground nobody described, and the check
+    // refuses rather than reading silence as safety (ADR-0056).
+    inertGround: ['docs'],
   },
   tripwires: [TRIPWIRE],
 };
@@ -308,8 +312,15 @@ test('a ship over a disjoint merge keeps the certification it earned', async (t)
   for (const recorded of escapeEvents(fx).filter((e) => e.event === 'escape-recorded')) {
     assert.equal(recorded.kind, 'fast-path-escape');
     assert.equal(recorded.attribution, runId);
+    assert.equal(recorded.refs.project, PROJECT);
     assert.equal(recorded.refs.pr, merged.pr);
     assert.equal(recorded.refs.fastPathSeq, fast.seq);
+    // Ticketed as well as recorded: the owed-repairs set is ticketed and not
+    // fixed, so an escape with no ticket is repaired by nobody.
+    const ticketed = escapeEvents(fx).find(
+      (e) => e.event === 'escape-ticketed' && e.escape === recorded.seq,
+    );
+    assert.ok(ticketed, `escape ${recorded.seq} carries no ticket`);
   }
   const breach = await pollFor(
     'the tripwire that proposes turning the flag off',

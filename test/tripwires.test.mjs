@@ -156,12 +156,15 @@ test('fast-path-escapes counts only the kind, only inside the window', async (t)
   writeLedger(paths.escapesLedger, [
     // Before the window's oldest ship: outside the reading, like every other
     // recency-based window here.
-    escape(1, '2026-07-01T00:00:00Z', { kind: 'fast-path-escape' }),
+    escape(1, '2026-07-01T00:00:00Z', { kind: 'fast-path-escape', refs: { project: 'p' } }),
     // An ordinary escape of the same window. It is a defect and it is not this
     // metric's defect: the flag is not what let it through.
-    escape(2, '2026-08-03T00:00:00Z', {}),
-    escape(3, '2026-08-03T01:00:00Z', { kind: 'fast-path-escape' }),
-    escape(4, '2026-08-03T02:00:00Z', { kind: 'fast-path-escape' }),
+    escape(2, '2026-08-03T00:00:00Z', { refs: { project: 'p' } }),
+    escape(3, '2026-08-03T01:00:00Z', { kind: 'fast-path-escape', refs: { project: 'p' } }),
+    escape(4, '2026-08-03T02:00:00Z', { kind: 'fast-path-escape', refs: { project: 'p' } }),
+    // Another project's defect, on another project's trade. The escapes ledger
+    // is instance-scoped and this reading is about one project's flag.
+    escape(5, '2026-08-03T03:00:00Z', { kind: 'fast-path-escape', refs: { project: 'q' } }),
   ]);
   const result = await evaluateMetric('fast-path-escapes', { paths, project: 'p', window: 10 });
   assert.equal(result.value, 2);

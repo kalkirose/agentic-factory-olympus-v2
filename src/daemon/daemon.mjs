@@ -23,6 +23,7 @@ import {
   markEscapeFixed as appendFixedMark,
   readEscapeSet,
   recordEscape as appendEscape,
+  ticketEscape,
 } from '../telemetry/escapes.mjs';
 import { settleBreachOf } from '../telemetry/breaches.mjs';
 import { loadInstanceConfig, INSTANCE_CONFIG_FILE } from '../config/instance.mjs';
@@ -53,7 +54,7 @@ import { EvalScheduler } from '../eval/review.mjs';
 import { Notifier } from './notifier.mjs';
 import { OperatorHold } from './hold.mjs';
 import { checkSeatEnvironment } from './environment.mjs';
-import { scaffoldHome, homePaths, runLedgerPath } from './home.mjs';
+import { scaffoldHome, homePaths, runLedgerPath, repairTicketPath } from './home.mjs';
 import { acquireLock } from './lock.mjs';
 
 const ACTOR = 'daemon';
@@ -702,6 +703,16 @@ export class Daemon {
    * merge is named by its request number or by its commit; a defect that names
    * neither, or names a ship that took the full re-verdict, is the ordinary
    * escape it has always been.
+   *
+   * Every record carries refs, and every record carries a ticket. The refs name
+   * the project, because the escapes ledger is instance-scoped and nothing else
+   * in a record says which repository the defect is in. Without it the repair
+   * sweep cannot launch, and the per-project metrics count another project's
+   * defects as this one's. The ticket is what makes the escape owed: the
+   * owed-repairs set is ticketed-and-not-fixed, so an escape with no ticket is
+   * recorded, counted, and repaired by nobody. Both are what the red-merge
+   * route already does, and a defect a person found is owed exactly as much as
+   * one the harness found.
    * @param {{actor: string, project?: string, defectLine: string,
    *   category?: string, detectionSource?: string, pr?: number,
    *   mergeSha?: string, note?: string}} cmd
@@ -723,29 +734,38 @@ export class Daemon {
       throw new Error('an escape record requires the defect line (--defect)');
     }
     const ship = fastPathShipOf(this.paths, { project, pr, mergeSha });
+    const refs = {
+      ...(typeof project === 'string' && project.length > 0 && { project }),
+      ...(Number.isInteger(pr) && { pr }),
+      ...(typeof mergeSha === 'string' && mergeSha.length > 0 && { mergeSha }),
+      ...(ship && {
+        runId: ship.runId,
+        fastPathSeq: ship.seq,
+        ...(ship.pr !== null && { pr: ship.pr }),
+        ...(ship.mergeSha !== null && { mergeSha: ship.mergeSha }),
+      }),
+    };
     const store = openEscapesStore(this.paths, {
       // The same hook the run-side store carries: a tripwire that counts these
       // reads the append rather than a sweep that happens to come later.
       onAppend: (line, ledger) => this.tripwires?.notify(project, line, ledger),
     });
     try {
-      return appendEscape(store, {
+      const line = appendEscape(store, {
         actor,
         category,
         defectLine,
         detectionSource,
-        ...(ship && {
-          kind: FAST_PATH_ESCAPE_KIND,
-          attribution: ship.runId,
-          refs: {
-            runId: ship.runId,
-            fastPathSeq: ship.seq,
-            ...(ship.pr !== null && { pr: ship.pr }),
-            ...(ship.mergeSha !== null && { mergeSha: ship.mergeSha }),
-          },
-        }),
+        ...(ship && { kind: FAST_PATH_ESCAPE_KIND, attribution: ship.runId }),
+        refs,
         ...(note !== undefined && { note }),
       });
+      // The ticket file first, then the stamp that names it: a ticketed escape
+      // always has a ticket to repair from (ADR-0024).
+      const ticket = repairTicketPath(this.paths, line.seq);
+      writeFileSync(ticket, reportTicket({ escape: line, ship, refs, note }));
+      ticketEscape(store, { actor, escape: line.seq, ticket, refs });
+      return line;
     } finally {
       store.close();
     }
@@ -1389,6 +1409,46 @@ function readCommandFile(file) {
     return { reason: 'command and actor are required strings' };
   }
   return { command: parsed };
+}
+
+/**
+ * The repair ticket of one reported escape. The repair run reads it from a
+ * fresh worktree of the default branch and can see nothing else, so the ticket
+ * carries every fact the repair has: the defect as it was reported, where it
+ * came in, and the escape it closes.
+ */
+function reportTicket({ escape, ship, refs, note }) {
+  return [
+    `# Repair ticket: escape ${escape.seq}`,
+    '',
+    'A defect was reported in the product after a merge. This ticket is the',
+    'spec of the repair run: fix the defect below and leave a regression test',
+    'that fails without the fix.',
+    '',
+    '## The defect',
+    '',
+    escape.defectLine,
+    ...(note ? ['', note] : []),
+    '',
+    '## Facts',
+    '',
+    `- escape: seq ${escape.seq} in the escapes ledger`,
+    `- category (a routing hint, not a verdict): ${escape.category}`,
+    `- reported by: ${escape.actor}`,
+    `- detection source: ${escape.detectionSource}`,
+    ...(escape.kind ? [`- kind (the harness named this one): ${escape.kind}`] : []),
+    `- attributed to: ${escape.attribution}`,
+    ...(refs.project ? [`- project: ${refs.project}`] : []),
+    ...(refs.pr !== undefined ? [`- merged PR: #${refs.pr}`] : []),
+    ...(refs.mergeSha ? [`- merge commit: ${refs.mergeSha}`] : []),
+    ...(ship ? [`- the run that shipped it: ${ship.runId}`] : []),
+    '',
+    '## Scope',
+    '',
+    'Stay inside the defect above. The merge it came in on is on the default',
+    'branch already; repair it forward, never revert it here.',
+    '',
+  ].join('\n');
 }
 
 function diffKeys(a, b) {

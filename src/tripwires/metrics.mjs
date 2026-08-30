@@ -49,7 +49,13 @@ const IMPLEMENTATIONS = {
 
   'fast-path-escapes': async ({ paths, project, window }) => {
     const ships = listShips(paths).filter((s) => s.project === project);
-    const escapes = readEscapeSet(paths.escapesLedger);
+    // The escapes ledger is instance-scoped, and this reading is about one
+    // project's trade. Without the filter a second project's fast-path defects
+    // breach this project's band and propose turning this project's flag off.
+    // Every record the harness writes carries the project on its refs.
+    const escapes = readEscapeSet(paths.escapesLedger).filter(
+      (e) => e.refs?.project === project,
+    );
     const w = fastPathEscapesWindow({ ships, escapes, windowSize: window });
     return {
       value: w.counted,

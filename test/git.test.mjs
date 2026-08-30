@@ -37,6 +37,24 @@ test('a failure names the command the caller asked for, not the one built', asyn
   });
 });
 
+test('a call the caller bounded in time is killed at the bound', async (t) => {
+  // `hash-object --stdin` reads standard input until it closes, and nothing
+  // here ever writes to it, so the call would hang for as long as the caller
+  // waited. A caller holding something another run needs states a bound, and
+  // the bound is what ends the call.
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const started = Date.now();
+  await assert.rejects(
+    () => git(['hash-object', '--stdin'], { cwd: dir, timeout: 250 }),
+    (error) => {
+      assert.match(error.message, /^git hash-object --stdin failed: timed out after 250ms$/);
+      return true;
+    },
+  );
+  assert.ok(Date.now() - started < 15_000, 'the bound did not end the call');
+});
+
 // What this asserts is the round trip, not the flag. Which git builds need
 // `core.longPaths` to reach a path this long is a property of the host, and a
 // host that does not need it cannot demonstrate that it works — so the test

@@ -30,9 +30,10 @@ export function defaultProjectConfig() {
     // (ADR-0046); absent leaves it on. `concurrencyGroups` names the layers
     // that may hold the machine together (ADR-0047); absent is the strict
     // sequence. `fastPathShip: true` lets a ship carry its certification over
-    // a provably disjoint merge, and `breadthGround` names the ground every
-    // suite depends on whatever it declared (ADR-0056); both absent is
-    // today's behaviour.
+    // a provably disjoint merge, `breadthGround` names the ground every suite
+    // depends on whatever it declared, and `inertGround` names the ground the
+    // project states no suite can reach (ADR-0056); all absent is today's
+    // behaviour.
     gates: { tier1: [] },
     // one convention per line; prompt assembly consumes these
     conventions: [],
@@ -193,6 +194,13 @@ function validateGates(gates, commands, err) {
   }
   if (gates.breadthGround !== undefined && !isStringList(gates.breadthGround)) {
     err('gates.breadthGround', 'must be an array of path entries');
+  }
+  // `inertGround` is the other side of the same claim: ground the project
+  // states no suite of it can reach. A change on the default branch that lands
+  // outside it is ground nobody described, and the fast path refuses rather
+  // than reading silence as safety.
+  if (gates.inertGround !== undefined && !isStringList(gates.inertGround)) {
+    err('gates.inertGround', 'must be an array of path entries');
   }
   if (gates.tier1 !== undefined && !Array.isArray(gates.tier1)) {
     err('gates.tier1', 'must be an array of layers');

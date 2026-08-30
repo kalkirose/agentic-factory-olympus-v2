@@ -499,17 +499,25 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   keep the certification it already earned when two mechanical checks agree
   that the incoming work and the story cannot interact: the story's own diff is
   byte-identical before and after the merge, and every file the default branch
-  gained is disjoint from the story's own diff, from every declared suite input
-  of the certified verdict (ADR-0046), from the suite files and from the
-  project's shared breadth list (`gates.breadthGround`). An undeclared suite, an
-  intersection, a change the harness cannot read as a file of this repository,
-  and any error inside the check itself all take the full re-verdict: the path
-  removes work and never blocks a ship. A taken fast path stamps
-  `fast-path-ship` with the commits examined, the declaration version and the
+  gained is ground the project declared inert (`gates.inertGround`). A file that
+  instead hits the story's own diff, a declared suite input of the certified
+  verdict (ADR-0046), a suite file, the project's shared breadth list
+  (`gates.breadthGround`) or a file the declarations are produced from is an
+  intersection, and a file no set reaches at all is unclaimed ground: both
+  refuse, because doubt re-runs exactly as it does inside a layer
+  (`src/lanes/parts.mjs`). An undeclared suite, a project with no breadth list
+  or no suite files, a certification carrying a review-lens finding, a story
+  diff that moved the ground its own declarations come from, a change the
+  harness cannot read as a file of this repository (a submodule, a symlink, a
+  mode-only change), and any error inside the check itself all take the full
+  re-verdict: the path removes work and never blocks a ship. Every git read of
+  the check is bounded in time, because the check runs inside the ship token. A
+  taken fast path stamps `fast-path-ship` with the commits examined (capped, and
+  marked `truncated` past the cap), the declaration version and the
   certification it reuses, and the close carries `fastPath`. The cost of the
-  trade is counted under the `fast-path-escape` defect kind and watched by the
-  `fast-path-escapes` tripwire, whose answer is the one config line that
-  reverts it.
+  trade is counted per project under the `fast-path-escape` defect kind and
+  watched by the `fast-path-escapes` tripwire, whose answer is the one config
+  line that reverts it.
 - **The restore anchor** (ADR-0033) is the sha every story-mode restore of the
   test paths checks out from: the freeze commit until the tree merges the
   default branch, the merge commit after that, and the commit a fresh pass was
@@ -603,10 +611,11 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   no file at all (ADR-0043) — and `capture-takeback` on both take-back
   records, and `fast-path-escape` on an escape that came in through a ship
   which carried its certification over a moved base (ADR-0056), attributed to
-  that ship from the ledgers rather than from the report. Those three add no
-  alert and answer to nobody — the
-  record they ride already has whatever loudness it is owed, and the word is
-  there so a class that recurs after its fix is a count.
+  that ship from the ledgers rather than from the report, whether the report
+  came from an operator or from the harness converting a red merge of its own.
+  Those three add no alert and answer to nobody — the record they ride already
+  has whatever loudness it is owed, and the word is there so a class that
+  recurs after its fix is a count.
 - **One red regime.** CI reds get one automatic re-run of failed jobs, then
   the same four-class triage and the same routes as in-run reds. Budgets are
   shared.
@@ -909,10 +918,10 @@ condition, and all take the machinery's ordinary escalation — a queued breach,
 open until a human answers it (ADR-0010).
 
 One standing tripwire watches a trade rather than a defect: fast-path escapes
-over the last ten ships (ADR-0056). Two of them breach, and the answer it
-carries is the one config line that turns the fast path off. It is the whole
-measurement of a guarantee the owner thinned on purpose, so it is the one
-tripwire whose answer is a reversal rather than a repair.
+over the last ten ships of the project it reads (ADR-0056). Two of them breach,
+and the answer it carries is the one config line that turns the fast path off.
+It is the whole measurement of a guarantee the owner thinned on purpose, so it
+is the one tripwire whose answer is a reversal rather than a repair.
 
 Standing quality bar (written by the runs themselves, never mined from
 outside): escaped defects per story (ceiling 0.5, rolling 10 ships),

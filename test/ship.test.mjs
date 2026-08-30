@@ -2353,6 +2353,11 @@ function fastPathFixture(t, { gates = {}, files = {}, ...rest } = {}) {
         tier1: [{ name: 'unit', command: 'suite' }],
         fastPathShip: true,
         breadthGround: ['package-lock.json'],
+        // The ground this project states no suite of it can reach. Without a
+        // claim like this one every file the branch gains is ground nobody
+        // described, and the check refuses rather than reading silence as
+        // safety (ADR-0056).
+        inertGround: ['docs'],
         ...gates,
       },
     },
@@ -2477,16 +2482,58 @@ test('a defect from a ship that earned its verdict is the ordinary escape', asyn
     { 'docs/note.md': 'unrelated main work\n' },
     'docs: a note',
   );
+  const merged = events.find((e) => e.event === 'merged');
   fx.daemon.recordEscapeReport({
     actor: 'console:test',
     project: 'proj',
     defectLine: 'the total is off by one',
-    pr: events.find((e) => e.event === 'merged').pr,
+    pr: merged.pr,
   });
   const escape = readEscapeSet(fx.paths.escapesLedger)[0];
   // No word for it, because the harness has no claim to make about this one.
   assert.equal(escape.kind, null);
   assert.equal(escape.attribution, 'unattributed');
+  // Every record carries refs whatever route recorded it. Without the project
+  // the repair sweep has no repository to launch into, and the per-project
+  // metrics read another project's defects as this one's.
+  assert.equal(escape.refs.project, 'proj');
+  assert.equal(escape.refs.pr, merged.pr);
+});
+
+test('a reported defect is ticketed, and a ticketed defect is owed', async (t) => {
+  // An escape with no ticket is recorded, counted, and repaired by nobody: the
+  // owed set is ticketed-and-not-fixed. A defect a person found is owed exactly
+  // as much as one the harness found for itself.
+  const fx = fastPathFixture(t, { gates: { fastPathShip: undefined } });
+  const { events } = await shipOverMerge(
+    fx,
+    { 'docs/note.md': 'unrelated main work\n' },
+    'docs: a note',
+  );
+  const merged = events.find((e) => e.event === 'merged');
+  const line = fx.daemon.recordEscapeReport({
+    actor: 'console:test',
+    project: 'proj',
+    defectLine: 'the second row is lost',
+    pr: merged.pr,
+    mergeSha: merged.mergeSha,
+  });
+  assert.deepEqual(
+    readEvents(fx.paths.escapesLedger).map((e) => e.event),
+    ['escape-recorded', 'escape-ticketed'],
+  );
+  const escape = readEscapeSet(fx.paths.escapesLedger)[0];
+  assert.equal(escape.ticket, repairTicketPath(fx.paths, line.seq));
+  // The ticket is the whole spec of the repair: the repair run reads it from a
+  // fresh worktree and sees nothing else.
+  const ticket = readFileSync(escape.ticket, 'utf8');
+  assert.match(ticket, new RegExp(`escape: seq ${line.seq}`));
+  assert.match(ticket, /the second row is lost/);
+  assert.match(ticket, new RegExp(`merge commit: ${merged.mergeSha}`));
+  // What the sweep will find.
+  const owed = owedRepairs(fx.paths, 'proj');
+  assert.deepEqual(owed.map((e) => e.seq), [line.seq]);
+  assert.deepEqual(owedRepairs(fx.paths, 'other'), []);
 });
 
 test('one overlapping file takes the full re-verdict', async (t) => {
@@ -2541,6 +2588,87 @@ test('one suite without a declaration takes the full re-verdict', async (t) => {
   assert.equal(fast.refusal, 'undeclared-suite');
   assert.match(fast.detail, /reported no suite/);
   assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 2);
+});
+
+test('a merge onto ground no claim reaches takes the full re-verdict', async (t) => {
+  // The same merge that fast-paths above, with the project's inert claim taken
+  // away. Nothing in the project says a change under `docs` reaches no suite,
+  // and the part machinery's rule for ground nobody described is that doubt
+  // re-runs (parts.mjs).
+  const fx = fastPathFixture(t, { gates: { inertGround: [] } });
+  const { events } = await shipOverMerge(
+    fx,
+    { 'docs/note.md': 'unrelated main work\n' },
+    'docs: a note',
+  );
+  const fast = events.find((e) => e.event === 'fast-path-ship');
+  assert.equal(fast.taken, false);
+  assert.equal(fast.refusal, 'unclaimed-ground');
+  assert.match(fast.detail, /docs\/note\.md/);
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 2);
+  assert.equal(events.find((e) => e.event === 'run-closed').fastPath, undefined);
+});
+
+test('a story that moved its own declarations takes the full re-verdict', async (t) => {
+  // The declarations decide the skip and they are printed by the layer command
+  // running in the run's own worktree. A story that edited the ground they come
+  // out of would be judged against the narrowing it wrote itself.
+  const fx = fastPathFixture(t, {
+    seats: {
+      dev: () => ({
+        files: {
+          'src/feature.mjs': GOOD_FEATURE,
+          '.olympus/helper.mjs': 'export const helper = 1;\n',
+        },
+        report: { summary: 'implemented' },
+      }),
+    },
+  });
+  const { events } = await shipOverMerge(
+    fx,
+    { 'docs/note.md': 'unrelated main work\n' },
+    'docs: a note',
+  );
+  const fast = events.find((e) => e.event === 'fast-path-ship');
+  assert.equal(fast.taken, false);
+  assert.equal(fast.refusal, 'self-declared-ground');
+  assert.match(fast.detail, /\.olympus\/helper\.mjs/);
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 2);
+});
+
+test('a defect on a red merge a fast path carried takes the fast-path word', async (t) => {
+  // The other intake for the same kind. An operator reporting a defect gets the
+  // word from the ledgers (above); a red merge the harness converts itself gets
+  // it here, or the tripwire that measures the trade never sees the ships that
+  // breached.
+  const fx = fastPathFixture(t, { pollMs: 300 });
+  fx.forge.state.autoChecks = () => [running()];
+  fx.forge.state.onRerun = () => {};
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'freeze', 'freeze');
+  commitTree(fx.origin, { 'docs/note.md': 'unrelated main work\n' }, 'docs: a note');
+  await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'pre-verdict-update' && e.ran,
+    'the pre-verdict update',
+  );
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [red()]);
+  fx.forge.adminMerge();
+  const events = await waitClosed(fx.paths, runId);
+  const fast = events.find((e) => e.event === 'fast-path-ship');
+  assert.equal(fast.taken, true);
+  const merged = events.find((e) => e.event === 'merged');
+  const escapes = readEscapeSet(fx.paths.escapesLedger);
+  assert.equal(escapes.length, 1);
+  assert.equal(escapes[0].kind, 'fast-path-escape');
+  // The ship's own attribution, not the story's: the count is about the ships
+  // that carried, and the record has to reach the decision behind it.
+  assert.equal(escapes[0].attribution, runId);
+  assert.equal(escapes[0].refs.fastPathSeq, fast.seq);
+  assert.equal(escapes[0].refs.mergeSha, merged.mergeSha);
+  assert.equal(escapes[0].refs.project, 'proj');
 });
 
 test('a project that declares no breadth ground never fast-paths', async (t) => {
