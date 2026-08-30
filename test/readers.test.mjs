@@ -212,11 +212,21 @@ test('a fast path a later verdict superseded is not a fast-path ship', (t) => {
     line(3, '2026-08-02T01:00:00Z', 'verdict-rendered', { cycle: 2, verdict: 'green' }),
     line(4, '2026-08-02T02:00:00Z', 'merged', { pr: 8, mergeSha: 'm2' }),
   ]);
+  // A RED render after the record re-certified nothing: the env-only CI route
+  // renders one for a failure the tree is not to blame for, and the run
+  // recovers and ships on the certification the fast path carried.
+  writeLedger(runLedgerPath(paths, 'recovered'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-02T00:00:00Z', 'fast-path-ship', { taken: true, commits: ['c3'] }),
+    line(3, '2026-08-02T01:00:00Z', 'verdict-rendered', { cycle: 2, verdict: 'red' }),
+    line(4, '2026-08-02T03:00:00Z', 'merged', { pr: 9, mergeSha: 'm3' }),
+  ]);
   assert.deepEqual(
     listFastPathShips(paths).map((s) => s.runId),
-    ['carried'],
+    ['carried', 'recovered'],
   );
   assert.equal(fastPathShipOf(paths, { project: 'p', pr: 7 }).runId, 'carried');
+  assert.equal(fastPathShipOf(paths, { project: 'p', pr: 9 }).runId, 'recovered');
   assert.equal(fastPathShipOf(paths, { project: 'p', pr: 8 }), null);
   assert.equal(fastPathShipOf(paths, { project: 'p', mergeSha: 'm2' }), null);
 });

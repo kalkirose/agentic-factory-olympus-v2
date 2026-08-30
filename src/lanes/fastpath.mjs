@@ -34,7 +34,7 @@
 // fast path can only remove work, so a defect in this module makes a ship
 // slow and can never make one wrong.
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isGlobEntry, underEntry } from '../config/project.mjs';
 import { git } from '../isolation/git.mjs';
@@ -261,22 +261,24 @@ export function declaredGround(layers, prior) {
 /** How many files one layer's declaration surface may reach before it refuses. */
 export const IMPORT_LIMIT = 500;
 
-/** The extensions a specifier without one is tried under, in order. */
+/** The suffixes a specifier may name a file under. */
 const IMPORT_EXTENSIONS = ['', '.mjs', '.js', '.cjs', '.ts', '/index.mjs', '/index.js'];
 
-// Every literal module specifier a source file names. Static `from` clauses,
-// bare side-effect imports, literal dynamic imports, and literal requires.
-const SPECIFIER_FORMS = [
-  /\bfrom\s*['"]([^'"]+)['"]/g,
-  /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
-  /\bimport\s+['"]([^'"]+)['"]/g,
-  /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
-];
+// The static forms: a `from` clause and a bare side-effect import. Both take a
+// literal and nothing else, so a match is the whole specifier.
+const STATIC_FORMS = [/\bfrom\s*['"]([^'"]+)['"]/g, /\bimport\s+['"]([^'"]+)['"]/g];
 
-// A specifier this module cannot read: an import or a require whose argument is
-// not a literal string. What it reaches is decided at run time, and a surface
-// decided at run time is a surface nothing can enumerate.
-const COMPUTED_FORMS = [/\bimport\s*\(\s*[^'")\s]/, /\brequire\s*\(\s*[^'")\s]/];
+// A module load written as a call: `import(...)` and `require(...)`. The lookbehind
+// keeps a method of that name (`db.import(x)`) out, and nothing else is excluded:
+// what follows the paren decides, and it decides by proof.
+const CALL_FORM = /(?<![.\w$])(import|require)\s*\(/g;
+
+// The proof a call's argument is a specifier and not an expression: one quoted
+// string, then the end of the argument. `import('./x', {with: …})` is a load of
+// './x'; `import('./dir/' + name)` and `import(`./${d}`)` are not loads of
+// anything this can name, so they are refused rather than skipped. A form that
+// is neither followed nor refused is the hole this shape exists to close.
+const LITERAL_ARGUMENT = /^\s*(['"])((?:[^'"\\]|\\.)*)\1\s*[),]/;
 
 /**
  * The files a Tier-1 layer's declarations are produced from: the command's own
@@ -307,8 +309,10 @@ const COMPUTED_FORMS = [/\bimport\s*\(\s*[^'")\s]/, /\brequire\s*\(\s*[^'")\s]/]
  * @param {Record<string, string[]>} commands the project's command table
  * @param {(path: string) => string|null} readSource one repo-relative file's
  *   text, or null for a file that is not there
+ * @param {(path: string) => boolean} isLinkPath whether a repo-relative path
+ *   reaches its content through a symlink, at any segment of it
  */
-export function declarationSources(layers, commands, readSource) {
+export function declarationSources(layers, commands, readSource, isLinkPath = () => false) {
   const entries = new Set();
   for (const layer of layers) {
     const argv = commands?.[layer.command] ?? [];
@@ -321,7 +325,7 @@ export function declarationSources(layers, commands, readSource) {
       );
     }
     for (const path of paths) {
-      const reached = reachableSources(path, readSource);
+      const reached = reachableSources(path, readSource, isLinkPath);
       if (reached.ok !== true) return reached;
       for (const file of reached.files) {
         entries.add(file);
@@ -340,7 +344,7 @@ export function declarationSources(layers, commands, readSource) {
  * Every file one command path reaches, itself included, or a refusal naming the
  * edge the walk could not read.
  */
-function reachableSources(entry, readSource) {
+function reachableSources(entry, readSource, isLinkPath) {
   if (isGlobEntry(entry)) {
     return refusal(
       'self-declared-ground',
@@ -360,58 +364,115 @@ function reachableSources(entry, readSource) {
       );
     }
     files.add(path);
+    // A path that reaches its content through a link is a path whose name is
+    // not its content. The guard compares names: the story's diff and the
+    // branch's diff both name the target, and this set would name the link, so
+    // an edit to the file the gate actually loads would pass the guard
+    // untouched. What a link points at is also ground the ground question
+    // classifies as unreadable, and the two readings have to agree.
+    const link = linkedSegment(path, isLinkPath);
+    if (link !== null) {
+      return refusal(
+        'self-declared-ground',
+        `the declaration source ${path} reaches its content through a symlink ` +
+          `(${link}), so the file it names is not the file it loads`,
+      );
+    }
     const text = readOne(readSource, path);
     if (text === null) {
       return refusal('self-declared-ground', `the declaration source ${path} will not read`);
     }
-    for (const form of COMPUTED_FORMS) {
-      if (form.test(text)) {
-        return refusal(
-          'self-declared-ground',
-          `${path} imports a module it names at run time, so what its declarations ` +
-            'come out of cannot be enumerated',
-        );
-      }
+    const named = specifiersOf(text);
+    if (named.ok !== true) {
+      return refusal(
+        'self-declared-ground',
+        `${path} loads a module it names at run time (${named.form}), so what its ` +
+          'declarations come out of cannot be enumerated',
+      );
     }
-    for (const specifier of specifiersOf(text)) {
+    for (const specifier of named.specifiers) {
       if (!specifier.startsWith('.')) continue; // a dependency, not a file here
       const resolved = resolveSpecifier(path, specifier, readSource);
-      if (resolved === null) {
-        return refusal(
-          'self-declared-ground',
-          `${path} imports ${specifier}, which resolves to no file this check can read`,
-        );
+      if (resolved.ok !== true) {
+        return refusal('self-declared-ground', `${path} imports ${specifier}, which ${resolved.why}`);
       }
-      queue.push(resolved);
+      queue.push(resolved.path);
     }
   }
   return { ok: true, files: [...files] };
 }
 
-/** Every literal module specifier one source file names. */
-function specifiersOf(text) {
-  const out = new Set();
-  for (const form of SPECIFIER_FORMS) {
-    form.lastIndex = 0;
-    let match;
-    while ((match = form.exec(text)) !== null) out.add(match[1]);
+/**
+ * The first segment of one path that is a symlink, or null.
+ *
+ * Every prefix is asked and not the last one only: a link in the middle of the
+ * path moves the whole subtree under it, and the file at the end would read
+ * perfectly well while living somewhere else entirely.
+ */
+function linkedSegment(path, isLinkPath) {
+  const segments = path.split('/');
+  for (let i = 1; i <= segments.length; i++) {
+    const prefix = segments.slice(0, i).join('/');
+    if (isLinkPath(prefix)) return prefix;
   }
-  return out;
+  return null;
 }
 
 /**
- * One relative specifier as a repo-relative file, or null when nothing under
- * the extensions this understands is there. A specifier that climbs out of the
- * repository canonicalises to null and answers null here, which refuses.
+ * Every module specifier one source file names, or the first call whose
+ * argument is not one.
+ *
+ * The two answers partition every load the file writes. A static form takes a
+ * literal and nothing else. A call form is proved a load of a named module or
+ * it is refused: there is no third reading, because a form that is neither
+ * followed nor refused is a module the walk misses in silence.
+ * @returns {{ok: true, specifiers: Set<string>}|{ok: false, form: string}}
+ */
+export function specifiersOf(text) {
+  const specifiers = new Set();
+  for (const form of STATIC_FORMS) {
+    form.lastIndex = 0;
+    let match;
+    while ((match = form.exec(text)) !== null) specifiers.add(match[1]);
+  }
+  CALL_FORM.lastIndex = 0;
+  let call;
+  while ((call = CALL_FORM.exec(text)) !== null) {
+    const argument = text.slice(call.index + call[0].length);
+    const literal = LITERAL_ARGUMENT.exec(argument);
+    if (literal === null) {
+      const shown = `${call[1]}(${argument.slice(0, 24).split('\n')[0]}`;
+      return { ok: false, form: shown };
+    }
+    specifiers.add(literal[2]);
+  }
+  return { ok: true, specifiers };
+}
+
+/**
+ * One relative specifier as the repo-relative file it names, or why it is not
+ * one file.
+ *
+ * Every suffix is tried and every hit is kept, because the first hit is not the
+ * answer: which of `x.mjs`, `x.js` and `x/index.js` a runtime loads depends on
+ * the module kind and the package the file sits in, and a probe that guessed
+ * would record a file the gate never loads while the real one stayed outside
+ * the guard. Two candidates is therefore a refusal and not a choice.
+ * @returns {{ok: true, path: string}|{ok: false, why: string}}
  */
 function resolveSpecifier(from, specifier, readSource) {
   const base = from.split('/').slice(0, -1);
+  const found = [];
   for (const extension of IMPORT_EXTENSIONS) {
     const candidate = resolveAgainst(base, specifier + extension);
-    if (candidate === null) continue;
-    if (readOne(readSource, candidate) !== null) return candidate;
+    if (candidate === null || found.includes(candidate)) continue;
+    if (readOne(readSource, candidate) !== null) found.push(candidate);
   }
-  return null;
+  if (found.length === 0) return { ok: false, why: 'resolves to no file this check can read' };
+  if (found.length > 1) {
+    return { ok: false, why: `resolves to more than one file (${found.join(', ')})` };
+  }
+  return { ok: true, path: found[0] };
 }
 
 /**
@@ -549,6 +610,7 @@ export function fastPathVerdict({
   inert = [],
   lensFindings = [],
   readSource = () => null,
+  isLinkPath = () => false,
   storyDiffBefore,
   storyDiffAfter,
   mainChanged,
@@ -589,7 +651,7 @@ export function fastPathVerdict({
   }
   const declared = declaredGround(layers, prior);
   if (declared.ok !== true) return declared;
-  const sources = declarationSources(layers, commands, readSource);
+  const sources = declarationSources(layers, commands, readSource, isLinkPath);
   if (sources.ok !== true) return sources;
   // The declarations decide this skip and they came off the run's own tree. A
   // story that moved the ground they are produced from would be judged against
@@ -732,6 +794,7 @@ export async function fastPathDecision(base, events, { fromSha, toSha, mainSha }
     // The declaration surface is walked in the run's own worktree, which is
     // where the layer commands run and where the modules they import live.
     readSource: worktreeReader(base.worktree),
+    isLinkPath: worktreeLinks(base.worktree),
     storyDiffBefore: facts.storyDiffBefore,
     storyDiffAfter: facts.storyDiffAfter,
     mainChanged: facts.mainChanged,
@@ -761,6 +824,27 @@ export function worktreeReader(worktree) {
       return readFileSync(join(worktree, canonical), 'utf8');
     } catch {
       return null;
+    }
+  };
+}
+
+/**
+ * Whether one repo-relative path of one worktree is itself a symlink. The walk
+ * asks about every segment of a path in turn, so this answers about the one it
+ * is given and nothing under it.
+ *
+ * A path that cannot be stat-ed at all answers false. It is not a link; it is
+ * a file that is not there, and the read that follows says so in the words that
+ * fact deserves.
+ */
+export function worktreeLinks(worktree) {
+  return (path) => {
+    const canonical = groundEntry(path);
+    if (canonical === null) return false;
+    try {
+      return lstatSync(join(worktree, canonical)).isSymbolicLink();
+    } catch {
+      return false;
     }
   };
 }

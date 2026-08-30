@@ -373,19 +373,119 @@ test('every edge the walk cannot read refuses', () => {
   }
 });
 
-test('a specifier without an extension resolves under the ones a gate uses', () => {
+test('a load the walk cannot prove is a literal refuses, whatever it starts with', () => {
+  // The hole this closes: a call whose argument BEGINS with a quote read as
+  // neither a specifier to follow nor an expression to refuse, so the module it
+  // reached was missed in silence. The two readings have to partition the space.
+  const walk = (source) =>
+    declarationSources(
+      [layer('unit', 'suite')],
+      { suite: ['node', 'scripts/gate.mjs'] },
+      sourceTree({ 'scripts/gate.mjs': source, 'scripts/p.mjs': 'export const p = 1;\n' }),
+    );
+  for (const source of [
+    "await import('./dir/' + name);\n",
+    "const m = require('./p' + x);\n",
+    'await import(`./${dir}/p.mjs`);\n',
+    'await import(`./p.mjs`);\n',
+    "await import('./p' , '/x');\n".replace(' ,', ''),
+    'const m = require(paths[0]);\n',
+    'await import(cond ? a : b);\n',
+    "await import('./p.mjs'.trim());\n",
+  ]) {
+    const out = walk(source);
+    assert.equal(out.refusal, 'self-declared-ground', source);
+    assert.match(out.detail, /names at run time/, source);
+  }
+  // What still passes: a plain literal, and a literal with import attributes
+  // after it, which is a load of exactly the module it names.
+  for (const source of [
+    "await import('./p.mjs');\n",
+    "await import( './p.mjs' );\n",
+    "await import('./p.mjs', { with: { type: 'json' } });\n",
+    "const m = require('./p.mjs');\n",
+  ]) {
+    const out = walk(source);
+    assert.equal(out.ok, true, source);
+    assert.ok(out.entries.includes('scripts/p.mjs'), source);
+  }
+  // A method that happens to be called `import` is not a module load.
+  const method = walk("db.import('./p.mjs');\nconst q = obj.require(x);\n");
+  assert.equal(method.ok, true);
+  assert.ok(!method.entries.includes('scripts/p.mjs'));
+});
+
+test('a specifier that could be more than one file is not resolved by guessing', () => {
+  // Which of `x.mjs`, `x.js` and `x/index.js` a runtime loads depends on the
+  // module kind and the package around it. A probe that took the first hit
+  // would record a file the gate never loads and leave the real one outside
+  // the guard, so more than one candidate is a refusal.
+  const walk = (files) =>
+    declarationSources(
+      [layer('unit', 'suite')],
+      { suite: ['node', 'scripts/gate.mjs'] },
+      sourceTree(files),
+    );
+  const ambiguous = walk({
+    'scripts/gate.mjs': "import './helper';\n",
+    'scripts/helper.mjs': 'export const h = 1;\n',
+    'scripts/helper.js': 'module.exports = {};\n',
+  });
+  assert.equal(ambiguous.refusal, 'self-declared-ground');
+  assert.match(ambiguous.detail, /resolves to more than one file/);
+  // A directory index beside a file of the same name is the same ambiguity.
+  const both = walk({
+    'scripts/gate.mjs': "import './dir';\n",
+    'scripts/dir.mjs': 'export const d = 1;\n',
+    'scripts/dir/index.js': 'module.exports = {};\n',
+  });
+  assert.match(both.detail, /resolves to more than one file/);
+});
+
+test('a specifier with exactly one candidate resolves to it', () => {
   const sources = declarationSources(
     [layer('unit', 'suite')],
     { suite: ['node', 'scripts/gate.mjs'] },
     sourceTree({
-      'scripts/gate.mjs': "import './helper';\nimport './dir';\n",
+      'scripts/gate.mjs': "import './helper';\nimport './dir';\nimport './exact.mjs';\n",
       'scripts/helper.mjs': 'export const h = 1;\n',
       'scripts/dir/index.mjs': 'export const d = 1;\n',
+      'scripts/exact.mjs': 'export const e = 1;\n',
     }),
   );
   assert.equal(sources.ok, true);
   assert.ok(sources.entries.includes('scripts/helper.mjs'));
   assert.ok(sources.entries.includes('scripts/dir/index.mjs'));
+  assert.ok(sources.entries.includes('scripts/exact.mjs'));
+});
+
+test('a declaration source reached through a link is not the file it names', () => {
+  // The guard compares names. A link's name is not its content: the story's
+  // diff and the branch's diff both name the target, and a set holding the link
+  // would watch a path neither of them ever touches.
+  const files = {
+    'scripts/gate.mjs': "import './lib/parts.mjs';\n",
+    'scripts/lib/parts.mjs': 'export const parts = () => {};\n',
+  };
+  const links = new Set(['scripts/lib']);
+  const walk = (isLink) =>
+    declarationSources(
+      [layer('unit', 'suite')],
+      { suite: ['node', 'scripts/gate.mjs'] },
+      sourceTree(files),
+      isLink,
+    );
+  // A link at a segment of the path, not the file at the end of it.
+  const out = walk((path) => links.has(path));
+  assert.equal(out.refusal, 'self-declared-ground');
+  assert.match(out.detail, /reaches its content through a symlink/);
+  // The file itself as the link.
+  const leaf = walk((path) => path === 'scripts/lib/parts.mjs');
+  assert.match(leaf.detail, /reaches its content through a symlink/);
+  // The other direction: no link, and the same tree walks clean.
+  const clean = walk(() => false);
+  assert.equal(clean.ok, true);
+  assert.ok(clean.entries.includes('scripts/lib/parts.mjs'));
 });
 
 test('an import cycle ends the walk rather than running it forever', () => {

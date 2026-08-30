@@ -17,10 +17,10 @@ import {
 } from '../src/daemon/home.mjs';
 import { postFreeze, repairLane, restoreAnchor } from '../src/lanes/verdict.mjs';
 import {
+  certifiedTree,
   checksByName,
   fastPathTaken,
   shipStep,
-  unstampedMerge,
   CHECKLESS_POLLS,
   UPDATE_CAP,
 } from '../src/lanes/ship.mjs';
@@ -2719,6 +2719,16 @@ test('a fast path a later verdict superseded is not a fast-path ship', () => {
     event(3, 'merged', { pr: 7 }),
   ];
   assert.equal(fastPathTaken(before).seq, 2);
+  // A RED render after the record certifies nothing. The env-only CI route
+  // renders one to carry a failure the tree is not to blame for; the run
+  // recovers and ships on the certification the fast path carried, so the mark,
+  // the escape kind and the count all still belong to it.
+  const red = [
+    event(1, 'fast-path-ship', { taken: true }),
+    event(2, 'verdict-rendered', { cycle: 2, verdict: 'red', source: 'ci' }),
+    event(3, 'merged', { pr: 7 }),
+  ];
+  assert.equal(fastPathTaken(red).seq, 1);
   // A refusal was never a carry.
   assert.equal(fastPathTaken([event(1, 'fast-path-ship', { taken: false })]), undefined);
 });
@@ -2758,55 +2768,42 @@ test('a defect on a red merge a fast path carried takes the fast-path word', asy
   assert.equal(escapes[0].refs.project, 'proj');
 });
 
-test('a merge this run never stamped is a merge the resume has to judge', async (t) => {
-  // The crash window: the merge commit lands in the worktree and the daemon
-  // dies before the stamp. On the resume the merge answers "already up to
-  // date", `ran` reads false, and the old reading took the run to the request
-  // over a tree no verdict had judged. The tree is the record that survived the
-  // crash, and this is the stage's reading of it.
-  const fx = fastPathFixture(t);
-  fx.forge.state.autoChecks = () => [running()];
-  const runId = await fx.launch();
-  const launched = await waitEvent(
-    fx.paths,
-    runId,
-    (e) => e.event === 'run-launched',
-    'run-launched',
+test('the resume routes on what the ledger proves, never on merge idempotence', () => {
+  // Every write of this stage has a crash window behind it, and every resume
+  // out of one meets a merge that answers "already up to date" and a base that
+  // reads exactly like one which never moved. So the route reads the proof
+  // instead: a green verdict at the tree, or a taken fast path onto it. There
+  // is no third proof, and each window below carries none of the two.
+  const event = (seq, name, extra = {}) => ({ seq, event: name, ...extra });
+  const HEAD = 'h'.repeat(40);
+  // The two proofs.
+  assert.equal(
+    certifiedTree([event(1, 'verdict-rendered', { verdict: 'green', sha: HEAD })], HEAD),
+    true,
   );
-  await waitEvent(fx.paths, runId, (e) => e.event === 'freeze', 'freeze');
-  const worktree = launched.worktree;
-  const before = gitSync(['rev-parse', 'HEAD'], worktree).trim();
-  const events = readEvents(runLedgerPath(fx.paths, runId));
-  // No merge in the tree yet: nothing to judge.
-  assert.equal(await unstampedMerge({ worktree }, events), null);
-  // The merge the crash left behind, stamped nowhere.
-  commitTree(fx.origin, { 'docs/late.md': 'a competing note\n' }, 'docs: a note');
-  gitSync(['fetch', '--quiet', fx.origin, 'main'], worktree);
-  // The identity rides the invocation, as it does for every commit the harness
-  // makes in a run worktree: a run worktree carries none of its own, and a CI
-  // runner has none globally either.
-  gitSync(
-    [
-      '-c',
-      'commit.gpgsign=false',
-      '-c',
-      'user.name=Harness Test',
-      '-c',
-      'user.email=harness@test.invalid',
-      'merge',
-      '--no-ff',
-      '-m',
-      'merge main',
-      'FETCH_HEAD',
-    ],
-    worktree,
+  assert.equal(
+    certifiedTree([event(1, 'fast-path-ship', { taken: true, toSha: HEAD })], HEAD),
+    true,
   );
-  const head = gitSync(['rev-parse', 'HEAD'], worktree).trim();
-  assert.notEqual(head, before);
-  assert.ok(!events.some((e) => e.sha === head || e.toSha === head));
-  assert.equal(await unstampedMerge({ worktree }, events), head);
-  // A merge the ledger does name is the ordinary case and reads as nothing.
-  assert.equal(await unstampedMerge({ worktree }, [...events, { event: 'x', toSha: head }]), null);
+  // Every crash window. A resolved merge round stamps the sha it produced; the
+  // pre-verdict-update stamps the tree it built; a fast-path REFUSAL stamps the
+  // tree it refused to carry. None of the three is a certification, and the
+  // last one inverted into a carry under a rule that read any sha-carrying
+  // stamp as a tree already settled.
+  for (const window of [
+    [event(1, 'merge-round', { resolved: true, sha: HEAD })],
+    [event(1, 'pre-verdict-update', { ran: true, fromSha: 'a', toSha: HEAD })],
+    [event(1, 'fast-path-ship', { taken: false, refusal: 'ground-intersects', toSha: HEAD })],
+    [event(1, 'branch-update', { fromSha: 'a', toSha: HEAD })],
+    // A verdict that judged some other tree, and a red one at this tree.
+    [event(1, 'verdict-rendered', { verdict: 'green', sha: 'other' })],
+    [event(1, 'verdict-rendered', { verdict: 'red', sha: HEAD })],
+    [],
+  ]) {
+    assert.equal(certifiedTree(window, HEAD), false, JSON.stringify(window));
+  }
+  // A sha nothing can name is nothing to prove anything about.
+  assert.equal(certifiedTree([event(1, 'verdict-rendered', { verdict: 'green' })], undefined), false);
 });
 
 test('a project that declares no breadth ground never fast-paths', async (t) => {

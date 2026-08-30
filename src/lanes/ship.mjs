@@ -313,33 +313,35 @@ const UPDATE_CAP_NOTE =
   'the base moved twice under one pass: the ship stage takes the update from ' +
   'here, as it did before this one existed';
 
-// Why a resume that finds an unrecorded merge goes back to the verdict.
-const UNSTAMPED_MERGE_NOTE =
-  'a merge this run took and never stamped: the tree at the head is not a tree ' +
-  'any verdict judged, so it is judged now';
+// Why a tree nothing certified goes back to the verdict.
+const UNCERTIFIED_TREE_NOTE =
+  'the tree at the head is not a tree any green verdict judged and not one a ' +
+  'fast path carried: it is judged now';
 
 /**
- * The head of the run worktree when it is a merge commit no stamp of this run
- * names, or null.
+ * Whether the ledger PROVES the tree at one sha may open a request.
  *
- * Every merge this stage takes ends in a record that carries the sha it
- * produced. A merge commit outside that set is the crash window between the
- * merge and its record, and the tree is ahead of everything the ledger says.
- * Nothing else in a run worktree has two parents: the candidate captures commit
- * on one.
+ * There are exactly two proofs and the stage accepts nothing else. A green
+ * verdict rendered at the sha judged that tree. A taken fast-path record for
+ * the sha carried a certification onto it, on purpose, with the reasons in the
+ * record. Everything else is a tree with no standing about it.
+ *
+ * The rule exists because the merge is not evidence. Every write this stage
+ * makes has a crash window behind it: after a resolved merge round, after the
+ * `ran: true` stamp, after a fast-path REFUSAL. On any of those resumes the
+ * merge answers "already up to date" and reads exactly like a base that never
+ * moved, so a route decided on the merge would take the run to the request over
+ * a tree nothing judged, and the last of them would turn a recorded refusal
+ * into a carried certification. A route decided on the proofs cannot: none of
+ * those resumes has one, and each goes back to the verdict.
  */
-export async function unstampedMerge(base, events) {
-  const head = await headSha(base.worktree);
-  const named = new Set();
-  for (const e of events) {
-    for (const value of [e.sha, e.toSha, e.mergeSha, e.fromSha]) {
-      if (typeof value === 'string' && value.length > 0) named.add(value);
-    }
-  }
-  if (named.has(head)) return null;
-  const line = await git(['rev-list', '--parents', '-n', '1', head], { cwd: base.worktree });
-  const parents = line.trim().split(/\s+/).slice(1);
-  return parents.length >= 2 ? head : null;
+export function certifiedTree(events, sha) {
+  if (typeof sha !== 'string' || sha.length === 0) return false;
+  return events.some(
+    (e) =>
+      (e.event === 'verdict-rendered' && e.verdict === 'green' && e.sha === sha) ||
+      (e.event === 'fast-path-ship' && e.taken === true && e.toSha === sha),
+  );
 }
 
 async function preVerdictUpdate(ctx, base) {
@@ -362,40 +364,29 @@ async function preVerdictUpdate(ctx, base) {
     }
     return { next: 'ship' };
   }
-  // The merge and the stamp below are two writes, and a crash lands between
-  // them. On the resume the merge is already in the tree, so the merge answers
-  // "already up to date", `ran` reads false, and the run would go on to the
-  // request over a tree no verdict ever judged. The tree itself is the record
-  // that survives the crash: a merge commit at the head that no stamp of this
-  // run names is a merge this run took and never wrote down (ADR-0033).
-  const orphan = await unstampedMerge(base, events);
-  if (orphan) {
-    ctx.store.append('pre-verdict-update', {
-      actor: ACTOR,
-      pass,
-      ran: false,
-      unstamped: true,
-      toSha: orphan,
-      note: UNSTAMPED_MERGE_NOTE,
-    });
-    // The full re-verdict, never the fast path: the shas that check reads are
-    // the ones the lost stamp held, and a decision over shas this run cannot
-    // name is not the decision it would have made.
-    return { next: 'verdict' };
-  }
   // No push: there is no request to update yet, and a run branch pushed here
   // would meet a later fresh pass's rewrite with a plain push.
   const out = await branchUpdate(ctx, base, { push: false, stamp: false });
   if (out.directive) return out.directive;
   const ran = out.toSha !== out.fromSha;
+  // The route reads the ledger's proof about the tree the run now holds, never
+  // this call's merge. A merge is idempotent, so every crash window in this
+  // stage resumes with a merge that answers "already up to date" and a base
+  // that reads as one which never moved (ADR-0033).
+  const certified = certifiedTree(runEvents(ctx), out.toSha);
   ctx.store.append('pre-verdict-update', {
     actor: ACTOR,
     pass,
     ran,
     mainSha: out.mainSha,
     ...(ran && { fromSha: out.fromSha, toSha: out.toSha }),
+    ...(!ran && !certified && { toSha: out.toSha, uncertified: true, note: UNCERTIFIED_TREE_NOTE }),
   });
-  if (!ran) return { next: 'ship' };
+  if (certified) return { next: 'ship' };
+  // A tree nothing certified that this call's merge did not build: the run took
+  // a merge it never recorded, and the shas the fast path reads went with the
+  // record. The full re-verdict, never the fast path over shas it cannot name.
+  if (!ran) return { next: 'verdict' };
   // The flag is the whole of the difference. Absent or false, the moved tree
   // goes back to the verdict exactly as it always has, and nothing above or
   // below this line reads differently (ADR-0056).
@@ -451,9 +442,23 @@ async function fastPathShip(ctx, base, out) {
 export function fastPathTaken(events) {
   const fast = [...events].reverse().find((e) => e.event === 'fast-path-ship' && e.taken === true);
   if (!fast) return undefined;
-  return events.some((e) => e.event === 'verdict-rendered' && e.seq > fast.seq)
-    ? undefined
-    : fast;
+  return supersededFastPath(events, fast) ? undefined : fast;
+}
+
+/**
+ * Whether a green verdict rendered after a taken record re-certified the tree.
+ *
+ * Green, and nothing weaker. A red render certifies nothing: the env-only CI
+ * route renders one to carry a failure the tree is not to blame for, and the
+ * run recovers and ships on the certification the fast path carried. Reading
+ * that red as a re-certification would lose the mark on the close, the word on
+ * every escape behind the merge, and the ship from the count that measures what
+ * the trade costs, which is the whole of the flag's evidence (ADR-0056).
+ */
+export function supersededFastPath(events, fast) {
+  return events.some(
+    (e) => e.event === 'verdict-rendered' && e.verdict === 'green' && e.seq > fast.seq,
+  );
 }
 
 // -- the ship stage ----------------------------------------------------------

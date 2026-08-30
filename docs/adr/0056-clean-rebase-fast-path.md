@@ -108,16 +108,45 @@ wrong file while the story edited the right one.
 Every edge the walk cannot read refuses, because an edge nobody can enumerate is
 a surface with an unknown boundary: a command that names no file of this
 repository (`npm test`), an argv path that is a glob rather than a file, a file
-that will not read, a relative specifier that resolves to nothing under the
-extensions a gate uses, and an import or require whose argument is computed
-rather than written. A bare specifier is the one thing followed nowhere and
-refused nowhere: it names a dependency and not a file of this repository, and a
-dependency moving is what the shared breadth list is for.
+that will not read, a relative specifier that resolves to nothing, one that
+resolves to more than one thing, a path that reaches its content through a
+symlink, and a load whose argument is not a written literal. A bare specifier is
+the one thing followed nowhere and refused nowhere: it names a dependency and
+not a file of this repository, and a dependency moving is what the shared
+breadth list is for.
+
+Three of those deserve their reasons written down.
+
+**A load is proved or refused, and there is no third reading.** Matching the
+literal forms and refusing an obviously computed one leaves a gap in the middle,
+and `import('./dir/' + name)` sits in it: it begins with a quote, so it reads as
+neither. A module the walk neither follows nor refuses is a module it misses in
+silence, which is the one outcome this check may never have. So the rule is
+stated the other way round: every `import(` and `require(` must be PROVED a load
+of one written literal, and everything else refuses. Import attributes after the
+specifier are still a proof; a template literal, a concatenation, a variable and
+a conditional are not.
+
+**A specifier that could be more than one file is not resolved by guessing.**
+Which of `x.mjs`, `x.js` and `x/index.js` a runtime loads depends on the module
+kind and the package the file sits in. A probe that took the first hit would
+record a file the gate never loads while the real one stayed outside the guard,
+so more than one candidate is a refusal rather than a choice. A specifier with
+its extension written, which is the ordinary ESM case, has exactly one.
+
+**A symlink is refused rather than followed.** The guard compares names: the
+story's diff and the branch's diff both name the target of a link, never the
+link, so a set holding the link would watch a path neither of them ever touches
+while the real file moved under `inertGround`. Recording the target instead was
+the alternative and it was rejected as a second vocabulary: the ground question
+already reads a symlink as ground it cannot classify, and the two readings have
+to agree. Every segment of a path is asked, not the last one only, because a
+link in the middle moves the whole subtree under it.
 
 One bound remains and it is worth stating. The walk reads specifiers, not
 semantics: a module reached only through a runtime path this parse cannot see is
 outside it. Every shape that hides one, though, is itself a refusal, so what is
-left is a module reached by a literal relative specifier the regexes miss.
+left is a module reached by a literal relative specifier the static forms miss.
 
 ## Why a lens finding is not carried
 
@@ -152,11 +181,18 @@ A run can take the fast path over one moved base and still render the full
 verdict afterwards: a red at the request sends it back, and so does a second
 moved base at the ship stage. That verdict judges the tree that lands, which is
 the whole of what the fast path skipped, so the run earned the certification it
-ships and the trade was never made. A taken record with a verdict rendered after
-it therefore marks nothing: the close carries no `fastPath`, an escape behind
-that merge is the ordinary escape, and the tripwire that measures the trade does
-not count that ship. The record itself stays in the ledger, because the check
-did run and did answer.
+ships and the trade was never made. A taken record with a GREEN verdict rendered
+after it therefore marks nothing: the close carries no `fastPath`, an escape
+behind that merge is the ordinary escape, and the tripwire that measures the
+trade does not count that ship. The record itself stays in the ledger, because
+the check did run and did answer.
+
+Green, and nothing weaker. A red render certifies nothing, and the env-only CI
+route renders one deliberately: it carries a failure the tree is not to blame
+for, the run recovers, and it ships on the certification the fast path carried.
+Reading that red as a re-certification would take the mark off the close, the
+word off every escape behind the merge, and the ship out of the count, which is
+the whole of the evidence the flag is judged on.
 
 ## What the check may not do to the ship queue
 
@@ -232,14 +268,21 @@ never been written. The fast path can only remove work. A defect in it makes a
 ship slow and can never make one wrong.
 
 The stage around it has one more ending, and it belongs to the stage rather than
-to the check. The merge and the record of the merge are two writes, and a crash
-lands between them; on the resume the merge is already in the tree, so it
-answers "already up to date" and the base reads as one that never moved. The
-tree is the record that survived: a merge commit at the head of the run worktree
-that no stamp of the run names is a merge the run took and never wrote down.
-That routes to the full re-verdict and never to the fast path, because the shas
-the check reads are the ones the lost stamp held, and a decision over shas the
-run cannot name is not the decision it would have made.
+to the check. Every write the stage makes has a crash window behind it: after a
+resolved merge round, after the update stamp, after a fast-path REFUSAL. A merge
+is idempotent, so every one of those resumes meets a merge that answers "already
+up to date" and a base that reads exactly like one which never moved. A route
+decided on that reading takes the run to the request over a tree nothing judged,
+and the last window turns a recorded refusal into a carried certification.
+
+So the route is decided on what the ledger PROVES about the tree the run holds,
+and there are exactly two proofs: a green verdict rendered at that sha, or a
+taken fast-path record for it. A stamp that merely carries a sha is not one; it
+says a tree was built, never that anything stood behind it. A tree with neither
+proof that this call's merge did not build goes to the full re-verdict and never
+to the fast path, because the shas the check reads went with the lost record,
+and a decision over shas the run cannot name is not the decision it would have
+made.
 
 ## Measuring what the trade costs
 
