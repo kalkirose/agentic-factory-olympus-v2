@@ -5,10 +5,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { cardSections } from '../src/lanes/card.mjs';
+import { FORESEEN_HEADING, cardSections } from '../src/lanes/card.mjs';
 import {
   MIN_QUOTE_CHARS,
   OWNER_PIN_MARKER,
+  SUPERSEDE_BRIEF_LINES,
+  SUPERSEDE_CLAUSES,
   SUPERSEDE_REFUSALS,
   authorizedSupersedes,
   ownerPinned,
@@ -198,4 +200,79 @@ test('a set of authorized supersedes is one ruling, anchored on the last of them
   assert.ok(ruling.answer.includes(COVERING_LINE));
   assert.equal(supersedeRuling([]), null);
   assert.ok(supersedeLines(authorizedSupersedes(events))[0].includes('scope-boundary'));
+});
+
+// -- covered is a test of necessity, not of naming (ADR-0053) ----------------
+
+const MANDATE_CARD = `---
+key: alpha-2
+title: Alpha extension
+---
+
+## Scope boundary
+
+The feature module only.
+
+## Foreseen amendments
+
+- Foreseen amendment: tests/pinned.test.mjs pins the closed export set; AC-2 mandates the second export.
+
+## Acceptance criteria
+
+**AC-2** The module publishes g beside f, so the published set is f and g.
+`;
+
+// The two lines a claim on this card can rest on: the criterion that mandates
+// the behavior, and the note a close-out sweep wrote about the same mandate.
+const MANDATE_LINE = 'The module publishes g beside f, so the published set is f and g.';
+const NOTE_LINE =
+  'Foreseen amendment: tests/pinned.test.mjs pins the closed export set; AC-2 mandates the ' +
+  'second export.';
+
+test('a mandate in the criteria authorizes, and so does the note written about it', (t) => {
+  const files = { 'tests/pinned.test.mjs': PLAIN_TEST };
+  const on = (clause, quote) =>
+    refusalFor(t, {
+      files,
+      cardText: MANDATE_CARD,
+      claim: claimOf({ supersedeClause: clause, supersedeQuote: quote }),
+    });
+  // The card never names the test file. The criterion mandates the second
+  // export, and no implementation of it leaves the closed set true.
+  assert.equal(on('acceptance', MANDATE_LINE), null);
+  // The note a close-out sweep wrote is quotable evidence of the same mandate.
+  assert.equal(on('foreseen', NOTE_LINE), null);
+  // Each clause still reads its own section, and nothing else: the quote check
+  // is the guard it always was.
+  assert.equal(on('scope-boundary', MANDATE_LINE), 'quote-not-in-card');
+  assert.equal(on('acceptance', NOTE_LINE), 'quote-not-in-card');
+  assert.deepEqual(
+    [...SUPERSEDE_CLAUSES],
+    ['acceptance', 'scope-boundary', 'decisions', 'foreseen'],
+  );
+});
+
+test('the classification brief states the necessity test and the restatement duty', () => {
+  const brief = SUPERSEDE_BRIEF_LINES.join('\n');
+  assert.ok(brief.includes('necessarily changes what the pinned clause asserts'));
+  assert.ok(brief.includes('The test is necessity, not naming'));
+  assert.ok(brief.includes("restates the pin's protected guarantee in its new form"));
+  assert.ok(brief.includes('"acceptance", "scope-boundary", "decisions" or "foreseen"'));
+  assert.ok(brief.includes(FORESEEN_HEADING));
+  // The honesty guard the brief carries is unchanged.
+  assert.ok(brief.includes('word for word is refused and the run parks'));
+});
+
+test('the ruling a card mints tells the amendment to restate the guarantee', () => {
+  const ruling = supersedeRuling([
+    {
+      seq: 7,
+      test: 'tests/pinned.test.mjs',
+      assertion: 'the export set is exactly ["f"], and becomes exactly ["f", "g"]',
+      cardQuote: MANDATE_LINE,
+      clause: 'acceptance',
+    },
+  ]);
+  assert.ok(ruling.answer.includes('a pin is amended, never deleted'));
+  assert.ok(ruling.answer.includes(MANDATE_LINE));
 });

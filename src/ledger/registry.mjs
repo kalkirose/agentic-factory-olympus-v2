@@ -476,6 +476,11 @@ export const PARK_TYPES = new Set([
   // every result it earned while it waits (ADR-0022).
   'cycle-repeat',
   'card-invalidated', // ship-time card sweep
+  // A choice a shipped story left open on a later card, asked at close-out
+  // while the context is fresh. Like `card-invalidated` it belongs to the card
+  // and not to a run: it holds that card's next launch and closes nothing
+  // (ADR-0052).
+  'card-decision',
   'provisioning-gate',
   // Terminal-state discipline (ADR-0015): a recoverable failure parks with
   // `retry` / `abandon` instead of closing the run.

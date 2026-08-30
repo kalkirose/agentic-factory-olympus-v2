@@ -8,12 +8,19 @@
 // them — a card whose scope covers the extension has sanctioned the amendment,
 // and the arithmetic between the card and the suite is not the owner's job.
 //
-// So the default inverts. A collision the card's scope covers is an authorized
+// So the default inverts. A collision the card covers is an authorized
 // supersede: no park, an amendment through the re-freeze route the ruling
 // already had, and a record of what was superseded and on whose words. A
 // collision the card is silent about is a genuine intent gap and parks exactly
 // as it always did. Authorization derives from the card, so it is re-derivable
 // in every run: nothing survives a dead run because nothing needs to.
+//
+// Covered is a test of necessity, not of naming (ADR-0053). The card mandates a
+// behavior whose implementation necessarily changes what the pinned clause
+// asserts, and the amendment restates the guarantee that clause protected in its
+// new form. Asking instead whether the card NAMES the colliding surface reads a
+// card that mandates the change as silent, because a card states what the story
+// must do and never which test files the answer disturbs.
 //
 // Nothing here judges scope. A reasoning seat reads the card and makes the
 // claim; this module is the mechanical half of the bargain and it is the only
@@ -28,7 +35,7 @@
 // take.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { cardSections } from './card.mjs';
+import { FORESEEN_HEADING, FORESEEN_SECTION, cardSections } from './card.mjs';
 import { underAny } from './shared.mjs';
 
 /**
@@ -47,15 +54,30 @@ export const OWNER_PIN_MARKER = 'olympus:owner-pinned';
  */
 export const MIN_QUOTE_CHARS = 24;
 
-/** The card sections a supersede authorization may rest on. */
-export const SUPERSEDE_CLAUSES = Object.freeze(['scope-boundary', 'decisions']);
+/**
+ * The card sections a supersede authorization may rest on.
+ *
+ * A mandate is what covers a collision, and a card states its mandates in its
+ * acceptance criteria, so that section carries authority beside the two that
+ * bound scope. `foreseen` is the fourth: a close-out sweep that already found
+ * the collision wrote the mandating line onto the card, and a note the machine
+ * wrote out of the card is quotable evidence of the same mandate.
+ */
+export const SUPERSEDE_CLAUSES = Object.freeze([
+  'acceptance',
+  'scope-boundary',
+  'decisions',
+  'foreseen',
+]);
 
 // The headings each clause reads. `decisions` takes every section whose heading
 // carries the word, so a card that writes "Open decisions" and a card that
 // writes "Decisions" are read the same way.
 const CLAUSE_HEADINGS = Object.freeze({
+  acceptance: /acceptance/i,
   'scope-boundary': /scope boundary/i,
   decisions: /decisions/i,
+  foreseen: FORESEEN_SECTION,
 });
 
 /**
@@ -77,17 +99,41 @@ export const SUPERSEDE_CLAIM_PROPERTIES = Object.freeze({
   supersedeClause: { type: 'string', enum: [...SUPERSEDE_CLAUSES] },
 });
 
-/** The lines that put the classification duty on a seat that can make a claim. */
+/**
+ * The lines that put the classification duty on a seat that can make a claim.
+ *
+ * The test is necessity, not naming. Asking whether the card NAMES the colliding
+ * surface answers the wrong question: a card writes what the story must do, not
+ * which test files the answer disturbs, so a card that mandates a second email
+ * and never mentions the test counting emails reads as silent and buys an owner
+ * a question its own criteria already settled. Asking whether an implementation
+ * of the mandated behavior can leave the pinned assertion true is the question
+ * the two documents can actually answer.
+ */
 export const SUPERSEDE_BRIEF_LINES = Object.freeze([
   'A frozen test that collides with this story\'s own scope is not automatically an owner question.',
-  "Read the card's Scope boundary and Decisions sections and decide: does the card's scope cover this collision?",
-  'When it does, state the supersede: "supersedes" (the frozen test file), "supersedeAssertion" ' +
-    '(the assertion that changes), "supersedeQuote" (the card line the authorization rests on, ' +
-    'copied word for word out of the card), and "supersedeClause" ("scope-boundary" or "decisions").',
+  'Read the whole card. Its acceptance criteria, its Scope boundary, its Decisions and any ' +
+    `"${FORESEEN_HEADING}" notes all carry authority. Answer one question: does the card mandate ` +
+    'a behavior whose implementation necessarily changes what the pinned clause asserts? A yes ' +
+    'is covered.',
+  'The test is necessity, not naming. A card that never names the test file still covers the ' +
+    'collision when no implementation of the mandated behavior can leave the pinned assertion ' +
+    'true. A card that does name the surface covers nothing when the mandated behavior can be ' +
+    'built with that assertion intact.',
+  `A "${FORESEEN_HEADING}" note is evidence you may use: a close-out sweep already read this card ` +
+    'as mandating this collision and wrote down the pinned clause, the file it lives in, and the ' +
+    'card line that mandates the change. It answers the necessity test; it does not excuse it.',
+  'When the card covers it, state the supersede: "supersedes" (the frozen test file), ' +
+    '"supersedeAssertion" (the guarantee the pin protects and the form it now takes), ' +
+    '"supersedeQuote" (the card line the mandate rests on, copied word for word out of the card), ' +
+    'and "supersedeClause" ("acceptance", "scope-boundary", "decisions" or "foreseen").',
+  'The amendment restates the pin\'s protected guarantee in its new form; it never deletes it. A ' +
+    'pin that asserted a closed set of two becomes a pin that asserts the closed set of three the ' +
+    'card mandates. An amendment that drops the guarantee is a defect, not a supersede.',
   'The quote is checked against the card mechanically. A quote that is not in the named section ' +
     'word for word is refused and the run parks, so copy the line and never paraphrase it.',
-  'When the card is silent on the collision, state no supersede. Silence is the owner\'s question, ' +
-    'and stretching a scope line to cover a collision it does not cover is a reviewable defect.',
+  'When the card mandates no such behavior, state no supersede. Silence is the owner\'s question, ' +
+    'and stretching a card line to reach a collision it does not reach is a reviewable defect.',
 ]);
 
 /**
@@ -99,8 +145,9 @@ export const SUPERSEDE_REFUSALS = Object.freeze({
   disabled:
     'the project turned card-authorized supersedes off, so every frozen-surface collision parks.',
   silent:
-    'the seat claimed no card authority for this collision, so the card is silent on it and the ' +
-    'decision is the owner\'s.',
+    'the seat claimed no card authority for this collision: the card mandates no behavior whose ' +
+    'implementation necessarily changes what the pinned clause asserts, so the decision is the ' +
+    'owner\'s.',
   'owner-pinned':
     `the frozen test carries the owner pin (${OWNER_PIN_MARKER}). A pinned collision parks whatever ` +
     'the card says.',
@@ -268,7 +315,8 @@ export function supersedeRuling(supersedes) {
     actor: 'card',
     answer: [
       'The intent card authorizes these supersedes; amend each frozen test named here, ' +
-        'exactly as far as the quoted card line reaches and no further:',
+        'exactly as far as the quoted card line reaches and no further. Restate what each pin ' +
+        'protected in the form the card mandates; a pin is amended, never deleted:',
       ...supersedes.map(
         (s) =>
           `- ${s.test}: the assertion "${s.assertion}" is superseded. The card's ${s.clause} ` +

@@ -3000,7 +3000,9 @@ test('the same collision on a card that does not cover it parks, exactly as befo
   const { runId } = await fx.launch({ card: 'cards/alpha.md' });
   const park = await waitParked(fx.paths, runId, 'intent-conflict');
   assert.ok(park.question.includes('The card did not settle it'));
-  assert.ok(park.question.includes('the card is silent on it'));
+  // The park says which check refused, in the words of the test it applied
+  // (ADR-0053).
+  assert.ok(park.question.includes('the card mandates no behavior whose implementation'));
   fx.daemon.engine.answer({
     runId,
     actor: 'operator',

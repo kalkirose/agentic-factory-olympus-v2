@@ -324,6 +324,11 @@ function readinessHandler(postFreezeStage, forgeFor) {
         });
       }
     }
+    // The questions the card leaves open, and never the foreseen amendments a
+    // close-out sweep wrote onto it. A foreseen amendment states a consequence
+    // the card's own criteria already mandate, so there is nothing here for a
+    // human to settle: the build-time classifier consumes the note as evidence
+    // and the launch proceeds (ADR-0052).
     if (card.openDecisions.length > 0) {
       const events = runEvents(ctx);
       if (!answeredPark(events, 'open-decisions')?.answer) {
@@ -1489,6 +1494,8 @@ function supersedeBrief(detail, event) {
     `The frozen test ${event.test} pins: ${event.assertion}`,
     'Amend the spec so the criterion states the supersede and names that test file in its ' +
       'Supersedes clause. Go exactly as far as the quoted card line reaches and no further.',
+    'Restate what the pin protected in the form the card mandates. The guarantee survives in its ' +
+      'new form; a pin is amended, never deleted.',
   ].join('\n');
 }
 

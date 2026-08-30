@@ -387,10 +387,13 @@ function supersedeDutyLines(base, supersedes) {
   return [
     'This run amended frozen tests on the intent card\'s authority, without asking the owner.',
     `The card: ${base.cardPath ?? '(the run names none)'}`,
-    'Verify every one of these against the card: the quoted line is in the card, and the scope it ' +
-      'states genuinely covers the assertion that changed.',
+    'Verify every one of these against the card: the quoted line is in the card, and what it ' +
+      'mandates genuinely reaches the assertion that changed. It reaches it when no ' +
+      'implementation of the mandated behavior could leave that assertion true.',
     ...supersedeLines(supersedes),
     'An authorization whose card line does not reach the change is a HIGH finding on the spec lens.',
+    'So is an amendment that drops what the pin protected instead of restating it in the form the ' +
+      'card mandates: the guarantee survives the supersede, or the supersede is a deletion.',
   ];
 }
 

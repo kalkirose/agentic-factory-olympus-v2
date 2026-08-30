@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { noCriteriaMessage, parseIntentCard } from '../src/lanes/card.mjs';
+import {
+  FORESEEN_MARKER,
+  isForeseenNote,
+  noCriteriaMessage,
+  parseIntentCard,
+} from '../src/lanes/card.mjs';
 
 const CARD = `---
 key: alpha-1
@@ -124,4 +129,50 @@ test('a card with no criterion line yields none, and the message names it', () =
   const message = noCriteriaMessage('.olympus/cards/a-1.md');
   assert.match(message, /\.olympus\/cards\/a-1\.md/);
   assert.match(message, /acceptance/);
+});
+
+// -- foreseen amendments (ADR-0052) ------------------------------------------
+
+const NOTE = `${FORESEEN_MARKER} tests/exports.test.mjs pins the closed export set; AC-2 mandates the third export.`;
+
+const NOTED_CARD = `---
+key: alpha-2
+title: Alpha extension
+---
+
+## Open decisions
+
+- Pick the rounding mode
+- ${NOTE}
+
+## Foreseen amendments
+
+- ${NOTE}
+- **${FORESEEN_MARKER}** tests/rows.test.mjs pins the row count; AC-3 mandates a new row.
+
+## Acceptance criteria
+
+**AC-1** The extension ships.
+`;
+
+test('a foreseen amendment is published on its own and never as an open decision', () => {
+  const { card } = parseIntentCard(NOTED_CARD);
+  // The question stays a question. The notes leave the set a launch parks on,
+  // including the one a writer put under the wrong heading.
+  assert.deepEqual(card.openDecisions, ['Pick the rounding mode']);
+  assert.equal(card.foreseenAmendments.length, 2);
+  assert.ok(card.foreseenAmendments[0].includes('tests/exports.test.mjs'));
+  assert.ok(card.foreseenAmendments[1].includes('tests/rows.test.mjs'));
+});
+
+test('the note marker is read through markdown emphasis and leading space', () => {
+  assert.ok(isForeseenNote(`${FORESEEN_MARKER} a note`));
+  assert.ok(isForeseenNote(`  **${FORESEEN_MARKER}** a note`));
+  assert.ok(isForeseenNote(`\`${FORESEEN_MARKER}\` a note`));
+  assert.ok(!isForeseenNote('Pick the rounding mode'));
+  assert.ok(!isForeseenNote(null));
+});
+
+test('a card with no foreseen section carries no notes', () => {
+  assert.deepEqual(parseIntentCard(CARD).card.foreseenAmendments, []);
 });

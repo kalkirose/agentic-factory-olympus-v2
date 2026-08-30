@@ -9,7 +9,8 @@ import { streamIndexPath, readStreamIndex } from './streams.mjs';
 import { ledgerPathFor } from './readers.mjs';
 
 /**
- * Unanswered instance-ledger parks (card-invalidated from ship-time sweeps).
+ * Unanswered instance-ledger parks: card-invalidated and card-decision, both
+ * from ship-time sweeps.
  * The frontier blocks these cards; the queue presents them.
  */
 export function openCardParks(paths) {

@@ -604,9 +604,10 @@ export class Daemon {
   }
 
   /**
-   * Validates and stamps a human answer to an instance-ledger park (a
-   * card-invalidated card from a ship-time sweep). Mirrors the engine's
-   * run-park validation; the paired `answer` unblocks the card.
+   * Validates and stamps a human answer to an instance-ledger park (a card a
+   * ship-time sweep invalidated, or a decision it found the card leaves open).
+   * Mirrors the engine's run-park validation; the paired `answer` unblocks the
+   * card.
    * @param {{actor: string, seq: number, option?: string, answer?: string}} cmd
    */
   answerInstancePark({ actor, seq, option, answer }) {

@@ -209,7 +209,8 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 (seat) → adversary → freeze (process).
 
 - **Readiness** is mechanical: card on the graph frontier, open decisions
-  empty, references lint-green, worktree provisioned, and every external
+  empty (a foreseen-amendment note is not one, ADR-0052), references
+  lint-green, worktree provisioned, and every external
   credential the project declares wired on every surface it declared and
   proven by its read-only probe (ADR-0027).
 - **Spec birth** authors the buildable spec from the intent card, grounded
@@ -234,8 +235,8 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   spot-checks, scope against the card, AC encodability), evidence-cited. The
   birth seat amends; the gate re-checks amended sections only. Cap 2 rounds.
   An intent conflict the card does not cover escalates instead of burning a
-  round; one the card's scope does cover is superseded on the card's own words
-  and buys one amendment, which burns no round either (ADR-0044). Findings
+  round; one the card mandates is superseded on the card's own words and buys
+  one amendment, which burns no round either (ADR-0044, ADR-0053). Findings
   carry a severity: blocking findings hold the spec; notes do not, and travel
   to the suite seat as obligations to prove against running code. An omitted
   severity is blocking.
@@ -430,6 +431,17 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   authorization is a `supersede-authorized` stamp the eval review counts.
   `lanes.story.cardAuthorizedSupersede: false` restores the always-park
   default.
+- **Covered is necessity, not naming** (ADR-0053). The classifier asks one
+  question: does the card mandate a behavior whose implementation necessarily
+  changes what the pinned clause asserts? A card states what the story must do
+  and never which test files the answer disturbs, so asking whether the card
+  NAMES the colliding surface reads a mandating card as silent. The
+  authorization may rest on the acceptance criteria, the scope boundary, the
+  decisions, or a foreseen-amendment note, and the executed amendment restates
+  the guarantee the pin protected in its new form instead of deleting it. Every
+  guard behind the classifier is unchanged: the verbatim quote check, the spec
+  lens on the amendment nobody was asked about, the counted stamp, the owner
+  pin.
 - **Repair progress is a closed finding, never a smaller open set.** A repair
   round is a stall when it closed none of the findings the render before it
   left open; a round that closes one while the review surfaces another is
@@ -598,6 +610,17 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   supersede, and the sweep records them on that story's card under a
   `## Supersedes` heading. The run ledger archives with the run; the card is
   what the next story reads.
+- **The sweep classifies what the ship collides with** (ADR-0052). A later card
+  whose own acceptance criteria mandate a colliding behavior gets a
+  foreseen-amendment note on that card: the pinned clause, the file it lives in,
+  and the mandating card line, under a `## Foreseen amendments` heading and
+  behind a `Foreseen amendment:` marker. The launch gate parks on no such note,
+  by heading and by marker both, and the build-time classifier consumes it as
+  evidence. A collision the later card genuinely leaves open is a
+  `card-decision` park in the instance ledger, asked at close-out while the
+  context is fresh: it holds that card's next launch, offers no abandon, and
+  never holds the run that shipped. A note the report claims and the card does
+  not carry fails the sweep attempt and re-briefs the seat.
 - **Reconciliation judgment** (ADR-0026): a fresh-context seat judges
   whether the shipped diff implements or contradicts any decision record.
   Owed writes a reconciliation ticket and stamps `reconciliation-judged`;
@@ -668,19 +691,19 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 
 ## Escalations and the human
 
-- **Touchpoint catalog** (closed, ten park events): open decisions at build
+- **Touchpoint catalog** (closed, eleven park events): open decisions at build
   start; grounding conflict at spec birth; intent conflict at spec gate;
   spec-gate exhaustion; spec-gate non-convergence; unkilled-gap survivor;
   second 0/3 adversary round; second stall; card invalidated at ship-time
-  sweep; provisioning gate.
+  sweep; card decision at ship-time sweep; provisioning gate.
 - Park = stamped escalation record (question, context refs, answer forms) + a
   queued-stream event. The answer is a state change from any console session;
   the daemon validates, stamps who and when, resumes at the parked state.
 - **Every park states what it accepts, on the record**: the options it offers,
   the free-text slot it wants, or both. The engine adds `abandon` to every
-  park of a run, so the close-by-abandon route is open at all of them; the
-  card-invalidated park has no run behind it and offers none. A refusal quotes
-  the forms, and the queue renders the answer line off the same declaration.
+  park of a run, so the close-by-abandon route is open at all of them; the two
+  card parks have no run behind them and offer none. A refusal quotes the
+  forms, and the queue renders the answer line off the same declaration.
 - **A known harness defect is answered once.** A provisioning gate that names
   a harness finding also offers `ack`, which answers the gate and records that
   finding as known and deferred, by an identity derived from the defect — its

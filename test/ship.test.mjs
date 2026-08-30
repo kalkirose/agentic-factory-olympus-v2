@@ -25,6 +25,8 @@ import { readEvents } from '../src/ledger/ledger.mjs';
 import { openEscapesStore, openRunStore, TelemetryStore } from '../src/telemetry/stores.mjs';
 import { BEATS_PER_STAMP } from '../src/telemetry/heartbeat.mjs';
 import { openLoud } from '../src/telemetry/readers.mjs';
+import { openCardParks } from '../src/telemetry/queue.mjs';
+import { FORESEEN_HEADING, FORESEEN_MARKER } from '../src/lanes/card.mjs';
 import { RUN_EVENTS } from '../src/ledger/registry.mjs';
 import { recordEscape, ticketEscape, readEscapeSet } from '../src/telemetry/escapes.mjs';
 import { owedRepairs } from '../src/frontier/repairs.mjs';
@@ -3103,4 +3105,134 @@ test('a run that superseded nothing tells the sweep nothing about supersedes', a
   fx.forge.setChecks(opened.sha, [green()]);
   await waitClosed(fx.paths, runId);
   assert.ok(!fx.calls.find((c) => c.seat === 'card-sweep').prompt.includes('## Supersedes'));
+});
+
+// -- the close-out classification (ADR-0052) ---------------------------------
+
+// The card of a later story. Its criteria mandate a second export, which is
+// what makes the collision with this ship's frozen suite a consequence rather
+// than a question.
+const BETA_CARD = `---
+key: beta-1
+title: Beta extension
+---
+
+## Goal
+
+Publish g beside f.
+
+## Acceptance criteria
+
+**AC-1** The module publishes g beside f, so the published set is f and g.
+`;
+
+const BETA_NOTE =
+  `${FORESEEN_MARKER} tests/feature.test.mjs pins the published export set; AC-1 mandates the ` +
+  'second export.';
+
+const BETA_NOTED = `${BETA_CARD}
+## ${FORESEEN_HEADING}
+
+- ${BETA_NOTE}
+`;
+
+/** A sweep report with the two classified sets and nothing else to do. */
+function sweepReport({ foreseen = [], decisions = [], updatedCards = [] } = {}) {
+  return { updatedCards, invalidated: [], foreseen, decisions, summary: 'swept' };
+}
+
+const BETA_FORESEEN = {
+  card: 'stories/beta.md',
+  clause: 'the published export set is exactly f',
+  file: 'tests/feature.test.mjs',
+  mandate: 'AC-1 the module publishes g beside f',
+};
+
+test('a collision the later card mandates becomes a note on that card, never a question', async (t) => {
+  const fx = shipFixture(t, {
+    files: { 'stories/beta.md': BETA_CARD },
+    seats: {
+      'card-sweep': () => ({
+        files: { 'stories/beta.md': BETA_NOTED },
+        report: sweepReport({ foreseen: [BETA_FORESEEN], updatedCards: ['stories/beta.md'] }),
+      }),
+    },
+  });
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const sweep = events.find((e) => e.event === 'card-sweep');
+  assert.equal(sweep.ok, true);
+  assert.equal(sweep.foreseen, 1);
+  assert.equal(sweep.decisions, 0);
+  // The note is on the default branch, and it holds nothing: no park was
+  // written, so the next launch of that card walks past it.
+  assert.match(gitSync(['show', 'main:stories/beta.md'], fx.origin), /Foreseen amendment: tests/);
+  assert.deepEqual(openCardParks(fx.paths), []);
+  // The seat was told which route each class of collision takes.
+  const prompt = fx.calls.find((c) => c.seat === 'card-sweep').prompt;
+  assert.ok(prompt.includes(`## ${FORESEEN_HEADING}`));
+  assert.ok(prompt.includes('never write it as an open decision'));
+  assert.ok(prompt.includes('Report foreseen and decisions on every sweep'));
+});
+
+test('a note the card does not carry fails the sweep attempt and never the ship', async (t) => {
+  const fx = shipFixture(t, {
+    files: { 'stories/beta.md': BETA_CARD },
+    seats: {
+      // The claim is made and the card is left alone: the note exists only in
+      // the report, which is exactly what the check refuses.
+      'card-sweep': () => ({ report: sweepReport({ foreseen: [BETA_FORESEEN] }) }),
+    },
+  });
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  // The story shipped. The sweep spent its two attempts and recorded the miss.
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const sweep = events.find((e) => e.event === 'card-sweep');
+  assert.equal(sweep.ok, false);
+  assert.equal(sweep.cause, 'work-product-defect');
+  const failure = events.find((e) => e.event === 'seat-failure' && e.seat === 'card-sweep');
+  assert.ok(failure.defects.some((d) => d.includes('is not on stories/beta.md')));
+  const attempts = fx.calls.filter((c) => c.seat === 'card-sweep');
+  assert.equal(attempts.length, 2);
+  assert.ok(attempts[1].prompt.includes('is not on stories/beta.md'));
+});
+
+test('a choice the later card leaves open parks that card at close-out, not the run', async (t) => {
+  const fx = shipFixture(t, {
+    files: { 'stories/beta.md': BETA_CARD },
+    seats: {
+      'card-sweep': () => ({
+        report: sweepReport({
+          decisions: [{ card: 'stories/beta.md', question: 'Does g round or truncate?' }],
+        }),
+      }),
+    },
+  });
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  // The run that shipped closed shipped; the question holds the card alone.
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.find((e) => e.event === 'card-sweep').decisions, 1);
+  const park = readEvents(fx.paths.instanceLedger).find(
+    (e) => e.event === 'park' && e.type === 'card-decision',
+  );
+  assert.equal(park.card, 'stories/beta.md');
+  assert.equal(park.decision, 'Does g round or truncate?');
+  assert.equal(park.runId, runId);
+  assert.ok(park.question.includes('Does g round or truncate?'));
+  // A card park offers no abandon: there is no run to close (ADR-0029).
+  assert.ok(!(park.answers.options ?? []).includes('abandon'));
+  assert.match(readFileSync(fx.paths.queuedStream, 'utf8'), /card-decision/);
+  // The frontier reads the same park and blocks that card.
+  assert.deepEqual(openCardParks(fx.paths).map((p) => p.card), ['stories/beta.md']);
+  // Nothing was written onto the card: a question is asked, never planted.
+  assert.ok(!gitSync(['show', 'main:stories/beta.md'], fx.origin).includes(FORESEEN_MARKER));
 });

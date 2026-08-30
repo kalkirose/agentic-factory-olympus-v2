@@ -130,7 +130,9 @@ test('every park site declares the forms it accepts', () => {
   // The recovery types come from the `recover` helper, which declares for all
   // three of them; every other type in the catalog is declared at its site.
   const fromRecover = new Set(['seat-failure', 'stage-blocked', 'command-error']);
-  const fromSweep = new Set(['card-invalidated']);
+  // The two card parks are appended to the instance ledger rather than routed
+  // through a directive, and both declare their forms at their own site.
+  const fromSweep = new Set(['card-invalidated', 'card-decision']);
   assert.deepEqual(
     [...PARK_TYPES].filter((type) => !declared.has(type) && !fromRecover.has(type) && !fromSweep.has(type)),
     [],

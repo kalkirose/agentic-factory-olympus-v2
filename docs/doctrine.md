@@ -68,7 +68,10 @@ of them is a design decision, not an implementation detail.
   arithmetic and records what it did, with the source quoted. The human's
   touch belongs where the intent is written, once, not at every run that meets
   its consequence. What derives from a document survives a dead run, because
-  the document does.
+  the document does. An automated writer obeys the same rule in the other
+  direction: it never writes a question onto a document that the document
+  already answers. A planted question wakes a human at every launch behind it
+  (ADR-0052).
 - **Pull, not push.** Notifications are two ledger streams (queued, loud)
   read by console sessions. No push channel.
 

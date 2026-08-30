@@ -13,6 +13,7 @@ import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemo
 import { storyLane } from '../src/lanes/story.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { OWNER_PIN_MARKER } from '../src/lanes/supersede.mjs';
+import { FORESEEN_HEADING, FORESEEN_MARKER } from '../src/lanes/card.mjs';
 import {
   tempDir,
   removeDir,
@@ -1617,8 +1618,14 @@ test('the gate supersedes a collision the card covers, and never asks', async (t
     rounds.map((e) => [e.round, e.verdict]),
     [[1, 'pass']],
   );
-  // The gate seat was told to classify before it reported.
-  assert.ok(fx.calls[1].prompt.includes("does the card's scope cover this collision"));
+  // The gate seat was told to classify before it reported, on the necessity
+  // test rather than on whether the card names the surface (ADR-0053).
+  assert.ok(
+    fx.calls[1].prompt.includes(
+      'does the card mandate a behavior whose implementation necessarily changes what the ' +
+        'pinned clause asserts',
+    ),
+  );
 });
 
 test('the gate parks a collision the card is silent on, and refuses a fabricated quote', async (t) => {
@@ -1690,4 +1697,76 @@ test('the freeze records which frozen tests are pinned to the owner', async (t) 
     readFileSync(join(fx.paths.archivedRuns, runId, 'freeze.json'), 'utf8'),
   );
   assert.deepEqual(record.ownerPinned, ['tests/pinned.test.mjs']);
+});
+
+// -- foreseen amendments at the launch gate (ADR-0052) -----------------------
+
+/** The shortest clean pre-freeze chain: born, gated, one suite, one wave. */
+const CLEAN_SEATS = {
+  'spec-birth': ({ prompt }) => ({
+    files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
+    report: { outcome: 'spec-born', summary: 'born' },
+  }),
+  'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
+  suite: () => ({
+    files: { 'tests/feature.test.mjs': STRONG_TEST },
+    report: {
+      suiteFiles: ['tests/feature.test.mjs'],
+      reds: [{ test: 'f doubles', class: 'feature-absence' }],
+      summary: 'authored',
+    },
+  }),
+  adversary: () => ({
+    files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
+    report: { approach: 'stub', wrongness: 'f returns 0' },
+  }),
+};
+
+const LAUNCH_NOTE =
+  `${FORESEEN_MARKER} tests/feature.test.mjs pins the published export set; AC-1 mandates the ` +
+  'second export.';
+
+test('a foreseen amendment on the card never parks the launch', async (t) => {
+  // The note states a consequence the card's own criteria mandate, so nothing
+  // here waits on a human. The card carries it under its own heading and, as a
+  // writer once put it, in the decisions section too: neither parks.
+  const card = `---
+key: alpha-1
+title: Alpha
+---
+
+## Open decisions
+
+- ${LAUNCH_NOTE}
+
+## ${FORESEEN_HEADING}
+
+- ${LAUNCH_NOTE}
+${FIXTURE_ACCEPTANCE}`;
+  const fx = storyFixture(t, { seats: CLEAN_SEATS, card });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!events.some((e) => e.event === 'park'));
+});
+
+test('a question the card leaves open parks the launch, and the note beside it does not', async (t) => {
+  const card = `---
+key: alpha-1
+title: Alpha
+---
+
+## Open decisions
+
+- ${LAUNCH_NOTE}
+- Pick the rounding mode
+${FIXTURE_ACCEPTANCE}`;
+  const fx = storyFixture(t, { seats: CLEAN_SEATS, card });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'open-decisions');
+  assert.ok(park.question.includes('Pick the rounding mode'));
+  assert.ok(!park.question.includes(FORESEEN_MARKER));
+  fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'round half up' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
 });

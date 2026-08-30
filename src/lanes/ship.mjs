@@ -78,7 +78,12 @@ import { testEditDenyRules } from '../seats/boundary.mjs';
 import { attemptOrder, noLogReason, PartialLogRefusal } from '../ship/forge.mjs';
 import { derivedLabels } from '../ship/labels.mjs';
 import { takeShipToken } from '../ship/token.mjs';
-import { parseIntentCard } from './card.mjs';
+import {
+  FORESEEN_HEADING,
+  FORESEEN_MARKER,
+  isForeseenNote,
+  parseIntentCard,
+} from './card.mjs';
 import { authorizedSupersedes, supersedeLines } from './supersede.mjs';
 import { probeCredentials } from './probes.mjs';
 import { SUITE_SCHEMA } from './story.mjs';
@@ -198,6 +203,37 @@ export const CARD_SWEEP_SCHEMA = {
           reason: { type: 'string' },
         },
         required: ['card', 'reason'],
+      },
+    },
+    // The two routes a downstream collision takes (ADR-0052). A consequence the
+    // target card already mandates is a note the sweep writes onto that card; a
+    // choice the card leaves open is a question for the owner. Both are
+    // optional: a sweep that reports neither has found neither, and the
+    // build-time classifier still reads the card for itself.
+    foreseen: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          card: { type: 'string' },
+          clause: { type: 'string' },
+          file: { type: 'string' },
+          mandate: { type: 'string' },
+        },
+        required: ['card', 'clause', 'file', 'mandate'],
+      },
+    },
+    decisions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          card: { type: 'string' },
+          question: { type: 'string' },
+        },
+        required: ['card', 'question'],
       },
     },
     summary: { type: 'string' },
@@ -1815,10 +1851,11 @@ async function cardSweep(ctx, base, merged) {
   // An invalidated card parks the card, never the run that shipped: the park
   // lands in the instance ledger and blocks that card's launch, not this
   // close.
+  const instanceParks = readEvents(ctx.paths.instanceLedger).filter(
+    (e) => e.event === 'park' && e.runId === ctx.runId,
+  );
   const parked = new Set(
-    readEvents(ctx.paths.instanceLedger)
-      .filter((e) => e.event === 'park' && e.type === 'card-invalidated' && e.runId === ctx.runId)
-      .map((e) => e.card),
+    instanceParks.filter((e) => e.type === 'card-invalidated').map((e) => e.card),
   );
   for (const inv of report.invalidated) {
     if (parked.has(inv.card)) continue;
@@ -1835,11 +1872,44 @@ async function cardSweep(ctx, base, merged) {
       gist: gist(`card-invalidated: ${inv.card} — ${inv.reason}`),
     });
   }
+  // A choice the card genuinely leaves open takes the same route, one park per
+  // question. It is asked here rather than planted on the card, because a
+  // question written into a card parks the next launch of that card before the
+  // machinery that settles collisions from card authority ever runs, and the
+  // owner is then asked once per ship for ever (ADR-0052). The park holds the
+  // card it names and never this close: the story shipped.
+  const asked = new Set(
+    instanceParks
+      .filter((e) => e.type === 'card-decision')
+      .map((e) => `${e.card}\n${e.decision}`),
+  );
+  for (const open of report.decisions ?? []) {
+    const key = `${open.card}\n${open.question}`;
+    if (asked.has(key)) continue;
+    asked.add(key);
+    ctx.instanceStore?.append('park', {
+      actor: ACTOR,
+      type: 'card-decision',
+      card: open.card,
+      decision: open.question,
+      runId: ctx.runId,
+      question:
+        `The ship of ${base.storyKey ?? ctx.runId} left a decision open on ${open.card}: ` +
+        open.question,
+      answers: instanceParkForms({ text: 'the decision, resolved' }),
+      gist: gist(`card-decision on ${open.card}: ${open.question}`),
+    });
+  }
   ctx.store.append('card-sweep', {
     actor: ACTOR,
     ok: true,
     updated: report.updatedCards.length,
     invalidated: report.invalidated.length,
+    // What the sweep classified: the notes it wrote onto cards, and the
+    // questions it put to the owner. Both counts record that the
+    // classification duty ran at all.
+    foreseen: (report.foreseen ?? []).length,
+    decisions: (report.decisions ?? []).length,
     pushed,
     ...(sha && { sha }),
     ...(pushError && { error: pushError }),
@@ -1859,7 +1929,45 @@ async function sweepChecks(base, cardDir, report) {
       defects.push(`invalidated card outside the card directory: ${inv.card}`);
     }
   }
+  // A foreseen amendment is a note ON a card, so the note has to be there. The
+  // report is the sweep's claim and the card is the durable record: the next
+  // launch reads the card to see there is nothing to ask, and the build-time
+  // classifier reads it as evidence. A claim with no note on the card is a
+  // work-product defect, and the attempt is re-briefed (ADR-0052).
+  for (const note of report.foreseen ?? []) {
+    if (!underAny(note.card, [cardDir])) {
+      defects.push(`foreseen amendment on a card outside the card directory: ${note.card}`);
+    } else if (!noteWritten(base.worktree, note)) {
+      defects.push(
+        `the foreseen amendment for ${note.file} is not on ${note.card}: write it there under a ` +
+          `"${FORESEEN_HEADING}" heading, as one line that opens with "${FORESEEN_MARKER}" and ` +
+          'names the file.',
+      );
+    }
+  }
+  for (const open of report.decisions ?? []) {
+    if (!underAny(open.card, [cardDir])) {
+      defects.push(`open decision on a card outside the card directory: ${open.card}`);
+    }
+  }
   return defects;
+}
+
+/**
+ * Whether the card really carries the note the report claims for it: a line
+ * under the foreseen heading, opening with the marker, naming the file whose
+ * clause the amendment is foreseen for.
+ */
+function noteWritten(worktree, note) {
+  let text;
+  try {
+    text = readFileSync(join(worktree, note.card), 'utf8');
+  } catch {
+    return false;
+  }
+  return parseIntentCard(text).card.foreseenAmendments.some(
+    (item) => isForeseenNote(item) && item.includes(note.file),
+  );
 }
 
 // -- the reconciliation judgment (ADR-0026) ----------------------------------
@@ -2135,6 +2243,7 @@ function sweepRole(base, cardDir, brief, supersedes = []) {
     'Update Blocked-by edges, sources, and open decisions so every card matches the repository as shipped.',
     "When the shipped work invalidates a card's goal or scope boundary, do not rewrite the card: list it under invalidated with the reason.",
     'List every card you edited under updatedCards.',
+    ...foreseenLines(cardDir),
     ...(supersedes.length > 0
       ? [
           'This run amended frozen tests on this card\'s own authority. Record each one on this ' +
@@ -2146,6 +2255,40 @@ function sweepRole(base, cardDir, brief, supersedes = []) {
       : []),
     ...briefLines(brief),
   ].join('\n');
+}
+
+/**
+ * The classification duty (ADR-0052). This ship froze tests, and a later card's
+ * work can collide with them. Every such collision is one of two things, and
+ * they take different routes.
+ *
+ * A consequence the target card's own acceptance criteria already mandate is
+ * not a question. It becomes a note on that card: the next launch reads it and
+ * proceeds, and the machinery that settles collisions from card authority
+ * consumes it as evidence at build time. Writing it as an open decision instead
+ * parks that launch before the machinery ever runs, and asks the owner, once
+ * per ship, what the card already answered.
+ *
+ * A choice the card genuinely leaves open is a question, and it is put to the
+ * owner here, at close-out, while the context is fresh. It holds the card it
+ * names and no run.
+ */
+function foreseenLines(cardDir) {
+  return [
+    `This ship froze tests. Where the work of a later card under ${cardDir} would collide with ` +
+      'them, classify the collision before you write anything, and take the route the class asks for.',
+    `Mandated by the target card: the card's own acceptance criteria mandate a behavior whose ` +
+      `implementation necessarily changes what the frozen clause asserts. Write a note on that ` +
+      `card under a "## ${FORESEEN_HEADING}" heading, creating the heading when the card has ` +
+      `none. One line, opening with "${FORESEEN_MARKER}", naming the clause the tests pin, the ` +
+      `file it lives in, and the card line that mandates the change. Report it under foreseen ` +
+      `with the card, the clause, the file and the mandate. It is a note, not a question: never ` +
+      `write it as an open decision, and never rewrite the frozen tests here.`,
+    'Left open by the target card: the card states no such mandate and a human has to choose. ' +
+      'Report it under decisions with the card and the question. The owner is asked at this ' +
+      'close-out and the question holds that card alone. Do not write it onto the card.',
+    'Report foreseen and decisions on every sweep, empty when you found neither.',
+  ];
 }
 
 async function incomingBrief(base, mainSha) {

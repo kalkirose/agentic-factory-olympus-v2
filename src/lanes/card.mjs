@@ -1,8 +1,8 @@
 // Intent-card parsing. A card is the roadmap artifact for one story: YAML
 // frontmatter (key, title, blocked-by, phase) plus markdown sections. The
 // harness reads only what readiness, the frontier and the spec lint need —
-// the key, the edges, the phase, the open decisions, and the acceptance
-// criteria. Everything else is seat-facing prose.
+// the key, the edges, the phase, the open decisions, the foreseen amendments,
+// and the acceptance criteria. Everything else is seat-facing prose.
 //
 // This is the harness's only card parser: readiness, the daemon's card sweep,
 // the frontier's graph source and the spec lint all read a card through
@@ -14,6 +14,40 @@ const ACCEPTANCE_HEADING = /acceptance/i;
 const HEADING = /^(#{1,6})\s+(.*\S)\s*$/;
 const LIST_ITEM = /^\s*[-*+]\s+(.*)$/;
 const NONE = /^none\.?$/i;
+
+/**
+ * The heading a card carries its foreseen amendments under, and the lead token
+ * every one of those notes opens with.
+ *
+ * A foreseen amendment states a settled consequence, never a question. A
+ * close-out sweep writes one when a card's own acceptance criteria already
+ * mandate a behavior that collides with a suite an earlier story froze: the
+ * pinned clause, the file it lives in, and the card line that mandates the
+ * change. Nothing is left for a human to settle, so nothing may park on it.
+ *
+ * The marker is what makes that mechanical. The heading keeps the notes out of
+ * the decisions section by structure, and the marker keeps them out of it by
+ * content, so a note written under the wrong heading still parks nothing.
+ */
+export const FORESEEN_HEADING = 'Foreseen amendments';
+export const FORESEEN_MARKER = 'Foreseen amendment:';
+
+/** The heading pattern the foreseen section is read by. */
+export const FORESEEN_SECTION = /foreseen amendments/i;
+
+const EMPHASIS = /^[`*_]+/;
+
+/**
+ * Whether a card line is a foreseen-amendment note. Markdown emphasis around
+ * the lead token is stripped first: a card writes the marker in bold as readily
+ * as it writes it plain, and both are the same note.
+ * @param {string} item
+ */
+export function isForeseenNote(item) {
+  if (typeof item !== 'string') return false;
+  const lead = item.trimStart().replace(EMPHASIS, '').toLowerCase();
+  return lead.startsWith(FORESEEN_MARKER.toLowerCase());
+}
 
 /**
  * An acceptance-criterion id: an identifier that carries a digit. The digit is
@@ -59,7 +93,11 @@ export function parseIntentCard(text) {
     blockedBy: parseList(fields['blocked-by']),
     // Phase membership for the launch gate; absent = the first phase.
     phase: fields.phase ?? null,
-    openDecisions: sectionItems(body, /open decisions/i),
+    // The questions a launch waits on, and never the notes. A foreseen
+    // amendment is an answer the card already gave, so it is filtered out of
+    // the set the launch gate parks on and published on its own instead.
+    openDecisions: sectionItems(body, /open decisions/i).filter((d) => !isForeseenNote(d)),
+    foreseenAmendments: sectionItems(body, FORESEEN_SECTION),
     acceptance: acceptanceCriteria(body),
   };
   return { card, errors };
