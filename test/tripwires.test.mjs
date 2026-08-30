@@ -8,7 +8,11 @@ import { openBreaches, openStreamItems } from '../src/telemetry/readers.mjs';
 import { recordEscape } from '../src/telemetry/escapes.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { validateProjectConfig } from '../src/config/project.mjs';
-import { standingTripwires, withTripwireDefaults } from '../src/tripwires/registry.mjs';
+import {
+  armedTripwires,
+  standingTripwires,
+  withTripwireDefaults,
+} from '../src/tripwires/registry.mjs';
 import { evaluateMetric } from '../src/tripwires/metrics.mjs';
 import { TripwireWatcher } from '../src/tripwires/watcher.mjs';
 import { computeFrontier } from '../src/frontier/graph.mjs';
@@ -98,6 +102,40 @@ test('defaults fill the window and the trigger events', () => {
   });
   assert.equal(width.window, undefined);
   assert.deepEqual(width.triggerEvents, ['merged', 'card-sweep']);
+});
+
+test('the fast path cannot be turned on without the counter that measures it', () => {
+  // The doctrine rule for a gate cut: the cut, its metric, its window and its
+  // breach condition land together. `gates.fastPathShip` is a cut, and a
+  // project that turns it on and names no counter has traded a guarantee with
+  // nothing measuring the cost and nothing able to propose the revert.
+  const off = { gates: { tier1: [] }, tripwires: [] };
+  assert.deepEqual(armedTripwires(off), []);
+  const on = { gates: { tier1: [], fastPathShip: true }, tripwires: [] };
+  const armed = armedTripwires(on);
+  assert.deepEqual(
+    armed.map((e) => e.metric),
+    ['fast-path-escapes'],
+  );
+  assert.match(armed[0].answer, /gates\.fastPathShip to false/);
+  // A project that wrote its own band keeps it: the arming fills a gap, it
+  // never overrides a decision somebody made.
+  const own = {
+    gates: { tier1: [], fastPathShip: true },
+    tripwires: [
+      { id: 'mine', metric: 'fast-path-escapes', window: 20, breach: { op: '>', value: 4 }, answer: 'x' },
+    ],
+  };
+  assert.deepEqual(armedTripwires(own), own.tripwires);
+  // Every other entry the project wrote rides through untouched.
+  const mixed = {
+    gates: { tier1: [], fastPathShip: true },
+    tripwires: [{ id: 'k', metric: 'kill-rate', breach: { op: '<', value: 1 }, answer: 'y' }],
+  };
+  assert.deepEqual(
+    armedTripwires(mixed).map((e) => e.id),
+    ['k', 'fast-path-escapes'],
+  );
 });
 
 // -- metrics ------------------------------------------------------------------

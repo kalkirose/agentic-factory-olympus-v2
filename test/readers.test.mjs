@@ -192,6 +192,35 @@ test('a fast-path ship is found by its request number or by its merge commit', (
   assert.equal(fastPathShipOf(paths, { project: 'q', pr: 7 }), null);
 });
 
+test('a fast path a later verdict superseded is not a fast-path ship', (t) => {
+  // The run took the fast path over one moved base and then rendered the full
+  // verdict anyway: a second base moved, or a red at the request sent it back.
+  // That verdict judged the tree that lands, which is the whole of what the
+  // fast path skipped, so the trade was never made and nothing may count it.
+  const paths = home(t);
+  const line = (seq, ts, event, extra = {}) => ({ seq, ts, event, actor: 'daemon', ...extra });
+  writeLedger(runLedgerPath(paths, 'carried'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-02T00:00:00Z', 'fast-path-ship', { taken: true, commits: ['c1'] }),
+    line(3, '2026-08-02T01:00:00Z', 'merged', { pr: 7, mergeSha: 'm1' }),
+  ]);
+  writeLedger(runLedgerPath(paths, 'earned'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-02T00:00:00Z', 'fast-path-ship', { taken: true, commits: ['c2'] }),
+    // The full re-verdict, after the record. The certification this run ships
+    // is one it earned over this tree.
+    line(3, '2026-08-02T01:00:00Z', 'verdict-rendered', { cycle: 2, verdict: 'green' }),
+    line(4, '2026-08-02T02:00:00Z', 'merged', { pr: 8, mergeSha: 'm2' }),
+  ]);
+  assert.deepEqual(
+    listFastPathShips(paths).map((s) => s.runId),
+    ['carried'],
+  );
+  assert.equal(fastPathShipOf(paths, { project: 'p', pr: 7 }).runId, 'carried');
+  assert.equal(fastPathShipOf(paths, { project: 'p', pr: 8 }), null);
+  assert.equal(fastPathShipOf(paths, { project: 'p', mergeSha: 'm2' }), null);
+});
+
 test('story-run history is read per project, because a story key is a project word', (t) => {
   // Two projects may both call a card `alpha-1`. Without the narrowing, one
   // project's shipped run marks the other project's card shipped, the frontier

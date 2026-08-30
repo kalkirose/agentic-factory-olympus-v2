@@ -15,7 +15,7 @@ import { openLoud, listRunEvents, storyRunsByKey } from '../telemetry/readers.mj
 import { escalationQueue, openCardParks } from '../telemetry/queue.mjs';
 import { readEscapeSet, escapesWindow } from '../telemetry/escapes.mjs';
 import { furyYieldBaseline, BASELINE_WINDOW } from '../tripwires/metrics.mjs';
-import { withTripwireDefaults } from '../tripwires/registry.mjs';
+import { armedTripwires, withTripwireDefaults } from '../tripwires/registry.mjs';
 import { readInstanceConfig, armingState } from '../console/status.mjs';
 import { holdState, projectHeld } from '../daemon/hold.mjs';
 import { CRASH_RETRIES } from '../seats/runner.mjs';
@@ -255,7 +255,7 @@ function projectHealth(paths, project, ships, escapes, instanceEvents, source) {
   // defects as this project's quality bar and shows this project in breach for
   // work in another repository. The instance-wide count is the tile above.
   const projectEscapes = escapes.filter((e) => e.refs?.project === project);
-  const registry = source?.config?.tripwires?.map(withTripwireDefaults) ?? null;
+  const registry = source?.config ? armedTripwires(source.config).map(withTripwireDefaults) : null;
   const ceiling =
     registry?.find((t) => t.metric === 'escapes-window')?.breach?.value ?? 0.5;
   const window = escapesWindow({

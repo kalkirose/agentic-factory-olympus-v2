@@ -48,6 +48,7 @@ import { FrontierLauncher } from '../frontier/autolaunch.mjs';
 import { launchEscape } from '../frontier/repairs.mjs';
 import { readGraphSource } from '../frontier/source.mjs';
 import { TripwireWatcher } from '../tripwires/watcher.mjs';
+import { armedTripwires } from '../tripwires/registry.mjs';
 import { WorkflowWatcher } from '../ship/workflows.mjs';
 import { projectForge } from '../lanes/assemble.mjs';
 import { EvalScheduler } from '../eval/review.mjs';
@@ -472,7 +473,7 @@ export class Daemon {
       });
       // The launch read the config fresh from the default branch; the tripwire
       // registry the watcher evaluates is the registry that just shipped.
-      this.tripwires.setRegistry(project, ws.projectConfig.tripwires);
+      this.tripwires.setRegistry(project, armedTripwires(ws.projectConfig));
       try {
         this.engine.launch({
           runId,
@@ -733,9 +734,18 @@ export class Daemon {
     if (typeof defectLine !== 'string' || defectLine.trim().length === 0) {
       throw new Error('an escape record requires the defect line (--defect)');
     }
+    // The repository the defect is in, and it is required. The escapes ledger
+    // is instance-scoped: without it a request number matches whatever project
+    // opened a request of that number, and the record it writes belongs to no
+    // project, so every per-project metric counts it for none and the repair
+    // sweep has nowhere to launch. The console route already requires it; this
+    // is the same rule at the API the console goes through.
+    if (typeof project !== 'string' || project.trim().length === 0) {
+      throw new Error('an escape record requires the project it is in (--project)');
+    }
     const ship = fastPathShipOf(this.paths, { project, pr, mergeSha });
     const refs = {
-      ...(typeof project === 'string' && project.length > 0 && { project }),
+      project,
       ...(Number.isInteger(pr) && { pr }),
       ...(typeof mergeSha === 'string' && mergeSha.length > 0 && { mergeSha }),
       ...(ship && {
@@ -850,7 +860,7 @@ export class Daemon {
       const dir = cloneDir(this.paths, project);
       const { text } = await readBlobFromBranch(dir, entry.defaultBranch, entry.projectConfigPath);
       const source = `${entry.defaultBranch}:${entry.projectConfigPath}`;
-      return parseProjectConfig(text, source).tripwires;
+      return armedTripwires(parseProjectConfig(text, source));
     });
   }
 

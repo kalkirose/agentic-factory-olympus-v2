@@ -35,6 +35,12 @@ const part = (name, inputs) => ({ name, status: 'green', ...(inputs && { inputs 
 
 const CERTIFICATION = { cycle: 3, sha: 'c'.repeat(40), record: '/runs/r1/verdict-3.json' };
 
+/** A reader over an in-memory tree, in the shape the walk consumes. */
+const sourceTree = (files) => (path) => (path in files ? files[path] : null);
+
+/** The gate script of the decision that fires: one file, no imports. */
+const GATE = { '.olympus/gates/unit.mjs': "console.log('::olympus part api');\n" };
+
 /** The inputs of a decision that fires, so each test moves one of them. */
 function inputs(overrides = {}) {
   return {
@@ -42,6 +48,7 @@ function inputs(overrides = {}) {
     layers: [layer('unit')],
     prior: new Map([['unit', result([part('api', ['src/api'])])]]),
     commands: { unit: ['node', '.olympus/gates/unit.mjs'] },
+    readSource: sourceTree(GATE),
     testPaths: ['tests'],
     breadth: ['package-lock.json', 'db/migrations'],
     inert: ['docs'],
@@ -199,12 +206,70 @@ test('a ground entry is a repo-relative path or nothing', () => {
   }
 });
 
+test('one spelling of a path is every spelling of it', () => {
+  // Declarations, argv words and git output name the same file in different
+  // hands. A comparison of two spellings is not a comparison of two paths, so
+  // there is one canonical form and everything meets it.
+  for (const [written, canonical] of [
+    ['./docs/fixtures', 'docs/fixtures'],
+    ['.\\docs\\fixtures', 'docs/fixtures'],
+    ['docs//fixtures///', 'docs/fixtures'],
+    ['./docs/./fixtures', 'docs/fixtures'],
+    ['  ./src  ', 'src'],
+    ['./gate.mjs', 'gate.mjs'],
+  ]) {
+    assert.equal(groundEntry(written), canonical, written);
+  }
+});
+
+test('a dot-slash declaration claims the ground it reads like', () => {
+  // `./docs/fixtures` passed the declared-suite check and matched no file, so
+  // the branch could move under a declared input and the ground question would
+  // call it disjoint. The canonical form is what closes it.
+  const ground = declaredGround(
+    [layer('unit')],
+    new Map([['unit', result([part('api', ['./docs/fixtures'])])]]),
+  );
+  assert.deepEqual(ground.entries, ['docs/fixtures']);
+  const out = fastPathVerdict(
+    inputs({
+      prior: new Map([['unit', result([part('api', ['./docs/fixtures'])])]]),
+      mainChanged: { files: ['docs/fixtures/data.json'], unclassifiable: [] },
+    }),
+  );
+  assert.equal(out.taken, false);
+  assert.equal(out.refusal, 'ground-intersects');
+  assert.match(out.detail, /a declared suite input/);
+});
+
+test('a dot-slash argv word still names the file it names', () => {
+  const sources = declarationSources(
+    [layer('unit', 'suite')],
+    { suite: ['node', './scripts/gate.mjs'] },
+    sourceTree({ 'scripts/gate.mjs': 'console.log(1);\n' }),
+  );
+  assert.equal(sources.ok, true);
+  assert.deepEqual(sources.entries, ['scripts', 'scripts/gate.mjs']);
+  // A script at the repository root, written the only way it can be written.
+  const root = declarationSources(
+    [layer('unit', 'suite')],
+    { suite: ['node', './gate.mjs'] },
+    sourceTree({ 'gate.mjs': 'console.log(1);\n' }),
+  );
+  assert.equal(root.ok, true);
+  assert.deepEqual(root.entries, ['gate.mjs']);
+});
+
 // -- the ground the declarations themselves come from -------------------------
 
 test('a declaration source is the command file and the directory it sits in', () => {
   const sources = declarationSources(
     [layer('unit', 'suite'), layer('lint', 'lint')],
     { suite: ['node', '.olympus/gates/suite.mjs'], lint: ['node', 'tools/lint.mjs'] },
+    sourceTree({
+      '.olympus/gates/suite.mjs': 'console.log(1);\n',
+      'tools/lint.mjs': 'console.log(2);\n',
+    }),
   );
   assert.equal(sources.ok, true);
   assert.deepEqual(sources.entries, [
@@ -216,9 +281,124 @@ test('a declaration source is the command file and the directory it sits in', ()
 });
 
 test('a command that names no file of the repository cannot be bounded', () => {
-  const sources = declarationSources([layer('unit', 'suite')], { suite: ['npm', 'test'] });
+  const sources = declarationSources(
+    [layer('unit', 'suite')],
+    { suite: ['npm', 'test'] },
+    sourceTree({}),
+  );
   assert.equal(sources.refusal, 'self-declared-ground');
   assert.match(sources.detail, /names no file of this repository/);
+});
+
+// -- the modules a gate reaches -----------------------------------------------
+
+test('a module the gate imports is a declaration source of its own', () => {
+  // The markers are printed where the code that prints them lives. A helper the
+  // gate imports produces the declarations as much as the gate does, and a
+  // guard that stopped at the gate's own directory would watch the wrong file.
+  const sources = declarationSources(
+    [layer('unit', 'suite')],
+    { suite: ['node', 'scripts/gate.mjs'] },
+    sourceTree({
+      'scripts/gate.mjs': "import { parts } from '../lib/parts.mjs';\nparts();\n",
+      'lib/parts.mjs': "import './shared.mjs';\nexport const parts = () => {};\n",
+      'lib/shared.mjs': 'export const shared = 1;\n',
+    }),
+  );
+  assert.equal(sources.ok, true);
+  assert.deepEqual(sources.entries, [
+    'lib',
+    'lib/parts.mjs',
+    'lib/shared.mjs',
+    'scripts',
+    'scripts/gate.mjs',
+  ]);
+});
+
+test('a story that edits a module the gate imports refuses', () => {
+  const out = fastPathVerdict(
+    inputs({
+      commands: { unit: ['node', 'scripts/gate.mjs'] },
+      readSource: sourceTree({
+        'scripts/gate.mjs': "import { parts } from '../lib/parts.mjs';\nparts();\n",
+        'lib/parts.mjs': 'export const parts = () => {};\n',
+      }),
+      storyChanged: ['lib/parts.mjs'],
+    }),
+  );
+  assert.equal(out.refusal, 'self-declared-ground');
+  assert.match(out.detail, /lib\/parts\.mjs/);
+});
+
+test('a bare specifier is a dependency and is not followed', () => {
+  const sources = declarationSources(
+    [layer('unit', 'suite')],
+    { suite: ['node', 'scripts/gate.mjs'] },
+    sourceTree({ 'scripts/gate.mjs': "import { test } from 'node:test';\nimport 'left-pad';\n" }),
+  );
+  assert.equal(sources.ok, true);
+  assert.deepEqual(sources.entries, ['scripts', 'scripts/gate.mjs']);
+});
+
+test('every edge the walk cannot read refuses', () => {
+  const walk = (files, argv = ['node', 'scripts/gate.mjs']) =>
+    declarationSources([layer('unit', 'suite')], { suite: argv }, sourceTree(files));
+  // A file that is not there.
+  assert.match(walk({}).detail, /scripts\/gate\.mjs will not read/);
+  // A relative specifier that resolves to nothing.
+  assert.match(
+    walk({ 'scripts/gate.mjs': "import './missing.mjs';\n" }).detail,
+    /resolves to no file this check can read/,
+  );
+  // A specifier the source names at run time.
+  assert.match(
+    walk({ 'scripts/gate.mjs': 'const m = await import(name);\n' }).detail,
+    /names at run time/,
+  );
+  assert.match(
+    walk({ 'scripts/gate.mjs': 'const m = require(name);\n' }).detail,
+    /names at run time/,
+  );
+  // A glob names a set of files, and a set of files has no imports to read.
+  assert.match(
+    walk({}, ['node', '--test', 'tests/*.test.mjs']).detail,
+    /names a set of files by pattern/,
+  );
+  for (const files of [
+    {},
+    { 'scripts/gate.mjs': "import './missing.mjs';\n" },
+    { 'scripts/gate.mjs': 'await import(name);\n' },
+  ]) {
+    assert.equal(walk(files).refusal, 'self-declared-ground');
+  }
+});
+
+test('a specifier without an extension resolves under the ones a gate uses', () => {
+  const sources = declarationSources(
+    [layer('unit', 'suite')],
+    { suite: ['node', 'scripts/gate.mjs'] },
+    sourceTree({
+      'scripts/gate.mjs': "import './helper';\nimport './dir';\n",
+      'scripts/helper.mjs': 'export const h = 1;\n',
+      'scripts/dir/index.mjs': 'export const d = 1;\n',
+    }),
+  );
+  assert.equal(sources.ok, true);
+  assert.ok(sources.entries.includes('scripts/helper.mjs'));
+  assert.ok(sources.entries.includes('scripts/dir/index.mjs'));
+});
+
+test('an import cycle ends the walk rather than running it forever', () => {
+  const sources = declarationSources(
+    [layer('unit', 'suite')],
+    { suite: ['node', 'scripts/gate.mjs'] },
+    sourceTree({
+      'scripts/gate.mjs': "import './a.mjs';\n",
+      'scripts/a.mjs': "import './gate.mjs';\nexport const a = 1;\n",
+    }),
+  );
+  assert.equal(sources.ok, true);
+  assert.deepEqual(sources.entries, ['scripts', 'scripts/a.mjs', 'scripts/gate.mjs']);
 });
 
 test('a story that moves the ground its own declarations come from refuses', () => {

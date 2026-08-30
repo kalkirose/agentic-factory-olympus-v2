@@ -98,11 +98,26 @@ under those paths is an intersection like any other. When both sides hold the
 same bytes, the run's report is the merge target's report, which is the side
 that must decide the skip.
 
-The bound is worth stating. The enumeration is argv-level: the command's own
-file and the directory beside it, which is where a gate's helper modules live. A
-declaration printed by a module imported from somewhere else entirely is outside
-it. A layer whose command names no file of this repository at all (`npm test`)
-has a surface nothing can bound, and that refuses outright.
+The surface is the command's own file, every module that file reaches through a
+relative import, transitively, and the directory each one sits in. The walk is
+what makes the guard match where the markers are actually printed: a gate script
+that prints them from a helper it imports has its declarations produced in the
+helper, and a guard that stopped at the gate's own directory would watch the
+wrong file while the story edited the right one.
+
+Every edge the walk cannot read refuses, because an edge nobody can enumerate is
+a surface with an unknown boundary: a command that names no file of this
+repository (`npm test`), an argv path that is a glob rather than a file, a file
+that will not read, a relative specifier that resolves to nothing under the
+extensions a gate uses, and an import or require whose argument is computed
+rather than written. A bare specifier is the one thing followed nowhere and
+refused nowhere: it names a dependency and not a file of this repository, and a
+dependency moving is what the shared breadth list is for.
+
+One bound remains and it is worth stating. The walk reads specifiers, not
+semantics: a module reached only through a runtime path this parse cannot see is
+outside it. Every shape that hides one, though, is itself a refusal, so what is
+left is a module reached by a literal relative specifier the regexes miss.
 
 ## Why a lens finding is not carried
 
@@ -118,6 +133,30 @@ two questions above cover it. The alternative considered was to give the lenses
 a declared surface of their own, and it was rejected as a fiction: the surface a
 lens reads is the repository, and writing a smaller one down would not make it
 true.
+
+## One canonical path, everywhere
+
+Declarations, argv words, import specifiers and git's own output all name files,
+and they name the same file in different hands: `./docs`, `docs//`, `docs`. The
+comparison this check runs is a prefix comparison, so two spellings compare as
+two different paths, and a declaration written `./docs/fixtures` would clear
+every check that asks whether a declaration exists while matching no file at
+all. There is therefore one canonical form and one function that produces it,
+and every path in the module meets it before anything compares it: separators
+forward, `.` and empty segments dropped, no trailing slash, and null for a name
+that canonicalises to nothing or climbs out of the repository.
+
+## What a taken record does not settle
+
+A run can take the fast path over one moved base and still render the full
+verdict afterwards: a red at the request sends it back, and so does a second
+moved base at the ship stage. That verdict judges the tree that lands, which is
+the whole of what the fast path skipped, so the run earned the certification it
+ships and the trade was never made. A taken record with a verdict rendered after
+it therefore marks nothing: the close carries no `fastPath`, an escape behind
+that merge is the ordinary escape, and the tripwire that measures the trade does
+not count that ship. The record itself stays in the ledger, because the check
+did run and did answer.
 
 ## What the check may not do to the ship queue
 
@@ -192,11 +231,30 @@ path vocabulary that will not compile, is caught at the lane, stamped as
 never been written. The fast path can only remove work. A defect in it makes a
 ship slow and can never make one wrong.
 
+The stage around it has one more ending, and it belongs to the stage rather than
+to the check. The merge and the record of the merge are two writes, and a crash
+lands between them; on the resume the merge is already in the tree, so it
+answers "already up to date" and the base reads as one that never moved. The
+tree is the record that survived: a merge commit at the head of the run worktree
+that no stamp of the run names is a merge the run took and never wrote down.
+That routes to the full re-verdict and never to the fast path, because the shas
+the check reads are the ones the lost stamp held, and a decision over shas the
+run cannot name is not the decision it would have made.
+
 ## Measuring what the trade costs
 
 This is a gate cut, so the doctrine rule applies: a cut names its metric, its
 watch window and its breach condition in the same change, and a breach restores
-the cut by default.
+the cut by default. The rule is enforced rather than asked for. A project that
+sets `gates.fastPathShip` and registers no `fast-path-escapes` tripwire has the
+standing one armed for it, at the standing band, wherever the registry is read.
+
+Arming is the answer rather than a config refusal because the flag is opt-in and
+a refusal would wedge the whole project over it: the launch reads the config, an
+invalid config launches nothing, and the project would be dark until somebody
+landed a PR. Arming cannot wedge anything, it shows in the same board the
+project's own wires show in, and a project that wants a different band writes
+its own entry, which the arming then leaves alone.
 
 `fast-path-escape` is a closed defect kind (ADR-0008). An escape recorded
 against a merge that a fast-path ship carried takes that word, with the run, the
@@ -212,9 +270,17 @@ Every escape record carries refs, whichever intake wrote it, and the project is
 the ref that matters most: the escapes ledger is instance-scoped and nothing
 else in a record says which repository the defect is in. Without it the repair
 sweep has no repository to launch into and the escape is never owed by anybody.
-Every escape record also carries a repair ticket, because the owed set is
-ticketed-and-not-fixed: a defect a person found is owed exactly as much as one
-the harness found for itself.
+The project is therefore required at the intake and not merely accepted: a
+report that names only a request number would otherwise match whatever project
+opened a request of that number. Every escape record also carries a repair
+ticket, because the owed set is ticketed-and-not-fixed: a defect a person found
+is owed exactly as much as one the harness found for itself.
+
+The two intakes stay separable in the ledger. A red-merge conversion marks its
+own records, and the conversion re-uses only records carrying that mark when a
+crash makes it run twice. Matching on the run id alone would let a report
+somebody filed between the merge and the close-out read as work already done,
+and the breach would then record none of its own findings at all.
 
 The `fast-path-escapes` tripwire counts that kind over the last ten shipped
 story-lane runs of ONE project, filtered by the project on the record's refs.

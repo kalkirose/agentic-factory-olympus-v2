@@ -152,7 +152,10 @@ export function listShips(paths) {
  * was decided under.
  *
  * A run whose fast-path record is a refusal is not one of these: it took the
- * full re-verdict, like every ship before the flag existed.
+ * full re-verdict, like every ship before the flag existed. Neither is a run
+ * that took the fast path and then rendered a verdict anyway: that verdict
+ * judged the tree that lands, so the run earned the certification it shipped
+ * and the trade this list measures was never made.
  * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
  */
 export function listFastPathShips(paths, { project } = {}) {
@@ -160,6 +163,7 @@ export function listFastPathShips(paths, { project } = {}) {
   for (const { runId, archived, project: owner, events } of listRunEvents(paths, { project })) {
     const fast = events.filter((e) => e.event === 'fast-path-ship' && e.taken === true).pop();
     if (!fast) continue;
+    if (events.some((e) => e.event === 'verdict-rendered' && e.seq > fast.seq)) continue;
     const merged = events.filter((e) => e.event === 'merged').pop();
     if (!merged) continue;
     ships.push({

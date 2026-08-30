@@ -35,7 +35,8 @@
 // slow and can never make one wrong.
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { underEntry } from '../config/project.mjs';
+import { join } from 'node:path';
+import { isGlobEntry, underEntry } from '../config/project.mjs';
 import { git } from '../isolation/git.mjs';
 import { priorStatus } from './spectrum.mjs';
 
@@ -157,7 +158,7 @@ export function parseRawDiff(out) {
       unclassifiable.push(path);
       continue;
     }
-    const norm = normalizePath(path);
+    const norm = groundEntry(path);
     if (norm === null) unclassifiable.push(path);
     else files.push(norm);
   }
@@ -186,36 +187,35 @@ function readableModes(srcMode, dstMode) {
 }
 
 /**
- * A repo-relative path in the vocabulary the rest of the config uses, or null
- * for a name this module will not compare: an absolute path, a path that
- * climbs out of the repository, or an empty one.
- */
-function normalizePath(path) {
-  if (typeof path !== 'string') return null;
-  const norm = path.replaceAll('\\', '/').trim();
-  if (norm.length === 0) return null;
-  if (norm.startsWith('/') || /^[A-Za-z]:\//.test(norm)) return null;
-  if (norm.split('/').includes('..')) return null;
-  return norm;
-}
-
-/**
- * One declared ground entry, or null for an entry that can never match a path
- * of this repository.
+ * The one canonical form every path in this module is compared in, or null for
+ * a name it will not compare at all.
  *
- * `.` is the entry this exists for. It reads like the whole repository and it
- * claims nothing: the path vocabulary compares a plain entry as a prefix, no
- * repo-relative path is `.` and none begins `./`, so a suite that declares it
- * has declared an input set that matches no file. An entry that matches nothing
- * is the undeclared case wearing a declaration's clothes, and it is refused
- * where a missing declaration is refused.
+ * Every path here meets the same vocabulary: git's own output, a suite's
+ * declared input, a layer command's argv, an import specifier a gate script
+ * holds. They arrive written differently for the same file, and a comparison
+ * of two spellings is not a comparison of two paths. `./docs` is the entry this
+ * exists for: it reads like a declaration of `docs` and it matches nothing,
+ * because the path vocabulary compares a plain entry as a prefix and no
+ * repo-relative path begins `./`. A declaration that matches nothing is the
+ * undeclared case wearing a declaration's clothes.
+ *
+ * The form: separators forward, `.` and empty segments dropped (which strips
+ * every `./` prefix and collapses every `//`), no trailing slash. Null for an
+ * absolute path, a path that climbs out of the repository, and a name that
+ * canonicalises to nothing at all (`.`, `./`, `/`, an empty string).
  */
 export function groundEntry(entry) {
-  const norm = normalizePath(entry);
-  if (norm === null) return null;
-  const trimmed = norm.replace(/\/+$/, '');
-  if (trimmed.length === 0 || trimmed === '.') return null;
-  return trimmed;
+  if (typeof entry !== 'string') return null;
+  const raw = entry.replaceAll('\\', '/').trim();
+  if (raw.length === 0) return null;
+  if (raw.startsWith('/') || /^[A-Za-z]:\//.test(raw)) return null;
+  const parts = [];
+  for (const segment of raw.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') return null;
+    parts.push(segment);
+  }
+  return parts.length > 0 ? parts.join('/') : null;
 }
 
 /**
@@ -258,9 +258,30 @@ export function declaredGround(layers, prior) {
   return { ok: true, suites: suites.sort(), entries: [...entries].sort() };
 }
 
+/** How many files one layer's declaration surface may reach before it refuses. */
+export const IMPORT_LIMIT = 500;
+
+/** The extensions a specifier without one is tried under, in order. */
+const IMPORT_EXTENSIONS = ['', '.mjs', '.js', '.cjs', '.ts', '/index.mjs', '/index.js'];
+
+// Every literal module specifier a source file names. Static `from` clauses,
+// bare side-effect imports, literal dynamic imports, and literal requires.
+const SPECIFIER_FORMS = [
+  /\bfrom\s*['"]([^'"]+)['"]/g,
+  /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
+  /\bimport\s+['"]([^'"]+)['"]/g,
+  /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
+];
+
+// A specifier this module cannot read: an import or a require whose argument is
+// not a literal string. What it reaches is decided at run time, and a surface
+// decided at run time is a surface nothing can enumerate.
+const COMPUTED_FORMS = [/\bimport\s*\(\s*[^'")\s]/, /\brequire\s*\(\s*[^'")\s]/];
+
 /**
  * The files a Tier-1 layer's declarations are produced from: the command's own
- * argv paths and the directory each one sits in.
+ * argv paths, every module those files reach through a relative import, and the
+ * directory each one sits in.
  *
  * The declarations that decide this skip are printed by the layer commands, and
  * those commands run in the RUN's worktree. That makes them the branch's own
@@ -269,12 +290,25 @@ export function declaredGround(layers, prior) {
  * diff may not touch it, so main's copy of every file a declaration comes out
  * of is byte for byte the run's copy, and the run's report is main's report.
  *
- * A layer whose command names no file of this repository has a declaration
- * surface nothing can bound, so it refuses.
+ * The argv path alone is not that set. A gate script that prints its markers
+ * from a helper it imports has its declarations produced in the helper, and a
+ * story editing the helper would narrow its own inputs with the guard looking
+ * elsewhere. So the walk follows every relative specifier, transitively.
+ *
+ * Anything the walk cannot enumerate refuses. A layer whose command names no
+ * file of this repository, a path that is a glob rather than a file, a file
+ * that will not read, a relative specifier that resolves to nothing, an import
+ * whose argument is computed rather than written: each is a surface with an
+ * unknown edge, and an unknown edge is what this check exists to refuse.
+ * A bare specifier is not followed and does not refuse: it names a dependency
+ * rather than a file of this repository, and the shared breadth list is what
+ * covers a dependency moving (ADR-0056).
  * @param {Array<{name: string, command: string}>} layers
  * @param {Record<string, string[]>} commands the project's command table
+ * @param {(path: string) => string|null} readSource one repo-relative file's
+ *   text, or null for a file that is not there
  */
-export function declarationSources(layers, commands) {
+export function declarationSources(layers, commands, readSource) {
   const entries = new Set();
   for (const layer of layers) {
     const argv = commands?.[layer.command] ?? [];
@@ -287,9 +321,13 @@ export function declarationSources(layers, commands) {
       );
     }
     for (const path of paths) {
-      entries.add(path);
-      const dir = path.split('/').slice(0, -1).join('/');
-      if (dir.length > 0) entries.add(dir);
+      const reached = reachableSources(path, readSource);
+      if (reached.ok !== true) return reached;
+      for (const file of reached.files) {
+        entries.add(file);
+        const dir = file.split('/').slice(0, -1).join('/');
+        if (dir.length > 0) entries.add(dir);
+      }
     }
   }
   if (entries.size === 0) {
@@ -299,14 +337,125 @@ export function declarationSources(layers, commands) {
 }
 
 /**
+ * Every file one command path reaches, itself included, or a refusal naming the
+ * edge the walk could not read.
+ */
+function reachableSources(entry, readSource) {
+  if (isGlobEntry(entry)) {
+    return refusal(
+      'self-declared-ground',
+      `${entry} names a set of files by pattern, so the modules its declarations ` +
+        'come out of cannot be enumerated',
+    );
+  }
+  const files = new Set();
+  const queue = [entry];
+  while (queue.length > 0) {
+    const path = queue.shift();
+    if (files.has(path)) continue;
+    if (files.size >= IMPORT_LIMIT) {
+      return refusal(
+        'self-declared-ground',
+        `the declaration surface of ${entry} passes ${IMPORT_LIMIT} files`,
+      );
+    }
+    files.add(path);
+    const text = readOne(readSource, path);
+    if (text === null) {
+      return refusal('self-declared-ground', `the declaration source ${path} will not read`);
+    }
+    for (const form of COMPUTED_FORMS) {
+      if (form.test(text)) {
+        return refusal(
+          'self-declared-ground',
+          `${path} imports a module it names at run time, so what its declarations ` +
+            'come out of cannot be enumerated',
+        );
+      }
+    }
+    for (const specifier of specifiersOf(text)) {
+      if (!specifier.startsWith('.')) continue; // a dependency, not a file here
+      const resolved = resolveSpecifier(path, specifier, readSource);
+      if (resolved === null) {
+        return refusal(
+          'self-declared-ground',
+          `${path} imports ${specifier}, which resolves to no file this check can read`,
+        );
+      }
+      queue.push(resolved);
+    }
+  }
+  return { ok: true, files: [...files] };
+}
+
+/** Every literal module specifier one source file names. */
+function specifiersOf(text) {
+  const out = new Set();
+  for (const form of SPECIFIER_FORMS) {
+    form.lastIndex = 0;
+    let match;
+    while ((match = form.exec(text)) !== null) out.add(match[1]);
+  }
+  return out;
+}
+
+/**
+ * One relative specifier as a repo-relative file, or null when nothing under
+ * the extensions this understands is there. A specifier that climbs out of the
+ * repository canonicalises to null and answers null here, which refuses.
+ */
+function resolveSpecifier(from, specifier, readSource) {
+  const base = from.split('/').slice(0, -1);
+  for (const extension of IMPORT_EXTENSIONS) {
+    const candidate = resolveAgainst(base, specifier + extension);
+    if (candidate === null) continue;
+    if (readOne(readSource, candidate) !== null) return candidate;
+  }
+  return null;
+}
+
+/**
+ * One relative specifier against the segments of the importing file's
+ * directory. `..` pops a segment here rather than nulling the path, which is
+ * what a specifier means by it; a `..` that pops past the repository root
+ * leaves the tree this check can read and answers null.
+ */
+function resolveAgainst(baseSegments, specifier) {
+  const parts = [...baseSegments];
+  for (const segment of specifier.replaceAll('\\', '/').split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      if (parts.length === 0) return null;
+      parts.pop();
+      continue;
+    }
+    parts.push(segment);
+  }
+  return parts.length > 0 ? parts.join('/') : null;
+}
+
+/** One file's text, or null. A reader that throws is a file that is not there. */
+function readOne(readSource, path) {
+  try {
+    const text = readSource(path);
+    return typeof text === 'string' ? text : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * An argv word that names a path inside this repository rather than a flag.
  * The whole argv is read and not the tail of it: a command may be a script of
- * this repository run directly, in which case the first word is the path.
+ * this repository run directly, in which case the first word is the path. A
+ * word written `./gate.mjs` names a file here even after the prefix is
+ * canonicalised away, and the raw spelling is what says so.
  */
 function looksLikeRepoPath(word) {
   if (typeof word !== 'string' || word.startsWith('-')) return false;
-  const norm = normalizePath(word);
-  return norm !== null && norm.includes('/');
+  const norm = groundEntry(word);
+  if (norm === null) return false;
+  return norm.includes('/') || /^\.\//.test(word.replaceAll('\\', '/').trim());
 }
 
 /**
@@ -383,6 +532,7 @@ export function declarationDigest({ suites, entries, testPaths, breadth, inert =
  * @param {{certification: object|null, layers: Array<{name: string}>,
  *   prior: Map<string, object>, commands: object, testPaths: string[],
  *   breadth: string[], inert: string[], lensFindings: string[],
+ *   readSource: (path: string) => string|null,
  *   storyDiffBefore: string, storyDiffAfter: string,
  *   mainChanged: {files: string[], unclassifiable: string[]},
  *   storyChanged: string[]}} input
@@ -398,6 +548,7 @@ export function fastPathVerdict({
   breadth,
   inert = [],
   lensFindings = [],
+  readSource = () => null,
   storyDiffBefore,
   storyDiffAfter,
   mainChanged,
@@ -438,7 +589,7 @@ export function fastPathVerdict({
   }
   const declared = declaredGround(layers, prior);
   if (declared.ok !== true) return declared;
-  const sources = declarationSources(layers, commands);
+  const sources = declarationSources(layers, commands, readSource);
   if (sources.ok !== true) return sources;
   // The declarations decide this skip and they came off the run's own tree. A
   // story that moved the ground they are produced from would be judged against
@@ -578,6 +729,9 @@ export async function fastPathDecision(base, events, { fromSha, toSha, mainSha }
     // A record this cannot read throws, and a throw is the internal-error
     // route, which is the full re-verdict.
     lensFindings: lensFindingsOf(certification.record),
+    // The declaration surface is walked in the run's own worktree, which is
+    // where the layer commands run and where the modules they import live.
+    readSource: worktreeReader(base.worktree),
     storyDiffBefore: facts.storyDiffBefore,
     storyDiffAfter: facts.storyDiffAfter,
     mainChanged: facts.mainChanged,
@@ -592,6 +746,23 @@ export async function fastPathDecision(base, events, { fromSha, toSha, mainSha }
   return verdict.taken === true
     ? { ...verdict, ...examined }
     : { ...verdict, baseSha: facts.baseSha };
+}
+
+/**
+ * A reader of one repo-relative file of one worktree. The path is canonical by
+ * the time it arrives here, so it names a file under the tree and nowhere else;
+ * anything that will not read answers null, which the walk refuses on.
+ */
+export function worktreeReader(worktree) {
+  return (path) => {
+    const canonical = groundEntry(path);
+    if (canonical === null) return null;
+    try {
+      return readFileSync(join(worktree, canonical), 'utf8');
+    } catch {
+      return null;
+    }
+  };
 }
 
 function refusal(kind, detail) {

@@ -313,6 +313,35 @@ const UPDATE_CAP_NOTE =
   'the base moved twice under one pass: the ship stage takes the update from ' +
   'here, as it did before this one existed';
 
+// Why a resume that finds an unrecorded merge goes back to the verdict.
+const UNSTAMPED_MERGE_NOTE =
+  'a merge this run took and never stamped: the tree at the head is not a tree ' +
+  'any verdict judged, so it is judged now';
+
+/**
+ * The head of the run worktree when it is a merge commit no stamp of this run
+ * names, or null.
+ *
+ * Every merge this stage takes ends in a record that carries the sha it
+ * produced. A merge commit outside that set is the crash window between the
+ * merge and its record, and the tree is ahead of everything the ledger says.
+ * Nothing else in a run worktree has two parents: the candidate captures commit
+ * on one.
+ */
+export async function unstampedMerge(base, events) {
+  const head = await headSha(base.worktree);
+  const named = new Set();
+  for (const e of events) {
+    for (const value of [e.sha, e.toSha, e.mergeSha, e.fromSha]) {
+      if (typeof value === 'string' && value.length > 0) named.add(value);
+    }
+  }
+  if (named.has(head)) return null;
+  const line = await git(['rev-list', '--parents', '-n', '1', head], { cwd: base.worktree });
+  const parents = line.trim().split(/\s+/).slice(1);
+  return parents.length >= 2 ? head : null;
+}
+
 async function preVerdictUpdate(ctx, base) {
   const events = runEvents(ctx);
   const pass = currentPass(events);
@@ -332,6 +361,27 @@ async function preVerdictUpdate(ctx, base) {
       });
     }
     return { next: 'ship' };
+  }
+  // The merge and the stamp below are two writes, and a crash lands between
+  // them. On the resume the merge is already in the tree, so the merge answers
+  // "already up to date", `ran` reads false, and the run would go on to the
+  // request over a tree no verdict ever judged. The tree itself is the record
+  // that survives the crash: a merge commit at the head that no stamp of this
+  // run names is a merge this run took and never wrote down (ADR-0033).
+  const orphan = await unstampedMerge(base, events);
+  if (orphan) {
+    ctx.store.append('pre-verdict-update', {
+      actor: ACTOR,
+      pass,
+      ran: false,
+      unstamped: true,
+      toSha: orphan,
+      note: UNSTAMPED_MERGE_NOTE,
+    });
+    // The full re-verdict, never the fast path: the shas that check reads are
+    // the ones the lost stamp held, and a decision over shas this run cannot
+    // name is not the decision it would have made.
+    return { next: 'verdict' };
   }
   // No push: there is no request to update yet, and a run branch pushed here
   // would meet a later fresh pass's rewrite with a plain push.
@@ -387,9 +437,23 @@ async function fastPathShip(ctx, base, out) {
   return decision.taken === true;
 }
 
-/** The taken fast-path record of this run, or undefined. */
+/**
+ * The taken fast-path record this run actually shipped on, or undefined.
+ *
+ * A taken record is not the end of the question. The run can take the fast path
+ * over one moved base and then meet a second one, or a red at the request, and
+ * render the full verdict after all. That verdict certifies the tree that
+ * lands, which is the whole of what the fast path skipped, so the trade was not
+ * made and nothing here may say it was: the close does not mark the ship, the
+ * escape kind is not assigned, and the tripwire that counts the trade does not
+ * count this ship (ADR-0056).
+ */
 export function fastPathTaken(events) {
-  return [...events].reverse().find((e) => e.event === 'fast-path-ship' && e.taken === true);
+  const fast = [...events].reverse().find((e) => e.event === 'fast-path-ship' && e.taken === true);
+  if (!fast) return undefined;
+  return events.some((e) => e.event === 'verdict-rendered' && e.seq > fast.seq)
+    ? undefined
+    : fast;
 }
 
 // -- the ship stage ----------------------------------------------------------
@@ -1584,9 +1648,18 @@ async function breachFlow(ctx, base, merged, enqueueRepair) {
   const ticketed = [];
   let entries = [];
   try {
-    // Restart-safe: a crash after recording re-uses the recorded entries.
+    // Restart-safe: a crash after recording re-uses the recorded entries. The
+    // match is this breach's own mark and not the run id: an escape somebody
+    // reported against this run between the merge and the close-out carries the
+    // run id too, and reading that as work already done would leave the breach
+    // with no record of its own findings at all.
     entries = readEvents(ctx.paths.escapesLedger)
-      .filter((e) => e.event === 'escape-recorded' && e.refs?.runId === ctx.runId)
+      .filter(
+        (e) =>
+          e.event === 'escape-recorded' &&
+          e.refs?.runId === ctx.runId &&
+          e.refs?.redMergeBreach === true,
+      )
       .map((e) => e.seq);
     if (entries.length === 0) {
       // A ship that carried a certification it did not earn over this merge is
@@ -1630,6 +1703,10 @@ async function breachFlow(ctx, base, merged, enqueueRepair) {
               // instance-scoped; nothing else in it names the repository the
               // defect shipped to.
               project: ctx.project,
+              // This breach's own mark. The reuse read above matches on it, so
+              // a report somebody else filed against this run is never mistaken
+              // for a conversion this breach already wrote.
+              redMergeBreach: true,
               pr: merged.pr,
               // The record that carried the certification, so a reader of the
               // escape reaches the decision behind it in one step.

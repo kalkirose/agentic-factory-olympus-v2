@@ -230,3 +230,34 @@ export function standingTripwires() {
     },
   ];
 }
+
+/** The metric that measures the one guarantee a project can trade away. */
+const FAST_PATH_METRIC = 'fast-path-escapes';
+
+/**
+ * The tripwires one project runs under: the registry it wrote, plus the
+ * standing fast-path counter when it turned the fast path on and did not name
+ * one itself.
+ *
+ * This is the doctrine rule for a gate cut, enforced rather than asked for: a
+ * cut names its metric, its watch window and its breach condition in the same
+ * change. `gates.fastPathShip` is a cut, and a project that turns it on without
+ * the counter has traded a guarantee for speed with nothing measuring what the
+ * trade costs and nothing able to propose the revert. The escapes still take
+ * the closed kind, and nobody ever reads them.
+ *
+ * The arming is the answer rather than a config refusal, because the flag is
+ * opt-in and a refusal would wedge the whole project over it: the launch reads
+ * the config, an invalid config launches nothing, and a project would be dark
+ * until somebody landed a PR. Arming cannot wedge anything, it is visible in
+ * the same board the project's own wires show in, and a project that wants
+ * another band writes its own entry, which this then leaves alone (ADR-0056).
+ * @param {object} config a validated project config
+ */
+export function armedTripwires(config) {
+  const entries = config?.tripwires ?? [];
+  if (config?.gates?.fastPathShip !== true) return entries;
+  if (entries.some((entry) => entry.metric === FAST_PATH_METRIC)) return entries;
+  const standing = standingTripwires().find((entry) => entry.metric === FAST_PATH_METRIC);
+  return [...entries, standing];
+}

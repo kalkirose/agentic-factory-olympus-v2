@@ -16,7 +16,14 @@ import {
   runLedgerPath,
 } from '../src/daemon/home.mjs';
 import { postFreeze, repairLane, restoreAnchor } from '../src/lanes/verdict.mjs';
-import { checksByName, shipStep, CHECKLESS_POLLS, UPDATE_CAP } from '../src/lanes/ship.mjs';
+import {
+  checksByName,
+  fastPathTaken,
+  shipStep,
+  unstampedMerge,
+  CHECKLESS_POLLS,
+  UPDATE_CAP,
+} from '../src/lanes/ship.mjs';
 import { FLAKE_LIMIT, RERUN_BUDGET } from '../src/ledger/cycles.mjs';
 import { gitHubForge, noLogReason, parseGitHubRepo, PartialLogRefusal } from '../src/ship/forge.mjs';
 import { derivedLabels } from '../src/ship/labels.mjs';
@@ -2471,6 +2478,15 @@ test('an escape record refuses what it cannot file', async (t) => {
       /requires the defect line/,
       String(bad),
     );
+    // The project is required for the same reason the defect line is. The
+    // ledger is instance-scoped: a record with no project matches a request
+    // number in whatever project opened one, and it belongs to none, so every
+    // per-project reading counts it for nobody and no sweep can repair it.
+    assert.throws(
+      () => fx.daemon.recordEscapeReport({ ...report, project: bad }),
+      /requires the project/,
+      String(bad),
+    );
   }
   assert.deepEqual(readEscapeSet(fx.paths.escapesLedger), []);
 });
@@ -2636,6 +2652,77 @@ test('a story that moved its own declarations takes the full re-verdict', async 
   assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 2);
 });
 
+test('a report between the merge and the close-out never silences the breach', async (t) => {
+  // The breach re-uses the escapes it already recorded, so a crash after the
+  // record does not file them twice. The match is the breach's own mark: an
+  // escape somebody reported against this run in the same window carries the
+  // run id too, and reading that as work already done would leave the red merge
+  // with no record of its own findings at all.
+  const fx = fastPathFixture(t, { pollMs: 300 });
+  fx.forge.state.autoChecks = () => [running()];
+  fx.forge.state.onRerun = () => {};
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'freeze', 'freeze');
+  commitTree(fx.origin, { 'docs/note.md': 'unrelated main work\n' }, 'docs: a note');
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [red()]);
+  fx.forge.adminMerge();
+  const merged = await waitEvent(fx.paths, runId, (e) => e.event === 'merged', 'merged');
+  // The operator gets there first, against the very merge the breach is about.
+  fx.daemon.recordEscapeReport({
+    actor: 'console:test',
+    project: 'proj',
+    defectLine: 'a person found this one first',
+    pr: merged.pr,
+  });
+  const events = await waitClosed(fx.paths, runId);
+  const breach = events.find((e) => e.event === 'red-merge-breach');
+  assert.ok(breach, 'the red merge recorded no breach');
+  assert.equal(breach.escapes.length, 1);
+  const escapes = readEscapeSet(fx.paths.escapesLedger);
+  assert.equal(escapes.length, 2);
+  const own = escapes.find((e) => e.seq === breach.escapes[0]);
+  assert.equal(own.detectionSource, 'harness-self');
+  assert.match(own.defectLine, /red merge on PR/);
+  assert.equal(own.refs.redMergeBreach, true);
+  // Both are ticketed and both are owed: neither swallowed the other.
+  assert.deepEqual(
+    owedRepairs(fx.paths, 'proj').map((e) => e.seq).sort((a, b) => a - b),
+    escapes.map((e) => e.seq).sort((a, b) => a - b),
+  );
+});
+
+test('a fast path a later verdict superseded is not a fast-path ship', () => {
+  // A taken record is not the end of the question. The run can carry its
+  // certification over one moved base and still render the full verdict later:
+  // a red at the request sends it back, and so does a second moved base at the
+  // ship stage. That verdict judges the tree that lands, which is the whole of
+  // what the fast path skipped. The trade was not made, so the close does not
+  // mark the ship and the kind that measures the trade is not assigned.
+  const event = (seq, name, extra = {}) => ({ seq, event: name, ...extra });
+  const carried = [
+    event(1, 'fast-path-ship', { taken: true }),
+    event(2, 'merged', { pr: 7 }),
+  ];
+  assert.equal(fastPathTaken(carried).seq, 1);
+  const earned = [
+    event(1, 'fast-path-ship', { taken: true }),
+    event(2, 'verdict-rendered', { cycle: 2, verdict: 'green' }),
+    event(3, 'merged', { pr: 7 }),
+  ];
+  assert.equal(fastPathTaken(earned), undefined);
+  // A verdict BEFORE the record is the certification the fast path carries;
+  // only one rendered after it is the re-verdict the path was skipping.
+  const before = [
+    event(1, 'verdict-rendered', { cycle: 1, verdict: 'green' }),
+    event(2, 'fast-path-ship', { taken: true }),
+    event(3, 'merged', { pr: 7 }),
+  ];
+  assert.equal(fastPathTaken(before).seq, 2);
+  // A refusal was never a carry.
+  assert.equal(fastPathTaken([event(1, 'fast-path-ship', { taken: false })]), undefined);
+});
+
 test('a defect on a red merge a fast path carried takes the fast-path word', async (t) => {
   // The other intake for the same kind. An operator reporting a defect gets the
   // word from the ledgers (above); a red merge the harness converts itself gets
@@ -2669,6 +2756,42 @@ test('a defect on a red merge a fast path carried takes the fast-path word', asy
   assert.equal(escapes[0].refs.fastPathSeq, fast.seq);
   assert.equal(escapes[0].refs.mergeSha, merged.mergeSha);
   assert.equal(escapes[0].refs.project, 'proj');
+});
+
+test('a merge this run never stamped is a merge the resume has to judge', async (t) => {
+  // The crash window: the merge commit lands in the worktree and the daemon
+  // dies before the stamp. On the resume the merge answers "already up to
+  // date", `ran` reads false, and the old reading took the run to the request
+  // over a tree no verdict had judged. The tree is the record that survived the
+  // crash, and this is the stage's reading of it.
+  const fx = fastPathFixture(t);
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const launched = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'run-launched',
+    'run-launched',
+  );
+  await waitEvent(fx.paths, runId, (e) => e.event === 'freeze', 'freeze');
+  const worktree = launched.worktree;
+  const before = gitSync(['rev-parse', 'HEAD'], worktree).trim();
+  const events = readEvents(runLedgerPath(fx.paths, runId));
+  // No merge in the tree yet: nothing to judge.
+  assert.equal(await unstampedMerge({ worktree }, events), null);
+  // The merge the crash left behind, stamped nowhere.
+  commitTree(fx.origin, { 'docs/late.md': 'a competing note\n' }, 'docs: a note');
+  gitSync(['fetch', '--quiet', fx.origin, 'main'], worktree);
+  gitSync(
+    ['-c', 'commit.gpgsign=false', 'merge', '--no-ff', '-m', 'merge main', 'FETCH_HEAD'],
+    worktree,
+  );
+  const head = gitSync(['rev-parse', 'HEAD'], worktree).trim();
+  assert.notEqual(head, before);
+  assert.ok(!events.some((e) => e.sha === head || e.toSha === head));
+  assert.equal(await unstampedMerge({ worktree }, events), head);
+  // A merge the ledger does name is the ordinary case and reads as nothing.
+  assert.equal(await unstampedMerge({ worktree }, [...events, { event: 'x', toSha: head }]), null);
 });
 
 test('a project that declares no breadth ground never fast-paths', async (t) => {
