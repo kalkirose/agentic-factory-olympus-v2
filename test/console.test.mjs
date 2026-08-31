@@ -93,6 +93,36 @@ test('status carries what this start found in the seat environment', (t) => {
   assert.ok(!after.includes('runner-trust'));
 });
 
+test('a run in verdict carries the share of its part work it did not do', (t) => {
+  // ADR-0058. The stage that spends gate-command hours is the one stage where
+  // the carry is worth a place on the status page.
+  const { paths } = seededHome(t);
+  const run = openRunStore(paths, 'r2');
+  run.append('run-launched', { actor: 'daemon', project: 'alpha', lane: 'story', storyKey: 's2' });
+  run.append('stage-entered', { actor: 'daemon', stage: 'verdict' });
+  run.append('verdict-rendered', {
+    actor: 'daemon',
+    cycle: 1,
+    sweep: 'targeted',
+    partsRun: 3,
+    partsCarried: 17,
+    carryShare: 0.85,
+    verdict: 'red',
+    open: [],
+  });
+  run.close();
+  assert.match(renderStatus(paths), /r2 story @ verdict · \$0\.00 · carry 85%/);
+
+  // A run in any other stage says nothing about it, and a run that has
+  // rendered no verdict has nothing to say.
+  const moved = openRunStore(paths, 'r2');
+  moved.append('stage-entered', { actor: 'daemon', stage: 'ship' });
+  moved.close();
+  const after = renderStatus(paths);
+  assert.match(after, /r2 story @ ship · \$0\.00$/m);
+  assert.match(after, /r1 story @ work · \$0\.00 \[parked:open-decisions\]/);
+});
+
 test('the queue render is answerable from the record alone', (t) => {
   const { paths } = seededHome(t);
   const rendered = renderQueue(paths);

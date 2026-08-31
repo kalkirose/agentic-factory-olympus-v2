@@ -122,6 +122,26 @@ const IMPLEMENTATIONS = {
     };
   },
 
+  'carry-share-window': async ({ paths, project, window }) => {
+    const readings = carryShares(paths, project).slice(-window);
+    const mean =
+      readings.length > 0
+        ? readings.reduce((sum, r) => sum + r.share, 0) / readings.length
+        : null;
+    return {
+      value: mean === null ? null : round(mean),
+      // Below one reading there is no share to be under a floor. Quiet, the
+      // way every cold window here is quiet: a project that runs no layer in
+      // parts, and a project whose ledgers predate the field, both report
+      // nothing rather than reporting a zero they did not measure.
+      eligible: readings.length > 0,
+      detail: {
+        cycles: readings.length,
+        ...(readings.length > 0 && { run: readings.at(-1).runId }),
+      },
+    };
+  },
+
   'ship-token-wait': async ({ paths, project, window, now = Date.now() }) => {
     const waits = tokenWaits(paths, project, now).slice(-window);
     // The longest, for the same reason the leftover metric reads the oldest:
@@ -422,6 +442,33 @@ function tokenWaits(paths, project, now) {
     waits.push({ runId, ts: queued.ts, minutes: ms / 60000 });
   }
   return waits.sort(byTs);
+}
+
+/**
+ * The carried share of each verdict cycle of one project that narrowed, in
+ * ledger order.
+ *
+ * Two cycles are left out, and both by the same rule: a cycle the harness runs
+ * whole on purpose says nothing about the narrowing. A full sweep is the first
+ * cycle of a pass and has nothing to carry from; a confirming cycle runs every
+ * layer at its own sha so the green it certifies rests on no carry (ADR-0046).
+ * Counting either would read the design as a decay and would drag the mean
+ * down hardest on the runs that went green fastest.
+ *
+ * A render written before the share existed carries no number and is no
+ * reading, which is how this metric stays quiet over old ledgers.
+ */
+function carryShares(paths, project) {
+  const readings = [];
+  for (const { runId, events } of listRunEvents(paths, { project })) {
+    for (const e of events) {
+      if (e.event !== 'verdict-rendered') continue;
+      if (e.sweep !== 'targeted' || e.confirmation === true) continue;
+      if (typeof e.carryShare !== 'number') continue;
+      readings.push({ runId, ts: e.ts, share: e.carryShare });
+    }
+  }
+  return readings.sort(byTs);
 }
 
 /** Freeze records in ts order: kills and initial-wave count per freeze. */

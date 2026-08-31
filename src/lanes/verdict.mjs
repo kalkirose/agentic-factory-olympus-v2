@@ -76,7 +76,7 @@ import {
 } from './replay.mjs';
 import { runSpectrum, persistentReds, cyclePlan } from './spectrum.mjs';
 import { configuredGroups } from './schedule.mjs';
-import { PARTS_ENV, partPlan } from './parts.mjs';
+import { PARTS_ENV, partPlan, carryTally } from './parts.mjs';
 import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview } from './review.mjs';
 import { panelLenses } from './lenses.mjs';
@@ -435,6 +435,11 @@ async function runCycle(ctx, base, mode, { cycle }) {
     clause: e.clause,
     site: e.site,
   }));
+  // What this cycle did not run, as a number. The record already says which
+  // parts carried; the share is what a tripwire can watch, and a carry that
+  // decays with nothing red is the one failure of this mechanism that nothing
+  // else detects (ADR-0058). Absent for a cycle that recorded no part.
+  const tally = carryTally(spectrum.results);
   const record = {
     runId: ctx.runId,
     cycle,
@@ -442,6 +447,7 @@ async function runCycle(ctx, base, mode, { cycle }) {
     sha,
     ...(suiteSha && { suiteSha }),
     sweep: plan.sweep,
+    ...(tally ?? {}),
     ...(confirmation && { confirmation: true }),
     // The capture took these paths back before this tree was committed, so a
     // red on the surface they cover is explained, not mysterious.
@@ -481,6 +487,10 @@ async function runCycle(ctx, base, mode, { cycle }) {
     sha,
     ...(suiteSha && { suiteSha }),
     sweep: plan.sweep,
+    // The share rides the event as well as the record, because the reading is
+    // taken from the ledgers and a metric that had to open a record file per
+    // cycle would be reading somebody else's lifecycle (ADR-0058).
+    ...(tally ?? {}),
     ...(confirmation && { confirmation: true }),
     ...(dropped.length > 0 && { dropped }),
     verdict,
@@ -492,13 +502,20 @@ async function runCycle(ctx, base, mode, { cycle }) {
 
 /**
  * The part plan of every layer this cycle runs: which parts of it the diff
- * since that layer's standing result could have reached, and which greens it
- * carries instead (ADR-0046). Null for a cycle that targets nothing.
+ * since that layer's standing result could have reached, which greens it
+ * carries instead (ADR-0046), and why every part that runs is running
+ * (ADR-0058). Null for a cycle that plans no layer.
  *
  * Every clause here re-runs on doubt. A cycle that runs the full spectrum
- * targets no parts. A layer with no part table has none to narrow. A range
- * git cannot answer, a result with no sha, a result older than the last
- * re-freeze — each drops the layer out of the map and the layer runs whole.
+ * plans no layer. A range git cannot answer, a result with no sha, a result
+ * older than the last re-freeze: each of the three drops the layer out of the
+ * map, and the layer then runs whole for a reason that is not about its parts,
+ * so no part of it is given a word it did not earn.
+ *
+ * A layer whose standing result holds no part table stays IN the map. Its
+ * plan narrows nothing and carries nothing, and the record it produces is the
+ * one that says so: every part the command opened is a part the standing
+ * result did not hold, and the result names each of them `no-record`.
  *
  * A re-freeze invalidates every carry because it moves the suite the parts
  * were judged against: a part's green is a statement about a pair of shas,
@@ -507,13 +524,16 @@ async function runCycle(ctx, base, mode, { cycle }) {
  */
 export async function partTargets(base, events, { plan, sha }) {
   if (plan.sweep !== 'targeted' || base.config?.gates?.partTargeting === false) return null;
+  // Ground the project states no suite of it reads. It leaves every diff this
+  // derivation reads, before anything is attributed to a part (ADR-0059).
+  const groundless = base.config?.gates?.groundlessPaths ?? [];
   const refrozen = events.filter((e) => e.event === 're-freeze').pop()?.seq ?? -1;
   const diffs = new Map();
   const targets = new Map();
   for (const layer of base.layers) {
     if (!plan.run?.has(layer.name)) continue;
     const prior = plan.prior?.get(layer.name);
-    if (!prior?.parts?.length || !prior.sha || prior.seq < refrozen) continue;
+    if (!prior || !prior.sha || prior.seq < refrozen) continue;
     if (!diffs.has(prior.sha)) {
       diffs.set(
         prior.sha,
@@ -522,8 +542,7 @@ export async function partTargets(base, events, { plan, sha }) {
     }
     const changed = diffs.get(prior.sha);
     if (changed === null) continue;
-    const narrowed = partPlan(prior, changed);
-    if (narrowed) targets.set(layer.name, narrowed);
+    targets.set(layer.name, partPlan(prior, changed, { groundless }));
   }
   return targets.size > 0 ? targets : null;
 }
@@ -534,6 +553,9 @@ export async function partTargets(base, events, { plan, sha }) {
  * execution earned the green. A layer the cycle carried whole carried every
  * part in it, whatever the part's own record says, and the layer's line
  * states where that one came from.
+ *
+ * A part this cycle ran also states why (ADR-0058). A carried part states
+ * none: it did not run, and a reason on it would read as a reason it did.
  */
 function partSummary(part, layerMode) {
   const carried = layerMode === 'carried' || part.carriedFrom !== undefined;
@@ -542,6 +564,7 @@ function partSummary(part, layerMode) {
     ...(part.status && { status: part.status }),
     mode: carried ? 'carried' : 'run',
     ...(part.carriedFrom !== undefined && { carriedFrom: part.carriedFrom }),
+    ...(!carried && part.reason !== undefined && { reason: part.reason }),
   };
 }
 

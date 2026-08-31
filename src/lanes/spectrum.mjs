@@ -70,7 +70,7 @@ import { commandLogPath } from '../daemon/home.mjs';
 import { assertDefectKind, assertAbandonReason } from '../ledger/registry.mjs';
 import { runCommand } from './exec.mjs';
 import { layerBatches } from './schedule.mjs';
-import { PARTS_ENV, carriedParts, mergeCarried } from './parts.mjs';
+import { PARTS_ENV, carriedParts, mergeCarried, withPartReasons } from './parts.mjs';
 import { exhaustionOf } from './resources.mjs';
 import { absentCredentials } from './replay.mjs';
 import { runEvents, ACTOR } from './shared.mjs';
@@ -110,7 +110,8 @@ const ATTEMPTS = 2;
  *   commands: Record<string, string[]>, cwd: string, env?: object,
  *   cycle: number, sha: string, run?: Set<string>|null,
  *   prior?: Map<string, object>|null, confirmation?: boolean,
- *   parts?: Map<string, {run: string[], carry: Array<object>}>|null,
+ *   parts?: Map<string, {narrow: {run: string[], carry: Array<object>}|null,
+ *     reasons: Map<string, string>, blindPaths: string[]}>|null,
  *   groups?: Array<string[]>|null,
  *   credentials?: Array<object>, exec?: typeof runCommand}} opts
  *   `run` names the layers this cycle executes; every other layer carries its
@@ -118,10 +119,12 @@ const ATTEMPTS = 2;
  *   `groups` names the layers this project lets hold the machine together
  *   (ADR-0047). Absent is the strict sequence, which is what every project ran
  *   before the field existed.
- *   `parts` narrows a layer that runs in parts to the parts a diff could have
- *   reached, and names the greens it carries instead (ADR-0046). Absent for
- *   every layer it does not mention, and absent altogether for a cycle that
- *   targets nothing.
+ *   `parts` is the cycle's part plan per layer (ADR-0046). `narrow` names the
+ *   parts a diff could have reached and the greens carried instead, or is null
+ *   where the layer runs whole; `reasons` and `blindPaths` say why each part
+ *   that runs is running, whether the layer narrowed or not (ADR-0058). Absent
+ *   for every layer it does not mention, and absent altogether for a cycle
+ *   that plans nothing.
  *   `credentials` is the project's credential declaration; a layer it names
  *   that this host cannot supply has its red attributed to the missing
  *   variable, on the result itself.
@@ -132,14 +135,17 @@ const ATTEMPTS = 2;
  *   mode: string, attributedTo?: string, output?: string, log?: string,
  *   credentialAbsent?: string[], resources?: object, exhaustion?: object,
  *   parts?: Array<{name: string, status: string, inputs?: string[],
- *     output?: string, carriedFrom?: number}>,
- *   concurrentWith?: string[]}>, error?: string}>}
+ *     output?: string, carriedFrom?: number, reason?: string}>,
+ *   blindPaths?: string[], concurrentWith?: string[]}>, error?: string}>}
  *   `concurrentWith` names the layers this one held the machine beside, and is
  *   absent for every layer that ran alone (ADR-0047).
  *   `parts` is the whole part table of a layer that runs in parts: what each
  *   part decided, what could change that, and — on a part this cycle did not
  *   run — the cycle whose execution earned its green. Only the parts that are
- *   evidence for a red carry `output`.
+ *   evidence for a red carry `output`. A part this cycle DID run carries
+ *   `reason`, one of the five words the plan derives (ADR-0058).
+ *   `blindPaths` names up to three changed paths the plan could attribute to
+ *   no part of this layer, which is why every part of it ran.
  *   `log` is the file holding that layer's whole output, for the red that has
  *   one: the tail and the parts are the summary, the file is the text.
  *   `resources` is what the layer's process tree peaked at, and `exhaustion`
@@ -234,6 +240,10 @@ export async function runSpectrum(
         ...(record.output && { output: record.output }),
         ...(record.log && { log: record.log }),
         ...(record.parts?.length > 0 && { parts: record.parts }),
+        // The paths this cycle's part plan could attribute to no part of this
+        // layer. They are why every part of it ran, so they travel with the
+        // result into the verdict record (ADR-0058).
+        ...(record.blindPaths?.length > 0 && { blindPaths: record.blindPaths }),
         // Only ever this cycle's own fact. A carried record is an older
         // cycle's, and what that cycle ran beside says nothing about this one.
         ...(mode === 'run' &&
@@ -318,8 +328,9 @@ async function executeLayer(
     // Who this layer holds the machine beside, on every stamp its attempts
     // leave (ADR-0047). Empty for a layer that ran alone.
     concurrentWith,
-    // What this layer runs of itself, and what it carries instead. Never in a
-    // confirmation sweep: that pass runs everything.
+    // What this layer runs of itself, what it carries instead, and why each
+    // part it runs is running. Never in a confirmation sweep: that pass runs
+    // everything by design, so no part of it owes a reason (ADR-0058).
     target: confirmation ? null : (parts?.get(layer.name) ?? null),
     // Read before the layer runs, so the attribution is a fact about the host
     // this attempt started on rather than one about the host at the moment
@@ -353,8 +364,10 @@ async function runLayer(
   const argv = commands[layer.command];
   // The narrowing the command is asked for, on the environment it runs in. A
   // command that does not read it runs everything and is recorded for
-  // everything it ran (ADR-0046).
-  const layerEnv = target ? { ...env, [PARTS_ENV]: target.run.join(',') } : env;
+  // everything it ran (ADR-0046). A plan that narrows nothing sets no
+  // variable: the layer runs whole, exactly as it did before the plan existed,
+  // and the plan's reasons still ride the result (ADR-0058).
+  const layerEnv = target?.narrow ? { ...env, [PARTS_ENV]: target.narrow.run.join(',') } : env;
   let previous = null;
   for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
     const settled = await runAttempt(ctx, {
@@ -368,7 +381,10 @@ async function runLayer(
       exec,
       absent,
       concurrentWith,
-      carry: target?.carry ?? [],
+      // The whole part plan for this layer, or null where the cycle derived
+      // none. It decides what a result may carry and what each part that ran
+      // says about why (ADR-0058).
+      target,
       attempt,
       // Retry provenance: an attempt above the first names the attempt it
       // replaced and what spawned it, so a replacement is never silent.
@@ -452,8 +468,8 @@ function attemptLogFile(ctx, { cycle, layer, attempt }) {
  * is a filter that can lose it.
  */
 function settle(ctx, spec, made) {
-  const { layer, cycle, sha, mark, attempt, absent, carry, concurrentWith } = spec;
-  const disposition = dispositionOf(made, attempt, layer.memoryCeilingMb ?? null, carry);
+  const { layer, cycle, sha, mark, attempt, absent, target, concurrentWith } = spec;
+  const disposition = dispositionOf(made, attempt, layer.memoryCeilingMb ?? null, target);
   made.disposition = disposition;
   // The terminal stamp closes the span the start opened, and says the same
   // thing about it: this reading is not the machine's whole cost for that
@@ -486,6 +502,11 @@ function settle(ctx, spec, made) {
       // annotated — the absence did not stop it, whatever the declaration
       // says.
       ...(disposition.status === 'red' && absent?.length > 0 && { credentialAbsent: absent }),
+      // The paths the plan could attribute to no part of this layer. They ride
+      // the result and not the attempt: they are a fact about the diff the
+      // cycle judged, and the flake filter's replaced red says nothing new
+      // about it (ADR-0058).
+      ...(target?.blindPaths?.length > 0 && { blindPaths: target.blindPaths }),
       ...mark,
     });
     if (disposition.exhaustion) stampExhaustion(ctx, spec, disposition.exhaustion);
@@ -564,11 +585,14 @@ function stampExhaustion(ctx, { layer, cycle, sha, mark }, exhaustion) {
  * on the exit and the output alone, and the forecast reads the trend instead
  * of a fraction (ADR-0045).
  *
- * `carry` is what the caller's part plan let this layer skip. It rides the
- * result and only the result: an attempt that judged nothing carries nothing
- * forward, because it proved nothing to carry it to (ADR-0046).
+ * `target` is the caller's part plan for this layer, or null where the cycle
+ * derived none. Its carry rides the result and only the result: an attempt
+ * that judged nothing carries nothing forward, because it proved nothing to
+ * carry it to (ADR-0046). Its reasons ride the same result, so a reader of one
+ * record sees both halves of the cycle's decision (ADR-0058).
  */
-function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, carry = []) {
+function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, target = null) {
+  const carry = target?.narrow?.carry ?? [];
   if (thrown) {
     return { event: 'layer-abandoned', reason: 'runner-error', detail: thrown.message };
   }
@@ -634,7 +658,10 @@ function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, carry = [
     // than an evidence subset: a later cycle carries a part only if a record
     // says it passed and says what could change that (ADR-0046). No output
     // rides them — a green says all it has to say in the tail.
-    const parts = mergeCarried(recordedParts(outcome.parts, { green: true }), carry);
+    const parts = withPartReasons(
+      mergeCarried(recordedParts(outcome.parts, { green: true }), carry),
+      target?.reasons,
+    );
     return {
       event: 'layer-result',
       status: 'green',
@@ -656,7 +683,7 @@ function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, carry = [
     };
   }
   const ran = recordedParts(outcome.parts, { green: false });
-  const parts = mergeCarried(ran, carry);
+  const parts = withPartReasons(mergeCarried(ran, carry), target?.reasons);
   return {
     event: 'layer-result',
     status: 'red',

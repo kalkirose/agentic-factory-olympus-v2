@@ -33,7 +33,9 @@ export function defaultProjectConfig() {
     // a provably disjoint merge, `breadthGround` names the ground every suite
     // depends on whatever it declared, and `inertGround` names the ground the
     // project states no suite can reach (ADR-0056); all absent is today's
-    // behaviour.
+    // behaviour. `groundlessPaths` names the ground the project states no
+    // suite READS, which a verdict cycle drops out of its diff before it
+    // attributes a path to a part (ADR-0059).
     gates: { tier1: [] },
     // one convention per line; prompt assembly consumes these
     conventions: [],
@@ -201,6 +203,24 @@ function validateGates(gates, commands, err) {
   // than reading silence as safety.
   if (gates.inertGround !== undefined && !isStringList(gates.inertGround)) {
     err('gates.inertGround', 'must be an array of path entries');
+  }
+  // `groundlessPaths` is a THIRD list and a different claim (ADR-0059). Read
+  // the three side by side, because two of them look alike and are not:
+  //
+  //   breadthGround    every suite depends on this, whatever it declared
+  //   inertGround      the DEFAULT BRANCH may move this and a certified ship
+  //                    still stands. Read at ship time, by fastpath.mjs alone.
+  //   groundlessPaths  no suite of this project READS this. Read at verdict
+  //                    time, by parts.mjs alone, to decide what a change can
+  //                    reach.
+  //
+  // The two questions are different and their answers may differ. A file the
+  // ship path may ignore over a merge is not automatically a file no suite
+  // opens, and a file no suite opens may still be one a ship must re-verdict
+  // over. So neither list is derived from the other, neither reader consults
+  // the other's list, and a project earns each entry of each by its own proof.
+  if (gates.groundlessPaths !== undefined && !isStringList(gates.groundlessPaths)) {
+    err('gates.groundlessPaths', 'must be an array of path entries');
   }
   if (gates.tier1 !== undefined && !Array.isArray(gates.tier1)) {
     err('gates.tier1', 'must be an array of layers');

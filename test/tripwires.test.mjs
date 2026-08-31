@@ -520,6 +520,124 @@ test('verdict-cycles reads the worst run of the window, not its average', async 
   assert.equal(empty.value, null);
 });
 
+// -- the carry share ---------------------------------------------------------
+//
+// ADR-0058. The one band in the registry that watches a number for falling: a
+// part-level carry that quietly stops happening costs the hours it was built
+// to remove and reddens nothing.
+
+/**
+ * A judged run whose cycles each recorded a share. `shares` is one entry per
+ * cycle; a number is a targeted cycle, and a `{share, sweep, confirmation}`
+ * object states a cycle that ran whole.
+ */
+function sharedRun(paths, runId, day, shares) {
+  writeLedger(runLedgerPath(paths, runId), [
+    line(1, `2026-08-0${day}T00:00:00Z`, 'run-launched', { project: 'p', lane: 'story' }),
+    ...shares.map((entry, i) => {
+      const cycle = typeof entry === 'number' ? { share: entry } : entry;
+      return line(2 + i, `2026-08-0${day}T0${i}:00:00Z`, 'verdict-rendered', {
+        cycle: i + 1,
+        verdict: 'red',
+        sweep: cycle.sweep ?? 'targeted',
+        ...(cycle.confirmation && { confirmation: true }),
+        ...(cycle.share !== undefined && {
+          partsRun: 1,
+          partsCarried: 1,
+          carryShare: cycle.share,
+        }),
+      });
+    }),
+  ]);
+}
+
+test('carry-share-window means the shares of the cycles that narrowed', async (t) => {
+  const paths = home(t);
+  sharedRun(paths, 'r1', 1, [0.8, 0.6]);
+  const healthy = await evaluateMetric('carry-share-window', { paths, project: 'p', window: 10 });
+  assert.equal(healthy.value, 0.7);
+  assert.deepEqual(healthy.detail, { cycles: 2, run: 'r1' });
+  // A project with no reading at all is ineligible and never breaches: nought
+  // measured is not a share of nought.
+  const cold = await evaluateMetric('carry-share-window', { paths, project: 'q', window: 10 });
+  assert.equal(cold.eligible, false);
+  assert.equal(cold.value, null);
+});
+
+test('the cycles that run whole on purpose are no reading about the narrowing', async (t) => {
+  const paths = home(t);
+  // A first cycle has nothing to carry from and a confirming cycle runs every
+  // layer at its own sha (ADR-0046). Both record a share of nought, and both
+  // would read the design as a decay.
+  sharedRun(paths, 'r1', 1, [
+    { share: 0, sweep: 'full' },
+    0.8,
+    { share: 0, confirmation: true },
+  ]);
+  const reading = await evaluateMetric('carry-share-window', { paths, project: 'p', window: 10 });
+  assert.equal(reading.value, 0.8);
+  assert.equal(reading.detail.cycles, 1);
+  // A render written before the share existed carries no number, so it is no
+  // reading either, and an old ledger keeps the band quiet.
+  sharedRun(paths, 'r2', 2, [{ share: undefined }]);
+  const old = await evaluateMetric('carry-share-window', { paths, project: 'p', window: 10 });
+  assert.equal(old.value, 0.8);
+  assert.equal(old.detail.cycles, 1);
+});
+
+test('a carry that decays breaches the floor, and ten healthy cycles do not', async (t) => {
+  const paths = home(t);
+  const ledger = openInstanceStore(paths);
+  t.after(() => ledger.close());
+  const watcher = new TripwireWatcher({ paths, ledger });
+  // A floor a project sets after measuring itself. The standing entry ships at
+  // nought and cannot fire; this is the shape it takes once the ten cycles
+  // named in ADR-0058 stand on the ledger.
+  const armed = withTripwireDefaults({
+    ...standingTripwires().find((e) => e.id === 'carry-share-floor'),
+    breach: { op: '<', value: 0.4 },
+  });
+  watcher.setRegistry('p', [armed]);
+  const breaches = () =>
+    readEvents(paths.instanceLedger).filter((e) => e.event === 'tripwire-breach');
+
+  // Ten cycles of a project whose declarations hold.
+  sharedRun(paths, 'r1', 1, [0.7, 0.6, 0.8, 0.7, 0.6, 0.7, 0.8, 0.6, 0.7, 0.7]);
+  await watcher.notify('p', { event: 'verdict-rendered' });
+  assert.deepEqual(breaches(), []);
+
+  // One family loses its input declaration. Every part runs every cycle, the
+  // share falls to nothing, and no layer goes red about it.
+  sharedRun(paths, 'r2', 2, [0.1, 0, 0, 0, 0, 0]);
+  await watcher.notify('p', { event: 'verdict-rendered' });
+  assert.equal(breaches().length, 1);
+  const breach = breaches()[0];
+  assert.equal(breach.tripwire, 'carry-share-floor');
+  assert.equal(breach.metric, 'carry-share-window');
+  assert.ok(breach.value < 0.4, `mean ${breach.value} did not fall under the floor`);
+  assert.equal(breach.window, 10);
+  assert.match(breach.answer, /input declaration/);
+  assert.equal(openBreaches(paths).length, 1);
+});
+
+test('the standing carry-share entry cannot fire on any share', async (t) => {
+  const paths = home(t);
+  const ledger = openInstanceStore(paths);
+  t.after(() => ledger.close());
+  const watcher = new TripwireWatcher({ paths, ledger });
+  const standing = standingTripwires().find((e) => e.id === 'carry-share-floor');
+  assert.deepEqual(standing.breach, { op: '<', value: 0 });
+  watcher.setRegistry('p', [withTripwireDefaults(standing)]);
+  // Every part of every cycle re-running is the worst reading there is, and
+  // the placeholder floor still says nothing. That is deliberate: the honest
+  // floor is measured, and a band nobody measured is a band an operator
+  // learns to ignore.
+  sharedRun(paths, 'r1', 1, [0, 0, 0, 0, 0]);
+  await watcher.notify('p', { event: 'verdict-rendered' });
+  const breaches = readEvents(paths.instanceLedger).filter((e) => e.event === 'tripwire-breach');
+  assert.deepEqual(breaches, []);
+});
+
 test('ship-token-wait reads the longest queue wait, open ones included', async (t) => {
   const paths = home(t);
   const queued = (runId, day, { waited, closed }) =>
