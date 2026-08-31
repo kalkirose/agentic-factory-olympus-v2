@@ -5,6 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
+import { ACK_OPTION } from '../ledger/acks.mjs';
 import { isAbandon } from '../ledger/parks.mjs';
 import { runLedgerPath, runReportPath } from '../daemon/home.mjs';
 import {
@@ -192,16 +193,27 @@ export function freezeOwnerPins(paths, runId) {
  * answer lands (ADR-0032). `detail` is the condition the park raised on, in
  * the form a reader can match against the ledger; the abandon route closes the
  * run on it, so a park that names its condition names it once.
+ *
+ * `gate` names the check an `ack` answer acknowledges, at a gate that states a
+ * judgment about the world. It rides the record for the reason `acks` does: the
+ * engine writes the acknowledgment from the record, and the site is gone by
+ * then. `reasoned` names the options that take the answer text as well
+ * (ADR-0062).
  */
-export function parkDirective(type, { question, options, text, refs, acks, detail }) {
+export function parkDirective(
+  type,
+  { question, options, text, reasoned, refs, acks, gate, detail },
+) {
   return {
     park: {
       type,
       question,
       ...(options && { options }),
       ...(text && { text }),
+      ...(reasoned && { reasoned }),
       ...(refs && { refs }),
       ...(acks && { acks }),
+      ...(gate && { gate }),
       ...(detail && { detail }),
     },
   };
@@ -216,6 +228,83 @@ export const GATE_FORMS = Object.freeze({
   options: ['retry'],
   text: 'a note on what you repaired',
 });
+
+// -- gates that state a judgment about the world (ADR-0062) -------------------
+
+// The gates an `ack` answer may take, by the check each one names. The set is
+// closed and it is the whole scope rule in code: adding a gate to it is a
+// decision about who may walk past what, and it cannot be taken at a call site.
+//
+// A gate is in here when its park states a JUDGMENT the harness formed about
+// the world: a declaration the run pinned, compared against the world; a
+// project-declared probe's verdict; an inference over a live read. A judgment
+// can be stale or wrong, the operator standing in front of the world is the
+// one who can say so, and `retry` only asks the same wrong question again.
+//
+// A gate is NOT in here when its park states a REFUSAL the world itself gave
+// to an action the harness took — a rejected push, an auto-merge the forge
+// would not arm, a label it would not apply, a check run it never delivered. An
+// ack cannot talk past one of those: the action did not happen, and the step
+// behind the gate needs it to have happened.
+//
+// And no gate that reads the run's own tree is in here, whatever else it does,
+// because a tree cannot be stale against itself.
+//
+// The verdict lane's operational-fix gate is deliberately absent. It already
+// answers itself on standing finding acknowledgments, keyed per finding and
+// ended by a revoke (ADR-0032), which is a finer instrument than this one and a
+// different question. Two acknowledgment rules at one gate would leave nobody
+// able to say which of them let a run through.
+export const WORLD_GATES = new Set(['credential-surface', 'credential-probe', 'substrate-probe']);
+
+// What the text slot is for at a gate that offers the ack. It says both jobs,
+// because the same slot carries the note beside a `retry` and the reason an
+// `ack` cannot be given without.
+const WORLD_GATE_TEXT = 'why this gate is wrong about the world, or a note on what you repaired';
+
+/**
+ * The park forms of a gate that states a judgment about the world: `retry`,
+ * `ack`, and the reason the ack owes. The key names the check the ack answers,
+ * and it rides the record — a subject may follow it after a colon, so an ack of
+ * one credential's probe is not an ack of another's.
+ * @param {string} key a name in `WORLD_GATES`, optionally `<name>:<subject>`
+ */
+export function worldGate(key) {
+  if (!WORLD_GATES.has(key.split(':')[0])) throw new Error(`unknown world gate: ${key}`);
+  return {
+    options: [...GATE_FORMS.options, ACK_OPTION],
+    text: WORLD_GATE_TEXT,
+    reasoned: [ACK_OPTION],
+    gate: key,
+  };
+}
+
+// What an `ack` at a world gate is worth, said at the gate itself, so the
+// operator reads the rule where they answer rather than in the source.
+export const WORLD_GATE_NOTE =
+  'Answer "ack" with --text to record, against this run, that the gate is wrong ' +
+  'about the world and that the run may go past it. The reason is required, and ' +
+  'the acknowledgment stands for this run and this gate alone: it ends with the ' +
+  'run, it covers no other gate, and it is counted.';
+
+/**
+ * The acknowledgment standing over one gate of this run, or null.
+ *
+ * It stands for the whole run rather than for the one park it answered. A gate
+ * that judges the world wrongly at the launch judges it wrongly again at the
+ * ship, and asking the same person the same settled question twice in one run
+ * is the loop this option exists to end. It reaches no further than the run:
+ * nothing here is standing policy, and the next run asks again (ADR-0062).
+ * @param {Array<object>} events the run ledger, in order
+ * @param {string} gate the key the gate declared
+ */
+export function gateAck(events, gate) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.event === 'gate-acknowledged' && e.gate === gate) return e;
+  }
+  return null;
+}
 
 // -- recoverable failures (ADR-0015) -----------------------------------------
 

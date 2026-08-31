@@ -37,10 +37,12 @@ import { ACK_OPTION, standingAcksFor } from '../ledger/acks.mjs';
 import {
   cloneDir,
   ensureBareClone,
+  fetchClone,
   hasBranch,
   hasCommit,
   readBlobFromBranch,
 } from '../isolation/clones.mjs';
+import { git } from '../isolation/git.mjs';
 import { parseProjectConfig } from '../config/project.mjs';
 import { parseIntentCard } from '../lanes/card.mjs';
 import { readInheritance, closeState } from '../lanes/resume.mjs';
@@ -190,6 +192,13 @@ export class Daemon {
     });
     this.registerCommand('kill', async (command) => {
       this.engine.killRun(command.runId, { actor: command.actor });
+    });
+    // A run adopts a project config that exists. The blob is resolved and
+    // parsed here, before anything is stamped: a run pinned to a config no
+    // stage can read would fail at every stage instead of at this command
+    // (ADR-0061).
+    this.registerCommand('reconfigure', async (command) => {
+      await this.reconfigureCommand(command);
     });
     this.registerCommand('arm', async (command) => {
       this.frontier.setArmed(command.project, true, command.actor);
@@ -779,6 +788,56 @@ export class Daemon {
     } finally {
       store.close();
     }
+  }
+
+  // -- the config a run reads (ADR-0061) ------------------------------------
+
+  /**
+   * Repins one open run's project config. The blob is settled before the run
+   * hears about it: without `--blob` it is the config on the project's default
+   * branch at the moment of the command, fetched first, and with one it is the
+   * blob the operator named. Either way it is read and parsed here, so a config
+   * that does not exist or does not validate is refused at the console instead
+   * of failing every stage of the run afterwards.
+   * @param {{actor: string, runId: string, blob?: string, reason: string}} cmd
+   */
+  async reconfigureCommand({ actor, runId, blob, reason }) {
+    const run = this.engine.runs.get(runId);
+    if (!run || run.closed) throw new Error(`no open run: ${runId}`);
+    const entry = this.config.projects[run.project];
+    if (!entry) throw new Error(`unknown project: ${run.project}`);
+    const resolved = await this.resolveProjectConfigBlob(run.project, entry, blob);
+    return this.engine.reconfigure({
+      runId,
+      actor,
+      configBlob: resolved.blob,
+      reason,
+      source: resolved.source,
+    });
+  }
+
+  /**
+   * The config blob a reconfigure pins, proven readable and valid.
+   *
+   * A named blob is read out of the project's bare clone: the run's stages read
+   * it from there with `git cat-file`, so a blob that clone does not hold is a
+   * pin no stage could load. An unnamed one is the default branch's config at
+   * command time, and the clone is fetched first — the point of the command is
+   * to reach a config that landed after the launch.
+   */
+  async resolveProjectConfigBlob(project, entry, blob) {
+    return this.isolation.withClone(project, async () => {
+      const dir = await ensureBareClone(this.paths, project, entry.repoUrl, entry.defaultBranch);
+      if (typeof blob === 'string' && blob.length > 0) {
+        const text = await git(['cat-file', '-p', blob], { cwd: dir });
+        parseProjectConfig(text, `${project}#${blob}`);
+        return { blob, source: 'named' };
+      }
+      await fetchClone(dir);
+      const read = await readBlobFromBranch(dir, entry.defaultBranch, entry.projectConfigPath);
+      parseProjectConfig(read.text, `${project}@${entry.defaultBranch}`);
+      return { blob: read.blob, source: 'branch' };
+    });
   }
 
   // -- finding acknowledgments (ADR-0032) -----------------------------------

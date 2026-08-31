@@ -142,6 +142,41 @@ const IMPLEMENTATIONS = {
     };
   },
 
+  'gate-acks-window': async ({ paths, project, window }) => {
+    const runs = runsByLaunch(paths, project).slice(-window);
+    const acks = runs.flatMap(({ runId, events }) =>
+      events.filter((e) => e.event === 'gate-acknowledged').map((e) => ({ runId, gate: e.gate })),
+    );
+    return {
+      value: acks.length,
+      // A window with no run in it is no reading. A window of runs that
+      // acknowledged nothing is a reading of zero, which is the answer.
+      eligible: runs.length > 0,
+      detail: {
+        runs: runs.length,
+        // The gates, because the gate is the thing to repair, and the runs,
+        // because that is where the reasons are written.
+        gates: [...new Set(acks.map((a) => a.gate))].sort(),
+        acked: [...new Set(acks.map((a) => a.runId))],
+      },
+    };
+  },
+
+  'run-reconfigures-window': async ({ paths, project, window }) => {
+    const runs = runsByLaunch(paths, project).slice(-window);
+    const repinned = runs.filter(({ events }) =>
+      events.some((e) => e.event === 'run-reconfigured'),
+    );
+    // Runs, not events: a run repinned twice in one sitting is one run whose
+    // launch pin was wrong, and counting the second would read a correction as
+    // a second fault.
+    return {
+      value: repinned.length,
+      eligible: runs.length > 0,
+      detail: { runs: runs.length, repinned: repinned.map((r) => r.runId) },
+    };
+  },
+
   'ship-token-wait': async ({ paths, project, window, now = Date.now() }) => {
     const waits = tokenWaits(paths, project, now).slice(-window);
     // The longest, for the same reason the leftover metric reads the oldest:
@@ -408,6 +443,20 @@ function workspaceReleases(paths, project) {
   return readEvents(paths.instanceLedger).filter(
     (e) => e.event === 'workspace-released' && e.project === project,
   );
+}
+
+/**
+ * Every run of one project, in launch order, with its events.
+ *
+ * The order is the launch stamp rather than the last event, because the two
+ * metrics that read this count what happened inside a run, and an open run that
+ * is still being written would otherwise walk to the end of the window on every
+ * append and push a closed run out of it.
+ */
+function runsByLaunch(paths, project) {
+  return listRunEvents(paths, { project })
+    .map((run) => ({ ...run, ts: run.events[0]?.ts ?? '' }))
+    .sort(byTs);
 }
 
 /**

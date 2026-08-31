@@ -9,6 +9,8 @@ import { join } from 'node:path';
 import { scaffoldHome } from '../src/daemon/home.mjs';
 import { openRunStore, openInstanceStore } from '../src/telemetry/stores.mjs';
 import { renderStatus, renderQueue } from '../src/console/status.mjs';
+import { runParkForms } from '../src/ledger/parks.mjs';
+import { worldGate } from '../src/lanes/shared.mjs';
 import { consoleActor } from '../src/console/identity.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
@@ -134,6 +136,27 @@ test('the queue render is answerable from the record alone', (t) => {
   assert.match(rendered, /options: narrow \| wide \| abandon/);
   assert.match(rendered, /text: the scope, in words/);
   assert.match(rendered, /olympusctl answer --run r1 --option <option> \| --text "<answer>"/);
+});
+
+test('a world gate renders the check it names and the option that takes a reason', (t) => {
+  const { paths } = seededHome(t);
+  const run = openRunStore(paths, 'r-gate');
+  run.append('run-launched', { actor: 'daemon', project: 'alpha', lane: 'story', storyKey: 's3' });
+  run.append('park', {
+    actor: 'daemon',
+    type: 'provisioning-gate',
+    question: 'These credential surfaces are not wired.',
+    answers: runParkForms(worldGate('credential-surface')),
+    gate: 'credential-surface',
+    gist: 'provisioning-gate: credential surfaces',
+  });
+  run.close();
+  const rendered = renderQueue(paths);
+  // Which check is being walked past, and that the option takes a reason: an
+  // operator reads both before they answer, not after a refusal (ADR-0062).
+  assert.match(rendered, /gate: credential-surface/);
+  assert.match(rendered, /options: retry \| ack \| abandon/);
+  assert.match(rendered, /ack: takes --option and --text together/);
 });
 
 // -- the session behind a command --------------------------------------------
@@ -415,4 +438,45 @@ test('a fixed-mark queues with its evidence and is refused without it', (t) => {
   assert.equal(noEscape.status, 2);
   assert.match(noEscape.stderr, /--escape is required/);
   assert.equal(readdirSync(paths.control).filter((f) => f.endsWith('.json')).length, 1);
+});
+
+test('reconfigure queues the run, the blob and the reason, and refuses an empty one', (t) => {
+  const { root, paths } = seededHome(t);
+  const bin = join(import.meta.dirname, '..', 'bin', 'olympusctl.mjs');
+  const home = join(root, 'home');
+  const ctl = (args) =>
+    execFileSync(process.execPath, [bin, ...args], { encoding: 'utf8', windowsHide: true });
+  ctl(['reconfigure', '--home', home, '--run', 'r1', '--reason', 'the surface was retired']);
+  const first = JSON.parse(
+    readFileSync(
+      join(paths.control, readdirSync(paths.control).find((f) => f.startsWith('reconfigure'))),
+      'utf8',
+    ),
+  );
+  assert.equal(first.command, 'reconfigure');
+  assert.equal(first.runId, 'r1');
+  assert.equal(first.reason, 'the surface was retired');
+  // No blob: the daemon resolves the config on the default branch at the time
+  // of the command (ADR-0061).
+  assert.equal(first.blob, undefined);
+  ctl(['reconfigure', '--home', home, '--run', 'r1', '--blob', 'abc123', '--reason', 'a named one']);
+  const named = readdirSync(paths.control)
+    .filter((f) => f.startsWith('reconfigure'))
+    .map((f) => JSON.parse(readFileSync(join(paths.control, f), 'utf8')))
+    .find((c) => c.blob !== undefined);
+  assert.equal(named.blob, 'abc123');
+  // The reason is the whole worth of the record. An empty one is refused
+  // before the inbox, exit code 2.
+  for (const args of [
+    ['reconfigure', '--home', home, '--run', 'r1'],
+    ['reconfigure', '--home', home, '--run', 'r1', '--reason', '   '],
+    ['reconfigure', '--home', home, '--reason', 'no run named'],
+  ]) {
+    try {
+      ctl(args);
+      throw new Error(`expected olympusctl to refuse: ${args.join(' ')}`);
+    } catch (error) {
+      assert.equal(error.status, 2, args.join(' '));
+    }
+  }
 });

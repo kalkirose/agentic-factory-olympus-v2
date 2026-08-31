@@ -73,6 +73,10 @@ export function escalationQueue(paths, { roadmap } = {}) {
       // What an `ack` answer would record, by fingerprint, so the operator
       // reads the identity here and hands it to a revoke later (ADR-0032).
       ...(Array.isArray(record.acks) && { acks: record.acks }),
+      // The check an `ack` answer acknowledges, at a gate that states a
+      // judgment about the world. The operator reads which check they are
+      // walking the run past before they write the reason (ADR-0062).
+      ...(record.gate && { gate: record.gate }),
       ...(record.refs && { refs: record.refs }),
       ...(record.card && { card: record.card }),
       ...(storyKey && { storyKey }),

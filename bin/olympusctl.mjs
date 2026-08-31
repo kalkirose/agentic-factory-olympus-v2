@@ -15,6 +15,8 @@
 //                       [--card <path>] [--ticket <path>] [--escape <n>]
 //                       [--resume-from <runId>]
 //   olympusctl kill     --home <dir> --run <id>
+//   olympusctl reconfigure --home <dir> --run <id> [--blob <sha>]
+//                       --reason <text>
 //   olympusctl resolve  --home <dir> [--run <id>] --seq <n> [--note <text>]
 //   olympusctl revoke   --home <dir> --project <name> --fingerprint <f>
 //                       --fix <ref> [--note <text>]
@@ -37,6 +39,17 @@
 // acknowledged answers itself on the record. `status` lists every standing
 // acknowledgment; `revoke` ends the one its fingerprint names, and carries the
 // fix it stands on. Nothing else ends one — a restart least of all.
+// A gate that states a judgment about the world — a credential surface read
+// against the config the run pinned, a credential probe, the substrate probe —
+// takes --option ack with --text as well. That answer says the gate is wrong
+// about the world, records the reason against the run, and lets the run past
+// that one gate for the rest of its life. It records nothing standing: the next
+// run asks again. `queue` prints the gate beside such a park.
+// `reconfigure` is the other way out of a gate that is wrong: the run adopts a
+// project config that exists, instead of the one it pinned at launch. Without
+// --blob the daemon reads the config on the default branch at the time of the
+// command; --blob names one. The reason is required, the run re-enters no
+// stage, and the launch record stays as it was written.
 // `hold` stops the stage chain and interrupts nothing: every run finishes the
 // stage it is in and stops at the boundary, so the factory drains itself to a
 // moment with no live seat. `release` enters the deferred stage of every run
@@ -108,6 +121,8 @@ function parseArgs(argv) {
     ['--source', 'source'],
     ['--pr', 'pr'],
     ['--merge', 'merge'],
+    ['--blob', 'blob'],
+    ['--reason', 'reason'],
   ]);
   // The one option that carries no value: a scope is the instance or it is not.
   const switches = new Map([['--all', 'all']]);
@@ -164,10 +179,16 @@ function queueCommand(paths, command) {
 const { command, opts } = parseArgs(process.argv.slice(2));
 if (!command) {
   fail(
-    'usage: olympusctl <status|queue|frontier|answer|arm|pause|hold|release|launch|kill|resolve|revoke|fixed|escape> --home <dir>\n' +
+    'usage: olympusctl <status|queue|frontier|answer|arm|pause|hold|release|launch|kill|\n' +
+      '                  reconfigure|resolve|revoke|fixed|escape> --home <dir>\n' +
       '       answer: (--run <id> | --seq <n>) (--option <o> | --text <t>)\n' +
       '               queue prints the forms each park accepts; every run park\n' +
       '               takes --option abandon, which closes the run\n' +
+      '               a world gate also takes --option ack with --text: the gate\n' +
+      '               is wrong about the world and the run may go past it\n' +
+      '       reconfigure: --run <id> [--blob <sha>] --reason <text>\n' +
+      '               the run adopts the project config on the default branch,\n' +
+      '               or the blob named; it re-enters no stage\n' +
       '       hold:   (--run <id> | --project <name> | --all)\n' +
       '               every run finishes its current stage and stops there;\n' +
       '               release enters the stage each held run did not enter\n' +
@@ -294,6 +315,19 @@ if (command === 'status') {
   });
 } else if (command === 'kill') {
   queueCommand(paths, { command: 'kill', actor, runId: need(opts, 'run') });
+} else if (command === 'reconfigure') {
+  // The reason is required here and again at the daemon. A run that stops
+  // judging against the config it launched under leaves one line explaining
+  // itself, and an empty one is worth nothing to whoever reads the ledger next.
+  const reason = need(opts, 'reason');
+  if (reason.trim().length === 0) fail('--reason cannot be empty');
+  queueCommand(paths, {
+    command: 'reconfigure',
+    actor,
+    runId: need(opts, 'run'),
+    reason,
+    ...(opts.blob !== undefined && { blob: opts.blob }),
+  });
 } else if (command === 'revoke') {
   // One fingerprint, one fix. There is no form that ends every acknowledgment
   // at once: a harness defect nobody fixed is still there after the one beside

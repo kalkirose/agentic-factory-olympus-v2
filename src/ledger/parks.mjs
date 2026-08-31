@@ -17,26 +17,34 @@ export const ABANDON = 'abandon';
  * The declaration a run park writes: the site's own options plus `abandon`,
  * and the free-text slot when the site wants one. `text` is the label the
  * console shows for that slot, so it states what the text is for.
- * @param {{options?: string[], text?: string}} declared
+ *
+ * `reasoned` names the options that take the text as well as the option word.
+ * An option is in it when answering with it costs the run a check it did not
+ * pass, so the record it leaves has to say why (ADR-0062).
+ * @param {{options?: string[], text?: string, reasoned?: string[]}} declared
  */
-export function runParkForms({ options, text } = {}) {
-  return forms({ options: [...(options ?? []), ABANDON], text });
+export function runParkForms({ options, text, reasoned } = {}) {
+  return forms({ options: [...(options ?? []), ABANDON], text, reasoned });
 }
 
 /**
  * The declaration an instance park writes. It carries no `abandon`: the park
  * belongs to a card rather than to a run, and there is no run to close.
- * @param {{options?: string[], text?: string}} declared
+ * @param {{options?: string[], text?: string, reasoned?: string[]}} declared
  */
-export function instanceParkForms({ options, text } = {}) {
-  return forms({ options, text });
+export function instanceParkForms({ options, text, reasoned } = {}) {
+  return forms({ options, text, reasoned });
 }
 
-function forms({ options, text }) {
+function forms({ options, text, reasoned }) {
   const offered = [...new Set(options ?? [])];
+  // A reasoned option the park does not offer would be a rule about an answer
+  // nobody can give, so the list is narrowed to what is on the record.
+  const requires = [...new Set(reasoned ?? [])].filter((option) => offered.includes(option));
   return {
     ...(offered.length > 0 && { options: offered }),
     ...(typeof text === 'string' && text.length > 0 && { text }),
+    ...(requires.length > 0 && { reasoned: requires }),
   };
 }
 
@@ -48,28 +56,36 @@ const UNDECLARED_TEXT = 'your answer';
 
 /**
  * What a park record accepts, whether it declared it or predates the
- * declaration.
+ * declaration. A record written before `reasoned` existed requires the text
+ * for no option, which is what those parks took.
  * @param {object} record a `park` ledger line
- * @returns {{options: string[], text: string|null}}
+ * @returns {{options: string[], text: string|null, reasoned: string[]}}
  */
 export function acceptedForms(record) {
   const declared = record?.answers;
   if (declared) {
-    return { options: declared.options ?? [], text: declared.text ?? null };
+    return {
+      options: declared.options ?? [],
+      text: declared.text ?? null,
+      reasoned: declared.reasoned ?? [],
+    };
   }
   return {
     options: [...new Set([...(record?.options ?? []), ABANDON])],
     text: UNDECLARED_TEXT,
+    reasoned: [],
   };
 }
 
 /** The one line a park says about what it will take. */
 export function formsLine(record) {
-  const { options, text } = acceptedForms(record);
+  const { options, text, reasoned } = acceptedForms(record);
   const ways = [];
   if (options.length > 0) ways.push(`--option ${options.join('|')}`);
   if (text) ways.push(`--text "<${text}>"`);
-  return ways.length > 0 ? ways.join(' or ') : 'no answer';
+  const line = ways.length > 0 ? ways.join(' or ') : 'no answer';
+  if (reasoned.length === 0) return line;
+  return `${line}; --option ${reasoned.join('|')} takes --text as well`;
 }
 
 /**
@@ -80,11 +96,19 @@ export function formsLine(record) {
  * @param {{option?: string, answer?: string}} given
  */
 export function checkAnswer(record, { option, answer }) {
-  const { options, text } = acceptedForms(record);
+  const { options, text, reasoned } = acceptedForms(record);
   if (option !== undefined) {
     if (!options.includes(option)) {
       throw new Error(
         `option not offered by the escalation record: ${option} — this park accepts ${formsLine(record)}`,
+      );
+    }
+    // The reason a reasoned option owes. It is refused here rather than
+    // recorded empty, because the whole worth of that answer to a later reader
+    // is the sentence beside it (ADR-0062).
+    if (reasoned.includes(option) && !(typeof answer === 'string' && answer.trim().length > 0)) {
+      throw new Error(
+        `--option ${option} takes the reason for it — this park accepts ${formsLine(record)}`,
       );
     }
     return;

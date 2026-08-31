@@ -218,6 +218,36 @@ export async function mergeIntoTree(tree, sha, message) {
   }
 }
 
+/**
+ * Replays one commit onto the current head, three-way. Returns the new head on
+ * a clean replay; on anything else, the conflicted paths and git's own reason,
+ * with the replay backed out and the tree left where it was.
+ *
+ * Three-way rather than a checkout of the commit's own file versions: the
+ * caller replays machine edits onto a head somebody else just wrote, and a
+ * checkout would silently take that person's work back. A conflict is the
+ * honest answer to two edits of one file, and the caller records it as the miss
+ * it is (ADR-0063).
+ * @returns {Promise<{ok: true, sha: string} | {ok: false, conflicts: string[], cause: string}>}
+ */
+export async function cherryPick(tree, sha) {
+  try {
+    await git([...IDENTITY, 'cherry-pick', sha], { cwd: tree });
+    return { ok: true, sha: await headSha(tree) };
+  } catch (error) {
+    const conflicts = await conflictedFiles(tree).catch(() => []);
+    await git(['cherry-pick', '--abort'], { cwd: tree }).catch(() => {});
+    return {
+      ok: false,
+      conflicts,
+      cause:
+        conflicts.length > 0
+          ? `the replay conflicts in ${conflicts.join(', ')}`
+          : error.message,
+    };
+  }
+}
+
 /** Paths with unmerged index entries. */
 export async function conflictedFiles(tree) {
   const out = await git(['diff', '--name-only', '--diff-filter=U'], { cwd: tree });

@@ -78,6 +78,8 @@ import {
   abortMerge,
   changedFiles,
   changedAgainstBase,
+  changedInRange,
+  cherryPick,
   commitAll,
   resetHard,
 } from '../isolation/tree.mjs';
@@ -2001,15 +2003,33 @@ async function cardSweep(ctx, base, merged) {
   let pushed = false;
   let sha = null;
   let pushError = null;
+  let replay = null;
+  let attempts = 0;
   if ((await changedFiles(base.worktree)).length > 0) {
     sha = await commitAll(base.worktree, `cards: sweep ${base.storyKey ?? ctx.runId}`);
+    attempts = 1;
     try {
       // Cards are planning artifacts; the sweep lands them directly on the
-      // default branch. A rejected push is recorded, never retried blindly.
+      // default branch.
       await push(base.worktree, 'origin', `HEAD:${base.defaultBranch}`);
       pushed = true;
     } catch (error) {
       pushError = error.message;
+      // One retry, and one only. A rejection here is almost always the branch
+      // moving under the push — a human landing a card edit while the sweep
+      // ran — and the sweep records that loss as a miss nobody notices
+      // (ADR-0063). The retry replays this sweep's own commit onto the head
+      // that beat it and proves the replayed result all over again.
+      attempts = 2;
+      const again = await replayCards(ctx, base, cardDir, sha);
+      replay = again.replay;
+      if (again.ok) {
+        pushed = true;
+        pushError = null;
+        sha = again.sha;
+      } else if (again.replay.cause) {
+        pushError = `${error.message}; the replay onto ${again.replay.onto} did not land: ${again.replay.cause}`;
+      }
     }
   }
   // An invalidated card parks the card, never the run that shipped: the park
@@ -2084,8 +2104,61 @@ async function cardSweep(ctx, base, merged) {
     ...(lint && { lint }),
     pushed,
     ...(sha && { sha }),
+    // How many pushes the cards took. Two is the race absorbed, and the count
+    // is what says how contended the card directory is (ADR-0063).
+    ...(attempts > 0 && { pushAttempts: attempts }),
+    ...(replay && { replay }),
     ...(pushError && { error: pushError }),
   });
+}
+
+/**
+ * The one retry a rejected card push is worth: refetch, replay this sweep's own
+ * commit onto the head that beat it, prove the replayed result, push again.
+ *
+ * The replay is a three-way pick rather than a checkout of the sweep's file
+ * versions, so a human edit to the same card conflicts instead of being taken
+ * back in silence. Every check the first push stood behind runs again on the
+ * result: the containment to the card directory, and the project's own card
+ * lint. Neither is assumed to hold because it held before the branch moved.
+ *
+ * A second rejection records the miss exactly as the first one did. There is no
+ * third attempt: a push that loses twice is a contended directory rather than a
+ * race, and a loop against it would run for as long as somebody keeps writing.
+ * @returns {Promise<{ok: boolean, sha?: string, replay: object}>}
+ */
+async function replayCards(ctx, base, cardDir, sweepSha) {
+  const replay = { onto: null };
+  try {
+    const clone = cloneDir(ctx.paths, ctx.project);
+    await fetchClone(clone);
+    const head = await branchSha(clone, base.defaultBranch);
+    replay.onto = head;
+    await resetHard(base.worktree, head);
+    const picked = await cherryPick(base.worktree, sweepSha);
+    if (!picked.ok) return { ok: false, replay: { ...replay, ok: false, cause: picked.cause } };
+    const changed = await changedInRange(base.worktree, head, picked.sha);
+    const outside = changed.filter((file) => !underAny(file, [cardDir]));
+    if (outside.length > 0) {
+      return {
+        ok: false,
+        replay: {
+          ...replay,
+          ok: false,
+          cause: `the replayed result reaches outside ${cardDir}: ${outside.join(', ')}`,
+        },
+      };
+    }
+    const defects = [];
+    const lint = await cardLint(ctx, base, changed, defects, '-replay');
+    if (defects.length > 0) {
+      return { ok: false, replay: { ...replay, ok: false, lint, cause: defects[0] } };
+    }
+    await push(base.worktree, 'origin', `HEAD:${base.defaultBranch}`);
+    return { ok: true, sha: picked.sha, replay: { ...replay, ok: true, lint, files: changed.length } };
+  } catch (error) {
+    return { ok: false, replay: { ...replay, ok: false, cause: error.message } };
+  }
 }
 
 /**
@@ -2152,7 +2225,7 @@ async function sweepChecks(ctx, base, cardDir, report) {
  * writer, and the lint of the tree as it was merged is not this sweep's answer
  * to give.
  */
-async function cardLint(ctx, base, changed, defects) {
+async function cardLint(ctx, base, changed, defects, label = '') {
   const name = base.config.lanes?.story?.lintCommand;
   if (!name) return 'undeclared';
   if (changed.length === 0) return 'unwritten';
@@ -2160,7 +2233,9 @@ async function cardLint(ctx, base, changed, defects) {
   const run = await runCommand(base.config.commands[name], {
     cwd: base.worktree,
     env: base.env,
-    log: commandLogPath(ctx.paths, ctx.runId, `card-sweep-lint-${n}`),
+    // The label keeps the replay's own lint file beside the first one rather
+    // than on top of it: two reads of two trees are two records (ADR-0043).
+    log: commandLogPath(ctx.paths, ctx.runId, `card-sweep-lint-${n}${label}`),
   });
   if (run.code === null) {
     defects.push(

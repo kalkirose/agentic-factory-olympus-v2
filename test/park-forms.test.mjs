@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { RunEngine } from '../src/engine/engine.mjs';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import {
@@ -24,7 +24,7 @@ import {
   instanceParkForms,
   runParkForms,
 } from '../src/ledger/parks.mjs';
-import { parkDirective, withAbandonGuard } from '../src/lanes/shared.mjs';
+import { WORLD_GATES, parkDirective, withAbandonGuard, worldGate } from '../src/lanes/shared.mjs';
 import { tempDir, removeDir, waitFor } from './helpers.mjs';
 
 // -- the descriptor ----------------------------------------------------------
@@ -53,13 +53,16 @@ test('an instance park declares no abandon: it has no run to close', () => {
 });
 
 test('a park recorded before the declaration derives its forms', () => {
+  // And it requires the text for no option, which is what those parks took.
   assert.deepEqual(acceptedForms({ event: 'park', options: ['round'] }), {
     options: ['round', 'abandon'],
     text: 'your answer',
+    reasoned: [],
   });
   assert.deepEqual(acceptedForms({ event: 'park' }), {
     options: ['abandon'],
     text: 'your answer',
+    reasoned: [],
   });
 });
 
@@ -121,7 +124,9 @@ test('every park site declares the forms it accepts', () => {
   for (const file of sourceFiles(src)) {
     for (const site of parkSites(readFileSync(file, 'utf8'))) {
       assert.ok(
-        /(^|[\s{,])(options|text):/.test(site.body) || /\.\.\.GATE_FORMS/.test(site.body),
+        /(^|[\s{,])(options|text):/.test(site.body) ||
+          /\.\.\.GATE_FORMS/.test(site.body) ||
+          /\.\.\.worldGate\(/.test(site.body),
         `the ${site.type} park in ${file} declares neither an option nor a text slot`,
       );
       declared.add(site.type);
@@ -137,6 +142,72 @@ test('every park site declares the forms it accepts', () => {
     [...PARK_TYPES].filter((type) => !declared.has(type) && !fromRecover.has(type) && !fromSweep.has(type)),
     [],
   );
+});
+
+// -- the world-gate scope (ADR-0062) -----------------------------------------
+
+test('the ack is offered by three gates, and the set says which', () => {
+  // The scope rule, held where it can be broken: a gate gains the ack by
+  // being added to WORLD_GATES and by spreading worldGate at its own park, and
+  // this fails on either half alone. A fourth world gate is a decision about
+  // who may walk past what, and it is taken here or it is not taken.
+  assert.deepEqual([...WORLD_GATES].sort(), [
+    'credential-probe',
+    'credential-surface',
+    'substrate-probe',
+  ]);
+  const src = join(import.meta.dirname, '..', 'src');
+  const byFile = {};
+  for (const file of sourceFiles(src)) {
+    const sites = parkSites(readFileSync(file, 'utf8')).filter((site) =>
+      /\.\.\.worldGate\(/.test(site.body),
+    );
+    if (sites.length > 0) byFile[basename(file)] = sites.length;
+  }
+  assert.deepEqual(byFile, { 'probes.mjs': 2, 'substrate.mjs': 1 });
+  // Every one of those sites is a provisioning gate; nothing else takes an ack.
+  for (const file of sourceFiles(src)) {
+    for (const site of parkSites(readFileSync(file, 'utf8'))) {
+      if (/\.\.\.worldGate\(/.test(site.body)) assert.equal(site.type, 'provisioning-gate');
+    }
+  }
+});
+
+test('a world gate declares the ack, the reason it owes, and the check it names', () => {
+  const forms = worldGate('credential-surface');
+  assert.deepEqual(forms.options, ['retry', 'ack']);
+  assert.deepEqual(forms.reasoned, ['ack']);
+  assert.equal(forms.gate, 'credential-surface');
+  // A subject rides the key, so one credential's probe is not another's.
+  assert.equal(worldGate('credential-probe:payments').gate, 'credential-probe:payments');
+  // A gate outside the set cannot reach the option from a call site.
+  assert.throws(() => worldGate('ship-preflight'), /unknown world gate: ship-preflight/);
+});
+
+test('a reasoned option is refused without its reason, and the refusal says so', () => {
+  const record = { answers: runParkForms(worldGate('substrate-probe')) };
+  assert.deepEqual(record.answers.options, ['retry', 'ack', 'abandon']);
+  assert.deepEqual(record.answers.reasoned, ['ack']);
+  assert.match(formsLine(record), /--option ack takes --text as well$/);
+  assert.throws(
+    () => checkAnswer(record, { option: 'ack' }),
+    /--option ack takes the reason for it/,
+  );
+  assert.throws(() => checkAnswer(record, { option: 'ack', answer: '  ' }), /takes the reason/);
+  checkAnswer(record, { option: 'ack', answer: 'the stack publishes on one family' });
+  // Every other answer the gate takes is unchanged by the requirement.
+  checkAnswer(record, { option: 'retry' });
+  checkAnswer(record, { option: 'abandon' });
+  checkAnswer(record, { answer: 'restarted the engine' });
+});
+
+test('a park declaring a reasoned option it does not offer declares nothing', () => {
+  // A rule about an answer nobody can give would refuse an answer for a reason
+  // no reader could find on the record.
+  assert.deepEqual(runParkForms({ options: ['retry'], text: 'a note', reasoned: ['ack'] }), {
+    options: ['retry', 'abandon'],
+    text: 'a note',
+  });
 });
 
 // -- the engine --------------------------------------------------------------

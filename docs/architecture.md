@@ -140,10 +140,13 @@ Two levels; the ownership test decides placement.
   watches on the default branch (`watchedWorkflows`), the tripwire registry,
   the optional close-out extras (`closeout`), the gate layers that may hold
   the machine together (`gates.concurrencyGroups`), the ground the project
-  states no suite of it reads (`gates.groundlessPaths`), and whether a run's
-  commands are offered a cache directory (`runCache`).
+  states no suite of it reads (`gates.groundlessPaths`), the project's own
+  declared-ground check for its suite (`lanes.story.groundCommand`), and
+  whether a run's commands are offered a cache directory (`runCache`).
   The daemon reads it from `main` in its bare clone at each run launch, so
-  config changes ship through the same PR path as the code they describe.
+  config changes ship through the same PR path as the code they describe. A run
+  holds the blob it launched with until an operator repins it on the record
+  (ADR-0061).
 
 ## Seats
 
@@ -272,6 +275,17 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   spec-indifferent (recorded) or unkilled gap (blocks; escalates). Zero kills:
   one full strengthening round + a fresh round of waves; a second zero
   escalates.
+- **Declared ground, checked while the seat is live** (ADR-0060). A project may
+  name its own declared-ground check in `lanes.story.groundCommand`, and every
+  suite write of this chain runs it over the tree as the seat left it: the
+  authoring round, an adversary amendment, a strengthening round, the red-state
+  fix. A red is a work-product defect and re-briefs that seat with the check's
+  own output; a command that could not run is a defect of the host and parks
+  under `command-error` instead. The `ground-check` stamp carries the phase and
+  one of `green`, `red`, `unrun`. A project that names no command runs no step.
+  The point is where the repair lands: the same check after the freeze finds
+  the file frozen, and the correction then costs a repair round, a re-freeze
+  and a second verdict.
 - **Red-state check** (process): the suite must be red against the
   pre-implementation tree, and the freeze report classes every red as
   feature-absence. Any other cause is a suite defect to fix before freeze.
@@ -688,6 +702,15 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   the same way, because a push behind it is a push of cards no check read. A
   sweep that wrote nothing runs no lint. The `card-sweep` stamp carries `lint`
   every time, so the reader can tell which of them happened.
+- **The sweep absorbs one race** (ADR-0063). A rejected push is almost always
+  the branch moving under it — a person landing a card edit while the sweep
+  ran — so the sweep refetches, replays its own commit onto the head that beat
+  it as a three-way pick, re-runs its containment and the project's card lint
+  on the replayed result, and pushes once more. A conflict is the honest answer
+  to two edits of one card and ends the retry; a second rejection records the
+  miss exactly as the first did. One retry, bounded to the card directory,
+  never a loop. The stamp carries `pushAttempts` and, when a replay ran,
+  `replay` with the head it replayed onto and what came of it.
 - **Reconciliation judgment** (ADR-0026): a fresh-context seat judges
   whether the shipped diff implements or contradicts any decision record.
   Owed writes a reconciliation ticket and stamps `reconciliation-judged`;
@@ -794,6 +817,30 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   `finding-ack` / `finding-ack-revoked` pairs in the instance ledger so a
   restart clears none, and end one at a time through `olympusctl revoke`,
   which carries the fix it stands on (ADR-0032).
+- **A gate that judges the world can be acknowledged** (ADR-0062). Three checks
+  state a judgment the harness formed about the world rather than a refusal the
+  world gave: the credential-surface sweep, which reads a declaration the run
+  pinned at launch against the surfaces as they now stand; a credential probe,
+  which reports what a project-declared command made of a value; and the
+  substrate probe, which infers a broken host from two loopback families. Each
+  offers `ack` with a required written reason, records `gate-acknowledged`
+  against the run, and lets the run past. The check still runs and still
+  records, and the read that was walked past names the acknowledgment's seq. An
+  ack stands for that run and that gate alone — it ends with the run and covers
+  no other gate — which is what separates it from a standing finding
+  acknowledgment. Every other provisioning gate reports something the world
+  refused to do, and an ack cannot perform an action that did not happen, so
+  none of them offers it. `WORLD_GATES` in `src/lanes/shared.mjs` is the whole
+  scope rule, and a structural test holds the set against the park sites.
+- **A run can adopt a project config that exists** (ADR-0061). `olympusctl
+  reconfigure --run <id> [--blob <sha>] --reason <text>` repins one open run:
+  the daemon resolves the config on the default branch at the time of the
+  command, or the blob named, parses it before anything is stamped, and writes
+  `run-reconfigured`. Replay applies the newest one over the launch value, so
+  the launch record stays true and the current pin is derivable from the ledger
+  alone. The run re-enters no stage; it continues where it stands. This is the
+  answer at a gate whose config is stale — the alternative was editing
+  `run-launched` by hand, which works and falsifies the run's own history.
 - **A retry on a blocked stage meets the repair** (ADR-0055). A `stage-blocked`
   park is the class the run cannot repair itself, and the repair lands on the
   default branch. An answer that is not `abandon` therefore brings the run's
@@ -959,6 +1006,14 @@ remove and reddens nothing, and no other reading here can see it. The band is a
 floor, and it ships at nought, which no share can fall below: the honest floor
 is what a project actually carries when its declarations hold, and that is
 measured over ten narrowed cycles before the value is set.
+
+Two standing tripwires watch the operator rather than the machine, and both are
+armed on every project because the levers they count are on every project: gate
+acknowledgments over the last ten runs (ADR-0062), and runs that replaced the
+project config they launched under, over the same window (ADR-0061). Each band
+is one in ten. One is an exception — a gate that was wrong once, a config that
+moved under a long run. Two is a habit, and a habit has a repair: the gate to
+fix, or whatever writes a config the runs cannot use.
 
 One standing tripwire watches a trade rather than a defect: fast-path escapes
 over the last ten ships of the project it reads (ADR-0056). Two of them breach,

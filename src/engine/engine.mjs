@@ -23,6 +23,7 @@ import {
 import { OWNER_EVENTS, settleOwnedLoud } from '../ledger/resolution.mjs';
 import { recoverOpenAttempts } from '../ledger/attempts.mjs';
 import { checkAnswer, runParkForms } from '../ledger/parks.mjs';
+import { ACK_OPTION } from '../ledger/acks.mjs';
 import { runLedgerPath, archivedRunLedgerPath } from '../daemon/home.mjs';
 import { openRunStore, archiveRun } from '../telemetry/stores.mjs';
 import { stagePulse, PULSE_INTERVAL_MS } from '../telemetry/heartbeat.mjs';
@@ -424,7 +425,8 @@ export class RunEngine {
       return;
     }
     if (directive.park) {
-      const { type, question, options, text, refs, reason, detail, acks } = directive.park;
+      const { type, question, options, text, reasoned, refs, reason, detail, acks, gate } =
+        directive.park;
       if (!PARK_TYPES.has(type)) {
         this.stampViolation(run, `park type not in the catalog: ${type}`);
         return;
@@ -440,7 +442,15 @@ export class RunEngine {
         this.stampViolation(run, `park at ${run.stage} declares no answer form`);
         return;
       }
-      this.park(run, { type, question, options, text, refs, reason, detail, acks });
+      // The two acknowledgment rules are disjoint by design and the record has
+      // to say which one governs. A park naming both would be answered `ack`
+      // and leave nobody able to say whether the run went past on a standing
+      // finding acknowledgment or on this operator's written reason (ADR-0062).
+      if (acks && gate) {
+        this.stampViolation(run, `park at ${run.stage} declares both an ack set and a world gate`);
+        return;
+      }
+      this.park(run, { type, question, options, text, reasoned, refs, reason, detail, acks, gate });
       return;
     }
     if (directive.close) {
@@ -534,17 +544,22 @@ export class RunEngine {
   // `acks` says what one of those options will record: the findings an `ack`
   // answer acknowledges, by fingerprint. It sits on the record so the daemon
   // writes the acks from the record and from nothing else (ADR-0032).
-  park(run, { type, question, options, text, refs, reason, detail, acks }) {
+  //
+  // `gate` is the other thing an `ack` can answer: the check of a gate that
+  // states a judgment about the world. It sits on the record for the same
+  // reason, and the engine writes `gate-acknowledged` from it (ADR-0062).
+  park(run, { type, question, options, text, reasoned, refs, reason, detail, acks, gate }) {
     run.parked = true;
     const line = run.store.append('park', {
       actor: ACTOR,
       type,
       question,
-      answers: runParkForms({ options, text }),
+      answers: runParkForms({ options, text, reasoned }),
       ...(refs && { refs }),
       ...(reason && { reason }),
       ...(detail && { detail }),
       ...(acks && { acks }),
+      ...(gate && { gate }),
       gist: gist(`${type}: ${question}`),
     });
     run.parkRecord = line;
@@ -570,12 +585,26 @@ export class RunEngine {
     // The record is the authority on its own answer forms, and the refusal
     // quotes them, so a rejected answer never sends the operator to the source.
     checkAnswer(run.parkRecord, { option, answer });
+    const record = run.parkRecord;
     run.store.append('answer', {
       actor,
       parkSeq: run.parkSeq,
       ...(option !== undefined && { option }),
       ...(answer !== undefined && { answer }),
     });
+    // The acknowledgment behind the answer, stamped before the run resumes on
+    // it: the gate the operator walked the run past, and the reason they gave.
+    // Derived from the record and from the answer alone, so the site that
+    // raised the gate is not needed and a restart changes nothing (ADR-0062).
+    if (option === ACK_OPTION && typeof record.gate === 'string') {
+      run.store.append('gate-acknowledged', {
+        actor,
+        gate: record.gate,
+        parkSeq: run.parkSeq,
+        stage: run.stage,
+        reason: answer,
+      });
+    }
     run.lastAnswer = { actor, option, answer };
     run.parked = false;
     run.parkRecord = null;
@@ -586,6 +615,61 @@ export class RunEngine {
     // standing at and the resumed stage runs at the release (ADR-0040).
     if (this.runHeld(run)) this.holdAt(run, run.stage, { resumed: true });
     else this.executeStage(run);
+  }
+
+  /**
+   * Replaces the project config one open run judges against, and records who
+   * did it and why.
+   *
+   * A launch pins the config blob on `run-launched`, and every stage of the run
+   * reads that pin. That is what makes a run reproducible, and it is also what
+   * leaves a run judging the world against a config nobody holds any more: a
+   * gate reading a retired declaration parks, `retry` re-reads the same blob and
+   * parks again, and `abandon` throws away everything the run earned. The
+   * honest third answer is this one — the run adopts a config that exists, in
+   * writing, on the record (ADR-0061).
+   *
+   * The run does not re-enter any stage. It continues where it stands, so a
+   * parked run stays parked and clears on the answer that follows, and a run
+   * between stages enters the next one with the new pin. A stage already in
+   * flight keeps the config it loaded and reads the new blob at its next load,
+   * which is why the stamp records the stage and whether the run was parked:
+   * an operator who wants the change to land on a boundary reconfigures a
+   * parked or held run.
+   * @param {{runId: string, actor: string, configBlob: string, reason: string,
+   *   source?: string}} cmd `source` says where the blob came from — the
+   *   default branch at command time, or a blob the operator named.
+   */
+  reconfigure({ runId, actor, configBlob, reason, source }) {
+    const run = this.runs.get(runId);
+    if (!run || run.closed) throw new Error(`no open run: ${runId}`);
+    if (typeof actor !== 'string' || actor.length === 0) {
+      throw new Error('a reconfigure requires an actor');
+    }
+    if (typeof configBlob !== 'string' || configBlob.length === 0) {
+      throw new Error('a reconfigure requires the config blob it pins');
+    }
+    // The reason is required and it is refused empty. The whole worth of this
+    // event to a later reader is the sentence that says why a run stopped
+    // judging against the config it launched under.
+    if (typeof reason !== 'string' || reason.trim().length === 0) {
+      throw new Error('a reconfigure carries the reason for it (--reason)');
+    }
+    const from = run.payload.configBlob ?? null;
+    if (from === configBlob) {
+      throw new Error(`run ${runId} already reads config blob ${configBlob}`);
+    }
+    const line = run.store.append('run-reconfigured', {
+      actor,
+      configBlob,
+      ...(from && { from }),
+      reason,
+      ...(source && { source }),
+      stage: run.stage,
+      parked: run.parked,
+    });
+    run.payload.configBlob = configBlob;
+    return line;
   }
 
   /**

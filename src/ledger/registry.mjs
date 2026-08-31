@@ -93,6 +93,17 @@ export function assertProbeRefusal(refusal) {
 export const RUN_EVENTS = new Set([
   // run lifecycle
   'run-launched',
+  // The project config this run judges against, replaced while the run is
+  // open: the blob it now reads, the blob it read before, the operator and the
+  // reason they gave. A launch pins the config on `run-launched` and every
+  // stage reads that pin, so a run whose pin predates a deliberate change
+  // judges the world against a config nobody holds any more and no answer at
+  // any gate can move it. Replay applies the newest of these over the launch
+  // value, so the launch record stays true, the current pin is derivable from
+  // the ledger alone, and nobody has to edit `run-launched` to clear a run —
+  // which is the operation this event replaces, and which falsified three
+  // ledgers before it existed (ADR-0061).
+  'run-reconfigured',
   'stage-entered',
   // The stage that settled while an operator hold stood, and the stage the run
   // did not enter behind it. A hold interrupts nothing: the running stage keeps
@@ -161,6 +172,14 @@ export const RUN_EVENTS = new Set([
   'adversary-wave',
   'survivor-disposition',
   'red-state-check',
+  // The project's own declared-ground check, run over the suite as a seat left
+  // it and before anything is committed or frozen: green, red, or unrun. A
+  // suite file that declares no ground is a lost skip and nothing more, but the
+  // check that finds it runs after the freeze today, where the file is frozen
+  // and the repair costs a re-freeze and a second verdict. This is the same
+  // check at the moment the seat that wrote the file is still live. A project
+  // that names no ground command stamps nothing, exactly as before (ADR-0060).
+  'ground-check',
   'freeze',
   // A launch that inherited a prior run's freeze instead of deriving one.
   // A resumed run never stamps `freeze`: it did not earn one.
@@ -317,6 +336,15 @@ export const RUN_EVENTS = new Set([
   // escalation
   'park',
   'answer',
+  // One gate answered `ack`: the operator's written statement that the gate is
+  // wrong about the world, and the run's authority to go past it. It names the
+  // gate, the park it answers, the stage the run stood in, and the reason,
+  // which is required. Quiet, because a person decided and the run does what
+  // they said — but never silent, because a check the run did not satisfy let
+  // it through, and the count of these is what says whether a gate is being
+  // repaired or merely acknowledged. Only a gate that states a JUDGMENT the
+  // harness formed about the world offers it (ADR-0062).
+  'gate-acknowledged',
   'resume',
   // The run's tree, brought to the default branch head for one answered
   // `stage-blocked` park: the park it belongs to, the branch, the sha the tree

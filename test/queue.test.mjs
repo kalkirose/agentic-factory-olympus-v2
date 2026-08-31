@@ -57,10 +57,16 @@ test('parks and breaches join the queue and leave on answer / resolve', (t) => {
   assert.equal(runEntry.question, 'Decide the scope of s1.');
   // Every queue item carries the record's own answer forms (ADR-0029); a park
   // written before the declaration existed derives them.
-  assert.deepEqual(runEntry.answers, { options: ['narrow', 'wide', 'abandon'], text: null });
+  assert.deepEqual(runEntry.answers, {
+    options: ['narrow', 'wide', 'abandon'],
+    text: null,
+    // No option here takes the text as well; a world gate's ack does (ADR-0062).
+    reasoned: [],
+  });
   assert.deepEqual(queue.find((e) => e.card === 'stories/s2.md').answers, {
     options: ['abandon'],
     text: 'your answer',
+    reasoned: [],
   });
   assert.equal(openCardParks(paths).length, 1);
 

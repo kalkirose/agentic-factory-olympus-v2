@@ -3938,3 +3938,90 @@ test('a project that declares no card lint sweeps as it always did', async (t) =
   assert.equal(sweep.lint, 'undeclared');
   assert.ok(!fx.calls.find((c) => c.seat === 'card-sweep').prompt.includes('card lint'));
 });
+
+// -- the card sweep absorbs one race (ADR-0063) ------------------------------
+
+const HUMAN_CARD = `---
+key: beta-1
+title: Beta
+---
+
+A card a person landed while the sweep ran.
+`;
+
+/**
+ * A card-sweep seat that lands a human commit on the fixture origin the first
+ * time it runs, so the sweep's own push meets a branch that moved under it.
+ */
+function racingSweep(origin, files) {
+  let raced = false;
+  return () => {
+    if (!raced) {
+      raced = true;
+      commitTree(origin(), files, 'a person edits a card');
+    }
+    return {
+      files: { 'stories/alpha.md': `${DEFAULT_CARD}\n<!-- swept -->\n` },
+      report: { updatedCards: ['stories/alpha.md'], invalidated: [], summary: 'swept' },
+    };
+  };
+}
+
+test('a card push that loses a race is replayed onto the new head and lands', async (t) => {
+  let fx;
+  fx = shipFixture(t, {
+    ...LINTED,
+    seats: { 'card-sweep': racingSweep(() => fx.origin, { 'stories/beta.md': HUMAN_CARD }) },
+  });
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const sweep = events.find((e) => e.event === 'card-sweep');
+  assert.equal(sweep.ok, true);
+  assert.equal(sweep.pushed, true);
+  // Two pushes: the first lost the race, the second carried the replay.
+  assert.equal(sweep.pushAttempts, 2);
+  assert.equal(sweep.replay.ok, true);
+  assert.equal(sweep.replay.lint, 'green');
+  assert.equal(sweep.replay.onto, gitSync(['rev-parse', 'HEAD~1'], fx.origin).trim());
+  // Both edits are on the branch: the sweep's cards, and the person's.
+  assert.match(gitSync(['show', 'main:stories/alpha.md'], fx.origin), /<!-- swept -->/);
+  assert.match(gitSync(['show', 'main:stories/beta.md'], fx.origin), /a person landed/);
+});
+
+test('a replay that conflicts with the edit that beat it records the miss', async (t) => {
+  // The person wrote the same card the sweep wrote. A three-way replay says so
+  // rather than taking their line back in silence, and the sweep stops there.
+  let fx;
+  fx = shipFixture(t, {
+    ...LINTED,
+    seats: {
+      'card-sweep': racingSweep(() => fx.origin, {
+        'stories/alpha.md': `${DEFAULT_CARD}\n<!-- a person wrote this -->\n`,
+      }),
+    },
+  });
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  // The story shipped. A sweep miss never un-ships one.
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const sweep = events.find((e) => e.event === 'card-sweep');
+  assert.equal(sweep.ok, true);
+  assert.equal(sweep.pushed, false);
+  assert.equal(sweep.pushAttempts, 2);
+  assert.equal(sweep.replay.ok, false);
+  assert.match(sweep.replay.cause, /conflicts in stories\/alpha\.md/);
+  assert.match(sweep.error, /the replay onto \w+ did not land/);
+  // The person's card stands, whole, and the branch is where they left it:
+  // there was no third attempt.
+  const head = gitSync(['show', 'main:stories/alpha.md'], fx.origin);
+  assert.match(head, /a person wrote this/);
+  assert.ok(!head.includes('<!-- swept -->'));
+  assert.equal(
+    gitSync(['log', '-1', '--format=%s', 'main'], fx.origin).trim(),
+    'a person edits a card',
+  );
+});
