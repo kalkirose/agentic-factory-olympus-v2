@@ -66,9 +66,28 @@ export function openRuns(paths) {
     if (events.length === 0) continue;
     const state = deriveRunState(events);
     if (state.closed) continue;
-    runs.push({ runId: entry.name, ...state, cost: runCost(events) });
+    runs.push({
+      runId: entry.name,
+      ...state,
+      cost: runCost(events),
+      carryShare: lastCarryShare(events),
+    });
   }
   return runs;
+}
+
+/**
+ * The carried share of the run's last rendered verdict, or null before one.
+ * It is what the cycles of this run are buying: a run whose share has fallen
+ * to nothing is re-running every part of every layer, which costs hours and
+ * turns nothing red (ADR-0058).
+ */
+function lastCarryShare(events) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.event === 'verdict-rendered' && typeof e.carryShare === 'number') return e.carryShare;
+  }
+  return null;
 }
 
 /** The status page: chips, loud strip, queue, runs, projects. */
@@ -120,8 +139,15 @@ export function renderStatus(paths) {
     ];
     const budget = run.payload?.budget;
     const spend = `$${run.cost.toFixed(2)}${typeof budget === 'number' ? ` of $${budget.toFixed(2)}` : ''}`;
+    // The carry, on the one stage that spends it. A run in verdict is a run
+    // paying for gate layers by the hour, and this is the share of that work
+    // its last cycle did not have to do (ADR-0058).
+    const carry =
+      run.stage === 'verdict' && typeof run.carryShare === 'number'
+        ? ` · carry ${Math.round(run.carryShare * 100)}%`
+        : '';
     lines.push(
-      `  ${run.runId} ${run.lane} @ ${run.stage} · ${spend}` +
+      `  ${run.runId} ${run.lane} @ ${run.stage} · ${spend}${carry}` +
         `${flags.length > 0 ? ` [${flags.join(', ')}]` : ''}`,
     );
   }

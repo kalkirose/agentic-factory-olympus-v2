@@ -135,6 +135,30 @@ test('the fast path is off unless a project says otherwise, in a boolean', () =>
   }
 });
 
+test('a project may declare the ground no suite of it reads', () => {
+  // ADR-0059. A third list, and a third claim. Absent is the empty list, which
+  // is the behaviour every project had before the field existed.
+  assert.equal(withProjectDefaults(valid()).gates.groundlessPaths, undefined);
+  const declared = valid();
+  declared.gates.groundlessPaths = ['docs', '.olympus/cards/**'];
+  assert.deepEqual(validateProjectConfig(declared), []);
+  assert.deepEqual(withProjectDefaults(declared).gates.groundlessPaths, [
+    'docs',
+    '.olympus/cards/**',
+  ]);
+  // Path entries, in the same vocabulary as every other path section.
+  for (const bad of ['docs', [''], [2], {}]) {
+    const wrong = valid();
+    wrong.gates.groundlessPaths = bad;
+    assert.deepEqual(errorPaths(wrong), ['gates.groundlessPaths'], JSON.stringify(bad));
+  }
+  // It is its own field and not the ship path's. Declaring one says nothing
+  // about the other, and the two readers never consult each other's list.
+  const one = valid();
+  one.gates.groundlessPaths = ['docs'];
+  assert.equal(withProjectDefaults(one).gates.inertGround, undefined);
+});
+
 test('duplicate layer names and tripwire ids are refused', () => {
   const config = valid();
   config.gates.tier1.push({ name: 'lint', command: 'lint' });

@@ -139,7 +139,8 @@ Two levels; the ownership test decides placement.
   request's diff is measured against (`labels`), the workflow files the daemon
   watches on the default branch (`watchedWorkflows`), the tripwire registry,
   the optional close-out extras (`closeout`), the gate layers that may hold
-  the machine together (`gates.concurrencyGroups`), and whether a run's
+  the machine together (`gates.concurrencyGroups`), the ground the project
+  states no suite of it reads (`gates.groundlessPaths`), and whether a run's
   commands are offered a cache directory (`runCache`).
   The daemon reads it from `main` in its bare clone at each run launch, so
   config changes ship through the same PR path as the code they describe.
@@ -375,6 +376,25 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   sweep refuses a result that carried anything, so the cycle whose green ships
   runs every part at its own sha. `gates.partTargeting: false` returns every
   layer to a whole re-run per cycle.
+- **The cycle records what it skipped and why** (ADR-0058). Every part a
+  planned layer ran carries one word of a closed five: `touched`, `undeclared`,
+  `blind`, `not-green`, `no-record`. A defect of the mapping outranks an honest
+  reason, so an undeclared part reads `undeclared` and not the red it also was.
+  A carried part carries no reason, only its provenance. Up to three changed
+  paths the plan could attribute to no part ride the `layer-result` and the
+  verdict record, because those paths are why every part of that layer ran. The
+  verdict record and the `verdict-rendered` event state `partsRun`,
+  `partsCarried` and `carryShare` over the whole cycle, and `olympusctl status`
+  prints the last share on the line of every run standing in the verdict stage.
+  A confirmation sweep and a full spectrum run every part by design, so neither
+  gives any part a reason.
+- **Ground no suite reads** (ADR-0059). `gates.groundlessPaths` names the path
+  entries the project states no test suite of it opens. A verdict cycle drops
+  them out of its diff before the blind test and before any part is matched, so
+  a change confined to them neither blinds the cycle nor reaches a part. It is
+  a different list from `gates.inertGround` and answers a different question at
+  a different moment; neither is derived from the other, and each entry of each
+  is proven by the project's own read sweep rather than asserted.
 - **A command's output is a file; the tail is the summary** (ADR-0043). Every
   command the harness runs streams its whole output to a file while it runs —
   a layer attempt, the suite, the lint, a replay probe. A caller with a run
@@ -931,6 +951,14 @@ worst run of the last five judged, and the longest ship-token queue wait of the
 last five runs that queued. All four were set from the ledgers that showed the
 condition, and all take the machinery's ordinary escalation — a queued breach,
 open until a human answers it (ADR-0010).
+
+One standing tripwire watches a number for falling rather than for rising: the
+mean carried share of the last ten verdict cycles that narrowed (ADR-0058). A
+part-level carry that quietly stops happening costs the hours it was built to
+remove and reddens nothing, and no other reading here can see it. The band is a
+floor, and it ships at nought, which no share can fall below: the honest floor
+is what a project actually carries when its declarations hold, and that is
+measured over ten narrowed cycles before the value is set.
 
 One standing tripwire watches a trade rather than a defect: fast-path escapes
 over the last ten ships of the project it reads (ADR-0056). Two of them breach,

@@ -796,29 +796,45 @@ test('a repair that reaches one part re-runs that part alone; the final cycle ru
     // cycle before it carried.
     ['alpha', 'beta', 'gamma'],
   ]);
-  // The red record states the carry, so no green in it is silent.
+  // The red record states the carry, so no green in it is silent, and every
+  // part it ran says why it ran (ADR-0058). Both reds re-run whatever the diff
+  // says, so both read `not-green` and neither reads `touched`.
   const record2 = readRecord(fx.paths, runId, 2);
   assert.deepEqual(
     record2.spectrum.find((r) => r.layer === 'acceptance').parts,
     [
-      { name: 'alpha', status: 'green', mode: 'run' },
-      { name: 'gamma', status: 'red', mode: 'run' },
+      { name: 'alpha', status: 'green', mode: 'run', reason: 'not-green' },
+      { name: 'gamma', status: 'red', mode: 'run', reason: 'not-green' },
       { name: 'beta', status: 'green', mode: 'carried', carriedFrom: 1 },
     ],
   );
+  // The share of the cycle's part work the cycle did not do, on the record and
+  // on the event the metric reads.
+  assert.deepEqual(
+    [record2.partsRun, record2.partsCarried, record2.carryShare],
+    [2, 1, 0.333],
+  );
+  const render2 = events.find((e) => e.event === 'verdict-rendered' && e.cycle === 2);
+  assert.deepEqual([render2.partsRun, render2.partsCarried, render2.carryShare], [2, 1, 0.333]);
   // The repair seat reads the same fact on the layer's own line.
   const repair2 = fx.calls.find((c) => c.label === 'repair-dev-2');
   assert.ok(
     repair2.prompt.includes('- acceptance: red (1 of 3 parts carried from cycle 1, not re-run)'),
     repair2.prompt,
   );
-  // The green record rests on nothing carried.
+  // The green record rests on nothing carried. The sweep runs every part by
+  // design, so no part of it owes a reason and its share is nought.
   const record3 = readRecord(fx.paths, runId, 3);
   assert.equal(record3.verdict, 'green');
   assert.deepEqual(
-    record3.spectrum.find((r) => r.layer === 'acceptance').parts.map((p) => p.mode),
-    ['run', 'run', 'run'],
+    record3.spectrum.find((r) => r.layer === 'acceptance').parts.map((p) => [p.mode, p.reason]),
+    [
+      ['run', undefined],
+      ['run', undefined],
+      ['run', undefined],
+    ],
   );
+  assert.deepEqual([record3.partsRun, record3.partsCarried, record3.carryShare], [3, 0, 0]);
 });
 
 test('a diff that touches a path no part claims re-runs every part', async (t) => {
@@ -871,12 +887,23 @@ test('a diff that touches a path no part claims re-runs every part', async (t) =
     // no layer at all.
     ['alpha', 'beta', 'gamma'],
   ]);
-  assert.deepEqual(
-    events
-      .filter((e) => e.event === 'layer-result' && e.cycle === 2 && e.layer === 'acceptance')
-      .flatMap((e) => e.parts.filter((p) => p.carriedFrom !== undefined)),
-    [],
+  const cycle2 = events.filter(
+    (e) => e.event === 'layer-result' && e.cycle === 2 && e.layer === 'acceptance',
   );
+  assert.deepEqual(cycle2.flatMap((e) => e.parts.filter((p) => p.carriedFrom !== undefined)), []);
+  // The saving the lockfile cost is on the record, with the path that cost it
+  // (ADR-0058). Before this the whole decision was silent.
+  assert.deepEqual(cycle2.at(-1).blindPaths, ['package-lock.json']);
+  assert.deepEqual(
+    cycle2.at(-1).parts.map((p) => [p.name, p.reason]),
+    [
+      ['alpha', 'blind'],
+      ['beta', 'blind'],
+      ['gamma', 'blind'],
+    ],
+  );
+  const render2 = events.find((e) => e.event === 'verdict-rendered' && e.cycle === 2);
+  assert.deepEqual([render2.partsRun, render2.partsCarried, render2.carryShare], [3, 0, 0]);
 });
 
 test('gates.partTargeting false runs every layer whole, whatever its parts say', async (t) => {

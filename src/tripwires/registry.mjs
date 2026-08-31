@@ -114,6 +114,23 @@ export const TRIPWIRE_METRICS = {
     defaultWindow: 5,
     defaultTriggers: ['verdict-rendered', 'run-closed'],
   },
+  // The mean carried share of the last N verdict cycles that narrowed: how
+  // much of the part work of a cycle the cycle did not have to do (ADR-0058).
+  // It reads the targeted cycles alone. A first cycle has nothing to carry
+  // from and a confirming cycle runs everything on purpose, so counting either
+  // would read the design as a decay.
+  //
+  // The band is a FLOOR, which makes this the one metric here that is watched
+  // for falling. Every other reading in this table is a count of something
+  // wrong; this one is a count of something right, and its failure mode is
+  // that it quietly stops happening. A family that loses its input
+  // declaration re-runs for ever and reddens nothing, so no other metric in
+  // this table can see it.
+  'carry-share-window': {
+    unit: 'verdicts',
+    defaultWindow: 10,
+    defaultTriggers: ['verdict-rendered'],
+  },
 };
 
 export const BREACH_OPS = new Set(['>', '>=', '<', '<=']);
@@ -227,6 +244,23 @@ export function standingTripwires() {
       answer:
         'read the peaks the layer recorded: a memory that climbs every run ' +
         'reaches its ceiling on a run nobody picked',
+    },
+    {
+      id: 'carry-share-floor',
+      metric: 'carry-share-window',
+      window: 10,
+      // Zero, which no share can fall below, so this entry cannot fire. That
+      // is deliberate and it is temporary. The honest floor is the share the
+      // project actually holds when its declarations are sound, and nobody
+      // knows that number until ten narrowed cycles have been measured under
+      // this metric; a floor guessed before them would either cry on every
+      // ordinary red run or sit under every decay it exists to catch. The
+      // project raises this one value in its own registry once the ten cycles
+      // are on the ledger.
+      breach: { op: '<', value: 0 },
+      answer:
+        'read the part reasons of the last cycles: a carry share this low is ' +
+        'an input declaration that went missing, not a repair that got wider',
     },
   ];
 }

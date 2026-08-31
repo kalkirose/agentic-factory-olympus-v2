@@ -787,6 +787,12 @@ export async function fastPathDecision(base, events, { fromSha, toSha, mainSha }
     commands: base.config.commands ?? {},
     testPaths: base.testPaths ?? [],
     breadth: base.config.gates.breadthGround ?? [],
+    // `inertGround` and NOT `gates.groundlessPaths`. This is the only reader
+    // of `inertGround`, and it asks one question: may the default branch move
+    // this file while a certified ship keeps its certification? The other list
+    // answers a different question at a different moment: may a change to this
+    // file reach a test suite? Only `src/lanes/parts.mjs` reads that one, and
+    // neither list is derived from the other (ADR-0056, ADR-0059).
     inert: base.config.gates.inertGround ?? [],
     // A record this cannot read throws, and a throw is the internal-error
     // route, which is the full re-verdict.
