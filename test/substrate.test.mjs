@@ -218,7 +218,13 @@ test('a failed probe parks the provisioning gate carrying its own evidence', asy
     },
   });
   assert.equal(directive.park.type, 'provisioning-gate');
-  assert.deepEqual(directive.park.options, ['retry']);
+  // The probe infers a broken host from two families answering differently, so
+  // it can be wrong about a host that publishes on one family by design. That
+  // makes it a gate an operator may acknowledge, in writing (ADR-0062).
+  assert.deepEqual(directive.park.options, ['retry', 'ack']);
+  assert.deepEqual(directive.park.reasoned, ['ack']);
+  assert.equal(directive.park.gate, 'substrate-probe');
+  assert.ok(directive.park.question.includes('Answer "ack" with --text'));
   assert.ok(directive.park.question.includes(`port ${port} (db)`));
   assert.ok(directive.park.question.includes('no loopback family accepted a connection'));
   assert.ok(directive.park.question.includes('before any layer re-run'));
@@ -227,6 +233,36 @@ test('a failed probe parks the provisioning gate carrying its own evidence', asy
   assert.equal(stamp.stack, 'oly-r1');
   assert.deepEqual(stamp.ports, [port]);
   assert.equal(stamp.failures[0].reason, 'unreachable');
+});
+
+test('an acknowledged substrate gate still probes, still records, and stops nothing', async (t) => {
+  const { ctx, events } = fixture(t);
+  const port = await freePort();
+  // The operator's written statement, as the engine records it on the answer.
+  ctx.store.append('gate-acknowledged', {
+    actor: 'console:test',
+    gate: 'substrate-probe',
+    parkSeq: 1,
+    stage: 'verdict',
+    reason: 'the stack publishes on one family by design',
+  });
+  const ack = events().find((e) => e.event === 'gate-acknowledged');
+  const directive = await substrateGate(ctx, {
+    stack: 'oly-r1',
+    composeCommand: COMPOSE,
+    cwd: process.cwd(),
+    io: {
+      run: psRunner(psDocument([{ service: 'db', port }])).run,
+      addresses: ['127.0.0.1'],
+      deadlineMs: DEADLINE,
+    },
+  });
+  // The run goes past the gate, and the host is read and recorded all the same:
+  // what an ack changes is whether the run stops, never what the ledger says.
+  assert.equal(directive, null);
+  const stamp = events().findLast((e) => e.event === 'substrate-probe');
+  assert.equal(stamp.state, 'failed');
+  assert.equal(stamp.acknowledged, ack.seq);
 });
 
 test('a clean probe stamps and lets the route through; a run with no stack asks nothing', async (t) => {

@@ -33,7 +33,19 @@
 // project may publish on one family by design.
 import { createConnection } from 'node:net';
 import { runCommand } from './exec.mjs';
-import { ACTOR, GATE_FORMS, parkDirective } from './shared.mjs';
+import {
+  ACTOR,
+  WORLD_GATE_NOTE,
+  gateAck,
+  parkDirective,
+  runEvents,
+  worldGate,
+} from './shared.mjs';
+
+// The check this gate names. Its park states an inference over a live read —
+// two loopback families given the same bytes — so it can be wrong about a host
+// that publishes on one family for a reason the probe cannot see (ADR-0062).
+const SUBSTRATE_GATE = 'substrate-probe';
 
 // The two loopback families, in the order the evidence names them. A refusal
 // on one of them is not a verdict, so a host that runs one family stays clean.
@@ -75,12 +87,21 @@ export async function substrateGate(ctx, { stack, composeCommand, cwd, io = {} }
   // a host with no compose argv has no stack either. Both leave the route
   // exactly as it was before the probe existed.
   if (!stack || !Array.isArray(composeCommand) || composeCommand.length === 0) return null;
+  const acked = gateAck(runEvents(ctx), SUBSTRATE_GATE);
   const result = await probeSubstrate({ stack, composeCommand, cwd, ...io });
-  ctx.store.append('substrate-probe', { actor: ACTOR, stack, ...result });
-  if (result.state !== 'failed') return null;
+  // The probe runs and its answer is stamped whether or not an acknowledgment
+  // stands. What the ack changes is whether the run stops; the reading of the
+  // host is evidence either way, and the stamp names the ack that let it past.
+  ctx.store.append('substrate-probe', {
+    actor: ACTOR,
+    stack,
+    ...result,
+    ...(result.state === 'failed' && acked && { acknowledged: acked.seq }),
+  });
+  if (result.state !== 'failed' || acked) return null;
   return parkDirective('provisioning-gate', {
-    ...GATE_FORMS,
-    question: gateQuestion(result),
+    ...worldGate(SUBSTRATE_GATE),
+    question: `${gateQuestion(result)}\n${WORLD_GATE_NOTE}`,
   });
 }
 

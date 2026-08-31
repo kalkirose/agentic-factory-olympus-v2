@@ -109,13 +109,19 @@ test('the fast path cannot be turned on without the counter that measures it', (
   // breach condition land together. `gates.fastPathShip` is a cut, and a
   // project that turns it on and names no counter has traded a guarantee with
   // nothing measuring the cost and nothing able to propose the revert.
+  // The two operator levers are armed on every project, because they are on
+  // every project: any world gate can be acknowledged and any run can be
+  // repinned, whatever the config says (ADR-0061, ADR-0062).
   const off = { gates: { tier1: [] }, tripwires: [] };
-  assert.deepEqual(armedTripwires(off), []);
+  assert.deepEqual(
+    armedTripwires(off).map((e) => e.metric),
+    ['gate-acks-window', 'run-reconfigures-window'],
+  );
   const on = { gates: { tier1: [], fastPathShip: true }, tripwires: [] };
   const armed = armedTripwires(on);
   assert.deepEqual(
     armed.map((e) => e.metric),
-    ['fast-path-escapes'],
+    ['fast-path-escapes', 'gate-acks-window', 'run-reconfigures-window'],
   );
   assert.match(armed[0].answer, /gates\.fastPathShip to false/);
   // A project that wrote its own band keeps it: the arming fills a gap, it
@@ -124,6 +130,8 @@ test('the fast path cannot be turned on without the counter that measures it', (
     gates: { tier1: [], fastPathShip: true },
     tripwires: [
       { id: 'mine', metric: 'fast-path-escapes', window: 20, breach: { op: '>', value: 4 }, answer: 'x' },
+      { id: 'acks', metric: 'gate-acks-window', window: 5, breach: { op: '>', value: 0 }, answer: 'y' },
+      { id: 'pins', metric: 'run-reconfigures-window', window: 5, breach: { op: '>', value: 0 }, answer: 'z' },
     ],
   };
   assert.deepEqual(armedTripwires(own), own.tripwires);
@@ -134,7 +142,7 @@ test('the fast path cannot be turned on without the counter that measures it', (
   };
   assert.deepEqual(
     armedTripwires(mixed).map((e) => e.id),
-    ['k', 'fast-path-escapes'],
+    ['k', 'fast-path-escapes', 'gate-acks', 'run-reconfigures'],
   );
 });
 
@@ -1160,4 +1168,124 @@ test('a failing hook never fails the append', (t) => {
   t.after(() => store.close());
   const l = store.append('launch', { actor: 'daemon', runId: 'r1', project: 'p', lane: 'story' });
   assert.equal(l.seq, 1);
+});
+
+// -- the two operator levers (ADR-0061, ADR-0062) ----------------------------
+
+/** A run ledger of one project holding whatever events a test needs after it. */
+function runWith(paths, runId, project, ts, events = []) {
+  writeLedger(runLedgerPath(paths, runId), [
+    line(1, ts, 'run-launched', { project, lane: 'story' }),
+    ...events.map((e, i) => line(2 + i, ts, e.event, e)),
+  ]);
+}
+
+test('gate-acks-window counts the gates walked past, and names them', async (t) => {
+  const paths = home(t);
+  runWith(paths, 'r1', 'p', '2026-08-01T00:00:00Z', [
+    { event: 'gate-acknowledged', gate: 'credential-surface', reason: 'retired surface' },
+  ]);
+  runWith(paths, 'r2', 'p', '2026-08-02T00:00:00Z');
+  runWith(paths, 'r3', 'p', '2026-08-03T00:00:00Z', [
+    { event: 'gate-acknowledged', gate: 'credential-probe:payments', reason: 'stale probe' },
+    { event: 'gate-acknowledged', gate: 'substrate-probe', reason: 'one family by design' },
+  ]);
+  // Another project's acks are not this project's.
+  runWith(paths, 'o1', 'other', '2026-08-04T00:00:00Z', [
+    { event: 'gate-acknowledged', gate: 'substrate-probe', reason: 'theirs' },
+  ]);
+  const all = await evaluateMetric('gate-acks-window', { paths, project: 'p', window: 10 });
+  assert.equal(all.value, 3);
+  assert.equal(all.eligible, true);
+  assert.equal(all.detail.runs, 3);
+  assert.deepEqual(all.detail.gates, [
+    'credential-probe:payments',
+    'credential-surface',
+    'substrate-probe',
+  ]);
+  assert.deepEqual(all.detail.acked.sort(), ['r1', 'r3']);
+  // The window is the last N runs in launch order: the oldest ack leaves it.
+  const narrow = await evaluateMetric('gate-acks-window', { paths, project: 'p', window: 2 });
+  assert.equal(narrow.value, 2);
+  assert.deepEqual(narrow.detail.acked, ['r3']);
+  // A project with no run at all is no reading.
+  const cold = await evaluateMetric('gate-acks-window', { paths, project: 'none', window: 10 });
+  assert.equal(cold.eligible, false);
+});
+
+test('the standing ack band holds one in ten runs and breaches on the second', async (t) => {
+  const paths = home(t);
+  const ledger = openInstanceStore(paths);
+  t.after(() => ledger.close());
+  const watcher = new TripwireWatcher({ paths, ledger });
+  watcher.setRegistry('p', [
+    withTripwireDefaults(standingTripwires().find((e) => e.id === 'gate-acks')),
+  ]);
+  const breaches = () =>
+    readEvents(paths.instanceLedger).filter((e) => e.event === 'tripwire-breach');
+
+  // Nine ordinary runs and one gate somebody was wrong about.
+  for (let i = 1; i <= 9; i++) runWith(paths, `q${i}`, 'p', `2026-08-0${i}T00:00:00Z`);
+  runWith(paths, 'q10', 'p', '2026-08-10T00:00:00Z', [
+    { event: 'gate-acknowledged', gate: 'substrate-probe', reason: 'one family by design' },
+  ]);
+  await watcher.notify('p', { event: 'gate-acknowledged' });
+  assert.deepEqual(breaches(), [], 'one gate in ten runs is an exception');
+
+  // A second one inside the same window is a habit, and the band says so.
+  runWith(paths, 'q11', 'p', '2026-08-11T00:00:00Z', [
+    { event: 'gate-acknowledged', gate: 'substrate-probe', reason: 'again' },
+  ]);
+  await watcher.notify('p', { event: 'gate-acknowledged' });
+  assert.equal(breaches().length, 1);
+  const breach = breaches()[0];
+  assert.equal(breach.tripwire, 'gate-acks');
+  assert.equal(breach.value, 2);
+  assert.match(breach.answer, /a gate to repair/);
+  assert.deepEqual(breach.detail.gates, ['substrate-probe']);
+});
+
+test('run-reconfigures-window counts the runs repinned, never the repins', async (t) => {
+  const paths = home(t);
+  runWith(paths, 'r1', 'p', '2026-08-01T00:00:00Z', [
+    { event: 'run-reconfigured', configBlob: 'aaa', reason: 'first' },
+    { event: 'run-reconfigured', configBlob: 'bbb', reason: 'a correction of the first' },
+  ]);
+  runWith(paths, 'r2', 'p', '2026-08-02T00:00:00Z');
+  const one = await evaluateMetric('run-reconfigures-window', { paths, project: 'p', window: 10 });
+  // One run whose launch pin was wrong, not two faults.
+  assert.equal(one.value, 1);
+  assert.deepEqual(one.detail.repinned, ['r1']);
+  assert.equal(one.detail.runs, 2);
+  const cold = await evaluateMetric('run-reconfigures-window', {
+    paths,
+    project: 'none',
+    window: 10,
+  });
+  assert.equal(cold.eligible, false);
+});
+
+test('the standing repin band breaches on the second run in the window', async (t) => {
+  const paths = home(t);
+  const ledger = openInstanceStore(paths);
+  t.after(() => ledger.close());
+  const watcher = new TripwireWatcher({ paths, ledger });
+  watcher.setRegistry('p', [
+    withTripwireDefaults(standingTripwires().find((e) => e.id === 'run-reconfigures')),
+  ]);
+  const breaches = () =>
+    readEvents(paths.instanceLedger).filter((e) => e.event === 'tripwire-breach');
+  runWith(paths, 'r1', 'p', '2026-08-01T00:00:00Z', [
+    { event: 'run-reconfigured', configBlob: 'aaa', reason: 'the config moved under a long run' },
+  ]);
+  await watcher.notify('p', { event: 'run-reconfigured' });
+  assert.deepEqual(breaches(), []);
+  runWith(paths, 'r2', 'p', '2026-08-02T00:00:00Z', [
+    { event: 'run-reconfigured', configBlob: 'bbb', reason: 'and again' },
+  ]);
+  await watcher.notify('p', { event: 'run-reconfigured' });
+  assert.equal(breaches().length, 1);
+  assert.equal(breaches()[0].tripwire, 'run-reconfigures');
+  assert.match(breaches()[0].answer, /pinning a config its own runs cannot use/);
+  assert.deepEqual(breaches()[0].detail.repinned, ['r1', 'r2']);
 });

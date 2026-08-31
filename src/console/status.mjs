@@ -226,6 +226,9 @@ export function renderQueue(paths, { roadmap } = {}) {
     for (const ack of item.acks ?? []) {
       lines.push(`    ack ${ack.fingerprint} — ${ack.summary}`);
     }
+    // The check an `ack` answer at this gate acknowledges, named before the
+    // operator writes the reason it takes (ADR-0062).
+    if (item.gate) lines.push(`    gate: ${item.gate}`);
     if (item.answers) {
       // Straight off the record: the forms the park declared are the forms the
       // engine will take, so the line an operator reads is the line that works.
@@ -237,6 +240,11 @@ export function renderQueue(paths, { roadmap } = {}) {
       if (item.answers.text) {
         lines.push(`    text: ${item.answers.text}`);
         ways.push('--text "<answer>"');
+      }
+      // An option the record says takes the text as well. Refused without it,
+      // so the line an operator reads has to say so before they try.
+      if (item.answers.reasoned?.length > 0) {
+        lines.push(`    ${item.answers.reasoned.join(' | ')}: takes --option and --text together`);
       }
       lines.push(`    answer: olympusctl answer ${target} ${ways.join(' | ')}`);
     } else {

@@ -46,6 +46,15 @@ export function deriveRunState(events) {
         }
         break;
       }
+      // The pin an operator replaced while the run was open. It lands after
+      // `run-launched` in every ledger that holds one, so the newest wins by
+      // walking the file in order and nothing here has to compare stamps. Only
+      // the config blob moves: a reconfigure states which config the run reads
+      // and nothing else about the run, and every other launch value stays the
+      // fact the launch recorded (ADR-0061).
+      case 'run-reconfigured':
+        state.payload.configBlob = e.configBlob;
+        break;
       case 'stage-entered':
         state.stage = e.stage;
         break;

@@ -347,6 +347,17 @@ function validateStoryLane(lane, commands, err) {
       err('lanes.story.lintCommand', 'must name a key in commands');
     }
   }
+  // The project's own check that every suite file declares the ground that can
+  // change its answer. It runs over the suite as a seat left it, before any
+  // commit and before the freeze (ADR-0060). The argv is the project's, so the
+  // project is what makes it strict: the entry names the strict form of the
+  // check, not the lenient one a gate layer runs. A project that names none
+  // skips the step, which is what every project had before the field existed.
+  if (lane.groundCommand !== undefined) {
+    if (typeof lane.groundCommand !== 'string' || !names[lane.groundCommand]) {
+      err('lanes.story.groundCommand', 'must name a key in commands');
+    }
+  }
   // Adversary waves per round. The lane defaults it, so the entry is only
   // ever a raise; a zero or a fraction would read as a raise and disarm the
   // stage instead, which is why the figure is validated rather than clamped.

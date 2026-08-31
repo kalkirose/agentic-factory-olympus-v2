@@ -131,6 +131,23 @@ export const TRIPWIRE_METRICS = {
     defaultWindow: 10,
     defaultTriggers: ['verdict-rendered'],
   },
+  // Gates an operator walked a run past on their own written authority, over
+  // the last N runs of the project (ADR-0062). The option exists because a gate
+  // can be wrong about the world and `retry` only asks it again; the count
+  // exists because the same option, used often, is a gate nobody is repairing.
+  'gate-acks-window': {
+    unit: 'runs',
+    defaultWindow: 10,
+    defaultTriggers: ['gate-acknowledged'],
+  },
+  // Runs that replaced the project config they launched under, over the last N
+  // runs of the project (ADR-0061). One is a config that moved under a long
+  // run. Several say the launch is pinning a config its own runs cannot use.
+  'run-reconfigures-window': {
+    unit: 'runs',
+    defaultWindow: 10,
+    defaultTriggers: ['run-reconfigured'],
+  },
 };
 
 export const BREACH_OPS = new Set(['>', '>=', '<', '<=']);
@@ -262,23 +279,52 @@ export function standingTripwires() {
         'read the part reasons of the last cycles: a carry share this low is ' +
         'an input declaration that went missing, not a repair that got wider',
     },
+    // The two levers an operator can pull on any project, each with the band
+    // that says it has stopped being an exception. One in ten runs is a gate
+    // that was wrong once. Two is a pattern, and a pattern has a repair.
+    {
+      id: 'gate-acks',
+      metric: 'gate-acks-window',
+      window: 10,
+      breach: { op: '>', value: 1 },
+      answer:
+        'read the gate each ack named: a gate wrong about the world twice in ' +
+        'ten runs is a gate to repair, not one to acknowledge again',
+    },
+    {
+      id: 'run-reconfigures',
+      metric: 'run-reconfigures-window',
+      window: 10,
+      breach: { op: '>', value: 1 },
+      answer:
+        'read the reason each reconfigure carried: a pin replaced twice in ten ' +
+        'runs says the launch is pinning a config its own runs cannot use',
+    },
   ];
 }
 
 /** The metric that measures the one guarantee a project can trade away. */
 const FAST_PATH_METRIC = 'fast-path-escapes';
 
+// The metrics that count an operator walking a run past a check. They are
+// armed on every project, because the levers they count are on every project:
+// any gate that states a judgment about the world can be acknowledged, and any
+// run can be repinned. A counter that had to be opted into would be absent from
+// exactly the projects nobody is watching (ADR-0061, ADR-0062).
+const LEVER_METRICS = ['gate-acks-window', 'run-reconfigures-window'];
+
 /**
  * The tripwires one project runs under: the registry it wrote, plus the
- * standing fast-path counter when it turned the fast path on and did not name
- * one itself.
+ * standing counters the harness arms on its behalf.
  *
  * This is the doctrine rule for a gate cut, enforced rather than asked for: a
  * cut names its metric, its watch window and its breach condition in the same
  * change. `gates.fastPathShip` is a cut, and a project that turns it on without
  * the counter has traded a guarantee for speed with nothing measuring what the
  * trade costs and nothing able to propose the revert. The escapes still take
- * the closed kind, and nobody ever reads them.
+ * the closed kind, and nobody ever reads them. The two operator levers are cuts
+ * of the same shape, taken one run at a time rather than declared in a config,
+ * so their counters are armed whatever the config says.
  *
  * The arming is the answer rather than a config refusal, because the flag is
  * opt-in and a refusal would wedge the whole project over it: the launch reads
@@ -289,9 +335,11 @@ const FAST_PATH_METRIC = 'fast-path-escapes';
  * @param {object} config a validated project config
  */
 export function armedTripwires(config) {
-  const entries = config?.tripwires ?? [];
-  if (config?.gates?.fastPathShip !== true) return entries;
-  if (entries.some((entry) => entry.metric === FAST_PATH_METRIC)) return entries;
-  const standing = standingTripwires().find((entry) => entry.metric === FAST_PATH_METRIC);
-  return [...entries, standing];
+  const own = config?.tripwires ?? [];
+  const wanted = [...LEVER_METRICS];
+  if (config?.gates?.fastPathShip === true) wanted.unshift(FAST_PATH_METRIC);
+  const missing = wanted.filter((metric) => !own.some((entry) => entry.metric === metric));
+  if (missing.length === 0) return own;
+  const standing = standingTripwires();
+  return [...own, ...missing.map((metric) => standing.find((entry) => entry.metric === metric))];
 }

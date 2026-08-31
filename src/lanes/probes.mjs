@@ -20,7 +20,15 @@
 import { cloneDir, fetchClone } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 import { runCommand } from './exec.mjs';
-import { ACTOR, GATE_FORMS, commandError, parkDirective } from './shared.mjs';
+import {
+  ACTOR,
+  WORLD_GATE_NOTE,
+  commandError,
+  gateAck,
+  parkDirective,
+  runEvents,
+  worldGate,
+} from './shared.mjs';
 
 /**
  * Checks every credential the project config declares: the declared surfaces
@@ -47,6 +55,15 @@ export async function probeCredentials(
   return null;
 }
 
+// The two gates here, by the check each one names. Both state a judgment about
+// the world rather than a refusal the world gave: the first compares a
+// declaration the run pinned at launch against the surfaces as they now stand,
+// and the second reports what a command the project declared made of a value.
+// Either can be wrong about the world in a way no retry can move, so either
+// takes an acknowledgment (ADR-0062).
+const SURFACE_GATE = 'credential-surface';
+const PROBE_GATE = 'credential-probe';
+
 // -- surface parity ----------------------------------------------------------
 
 /**
@@ -58,6 +75,12 @@ export async function probeCredentials(
 async function surfaceGate(ctx, config, { phase, env, forge, defaultBranch }) {
   const credentials = config.credentials ?? [];
   if (credentials.length === 0) return null;
+  // The operator's standing statement that this gate is wrong about the world.
+  // The sweep runs anyway and every gap it finds is still stamped: what the ack
+  // changes is whether the run stops, never what the ledger says was read
+  // (ADR-0062). It is read once for the whole sweep, because the gate names
+  // every gap in one park and is answered as one.
+  const acked = gateAck(runEvents(ctx), SURFACE_GATE);
   const held = { ...process.env, ...env };
   const wantsCi = credentials.some((credential) => credential.ci);
   const secrets = wantsCi ? await ciSecretNames(forge) : { names: [], read: true };
@@ -91,17 +114,24 @@ async function surfaceGate(ctx, config, { phase, env, forge, defaultBranch }) {
       credential: credential.name,
       ok: missing.length === 0,
       ...(missing.length > 0 && { missing }),
+      // The record of a read that found gaps and stopped nothing names the
+      // acknowledgment that let the run past, so the two never have to be
+      // matched up by hand.
+      ...(missing.length > 0 && acked && { acknowledged: acked.seq }),
     });
     for (const gap of missing) gaps.push({ credential: credential.name, ...gap });
   }
-  if (gaps.length === 0) return null;
+  if (gaps.length === 0 || acked) return null;
   return parkDirective('provisioning-gate', {
-    ...GATE_FORMS,
+    ...worldGate(SURFACE_GATE),
     question:
       `These credential surfaces are not wired, read at the ${phase} gate:\n` +
       gaps.map((gap) => `- ${surfaceLine(gap)}`).join('\n') +
       '\nWire every one of them, then answer to read them again. ' +
-      'The harness writes no secret on any surface.',
+      'The harness writes no secret on any surface.\n' +
+      'A surface list is a declaration the run pinned at launch, so this gate can be ' +
+      'wrong about a surface that was deliberately retired since. ' +
+      WORLD_GATE_NOTE,
   });
 }
 
@@ -207,14 +237,22 @@ async function probeOne(ctx, config, { name, env: variable, probe }, { phase, cw
     );
   }
   if (run.code !== 0) {
-    stamp({ ok: false, reason: 'refused', code: run.code });
+    // Per credential, not per probe run: an acknowledgment of one credential's
+    // probe says nothing about another's, and the key carries the name so it
+    // cannot spread (ADR-0062).
+    const gate = `${PROBE_GATE}:${name}`;
+    const acked = gateAck(runEvents(ctx), gate);
+    stamp({ ok: false, reason: 'refused', code: run.code, ...(acked && { acknowledged: acked.seq }) });
+    if (acked) return null;
     return parkDirective('provisioning-gate', {
-      ...GATE_FORMS,
+      ...worldGate(gate),
       question:
         `The ${name} credential probe answered no at the ${phase} gate: ` +
         `the value in ${variable} does not work (exit ${run.code}). ` +
         'Replace it on this host, run the probe command yourself to confirm, then answer to ' +
-        'probe again. The probe output is not recorded here, because it can carry the credential.',
+        'probe again. The probe output is not recorded here, because it can carry the credential.\n' +
+        'The verdict is the probe command\'s, so this gate is wrong wherever the command is. ' +
+        WORLD_GATE_NOTE,
     });
   }
   stamp({ ok: true });

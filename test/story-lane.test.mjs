@@ -481,6 +481,11 @@ test('a fixture story reaches a valid freeze record with kills and dispositions'
   assert.match(birthPrompt, /name each of those files in the block as a dev-owned entry/);
   assert.match(birthPrompt, /A baseline the block does not name is frozen/);
   assert.match(birthPrompt, /costs a verdict round-trip/);
+  // A project that names no declared-ground command runs no such step and
+  // stamps nothing, which is what every project had before the step existed
+  // (ADR-0060).
+  assert.ok(!events.some((e) => e.event === 'ground-check'));
+  assert.ok(fx.calls.every((c) => !c.prompt.includes('checks the declared ground')));
 });
 
 test('the adversary runs one wave a round, and a survivor still hardens the suite', async (t) => {
@@ -1769,4 +1774,237 @@ ${FIXTURE_ACCEPTANCE}`;
   fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'round half up' });
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+});
+
+// -- the declared-ground check before the freeze (ADR-0060) -------------------
+
+// A project's own declared-ground check, in the smallest honest form: every
+// suite file must name the family whose ground covers it. The check names the
+// files that do not, exactly as a real one names the file and the family.
+const GROUND_SCRIPT =
+  "const fs=require('fs');" +
+  "const files=fs.existsSync('tests')?fs.readdirSync('tests'):[];" +
+  "const bad=files.filter((f)=>!fs.readFileSync('tests/'+f,'utf8').includes('olympus:family'));" +
+  "if(bad.length){console.log('no family: '+bad.join(', '));process.exit(1);}" +
+  "console.log('every suite file has a family');";
+
+const GROUNDED_TEST = `// olympus:family unit\n${STRONG_TEST}`;
+
+function groundConfig(command) {
+  return {
+    commands: { ground: command },
+    lanes: { story: { suiteCommand: 'suite', groundCommand: 'ground' } },
+  };
+}
+
+test('a red declared-ground check re-briefs the suite seat, and nothing is committed behind it', async (t) => {
+  const seats = {
+    ...CLEAN_SEATS,
+    // The first suite file names no family; the corrective round adds it.
+    suite: ({ label }) => ({
+      files: { 'tests/feature.test.mjs': label === 'suite-1' ? STRONG_TEST : GROUNDED_TEST },
+      report: {
+        suiteFiles: ['tests/feature.test.mjs'],
+        reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        summary: 'authored',
+      },
+    }),
+  };
+  const fx = storyFixture(t, {
+    seats,
+    config: groundConfig([process.execPath, '-e', GROUND_SCRIPT]),
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The check ran on the authoring round, went red, and went green on the
+  // round that answered it.
+  const checks = events.filter((e) => e.event === 'ground-check');
+  assert.deepEqual(
+    checks.map((e) => [e.phase, e.result]),
+    [
+      ['author', 'red'],
+      ['author', 'green'],
+    ],
+  );
+  // Nothing was committed behind the red: the commit follows the green.
+  const committed = events.find((e) => e.event === 'suite-committed');
+  assert.ok(committed.seq > checks[1].seq);
+  // The seat that wrote the file was still live, and it was told which file.
+  const attempts = fx.calls.filter((c) => c.seat === 'suite');
+  assert.equal(attempts.length, 2);
+  assert.ok(attempts[1].prompt.includes('no family: feature.test.mjs'));
+  assert.ok(attempts[1].prompt.includes('declared-ground check of this project is red'));
+  // And every suite seat is told the rule before it can break it.
+  assert.ok(attempts.every((c) => c.prompt.includes('checks the declared ground of its suite with')));
+  // The run never reached the seat-failure park: one brief closed it.
+  assert.ok(!events.some((e) => e.event === 'park'));
+});
+
+test('a declared-ground check that cannot run parks the environment, not the seat', async (t) => {
+  const fx = storyFixture(t, {
+    seats: CLEAN_SEATS,
+    config: groundConfig(['olympus-no-such-ground-command']),
+  });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'command-error');
+  assert.equal(park.reason, 'ground-command-error');
+  assert.match(park.question, /could not run, so nothing read the suite/);
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  const check = live.find((e) => e.event === 'ground-check');
+  assert.equal(check.result, 'unrun');
+  assert.equal(check.phase, 'author');
+  assert.ok(check.cause.length > 0);
+  // A host defect is not a defect of the suite: the seat is neither re-briefed
+  // nor blamed, and one invocation is all it cost.
+  assert.ok(!live.some((e) => e.event === 'seat-failure'));
+  assert.equal(fx.calls.filter((c) => c.seat === 'suite').length, 1);
+  assert.ok(!live.some((e) => e.event === 'suite-committed'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
+});
+
+test('the check runs again on the round that hardens the suite', async (t) => {
+  // The authoring round is not the only writer of a suite file. A strengthening
+  // round writes one too, and a check that ran at the authoring round alone
+  // would let that file reach the freeze undeclared.
+  const seats = {
+    ...CLEAN_SEATS,
+    suite: ({ prompt }) =>
+      prompt.includes('scored zero kills')
+        ? {
+            files: { 'tests/feature-kill.test.mjs': GROUNDED_TEST },
+            report: {
+              suiteFiles: ['tests/feature.test.mjs', 'tests/feature-kill.test.mjs'],
+              reds: [{ test: 'f doubles', class: 'feature-absence' }],
+              summary: 'strengthened',
+            },
+          }
+        : {
+            files: { 'tests/feature.test.mjs': GROUNDED_TEST },
+            report: {
+              suiteFiles: ['tests/feature.test.mjs'],
+              reds: [{ test: 'f doubles', class: 'feature-absence' }],
+              summary: 'authored',
+            },
+          },
+    // A wave the suite cannot kill: the round scores zero and the lane
+    // strengthens once.
+    adversary: () => ({
+      files: { 'src/feature.mjs': 'export const f = (x) => 2 * x;\n' },
+      report: { approach: 'correct', wrongness: 'none the suite can see' },
+    }),
+  };
+  const fx = storyFixture(t, {
+    seats,
+    config: groundConfig([process.execPath, '-e', GROUND_SCRIPT]),
+  });
+  const runId = await fx.launch();
+  await waitParked(fx.paths, runId, 'second-zero-kill');
+  const checks = readEvents(runLedgerPath(fx.paths, runId)).filter(
+    (e) => e.event === 'ground-check',
+  );
+  assert.deepEqual(
+    checks.map((e) => [e.phase, e.result]),
+    [
+      ['author', 'green'],
+      ['strengthening', 'green'],
+    ],
+  );
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
+});
+
+// -- acknowledging a gate that judges the world (ADR-0062) -------------------
+
+test('an ack with a reason takes the run past a credential surface gate', async (t) => {
+  // The key works on this host. The CI surfaces the run pinned at launch are
+  // not wired, which is exactly the shape that goes stale: a workflow file
+  // retired after the launch reads as a gap for the life of the run, and no
+  // retry can move it.
+  heldCredential(t, 'live');
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
+  const fx = storyFixture(t, {
+    seats,
+    config: parityConfig(),
+    files: { [WORKFLOW]: UNWIRED_WORKFLOW },
+    ciSecrets: [],
+  });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  assert.deepEqual(park.answers.options, ['retry', 'ack', 'abandon']);
+  assert.deepEqual(park.answers.reasoned, ['ack']);
+  assert.equal(park.gate, 'credential-surface');
+  assert.match(park.question, /Answer "ack" with --text/);
+  // The reason is not optional, and the refusal names the forms.
+  assert.throws(
+    () => fx.daemon.engine.answer({ runId, actor: 'operator', option: 'ack' }),
+    /--option ack takes the reason for it/,
+  );
+
+  fx.daemon.engine.answer({
+    runId,
+    actor: 'console:test',
+    option: 'ack',
+    answer: 'the payments workflow was retired on 2026-08-31',
+  });
+  // The run goes past the gate to the first seat, and the ledger says why.
+  const stalled = await waitParked(fx.paths, runId, 'spec-gate-stalled');
+  assert.ok(stalled.seq > park.seq);
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  const ack = live.find((e) => e.event === 'gate-acknowledged');
+  assert.equal(ack.gate, 'credential-surface');
+  assert.equal(ack.actor, 'console:test');
+  assert.equal(ack.parkSeq, park.seq);
+  assert.equal(ack.stage, 'readiness');
+  assert.match(ack.reason, /retired on 2026-08-31/);
+  // The ack answered that gate and no other: the probe behind it still ran,
+  // and it still had to say yes before the first seat spawned.
+  assert.equal(live.find((e) => e.event === 'credential-probe').ok, true);
+  // The sweep ran again and found the same gap. It recorded it, named the ack
+  // that let the run past, and stopped nothing.
+  const surfaces = live.filter((e) => e.event === 'credential-surface');
+  assert.equal(surfaces.length, 2);
+  assert.equal(surfaces[0].ok, false);
+  assert.equal(surfaces[0].acknowledged, undefined);
+  assert.equal(surfaces[1].ok, false);
+  assert.equal(surfaces[1].acknowledged, ack.seq);
+  // One gate, one park: the acknowledgment stands for the run, so the second
+  // read of the same gate never asked again.
+  assert.equal(live.filter((e) => e.event === 'park' && e.type === 'provisioning-gate').length, 1);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
+});
+
+test('the credential probe gate names the credential it is about', async (t) => {
+  // A probe verdict is the project's own command speaking, so the gate can be
+  // as wrong as the command is. The key carries the credential, so an ack of
+  // one probe is not an ack of another's.
+  heldCredential(t, 'stale');
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
+  const fx = storyFixture(t, {
+    seats,
+    config: {
+      commands: { probe: [process.execPath, '-e', PROBE_SCRIPT] },
+      credentials: [{ name: 'payments', env: PROBE_VAR, probe: 'probe' }],
+    },
+  });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  assert.equal(park.gate, 'credential-probe:payments');
+  assert.deepEqual(park.answers.options, ['retry', 'ack', 'abandon']);
+  fx.daemon.engine.answer({
+    runId,
+    actor: 'console:test',
+    option: 'ack',
+    answer: 'the probe command reads a retired endpoint',
+  });
+  await waitParked(fx.paths, runId, 'spec-gate-stalled');
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  assert.equal(live.find((e) => e.event === 'gate-acknowledged').gate, 'credential-probe:payments');
+  const probes = live.filter((e) => e.event === 'credential-probe');
+  assert.equal(probes.at(-1).ok, false);
+  assert.ok(probes.at(-1).acknowledged > 0);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
 });
