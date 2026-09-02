@@ -294,6 +294,12 @@ export function superviseSeat(
  * the CLI still needs its own auth and system environment to run at all, so
  * this is a strip, never an allowlist. Without patterns the environment is
  * exactly what it was before the feature existed, for every seat.
+ *
+ * The caller's `env` is where a credential read from the machine's store
+ * arrives (ADR-0064). It rides in front of the daemon's own copy and then meets
+ * this rule like every other name: the suite seat keeps it, and a seat that
+ * runs no suite loses it with the rest of the secrets. The daemon's `process.env`
+ * is never written, so a stripped seat cannot reach one through the parent.
  */
 function seatEnv(seat, env, patterns) {
   const base = env ? { ...process.env, ...env } : process.env;

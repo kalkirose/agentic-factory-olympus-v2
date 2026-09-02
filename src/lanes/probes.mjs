@@ -19,6 +19,15 @@
 // carry one (ADR-0027).
 import { cloneDir, fetchClone } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
+import { readEvents } from '../ledger/ledger.mjs';
+import { listRunEvents } from '../telemetry/readers.mjs';
+import {
+  declaredNames,
+  declaredStore,
+  fingerprint,
+  lastFingerprints,
+  readCredentials,
+} from '../daemon/credentials.mjs';
 import { runCommand } from './exec.mjs';
 import {
   ACTOR,
@@ -37,7 +46,9 @@ import {
  * @param {object} config the project config
  * @param {{phase: 'launch'|'ship', cwd: string, env?: object, forge?: object,
  *   defaultBranch?: string}} opts `forge` answers for the CI surface; without
- *   one a declared CI surface reads as unproven rather than as wired.
+ *   one a declared CI surface reads as unproven rather than as wired. `env` is
+ *   the run's own environment; the machine's stored credential values are read
+ *   here and ride in front of it.
  * @returns {Promise<object|null>} a park directive, or null when every check
  *   passed and the caller may spend what comes next
  */
@@ -46,13 +57,68 @@ export async function probeCredentials(
   config,
   { phase, cwd, env, forge = null, defaultBranch = 'main' },
 ) {
-  const gap = await surfaceGate(ctx, config, { phase, env, forge, defaultBranch });
+  const credentials = config.credentials ?? [];
+  if (credentials.length === 0) return null;
+  // The machine's store, read here rather than inherited from the window that
+  // started the daemon. A value the owner replaced an hour ago is the value
+  // this gate asks the service about (ADR-0064). A home that declares no store
+  // reads nothing, records nothing, and the gate holds what it always held.
+  const store = declaredStore(ctx.paths);
+  const fresh = readCredentials(store, declaredNames(config));
+  recordRead(ctx, store, fresh.records);
+  const held = { ...process.env, ...env, ...fresh.values };
+  const gap = await surfaceGate(ctx, config, { phase, held, forge, defaultBranch });
   if (gap) return gap;
-  for (const credential of config.credentials ?? []) {
-    const directive = await probeOne(ctx, config, credential, { phase, cwd, env });
+  for (const credential of credentials) {
+    const directive = await probeOne(ctx, config, credential, {
+      phase,
+      cwd,
+      env: { ...env, ...fresh.values },
+      held,
+    });
     if (directive) return directive;
   }
   return null;
+}
+
+/**
+ * What this read found, against what the instance last recorded.
+ *
+ * A variable whose fingerprint moved stamps one `credential-rotated`: the
+ * password changed on this host, and this is the moment the harness first saw
+ * it. A variable no record covers stamps its fingerprint instead, so the read
+ * after this one has something to compare against. Both are quiet, and a
+ * variable that reads the same as last time stamps nothing at all.
+ */
+function recordRead(ctx, store, records) {
+  if (records.length === 0) return;
+  const known = lastFingerprints(readEvents(ctx.paths.instanceLedger));
+  const unseen = [];
+  for (const record of records) {
+    const to = record.fingerprint ?? null;
+    if (!known.has(record.name)) {
+      unseen.push(record);
+      continue;
+    }
+    const from = known.get(record.name);
+    if (from === to) continue;
+    ctx.instanceStore?.append('credential-rotated', {
+      actor: ACTOR,
+      project: ctx.project,
+      name: record.name,
+      from,
+      to,
+      source: record.source,
+    });
+  }
+  if (unseen.length > 0) {
+    ctx.instanceStore?.append('credential-fingerprints', {
+      actor: ACTOR,
+      project: ctx.project,
+      store: store.kind,
+      variables: unseen,
+    });
+  }
 }
 
 // The two gates here, by the check each one names. Both state a judgment about
@@ -72,16 +138,14 @@ const PROBE_GATE = 'credential-probe';
  * cost the owner a wiring round per surface, and each round ends in the same
  * place as the last.
  */
-async function surfaceGate(ctx, config, { phase, env, forge, defaultBranch }) {
-  const credentials = config.credentials ?? [];
-  if (credentials.length === 0) return null;
+async function surfaceGate(ctx, config, { phase, held, forge, defaultBranch }) {
+  const credentials = config.credentials;
   // The operator's standing statement that this gate is wrong about the world.
   // The sweep runs anyway and every gap it finds is still stamped: what the ack
   // changes is whether the run stops, never what the ledger says was read
   // (ADR-0062). It is read once for the whole sweep, because the gate names
   // every gap in one park and is answered as one.
   const acked = gateAck(runEvents(ctx), SURFACE_GATE);
-  const held = { ...process.env, ...env };
   const wantsCi = credentials.some((credential) => credential.ci);
   const secrets = wantsCi ? await ciSecretNames(forge) : { names: [], read: true };
   const workflowOf = workflowReader(ctx, defaultBranch);
@@ -201,19 +265,25 @@ function surfaceLine(gap) {
 
 // -- the live probe ----------------------------------------------------------
 
-async function probeOne(ctx, config, { name, env: variable, probe }, { phase, cwd, env }) {
+async function probeOne(ctx, config, { name, env: variable, probe }, { phase, cwd, env, held }) {
+  // The value this probe carries, named without being revealed. Every answer
+  // carries it, so a refusal is tied to the exact value the service refused and
+  // a later reader can tell a dead credential from a stale copy (ADR-0064).
+  const mark = fingerprint(held[variable]);
   const stamp = (fields) =>
     ctx.store.append('credential-probe', {
       actor: ACTOR,
       phase,
       credential: name,
       variable,
+      ...(mark !== null && { fingerprint: mark }),
       ...fields,
     });
   // The probe reads the variable out of the environment it is spawned with —
   // the same environment the suite runs with, whole, because a project-config
-  // command keeps every name a seat would lose (ADR-0023). The surface sweep
-  // has already answered for the value's presence.
+  // command keeps every name a seat would lose (ADR-0023), and with the
+  // machine's stored value in front of the inherited copy (ADR-0064). The
+  // surface sweep has already answered for the value's presence.
   //
   // The one command in the harness that writes no output file. Every other
   // caller keeps the stream on disk so a record can point at it (ADR-0043);
@@ -249,6 +319,7 @@ async function probeOne(ctx, config, { name, env: variable, probe }, { phase, cw
       question:
         `The ${name} credential probe answered no at the ${phase} gate: ` +
         `the value in ${variable} does not work (exit ${run.code}). ` +
+        historyLine(ctx, variable, mark) +
         'Replace it on this host, run the probe command yourself to confirm, then answer to ' +
         'probe again. The probe output is not recorded here, because it can carry the credential.\n' +
         'The verdict is the probe command\'s, so this gate is wrong wherever the command is. ' +
@@ -257,4 +328,43 @@ async function probeOne(ctx, config, { name, env: variable, probe }, { phase, cw
   }
   stamp({ ok: true });
   return null;
+}
+
+/**
+ * Which of the two failures this is, in one sentence.
+ *
+ * A refused probe has two causes and they take opposite repairs. Either the
+ * value on this host is the one that passed before, and the service has stopped
+ * accepting it, so the credential itself has to be replaced at the service.
+ * Or the value moved since the last pass, and the new one is refused, so what
+ * was placed on this host is what to look at. The last passing probe of this
+ * variable, in any run of this project, says which (ADR-0064). Nothing before
+ * the first recorded pass, where the park says what it always said.
+ */
+function historyLine(ctx, variable, mark) {
+  const passed = lastPass(ctx, variable);
+  if (passed === null || mark === null) return '';
+  const day = String(passed.ts).slice(0, 10);
+  return passed.fingerprint === mark
+    ? `The stored value is unchanged since it last passed on ${day}; the service now refuses it; ` +
+        'the credential itself needs replacing. '
+    : `The stored value changed since it last passed on ${day}; the new value is refused; ` +
+        'check the value placed on this host. ';
+}
+
+/**
+ * The newest probe of this variable that answered yes, over every run of this
+ * project, live and archived. A pass is a fact about the value and the service,
+ * not about the run that asked, so the run that recorded it does not matter.
+ */
+function lastPass(ctx, variable) {
+  let newest = null;
+  for (const { events } of listRunEvents(ctx.paths, { project: ctx.project })) {
+    for (const e of events) {
+      if (e.event !== 'credential-probe' || e.ok !== true) continue;
+      if (e.variable !== variable || typeof e.fingerprint !== 'string') continue;
+      if (newest === null || e.ts > newest.ts) newest = e;
+    }
+  }
+  return newest;
 }

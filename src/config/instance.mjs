@@ -4,6 +4,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { SEAT_SILENCE_MS } from '../engine/supervise.mjs';
+import { STORE_KINDS } from '../daemon/credentials.mjs';
 
 export const INSTANCE_CONFIG_FILE = 'instance.json';
 
@@ -48,6 +49,16 @@ export function defaultInstanceConfig() {
     // carry — test-mode keys, never live ones. Absent, no credential is
     // probe-eligible and a Tier-1 layer that declares one cannot be replayed
     // (ADR-0042).
+    //
+    // And absent by default: `credentialStore`, where this host keeps the
+    // values of the credentials the projects declare. `{kind:
+    // 'windows-user-env'}` reads the current user's stored environment,
+    // `{kind: 'env-file', path}` reads a dotenv-style file. Named, every
+    // declared value is read from that store at the moment of use, so a
+    // password changed while the daemon runs is seen without a restart.
+    // Absent, the daemon hands out the copy of the environment it inherited
+    // from the window that started it, exactly as it did before the field
+    // existed (ADR-0064).
   };
 }
 
@@ -153,7 +164,39 @@ export function validateInstanceConfig(config) {
     if (!isArgv(config[key])) err(key, 'must be a non-empty argv array of strings');
   }
   if (config.notifier !== undefined) validateNotifier(config.notifier, err);
+  if (config.credentialStore !== undefined) validateCredentialStore(config.credentialStore, err);
   return errors;
+}
+
+/**
+ * Where this host keeps the values of the credentials its projects declare.
+ * One kind, named exactly, because the two kinds read two different places and
+ * a config that named neither cleanly would fall back to the inherited copy
+ * without saying so. That silence is the condition the store exists to end, so
+ * a malformed declaration is refused here rather than honored as an absence
+ * (ADR-0064).
+ */
+function validateCredentialStore(store, err) {
+  if (!isPlainObject(store)) {
+    err('credentialStore', 'must be an object');
+    return;
+  }
+  if (!STORE_KINDS.includes(store.kind)) {
+    err('credentialStore.kind', `must be one of: ${STORE_KINDS.join(', ')}`);
+    return;
+  }
+  if (store.kind === 'env-file') {
+    // Absolute only, for the reason `worktreeRoot` is absolute: the daemon's
+    // working directory belongs to the service manager, so a relative path
+    // would name a different file per start.
+    if (typeof store.path !== 'string' || store.path.length === 0) {
+      err('credentialStore.path', 'required for an env-file store');
+    } else if (!isAbsolute(store.path)) {
+      err('credentialStore.path', 'must be an absolute path');
+    }
+  } else if (store.path !== undefined) {
+    err('credentialStore.path', 'a windows-user-env store names no path');
+  }
 }
 
 /**

@@ -140,6 +140,11 @@ export const RUN_EVENTS = new Set([
   // the ship gate: `ok` carries the answer, and both answers are stamped, so
   // a run always says which credentials it proved and when. The probe's own
   // output is never carried — it can hold the credential (ADR-0027).
+  // `fingerprint` names the value the probe carried, so a refusal is tied to
+  // the exact value the service refused and a later reader can tell a dead
+  // credential from a stale copy of a live one (ADR-0064). It is twelve hex
+  // characters of a hash: it identifies a value, it never reveals one, and it
+  // is absent for a probe that held no value at all.
   'credential-probe',
   // The parity read of one credential at one gate: every surface the project
   // declared for it, answered together. `ok` carries the verdict and `missing`
@@ -371,6 +376,20 @@ export const INSTANCE_EVENTS = new Set([
   // (ADR-0016). Every ordinary exit path stamps `daemon-stopped`, so this
   // event means a death no exit path saw.
   'daemon-crash-detected',
+  // What this instance holds for one project's declared credentials, stamped
+  // at the start and again the first time a gate reads a name no record covers.
+  // `variables` names each declared variable with where its value came from —
+  // the machine's store, the copy the daemon inherited from the window that
+  // started it, or nowhere — and the fingerprint of the value. A count of
+  // `inherited` above zero is a daemon running on a copy that the machine can
+  // no longer confirm (ADR-0064). Absent on a home that declares no store.
+  'credential-fingerprints',
+  // A declared credential whose stored value moved: the fingerprint the
+  // machine now holds differs from the one this instance last recorded.
+  // Quiet and informational. It says a password changed and when the harness
+  // first read the new one, which is what separates "the value on this host is
+  // wrong" from "the service refused a value that never changed" (ADR-0064).
+  'credential-rotated',
   // One defect in the environment this instance's seats will run in, found by
   // the start-time check and stamped once: a runner the host cannot execute, a
   // path its CLI will not trust, a clone whose git cannot hold the harness's

@@ -8,6 +8,7 @@ import { readEvents } from '../ledger/ledger.mjs';
 import { ACK_OPTION } from '../ledger/acks.mjs';
 import { isAbandon } from '../ledger/parks.mjs';
 import { runLedgerPath, runReportPath } from '../daemon/home.mjs';
+import { credentialEnv, declaredNames } from '../daemon/credentials.mjs';
 import {
   DEFAULT_CONSTITUTION_PATH,
   parseProjectConfig,
@@ -49,15 +50,22 @@ export function readConstitution(worktree, config) {
  * The environment every project-config command and every seat of a run is
  * given.
  *
- * Two things ride it. The run's stack env is the same derivation the stack
+ * Three things ride it. The run's stack env is the same derivation the stack
  * rose from at provision, so a host-run suite can find the stack it belongs to
  * (no fixed host ports: the project resolves published ports from the compose
  * project name). The run's cache directory (ADR-0048) is where a command that
  * builds something expensive puts it, so the cycle after this one reuses it;
  * it lives in the worktree and dies with the run, so a new run starts cold.
  *
- * Undefined when the project has no stack and turns the cache off, which is
- * what every caller saw before either existed.
+ * The third is the credentials the project declares, read from the machine's
+ * store at this moment rather than from the copy the daemon inherited when it
+ * started (ADR-0064). They ride last, so the freshest value wins, and they ride
+ * the environment rather than `process.env`, so the seat strip still decides
+ * which seats may hold them. A home that declares no store adds nothing here.
+ *
+ * Undefined when the project has no stack, turns the cache off and declares no
+ * credential the store answers for, which is what every caller saw before any
+ * of the three existed.
  */
 export function runEnv(ctx, config) {
   const stack = config.stack
@@ -67,8 +75,9 @@ export function runEnv(ctx, config) {
     config.runCache !== false && ctx.payload.worktree
       ? { [RUN_CACHE_ENV]: runCacheDir(ctx.payload.worktree) }
       : null;
-  if (!stack && !cache) return undefined;
-  return { ...stack, ...cache };
+  const credentials = credentialEnv(ctx.paths, declaredNames(config));
+  if (!stack && !cache && Object.keys(credentials).length === 0) return undefined;
+  return { ...stack, ...cache, ...credentials };
 }
 
 export function runEvents(ctx) {

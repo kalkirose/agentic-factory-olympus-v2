@@ -51,6 +51,38 @@ export function seatEnvironment(paths) {
   return events.slice(start).filter((e) => e.event === 'seat-environment');
 }
 
+/**
+ * The credential store this instance reads, and what the running instance found
+ * in it: per project, how many declared variables came from the store, how many
+ * fell back to the copy the daemon inherited, and how many nothing holds.
+ *
+ * A count above zero under `inherited` is the condition the store exists to
+ * end: the daemon is working from a copy the machine can no longer confirm, and
+ * it is readable here before any story tries the door (ADR-0064). Null for a
+ * home that declares no store, which prints the status page it always printed.
+ */
+export function credentialStoreState(paths) {
+  const store = readInstanceConfig(paths)?.credentialStore;
+  if (!store) return null;
+  const events = readEvents(paths.instanceLedger);
+  let start = -1;
+  events.forEach((e, i) => {
+    if (e.event === 'daemon-started') start = i;
+  });
+  // This instance's reads alone. A count behind an older start describes a host
+  // that no longer runs the probes.
+  const held = new Map();
+  for (const e of start === -1 ? [] : events.slice(start)) {
+    if (e.event !== 'credential-fingerprints') continue;
+    const counts = held.get(e.project) ?? { project: e.project, store: 0, inherited: 0, absent: 0 };
+    for (const variable of e.variables ?? []) {
+      if (counts[variable.source] !== undefined) counts[variable.source]++;
+    }
+    held.set(e.project, counts);
+  }
+  return { kind: store.kind, projects: [...held.values()] };
+}
+
 /** Open runs with their replayed state, from the run ledgers alone. */
 export function openRuns(paths) {
   const runs = [];
@@ -110,6 +142,16 @@ export function renderStatus(paths) {
       ` · runs ${active} active / ${parked} parked / ${held} held` +
       ` · loud ${loud.length} · queue ${queue.length}`,
   );
+  const credentials = credentialStoreState(paths);
+  if (credentials) {
+    const read = credentials.projects.map(
+      (p) => `${p.project} ${p.store} stored / ${p.inherited} inherited / ${p.absent} absent`,
+    );
+    lines.push(
+      `credential store ${credentials.kind} · ` +
+        (read.length > 0 ? read.join(' · ') : 'no project read at this start'),
+    );
+  }
   lines.push('');
   lines.push(`LOUD (${loud.length} open)`);
   for (const item of loud) {
