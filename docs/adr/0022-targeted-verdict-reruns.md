@@ -1,6 +1,12 @@
 # ADR-0022: Targeted verdict re-runs, carried greens, the confirmation sweep, and progress-keyed cycling
 
 Status: accepted (2026-08-15)
+Superseded in part by ADR-0065: the flake filter is still one red-only re-run
+inside a cycle, and that re-run now asks for the parts and the files the
+replaced attempt failed on rather than for the layer.
+Superseded in part by ADR-0046: the confirmation sweep of a layer whose result
+carried a part runs the carried parts alone and keeps what the cycle ran at
+that sha, instead of running the layer whole.
 
 ## Decision
 

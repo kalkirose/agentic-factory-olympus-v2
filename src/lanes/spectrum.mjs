@@ -6,6 +6,15 @@
 // finding. Reds that survive the re-run are persistent reds — only these
 // enter triage.
 //
+// That re-run asks only what failed. A layer that ran in parts reported which
+// parts went red and, where the command named them, which files inside those
+// parts; the re-run asks for those parts and those files, and the parts that
+// passed ride the second attempt's record as the greens of the attempt that
+// earned them. So the merged record is one complete part table at one sha, and
+// a re-run costs what the failure costs rather than what the layer costs. A
+// layer that named no part re-runs whole, exactly as it always did, and so
+// does a part that named no file.
+//
 // The cycle plan decides which layers run (ADR-0022). The first cycle of an
 // implementation pass has nothing proven, so it runs every layer. A later
 // cycle judges a tree a repair round, a re-freeze, or an operational fix
@@ -19,9 +28,12 @@
 // this cycle must execute, and the parts whose green it may carry. The
 // narrowing is passed to the command in `OLYMPUS_PARTS` and the carried parts
 // ride the layer's own `layer-result`, each naming the cycle that earned it.
-// The confirmation sweep will not accept a result that carried anything: the
-// cycle whose green the verdict ships on runs every part of every layer, so
-// no carry ever reaches a shipped record unproven at its own sha.
+// The confirmation sweep will not stand on a result that carried anything: the
+// cycle whose green the verdict ships on proves every part of every layer at
+// its own sha, so no carry ever reaches a shipped record unproven there. What
+// the sweep re-runs of such a layer is the carried parts alone. The parts the
+// cycle already ran at this sha are kept, each naming the pass that ran them,
+// and the merged record holds no carry at all.
 //
 // The order the layers run in is the order the project declared, one at a
 // time, unless the project named concurrency groups (ADR-0047). Then the
@@ -70,7 +82,15 @@ import { commandLogPath } from '../daemon/home.mjs';
 import { assertDefectKind, assertAbandonReason } from '../ledger/registry.mjs';
 import { runCommand } from './exec.mjs';
 import { layerBatches } from './schedule.mjs';
-import { PARTS_ENV, carriedParts, mergeCarried, withPartReasons } from './parts.mjs';
+import {
+  FAILED_FILES_ENV,
+  PARTS_ENV,
+  carriedParts,
+  failedFileNarrowing,
+  keptParts,
+  mergeParts,
+  withPartReasons,
+} from './parts.mjs';
 import { exhaustionOf } from './resources.mjs';
 import { absentCredentials } from './replay.mjs';
 import { runEvents, ACTOR } from './shared.mjs';
@@ -112,7 +132,7 @@ const ATTEMPTS = 2;
  *   prior?: Map<string, object>|null, confirmation?: boolean,
  *   parts?: Map<string, {narrow: {run: string[], carry: Array<object>}|null,
  *     reasons: Map<string, string>, blindPaths: string[]}>|null,
- *   groups?: Array<string[]>|null,
+ *   groups?: Array<string[]>|null, flakeRerun?: 'narrowed'|'whole',
  *   credentials?: Array<object>, exec?: typeof runCommand}} opts
  *   `run` names the layers this cycle executes; every other layer carries its
  *   `prior` green forward. Both absent means the full spectrum.
@@ -125,6 +145,10 @@ const ATTEMPTS = 2;
  *   that runs is running, whether the layer narrowed or not (ADR-0058). Absent
  *   for every layer it does not mention, and absent altogether for a cycle
  *   that plans nothing.
+ *   `flakeRerun` is what the flake filter's re-run asks for: `narrowed` (the
+ *   default) asks for the parts and files the replaced attempt failed on,
+ *   `whole` asks for the layer again. `whole` is the behaviour of every
+ *   project before this option existed.
  *   `credentials` is the project's credential declaration; a layer it names
  *   that this host cannot supply has its red attributed to the missing
  *   variable, on the result itself.
@@ -135,7 +159,9 @@ const ATTEMPTS = 2;
  *   mode: string, attributedTo?: string, output?: string, log?: string,
  *   credentialAbsent?: string[], resources?: object, exhaustion?: object,
  *   parts?: Array<{name: string, status: string, inputs?: string[],
- *     output?: string, carriedFrom?: number, reason?: string}>,
+ *     output?: string, carriedFrom?: number, reason?: string,
+ *     attempt?: number, seq?: number, confirmation?: boolean}>,
+ *   narrowedTo?: {parts: string[], files: number},
  *   blindPaths?: string[], concurrentWith?: string[]}>, error?: string}>}
  *   `concurrentWith` names the layers this one held the machine beside, and is
  *   absent for every layer that ran alone (ADR-0047).
@@ -144,6 +170,11 @@ const ATTEMPTS = 2;
  *   run — the cycle whose execution earned its green. Only the parts that are
  *   evidence for a red carry `output`. A part this cycle DID run carries
  *   `reason`, one of the five words the plan derives (ADR-0058).
+ *   A part an earlier execution of this same cycle earned rather than this one
+ *   names it: `attempt` is the attempt that ran it, `seq` the result it was
+ *   stamped on. A part the confirmation sweep itself ran carries
+ *   `confirmation`. Neither is a carry, and a table holding either holds no
+ *   `carriedFrom` at all.
  *   `blindPaths` names up to three changed paths the plan could attribute to
  *   no part of this layer, which is why every part of it ran.
  *   `log` is the file holding that layer's whole output, for the red that has
@@ -168,6 +199,7 @@ export async function runSpectrum(
     confirmation = false,
     parts = null,
     groups = null,
+    flakeRerun = 'narrowed',
     credentials = [],
     exec = runCommand,
   },
@@ -213,7 +245,11 @@ export async function runSpectrum(
               cycle,
               sha,
               confirmation,
+              // What the sweep re-runs of this layer and what it keeps, where
+              // the plan decided the layer is one it narrows (ADR-0046).
+              confirm: entry.confirm ?? null,
               parts,
+              flakeRerun,
               credentials,
               exec,
               mark,
@@ -240,6 +276,10 @@ export async function runSpectrum(
         ...(record.output && { output: record.output }),
         ...(record.log && { log: record.log }),
         ...(record.parts?.length > 0 && { parts: record.parts }),
+        // What the flake filter's re-run asked for, on the result the re-run
+        // earned. Absent everywhere else, including on a first attempt that
+        // judged the layer.
+        ...(record.narrowedTo && { narrowedTo: record.narrowedTo }),
         // The paths this cycle's part plan could attribute to no part of this
         // layer. They are why every part of it ran, so they travel with the
         // result into the verdict record (ADR-0058).
@@ -257,19 +297,29 @@ export async function runSpectrum(
 /**
  * What one layer of a batch is before any child process runs: the stamp this
  * cycle already holds, the green it carries, or the not-runnable it earns.
- * `record: null` means the layer has to run. Synchronous by design, so a whole
- * batch is decided before any of it is dispatched.
+ * `record: null` means the layer has to run, and `confirm` is what the
+ * confirmation sweep runs of it. Synchronous by design, so a whole batch is
+ * decided before any of it is dispatched.
  */
 function planLayer(ctx, { layer, stamped, confirmation, run, prior, status, cycle, sha, mark }) {
-  let record = stamped.get(layer.name);
-  // The confirmation sweep is the cycle whose green the verdict ships on,
-  // and it will not stand on a part nothing ran at this sha. A result this
-  // cycle already stamped that carried a part is therefore not a result the
-  // sweep can reuse: the layer runs again, whole, and the stamp it leaves
-  // carries nothing (ADR-0046). Idempotent by construction — the re-run's
-  // own stamp is the last one, and a daemon that comes back reads it and
-  // stops.
-  if (record && confirmation && carriedParts(record).length > 0) record = undefined;
+  const record = stamped.get(layer.name);
+  // The confirmation sweep is the cycle whose green the verdict ships on, and
+  // it will not stand on a part nothing ran at this sha. A result this cycle
+  // already stamped that carried a part is therefore not a result the sweep
+  // can stand on as it is — but the parts that DID run in it ran at this sha,
+  // and running them again proves nothing that is not already proven. So the
+  // sweep runs the carried parts alone, keeps the rest, and the stamp it
+  // leaves carries nothing (ADR-0046). Idempotent by construction — the
+  // re-run's own stamp is the last one, and a daemon that comes back reads a
+  // result with no carry in it and stops.
+  if (record && confirmation && carriedParts(record).length > 0) {
+    const keep = keptParts(record);
+    const run = carriedParts(record).map((part) => part.name);
+    // Nothing of this layer ran at this sha, so there is nothing to keep and
+    // the whole re-run is the only answer there ever was.
+    if (keep.length === 0) return { record: null, mode: 'run' };
+    return { record: null, mode: 'run', confirm: { narrow: { run, carry: [] }, keep } };
+  }
   if (record) return { record, mode: 'run' };
   const carried = carriedResult(layer, run, prior);
   if (carried) return { record: carried, mode: 'carried' };
@@ -310,7 +360,9 @@ async function executeLayer(
     cycle,
     sha,
     confirmation,
+    confirm,
     parts,
+    flakeRerun,
     credentials,
     exec,
     mark,
@@ -325,13 +377,16 @@ async function executeLayer(
     sha,
     mark,
     exec,
+    flakeRerun,
     // Who this layer holds the machine beside, on every stamp its attempts
     // leave (ADR-0047). Empty for a layer that ran alone.
     concurrentWith,
     // What this layer runs of itself, what it carries instead, and why each
-    // part it runs is running. Never in a confirmation sweep: that pass runs
-    // everything by design, so no part of it owes a reason (ADR-0058).
-    target: confirmation ? null : (parts?.get(layer.name) ?? null),
+    // part it runs is running. A confirmation sweep derives none of that from a
+    // diff: it runs what the cycle has not run at this sha and keeps the rest,
+    // so its plan is the one the sweep itself decided and no part of it owes a
+    // reason (ADR-0058).
+    target: confirmation ? confirm : (parts?.get(layer.name) ?? null),
     // Read before the layer runs, so the attribution is a fact about the host
     // this attempt started on rather than one about the host at the moment
     // somebody read the record.
@@ -356,10 +411,27 @@ function carriedResult(layer, run, prior) {
  * One layer, run until an attempt judges it or the attempts run out. The flake
  * filter is the loop: a first red is never the layer's answer, so it is
  * replaced by one red-only re-run and stamped as the replaced attempt it is.
+ *
+ * The re-run asks for what the replaced attempt failed on, and keeps what it
+ * passed. `flakeRerun: 'whole'` asks for the layer again instead, which is the
+ * loop every project ran before the option existed.
  */
 async function runLayer(
   ctx,
-  { layer, commands, cwd, env, cycle, sha, mark, exec, absent, target, concurrentWith = [] },
+  {
+    layer,
+    commands,
+    cwd,
+    env,
+    cycle,
+    sha,
+    mark,
+    exec,
+    absent,
+    target,
+    flakeRerun = 'narrowed',
+    concurrentWith = [],
+  },
 ) {
   const argv = commands[layer.command];
   // The narrowing the command is asked for, on the environment it runs in. A
@@ -369,12 +441,19 @@ async function runLayer(
   // and the plan's reasons still ride the result (ADR-0058).
   const layerEnv = target?.narrow ? { ...env, [PARTS_ENV]: target.narrow.run.join(',') } : env;
   let previous = null;
+  let narrowed = null;
+  // The parts an earlier execution of this same cycle earned, and the word
+  // this attempt's own parts are marked with beside them. Set by the
+  // confirmation sweep before the first attempt, and grown by the flake
+  // filter's re-run; null for the layer that neither touches, which is the
+  // record shape every layer had before this.
+  let keep = target?.keep?.length > 0 ? { parts: target.keep, mark: { confirmation: true } } : null;
   for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
     const settled = await runAttempt(ctx, {
       argv,
       layer,
       cwd,
-      env: layerEnv,
+      env: narrowed?.env ?? layerEnv,
       cycle,
       sha,
       mark,
@@ -385,7 +464,9 @@ async function runLayer(
       // none. It decides what a result may carry and what each part that ran
       // says about why (ADR-0058).
       target,
+      keep,
       attempt,
+      ...(narrowed && { narrowedTo: narrowed.narrowedTo }),
       // Retry provenance: an attempt above the first names the attempt it
       // replaced and what spawned it, so a replacement is never silent.
       ...(previous && { retryOf: previous.seq, trigger: 'flake-filter' }),
@@ -395,10 +476,65 @@ async function runLayer(
       return { error: settled.disposition.detail };
     }
     previous = settled.start;
+    narrowed =
+      flakeRerun === 'narrowed' ? narrowRerun(settled.outcome?.parts, layerEnv, attempt) : null;
+    if (narrowed) {
+      const stood = keep?.mark;
+      keep = {
+        // A part this attempt ran and the next one keeps carries what this
+        // attempt's own parts carried, so a keep never loses the word that
+        // says which pass bought it.
+        parts: [...(keep?.parts ?? []), ...narrowed.keep.map((part) => ({ ...stood, ...part }))],
+        mark: { ...stood, attempt: attempt + 1 },
+      };
+    }
   }
   // Unreachable: the last attempt never supersedes itself. A throw beats a
   // silent undefined if a later change to `ATTEMPTS` or the policy makes it so.
   throw new Error(`layer ${layer.name} ran out of attempts without a result`);
+}
+
+/**
+ * What the flake filter's re-run asks for, from what the replaced attempt said
+ * about its own parts: the parts that did not pass, the files those parts
+ * named, and the greens the re-run therefore does not have to buy again.
+ *
+ * Null wherever the narrowing would buy nothing, and every doubt lands there.
+ * A layer that named no part has nothing to narrow by. A part that said
+ * nothing about itself did not pass, so it re-runs. A red that named no file
+ * re-runs whole, and a re-run whose every part is red and file-less is the
+ * whole layer, so it asks for the layer.
+ *
+ * @param {Array<{name: string, ok: boolean, inputs?: string[],
+ *   failedFiles?: string[]}>} [parts] the replaced attempt's own parts
+ * @param {object} env the environment the layer runs in
+ * @param {number} attempt the attempt whose greens are being kept
+ * @returns {{env: object, narrowedTo: {parts: string[], files: number},
+ *   keep: Array<object>}|null}
+ */
+function narrowRerun(parts, env, attempt) {
+  if (!parts || parts.length === 0) return null;
+  const again = parts.filter((part) => !part.ok);
+  if (again.length === 0) return null;
+  const keep = parts
+    .filter((part) => part.ok)
+    .map((part) => ({
+      name: part.name,
+      status: 'green',
+      ...(part.inputs?.length > 0 && { inputs: part.inputs }),
+      attempt,
+    }));
+  const files = failedFileNarrowing(again);
+  if (keep.length === 0 && files.value === '') return null;
+  return {
+    env: {
+      ...env,
+      [PARTS_ENV]: again.map((part) => part.name).join(','),
+      ...(files.value !== '' && { [FAILED_FILES_ENV]: files.value }),
+    },
+    narrowedTo: { parts: again.map((part) => part.name), files: files.files },
+    keep,
+  };
 }
 
 /**
@@ -468,8 +604,9 @@ function attemptLogFile(ctx, { cycle, layer, attempt }) {
  * is a filter that can lose it.
  */
 function settle(ctx, spec, made) {
-  const { layer, cycle, sha, mark, attempt, absent, target, concurrentWith } = spec;
-  const disposition = dispositionOf(made, attempt, layer.memoryCeilingMb ?? null, target);
+  const { layer, cycle, sha, mark, attempt, absent, target, keep, narrowedTo, concurrentWith } =
+    spec;
+  const disposition = dispositionOf(made, attempt, layer.memoryCeilingMb ?? null, target, keep);
   made.disposition = disposition;
   // The terminal stamp closes the span the start opened, and says the same
   // thing about it: this reading is not the machine's whole cost for that
@@ -494,6 +631,10 @@ function settle(ctx, spec, made) {
       // keep (ADR-0045).
       ...(disposition.resources && { resources: disposition.resources }),
       ...(disposition.exhaustion && { exhaustion: disposition.exhaustion }),
+      // What this attempt was narrowed to, on the result it earned. Only the
+      // flake filter's re-run sets it, so it is the record's own statement
+      // that this green or this red answers the failure and not the layer.
+      ...(narrowedTo && { narrowedTo }),
       ...disposition.evidence,
       // The mechanical half of the attribution: this layer declared a
       // credential the host does not hold, and it went red. The variable is
@@ -590,8 +731,13 @@ function stampExhaustion(ctx, { layer, cycle, sha, mark }, exhaustion) {
  * that judged nothing carries nothing forward, because it proved nothing to
  * carry it to (ADR-0046). Its reasons ride the same result, so a reader of one
  * record sees both halves of the cycle's decision (ADR-0058).
+ *
+ * `keep` is what an earlier execution of this same cycle earned and this one
+ * was not asked to buy again — the flake filter's replaced attempt, or the
+ * pass the confirmation sweep is confirming — with the word this attempt's own
+ * parts are marked with beside it. Null for every layer neither touched.
  */
-function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, target = null) {
+function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, target = null, keep = null) {
   const carry = target?.narrow?.carry ?? [];
   if (thrown) {
     return { event: 'layer-abandoned', reason: 'runner-error', detail: thrown.message };
@@ -658,10 +804,11 @@ function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, target = 
     // than an evidence subset: a later cycle carries a part only if a record
     // says it passed and says what could change that (ADR-0046). No output
     // rides them — a green says all it has to say in the tail.
-    const parts = withPartReasons(
-      mergeCarried(recordedParts(outcome.parts, { green: true }), carry),
-      target?.reasons,
-    );
+    const parts = partTable(recordedParts(outcome.parts, { green: true }), {
+      keep,
+      carry,
+      reasons: target?.reasons,
+    });
     return {
       event: 'layer-result',
       status: 'green',
@@ -683,7 +830,7 @@ function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, target = 
     };
   }
   const ran = recordedParts(outcome.parts, { green: false });
-  const parts = withPartReasons(mergeCarried(ran, carry), target?.reasons);
+  const parts = partTable(ran, { keep, carry, reasons: target?.reasons });
   return {
     event: 'layer-result',
     status: 'red',
@@ -704,6 +851,26 @@ function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, target = 
         }),
     },
   };
+}
+
+/**
+ * The whole part table one result holds: what this execution stated, the parts
+ * an earlier execution of this same cycle earned and this one was not asked to
+ * buy again, and the greens an older cycle carried. In that order, and what
+ * the execution stated always wins over both.
+ *
+ * A table that keeps anything says so on every line of it: the parts this
+ * execution ran carry the keep's own word — the attempt that ran them, and
+ * `confirmation` where the confirmation sweep ran them — and the parts it kept
+ * carry the attempt and the seq of the execution that earned them. So a merged
+ * table names the execution behind every part in it, and it holds no
+ * `carriedFrom`: a keep is a green of this sha, and a carry never is.
+ *
+ * A layer with nothing kept takes the table it always took, unmarked.
+ */
+function partTable(stated, { keep = null, carry = [], reasons }) {
+  const own = keep ? stated.map((part) => ({ ...part, ...keep.mark })) : stated;
+  return withPartReasons(mergeParts(mergeParts(own, keep?.parts ?? []), carry), reasons);
 }
 
 /**

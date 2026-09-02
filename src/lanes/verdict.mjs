@@ -76,7 +76,7 @@ import {
 } from './replay.mjs';
 import { runSpectrum, persistentReds, cyclePlan } from './spectrum.mjs';
 import { configuredGroups } from './schedule.mjs';
-import { PARTS_ENV, partPlan, carryTally } from './parts.mjs';
+import { PARTS_ENV, partPlan, carryTally, confirmationTally } from './parts.mjs';
 import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview } from './review.mjs';
 import { panelLenses } from './lenses.mjs';
@@ -326,6 +326,11 @@ async function runCycle(ctx, base, mode, { cycle }) {
     // strict sequence, and arming, tuning and reverting the concurrency are
     // all edits of this one config field (ADR-0047).
     groups: configuredGroups(base.config),
+    // What the flake filter's re-run asks for. `whole` returns it to a whole
+    // re-run of the layer, which is what every project ran before the key
+    // existed; absent is the decision, which is that a re-run asks only what
+    // failed.
+    flakeRerun: base.config?.gates?.flakeRerun ?? 'narrowed',
     cycle,
     sha,
   };
@@ -406,10 +411,11 @@ async function runCycle(ctx, base, mode, { cycle }) {
 
   // The confirmation sweep: a targeted cycle proves nothing about the layers
   // it carried, so no green verdict rests on them. A clean targeted cycle
-  // therefore runs every layer it has not run yet, at this sha, before the
-  // record calls the tree green. A red the sweep turns up is a regression an
-  // edit left in an area no red pointed at, and it enters triage exactly like
-  // a first-cycle red.
+  // therefore runs everything it has not run yet, at this sha, before the
+  // record calls the tree green — every layer it carried whole, and, inside a
+  // layer it narrowed, the parts it carried. What it already ran at this sha
+  // it keeps. A red the sweep turns up is a regression an edit left in an area
+  // no red pointed at, and it enters triage exactly like a first-cycle red.
   if (plan.sweep === 'targeted' && reds.length === 0 && open.length === 0) {
     const confirmed = await runSpectrum(ctx, { ...gates, confirmation: true });
     if (confirmed.error) return { directive: gateCommandError(ctx, confirmed.error) };
@@ -440,6 +446,11 @@ async function runCycle(ctx, base, mode, { cycle }) {
   // decays with nothing red is the one failure of this mechanism that nothing
   // else detects (ADR-0058). Absent for a cycle that recorded no part.
   const tally = carryTally(spectrum.results);
+  // What the confirmation sweep executed of the layers it narrowed, and what it
+  // stood on instead. A sweep that re-ran every part of every layer it touched
+  // reports its whole part count as `ran` and nought as `kept`, which is the
+  // reading that says this narrowing has stopped working (ADR-0046).
+  const swept = confirmation ? confirmationTally(spectrum.results) : null;
   const record = {
     runId: ctx.runId,
     cycle,
@@ -449,6 +460,7 @@ async function runCycle(ctx, base, mode, { cycle }) {
     sweep: plan.sweep,
     ...(tally ?? {}),
     ...(confirmation && { confirmation: true }),
+    ...(swept && { confirmationParts: swept }),
     // The capture took these paths back before this tree was committed, so a
     // red on the surface they cover is explained, not mysterious.
     ...(dropped.length > 0 && { dropped }),
@@ -492,6 +504,7 @@ async function runCycle(ctx, base, mode, { cycle }) {
     // cycle would be reading somebody else's lifecycle (ADR-0058).
     ...(tally ?? {}),
     ...(confirmation && { confirmation: true }),
+    ...(swept && { confirmationParts: swept }),
     ...(dropped.length > 0 && { dropped }),
     verdict,
     open: openIds,
@@ -1654,8 +1667,8 @@ function affectedPartsLines(base) {
       'unless your diff falls entirely outside its input set — its own test sources ' +
       'and the source trees it exercises, as that command declares them. A path no ' +
       'part claims (a lockfile, a shared package, a migration, a config file) reaches ' +
-      'every part, so narrow nothing when you have touched one. The verdict runs every ' +
-      'part of every layer before it ships a green.',
+      'every part, so narrow nothing when you have touched one. The verdict proves every ' +
+      'part of every layer at the sha it ships.',
   ];
 }
 

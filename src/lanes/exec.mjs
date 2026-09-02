@@ -28,18 +28,27 @@
 // and the caller records the failing part under its name instead of the
 // minutes of green that followed it.
 //
-// The protocol is four lines a command may print, on their own:
+// The protocol is five lines a command may print, on their own:
 //
 //   ::olympus part <name>          what follows belongs to <name>
 //   ::olympus part-failed <name>   <name> failed; its own output is evidence
 //   ::olympus part-ok <name>       <name> finished and passed
 //   ::olympus part-inputs <e> …    the current part's input set: repo-relative
 //                                  path entries, whitespace-separated
+//   ::olympus part-failed-files <name> <path>[,<path>…]
+//                                  the files of <name> that failed, comma-
+//                                  separated and named by the framework's own
+//                                  summary rather than guessed at
 //
 // Nothing changes for a command that prints none of them: the parts are empty
 // and the tail is the tail it always was. Marker lines are consumed, never
 // kept — the file holds them, because the file is the stream as the command
 // printed it.
+//
+// `part-failed-files` is the line a re-run is narrowed by. The name is read to
+// the LAST whitespace on the line and the path list is the token after it, so a
+// part whose name holds a space keeps working and a path may hold none — which
+// is what `part-inputs` already asks of a path.
 //
 // `part-ok` and `part-inputs` are what make a part carryable between cycles
 // (ADR-0046). A part the caller may skip next cycle has to say two things
@@ -50,10 +59,12 @@
 // part that did not run declares nothing. Opening a part twice is opening the
 // same part.
 //
-// The caller's half of the protocol is one environment variable
-// (`OLYMPUS_PARTS`, see parts.mjs): the parts it asks for, by name. A command
-// that ignores it runs everything, which costs time and never correctness —
-// what the record holds is what the stream said ran.
+// The caller's half of the protocol is two environment variables (see
+// parts.mjs): `OLYMPUS_PARTS`, the parts it asks for by name, and
+// `OLYMPUS_FAILED_FILES`, the files it asks for inside a part
+// (`<part>=<path>,<path>;<part>=…`). A command that ignores either runs
+// everything, which costs time and never correctness — what the record holds
+// is what the stream said ran.
 //
 // A caller may also ask what the command cost the machine. The measurement is
 // the same additive shape the file is: an option to ask for it, a field on the
@@ -68,7 +79,11 @@ import { resolveArgv } from '../engine/executable.mjs';
 import { startPeakSampler } from './resources.mjs';
 
 const PART_PREFIX = '::olympus ';
-const PART_MARKER = /^::olympus (part|part-failed|part-ok|part-inputs)[ \t]+(.+?)[ \t]*$/;
+const PART_MARKER =
+  /^::olympus (part|part-failed-files|part-failed|part-ok|part-inputs)[ \t]+(.+?)[ \t]*$/;
+// The name of a `part-failed-files` line and the path list after it: the name
+// runs to the last whitespace, the list is the token that follows.
+const FAILED_FILES_LINE = /^(.*?)[ \t]+([^ \t]+)$/;
 // Per part, and how many parts a run holds: a bound the longest sequence a
 // project runs stays under, and small enough that a command with no markers
 // costs nothing and one with thousands cannot grow the daemon. The count is
@@ -82,6 +97,10 @@ const PART_LIMIT = 64;
 // honest one and exist for the command that has lost its mind.
 const PART_INPUTS = 64;
 const PART_INPUT_LENGTH = 200;
+// The failed files one part may name. The same bound and the same reason: a
+// part that names more files than this is a part whose whole re-run is the
+// cheaper answer anyway.
+const PART_FAILED_FILES = 64;
 // A marker is one line. Text this long with no newline in it is not a marker,
 // and holding it back to look for one would only grow a buffer.
 const LINE_LIMIT = 65536;
@@ -217,7 +236,7 @@ function openCommandLog(path, cap) {
  * @returns {Promise<{code: number|null, signal?: string|null, output: string,
  *   truncated: boolean,
  *   parts: Array<{name: string, failed: boolean, ok: boolean, output: string,
- *     inputs: string[]}>,
+ *     inputs: string[], failedFiles: string[]}>,
  *   log: {path: string, bytes: number, truncated: boolean, removed?: boolean,
  *     error?: string}|null,
  *   resources: {peakRssMb: number, peakProcess?: {name: string, rssMb: number},
@@ -230,7 +249,8 @@ function openCommandLog(path, cap) {
  *   what it said about each one; a part with neither said nothing about
  *   itself, and the caller decides what the exit code makes of that.
  *   `inputs` is the part's declared input set, empty for a part that declared
- *   none.
+ *   none. `failedFiles` is what the part said failed inside it, empty for a
+ *   part that named nothing — and then the part re-runs whole.
  *   `truncated` says the stream outgrew the in-memory bound, so `output` is a
  *   tail. It is not a statement that anything was lost: `log` says what the
  *   harness still holds. `log.truncated` is the loss — the file hit its cap —
@@ -313,9 +333,28 @@ export function runCommand(
         const spare = silent === -1 ? parts.findIndex((p) => !p.failed) : silent;
         parts.splice(spare === -1 ? 0 : spare, 1);
       }
-      const part = { name, failed: false, ok: false, output: '', inputs: [] };
+      const part = { name, failed: false, ok: false, output: '', inputs: [], failedFiles: [] };
       parts.push(part);
       return part;
+    };
+
+    // The files one part reported red, from the part's own `part-failed-files`
+    // line. It names its part, so it binds to that part wherever it is printed
+    // and never to whatever part happens to be open. A line with no path list
+    // states nothing and is dropped: an empty narrowing is a whole re-run, and
+    // that is the direction a broken parse has to fall in.
+    const declareFailedFiles = (text) => {
+      const line = FAILED_FILES_LINE.exec(text);
+      if (!line) return;
+      const paths = line[2]
+        .split(',')
+        .filter((path) => path !== '' && path.length <= PART_INPUT_LENGTH);
+      if (paths.length === 0) return;
+      const part = openPart(line[1]);
+      for (const path of paths) {
+        if (part.failedFiles.length >= PART_FAILED_FILES) return;
+        if (!part.failedFiles.includes(path)) part.failedFiles.push(path);
+      }
     };
 
     // The current part's declared input set, grown by every `part-inputs`
@@ -352,6 +391,10 @@ export function runCommand(
         }
         if (marker[1] === 'part-inputs') {
           declareInputs(current, marker[2]);
+          continue;
+        }
+        if (marker[1] === 'part-failed-files') {
+          declareFailedFiles(marker[2]);
           continue;
         }
         const part = openPart(marker[2]);

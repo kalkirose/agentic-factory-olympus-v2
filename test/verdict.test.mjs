@@ -227,6 +227,7 @@ function verdictFixture(t, opts) {
     stack = null,
     composeCommand = undefined,
     partTargeting = undefined,
+    flakeRerun = undefined,
     concurrencyGroups = undefined,
     laneConfig = { story: { suiteCommand: 'suite' } },
   } = opts;
@@ -238,6 +239,7 @@ function verdictFixture(t, opts) {
       gates: {
         tier1: gates,
         ...(partTargeting !== undefined && { partTargeting }),
+        ...(flakeRerun !== undefined && { flakeRerun }),
         ...(concurrencyGroups !== undefined && { concurrencyGroups }),
       },
       lanes: laneConfig,
@@ -725,7 +727,7 @@ function partTriageSeat() {
 }
 
 /** One scenario: two seeded part reds, repaired one at a time. */
-function partsScenario(t, { partTargeting } = {}) {
+function partsScenario(t, { partTargeting, flakeRerun } = {}) {
   const root = tempDir('olympus-parts-lane-');
   t.after(() => removeDir(root));
   const logFile = join(root, 'parts.log');
@@ -756,6 +758,7 @@ function partsScenario(t, { partTargeting } = {}) {
     ],
     commands: { suite: SUITE_CMD, acceptance: partsGate(logFile) },
     ...(partTargeting !== undefined && { partTargeting }),
+    ...(flakeRerun !== undefined && { flakeRerun }),
   });
   return {
     fx,
@@ -781,20 +784,21 @@ test('a repair that reaches one part re-runs that part alone; the final cycle ru
     ],
   );
   assert.deepEqual(ran(), [
-    // Cycle 1 proves nothing yet, so every part runs — twice, because two of
-    // them are red and the flake filter owes the layer one re-run.
+    // Cycle 1 proves nothing yet, so every part runs. Two of them are red, so
+    // the flake filter owes the layer one re-run — and that re-run buys the
+    // two reds, because beta passed at this sha already.
     ['alpha', 'beta', 'gamma'],
-    ['alpha', 'beta', 'gamma'],
+    ['alpha', 'gamma'],
     // Cycle 2 judges a diff that touched src/alpha.txt alone. Beta's green is
     // out of that diff's reach and carries; the two reds re-run whatever the
-    // diff says, and gamma is still red, so the filter runs the pair twice.
+    // diff says. Alpha passes and gamma does not, so the re-run buys gamma.
     ['alpha', 'gamma'],
-    ['alpha', 'gamma'],
+    ['gamma'],
     // Cycle 3 judges a diff that touched src/gamma.txt alone.
     ['gamma'],
-    // The cycle that turns green runs every part at this sha, whatever any
-    // cycle before it carried.
-    ['alpha', 'beta', 'gamma'],
+    // The cycle that turns green owes every part a proof at this sha. Gamma
+    // has one already, so the sweep buys the two this cycle carried.
+    ['alpha', 'beta'],
   ]);
   // The red record states the carry, so no green in it is silent, and every
   // part it ran says why it ran (ADR-0058). Both reds re-run whatever the diff
@@ -803,8 +807,8 @@ test('a repair that reaches one part re-runs that part alone; the final cycle ru
   assert.deepEqual(
     record2.spectrum.find((r) => r.layer === 'acceptance').parts,
     [
-      { name: 'alpha', status: 'green', mode: 'run', reason: 'not-green' },
       { name: 'gamma', status: 'red', mode: 'run', reason: 'not-green' },
+      { name: 'alpha', status: 'green', mode: 'run', reason: 'not-green' },
       { name: 'beta', status: 'green', mode: 'carried', carriedFrom: 1 },
     ],
   );
@@ -822,19 +826,36 @@ test('a repair that reaches one part re-runs that part alone; the final cycle ru
     repair2.prompt.includes('- acceptance: red (1 of 3 parts carried from cycle 1, not re-run)'),
     repair2.prompt,
   );
-  // The green record rests on nothing carried. The sweep runs every part by
-  // design, so no part of it owes a reason and its share is nought.
+  // The green record rests on nothing carried: every part of it ran at this
+  // sha, two in the sweep and one in the pass before it. The two the sweep
+  // bought owe no reason — it derived no plan — and the one it kept holds the
+  // reason of the pass that ran it.
   const record3 = readRecord(fx.paths, runId, 3);
   assert.equal(record3.verdict, 'green');
   assert.deepEqual(
-    record3.spectrum.find((r) => r.layer === 'acceptance').parts.map((p) => [p.mode, p.reason]),
+    record3.spectrum
+      .find((r) => r.layer === 'acceptance')
+      .parts.map((p) => [p.name, p.mode, p.reason]),
     [
-      ['run', undefined],
-      ['run', undefined],
-      ['run', undefined],
+      ['alpha', 'run', undefined],
+      ['beta', 'run', undefined],
+      ['gamma', 'run', 'not-green'],
     ],
   );
   assert.deepEqual([record3.partsRun, record3.partsCarried, record3.carryShare], [3, 0, 0]);
+  // What the sweep bought and what it stood on, as the number a tripwire reads
+  // (ADR-0046). `ran` reaching the layer's whole part count is the reading that
+  // says this narrowing has stopped working.
+  assert.deepEqual(record3.confirmationParts, { ran: 2, kept: 1 });
+  const render3 = events.find((e) => e.event === 'verdict-rendered' && e.cycle === 3);
+  assert.deepEqual(render3.confirmationParts, { ran: 2, kept: 1 });
+  // No part of the shipped record is carried, and the layer's own stamp says
+  // the same: the sweep's re-run stands on nothing an older sha proved.
+  const swept = events.filter(
+    (e) => e.event === 'layer-result' && e.layer === 'acceptance' && e.confirmation,
+  );
+  assert.equal(swept.length, 1);
+  assert.deepEqual(swept[0].parts.filter((p) => p.carriedFrom !== undefined), []);
 });
 
 test('a diff that touches a path no part claims re-runs every part', async (t) => {
@@ -879,9 +900,10 @@ test('a diff that touches a path no part claims re-runs every part', async (t) =
     .filter(Boolean)
     .map((line) => JSON.parse(line));
   assert.deepEqual(ran, [
-    // Cycle 1, twice: the flake filter owes the red layer a re-run.
+    // Cycle 1, twice: the flake filter owes the red layer a re-run, and that
+    // re-run buys the one part that failed.
     ['alpha', 'beta', 'gamma'],
-    ['alpha', 'beta', 'gamma'],
+    ['alpha'],
     // Cycle 2 narrows nothing, goes green, and carries nothing — so the
     // confirmation sweep has a full result at this sha already and re-runs
     // no layer at all.
@@ -911,12 +933,13 @@ test('gates.partTargeting false runs every layer whole, whatever its parts say',
   const { runId } = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
-  // The same three cycles, and every invocation pays for every part. There
-  // are five and not six: with nothing carried, the confirmation sweep has a
-  // full result at this sha and re-runs nothing.
+  // The same three cycles, and every cycle pays for every part: nothing
+  // carries, so the confirmation sweep has a full result at this sha and
+  // re-runs no layer at all. The two short invocations are the flake filter's
+  // own re-runs, which are a different switch and still ask only what failed.
   assert.deepEqual(
     ran().map((parts) => parts.length),
-    [3, 3, 3, 3, 3],
+    [3, 2, 3, 1, 3],
   );
   assert.deepEqual(
     events
@@ -934,6 +957,27 @@ test('gates.partTargeting false runs every layer whole, whatever its parts say',
   );
 });
 
+test('gates.flakeRerun "whole" sends the re-run back over the layer', async (t) => {
+  const { fx, ran } = partsScenario(t, { flakeRerun: 'whole' });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // Every re-run pays for the whole narrowing it was given, which is what the
+  // filter did before this key existed. The cycle-to-cycle carry is a
+  // different switch and still holds, and so is the sweep's own narrowing:
+  // the last invocation buys the two parts cycle 3 carried.
+  assert.deepEqual(
+    ran().map((parts) => parts.length),
+    [3, 3, 2, 2, 1, 2],
+  );
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'layer-result' && e.layer === 'acceptance')
+      .map((e) => e.narrowedTo),
+    [undefined, undefined, undefined, undefined],
+  );
+});
+
 test('the dev and repair briefs name the mapping the cycle uses', async (t) => {
   const { fx } = partsScenario(t);
   const { runId } = await fx.launch();
@@ -944,7 +988,7 @@ test('the dev and repair briefs name the mapping the cycle uses', async (t) => {
     assert.match(prompt, /a part is affected unless your diff falls entirely outside its input set/, seat);
     assert.match(prompt, /its own test sources and the source trees it exercises/, seat);
     assert.match(prompt, /A path no part claims \(a lockfile, a shared package, a migration, a config file\) reaches every part/, seat);
-    assert.match(prompt, /The verdict runs every part of every layer before it ships a green\./, seat);
+    assert.match(prompt, /The verdict proves every part of every layer at the sha it ships\./, seat);
   }
 });
 

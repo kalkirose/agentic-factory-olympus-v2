@@ -10,6 +10,9 @@ Superseded in part by ADR-0038: the review panel is the project's
 `review.lenses`, the default panel drops architecture and minimality, and the
 security lens rides the operational seat instead of one of its own — so the
 fan-out below is stated at a width the harness no longer runs by default.
+Superseded in part by ADR-0065: the flake filter's one re-run asks for the
+parts and the files the replaced attempt failed on, and the greens of that
+attempt ride the re-run's own record.
 Superseded in part by ADR-0022: the repair progress rule keys on finding
 identities — a round is a stall when it closes none of the findings the render
 before it left open — and not on the size of the open set, so the sections

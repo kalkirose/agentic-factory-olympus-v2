@@ -51,6 +51,7 @@ f(x) answers twice the number it is given. The suite asserts it on one value.
 
 Test mapping:
 - tests/feature.test.mjs — f(2) is 4
+- tests/feature-guard.test.mjs — f is a function
 
 Named constants:
 - FACTOR = 2
@@ -63,6 +64,7 @@ Supersedes:
 \`\`\`touched-paths
 src/feature.mjs — dev
 tests/feature.test.mjs — suite
+tests/feature-guard.test.mjs — suite
 \`\`\`
 
 ## Environment
@@ -79,10 +81,25 @@ test('f doubles its input', async () => {
 });
 `;
 
+// The second file of the same part. The first implementation pass answers it
+// and fails the one above, so the layer's red names one file of two and the
+// flake filter's re-run buys that one file.
+const GUARD = `import test from 'node:test';
+import assert from 'node:assert/strict';
+
+test('f is a function', async () => {
+  const { f } = await import('../src/feature.mjs');
+  assert.equal(typeof f, 'function');
+});
+`;
+
 const SCENARIO = {
   spec: SPEC,
-  suiteFiles: { 'tests/feature.test.mjs': SUITE },
-  suiteReds: [{ test: 'f doubles its input', class: 'feature-absence' }],
+  suiteFiles: { 'tests/feature.test.mjs': SUITE, 'tests/feature-guard.test.mjs': GUARD },
+  suiteReds: [
+    { test: 'f doubles its input', class: 'feature-absence' },
+    { test: 'f is a function', class: 'feature-absence' },
+  ],
   // A wrong implementation the frozen suite kills: the wave is a kill.
   adversaryFiles: { 'src/feature.mjs': 'export const f = (x) => x + x + 1;\n' },
   // The first pass is off by one, so the suite layer is red and the layer that
@@ -221,6 +238,7 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
       ['suite', 'green', false],
       ['smoke', 'green', false],
       ['lint', 'green', true],
+      ['suite', 'green', true],
     ],
     'the targeted cycle and its confirmation sweep did not run the layers they owe',
   );
@@ -234,6 +252,46 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
     [renders[1].verdict, renders[1].sweep, renders[1].confirmation],
     ['green', 'targeted', true],
   );
+
+  // -- a cycle buys the failure, and never what it has already proven -------
+  // The first cycle's suite layer failed one file of one part. Its re-run was
+  // asked for that part and that file, and the part that had passed rode the
+  // record as the green of the attempt that earned it.
+  const suite1 = cycle1.find((e) => e.layer === 'suite');
+  assert.deepEqual(
+    suite1.narrowedTo,
+    { parts: ['feature'], files: 1 },
+    'the flake re-run of a red layer was not narrowed to what failed',
+  );
+  assert.deepEqual(
+    suite1.parts.map((p) => [p.name, p.status, p.attempt]),
+    [
+      ['feature', 'red', 2],
+      ['base', 'green', 1],
+    ],
+  );
+  // The second cycle judged a diff under the feature part alone, so it carried
+  // the base part; the confirmation sweep then bought that carried part and
+  // kept the one the cycle had already run at this sha.
+  const narrowed = cycle2.find((e) => e.layer === 'suite' && !e.confirmation);
+  assert.deepEqual(
+    narrowed.parts.map((p) => [p.name, p.carriedFrom]),
+    [
+      ['feature', undefined],
+      ['base', 1],
+    ],
+  );
+  const swept = cycle2.find((e) => e.layer === 'suite' && e.confirmation);
+  assert.deepEqual(
+    swept.parts.map((p) => [p.name, p.carriedFrom, p.confirmation === true]),
+    [
+      ['base', undefined, true],
+      ['feature', undefined, false],
+    ],
+    'the shipped record rests on a part nothing ran at this sha',
+  );
+  assert.equal(swept.parts[1].seq, narrowed.seq);
+  assert.deepEqual(renders[1].confirmationParts, { ran: 1, kept: 1 });
   const triage = events.filter((e) => e.event === 'finding' && e.source === 'triage');
   assert.equal(triage.length, 1);
   assert.deepEqual(triage[0].layers, ['suite']);

@@ -29,6 +29,14 @@
 // part that runs, from a closed set of five, and the blind clause names the
 // paths it could not attribute. Those paths are the diagnosis.
 //
+// Two other narrowings share this vocabulary and are decided elsewhere, in
+// `spectrum.mjs`. The flake filter's re-run asks only for the parts the
+// replaced attempt did not pass, and only for the files those parts named; the
+// confirmation sweep asks only for the parts the cycle carried. Neither reads
+// a diff, so neither belongs to the derivation above. What they take from here
+// is the two environment variables, the merge, and the shapes a kept part and
+// a carried part hold.
+//
 // Nothing here knows what a workspace is, what a suite is, or what any
 // project calls its trees. The input set of a part is what that part's own
 // command declared about itself, in the marker protocol (exec.mjs), in the
@@ -42,6 +50,42 @@ import { underEntry } from '../config/project.mjs';
  * is what a command sees today and what it must keep doing.
  */
 export const PARTS_ENV = 'OLYMPUS_PARTS';
+
+/**
+ * The environment variable the flake filter's re-run narrows a part with: the
+ * files that part reported red, as `<part>=<path>,<path>;<part>=…`. Absent
+ * means every file of every part it runs, which is what a command sees today
+ * and what it must keep doing.
+ */
+export const FAILED_FILES_ENV = 'OLYMPUS_FAILED_FILES';
+
+// What the encoding cannot carry. The separators are the vocabulary, so a name
+// or a path that holds one of them cannot be stated in it. Such a part is left
+// out of the variable and re-runs whole, which is the direction every doubt in
+// this module falls in.
+const UNENCODABLE = /[;,=]/;
+
+/**
+ * The narrowing a re-run asks for inside the parts it runs: the variable's
+ * value, and how many files it names. Empty for a set of parts that reported
+ * no files, and then the re-run runs those parts whole.
+ *
+ * @param {Array<{name: string, failedFiles?: string[]}>} parts the parts the
+ *   re-run is about to run, as the replaced attempt reported them
+ * @returns {{value: string, files: number}}
+ */
+export function failedFileNarrowing(parts = []) {
+  const named = [];
+  let files = 0;
+  for (const part of parts) {
+    if (UNENCODABLE.test(part.name)) continue;
+    const paths = (part.failedFiles ?? []).filter((path) => !UNENCODABLE.test(path));
+    if (paths.length === 0) continue;
+    named.push(`${part.name}=${paths.join(',')}`);
+    files += paths.length;
+  }
+  return { value: named.join(';'), files };
+}
 
 /**
  * Why one part of a layer ran instead of carrying. The set is closed, and it
@@ -186,15 +230,39 @@ export function carriedParts(record) {
 }
 
 /**
- * The parts a layer's own execution proved and the parts it carried, merged
- * into one record. What the execution said always wins: a command that
- * ignored the narrowing and ran a part anyway has stated a fact about this
- * sha, and a carry is only ever a statement about an older one.
+ * The parts of a result that its own execution ran, as a later pass of the
+ * same cycle keeps them: the part with the attempt that earned it and the
+ * ledger seq of the result it was stamped on.
+ *
+ * A kept part is not a carried part. A carry is a green of an older sha and
+ * says so (`carriedFrom`); a keep is a green of THIS sha that a narrowed pass
+ * of this same cycle already earned, and the provenance says which pass. That
+ * is why a merged record holds no `carriedFrom` and still names, per part, the
+ * execution behind it.
  */
-export function mergeCarried(ran = [], carry = []) {
-  if (carry.length === 0) return ran;
+export function keptParts(record) {
+  return (record?.parts ?? [])
+    .filter((part) => part.carriedFrom === undefined)
+    .map((part) => ({
+      ...part,
+      ...(part.attempt === undefined &&
+        record.attempt !== undefined && { attempt: record.attempt }),
+      ...(record.seq !== undefined && { seq: record.seq }),
+    }));
+}
+
+/**
+ * The parts a layer's own execution proved and the parts an earlier execution
+ * earned, merged into one table. What the execution said always wins: a
+ * command that ignored the narrowing and ran a part anyway has stated a fact
+ * about this sha, and everything merged in is a statement about an earlier
+ * execution — an older cycle's carry, or an earlier attempt or pass of this
+ * one.
+ */
+export function mergeParts(ran = [], earlier = []) {
+  if (earlier.length === 0) return ran;
   const stated = new Set(ran.map((part) => part.name));
-  const added = carry.filter((part) => !stated.has(part.name));
+  const added = earlier.filter((part) => !stated.has(part.name));
   return added.length === 0 ? ran : [...ran, ...added];
 }
 
@@ -203,10 +271,12 @@ export function mergeCarried(ran = [], carry = []) {
  * for. `reasons` is what the cycle's own plan derived for this layer; a layer
  * the cycle derived no plan for takes the table unchanged.
  *
- * That condition is the whole guard against a false word. A confirmation sweep
- * runs every part by design (ADR-0046) and a full spectrum has nothing to
- * carry from, so neither derives a plan, and stamping `no-record` on their
- * parts would report a hole in a record that was never consulted.
+ * That condition is the whole guard against a false word. A full spectrum has
+ * nothing to carry from, and a confirmation sweep runs what the cycle has not
+ * run at this sha rather than what a diff could reach, so neither derives a
+ * plan, and stamping `no-record` on their parts would report a hole in a
+ * record that was never consulted. A part a confirmation keeps holds the
+ * reason of the pass that ran it, which is the pass the `seq` on it names.
  *
  * Inside a layer the plan did cover, a part the plan holds no reason for and
  * the execution ran anyway is a part the standing result did not hold: the
@@ -259,4 +329,30 @@ export function carryTally(results = []) {
     partsCarried,
     carryShare: Math.round((partsCarried / total) * 1000) / 1000,
   };
+}
+
+/**
+ * What the confirmation sweep executed of the layers it narrowed, and what it
+ * stood on instead: the parts it ran itself, and the parts an earlier pass of
+ * the same cycle had already run at this sha.
+ *
+ * Only a merged confirmation record carries the two marks this reads, so the
+ * count covers exactly the layers the sweep narrowed. A layer it ran whole is
+ * outside the measure: it ran whole because this cycle had run none of it, and
+ * counting it would drown the number this exists to expose. Null for a sweep
+ * that narrowed no layer.
+ *
+ * @param {Array<{parts?: Array<object>}>} results the sweep's spectrum results
+ * @returns {{ran: number, kept: number}|null}
+ */
+export function confirmationTally(results = []) {
+  let ran = 0;
+  let kept = 0;
+  for (const layer of results) {
+    for (const part of layer.parts ?? []) {
+      if (part.confirmation === true) ran += 1;
+      else if (part.seq !== undefined) kept += 1;
+    }
+  }
+  return ran + kept === 0 ? null : { ran, kept };
 }

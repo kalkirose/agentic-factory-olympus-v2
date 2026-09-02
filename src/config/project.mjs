@@ -35,7 +35,9 @@ export function defaultProjectConfig() {
     // project states no suite can reach (ADR-0056); all absent is today's
     // behaviour. `groundlessPaths` names the ground the project states no
     // suite READS, which a verdict cycle drops out of its diff before it
-    // attributes a path to a part (ADR-0059).
+    // attributes a path to a part (ADR-0059). `flakeRerun: "whole"` returns
+    // the flake filter's re-run to a whole re-run of the layer; absent, it
+    // asks only for the parts and the files that failed.
     gates: { tier1: [] },
     // one convention per line; prompt assembly consumes these
     conventions: [],
@@ -174,6 +176,9 @@ function validateCommands(commands, err) {
   }
 }
 
+/** What `gates.flakeRerun` may say. Closed, and the absent value is the first. */
+const FLAKE_RERUN = new Set(['narrowed', 'whole']);
+
 function validateGates(gates, commands, err) {
   if (gates === undefined) return;
   if (!isPlainObject(gates)) {
@@ -185,6 +190,13 @@ function validateGates(gates, commands, err) {
   // Absent is the decision, which is that a part a diff cannot reach carries.
   if (gates.partTargeting !== undefined && typeof gates.partTargeting !== 'boolean') {
     err('gates.partTargeting', 'must be a boolean');
+  }
+  // What the flake filter's one re-run asks for. `whole` is the re-run every
+  // project ran before this key existed and is the one-line revert; absent is
+  // the decision, which is that a re-run asks for the parts and the files the
+  // replaced attempt failed on.
+  if (gates.flakeRerun !== undefined && !FLAKE_RERUN.has(gates.flakeRerun)) {
+    err('gates.flakeRerun', `must be one of: ${[...FLAKE_RERUN].join(', ')}`);
   }
   // The clean-rebase fast path (ADR-0056). Off is the default and absent is
   // off: a ship whose incoming default branch moved takes the full re-verdict

@@ -146,9 +146,10 @@ Two levels; the ownership test decides placement.
   watches on the default branch (`watchedWorkflows`), the tripwire registry,
   the optional close-out extras (`closeout`), the gate layers that may hold
   the machine together (`gates.concurrencyGroups`), the ground the project
-  states no suite of it reads (`gates.groundlessPaths`), the project's own
-  declared-ground check for its suite (`lanes.story.groundCommand`), and
-  whether a run's commands are offered a cache directory (`runCache`).
+  states no suite of it reads (`gates.groundlessPaths`), what a flake re-run
+  asks for (`gates.flakeRerun`), the project's own declared-ground check for
+  its suite (`lanes.story.groundCommand`), and whether a run's commands are
+  offered a cache directory (`runCache`).
   The daemon reads it from `main` in its bare clone at each run launch, so
   config changes ship through the same PR path as the code they describe. A run
   holds the blob it launched with until an operator repins it on the record
@@ -385,6 +386,18 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   persistent reds; only these enter triage. The replaced red is stamped
   `superseded-by-rerun` with what it printed, so a re-run never replaces an
   attempt silently.
+- **A re-run asks only what failed** (ADR-0065). The re-run's scope is the
+  replaced attempt's own part table: the parts that did not pass, in
+  `OLYMPUS_PARTS`, and the files those parts named, in `OLYMPUS_FAILED_FILES`
+  (`<part>=<path>,<path>;<part>=…`). A part names them with one more marker
+  line, `::olympus part-failed-files <part> <path>[,<path>…]`, printed from
+  the framework's own summary. The greens of the replaced attempt ride the
+  re-run's `layer-result`, each carrying the `attempt` that earned it, so the
+  record is one complete part table at one sha; `narrowedTo` (parts, files)
+  says what that attempt was asked for. Every doubt buys the layer: a layer
+  that named no part, a part that named no file, a part whose name or path
+  the encoding cannot carry, and a re-run whose every part is red all run
+  whole. `gates.flakeRerun: "whole"` returns the re-run to the whole layer.
 - **A layer that runs in parts.** A gate command is often a sequence of its
   own, and one exit code covers all of it, so the tail of its stream is
   whatever ran last rather than what failed. A command may say where its parts
@@ -395,7 +408,9 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   exactly as before. Two more lines make a part carryable: `::olympus part-ok
   <name>` says a part finished and passed, and `::olympus part-inputs <entry>
   …` names the paths that could change what the part in flight decides
-  (ADR-0046).
+  (ADR-0046). A fifth, `::olympus part-failed-files <name> <path>[,<path>…]`,
+  names the files that failed inside a part, and is what a re-run is narrowed
+  by (ADR-0065).
 - **Part-level targeted re-runs** (ADR-0046). Inside a layer that runs in
   parts, a cycle re-runs the parts its diff could have reached and carries the
   rest. A part is affected unless the diff falls fully outside its declared
@@ -408,9 +423,19 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   whole part table, and a carried part carries `carriedFrom` — the cycle whose
   execution earned its green — into the verdict record and into the repair
   seat's layer line. A re-freeze invalidates every carry, and the confirmation
-  sweep refuses a result that carried anything, so the cycle whose green ships
-  runs every part at its own sha. `gates.partTargeting: false` returns every
-  layer to a whole re-run per cycle.
+  sweep will not stand on a result that carried anything, so the cycle whose
+  green ships proves every part at its own sha.
+  `gates.partTargeting: false` returns every layer to a whole re-run per cycle.
+- **The confirmation sweep buys the difference** (ADR-0046). Of a layer whose
+  same-cycle result carried a part, the sweep runs the carried parts alone,
+  named in `OLYMPUS_PARTS`. The parts the cycle already ran at this sha it
+  keeps, each carrying the `attempt` and the ledger `seq` of the pass that ran
+  it; the parts the sweep ran carry `confirmation`. The merged record holds no
+  `carriedFrom` on any part. A result that carried everything and ran none of
+  its own parts takes the whole re-run, because there is nothing to keep, and a
+  same-cycle result that carried nothing is stood on untouched. The verdict
+  record and the `verdict-rendered` event state `confirmationParts`
+  (`ran`, `kept`) over the layers the sweep narrowed.
 - **The cycle records what it skipped and why** (ADR-0058). Every part a
   planned layer ran carries one word of a closed five: `touched`, `undeclared`,
   `blind`, `not-green`, `no-record`. A defect of the mapping outranks an honest
@@ -421,8 +446,9 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   verdict record and the `verdict-rendered` event state `partsRun`,
   `partsCarried` and `carryShare` over the whole cycle, and `olympusctl status`
   prints the last share on the line of every run standing in the verdict stage.
-  A confirmation sweep and a full spectrum run every part by design, so neither
-  gives any part a reason.
+  A full spectrum and a confirmation sweep derive no plan from a diff, so
+  neither gives any part a reason; a part the sweep keeps holds the reason of
+  the pass that ran it, which is the pass its `seq` names.
 - **Ground no suite reads** (ADR-0059). `gates.groundlessPaths` names the path
   entries the project states no test suite of it opens. A verdict cycle drops
   them out of its diff before the blind test and before any part is matched, so

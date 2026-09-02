@@ -17,6 +17,7 @@ import {
   priorStatus,
   targetedLayers,
 } from '../src/lanes/spectrum.mjs';
+import { confirmationTally } from '../src/lanes/parts.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
 const GREEN = ['node', '-e', 'process.exit(0)'];
@@ -401,6 +402,237 @@ test('the run env reaches every layer command', async (t) => {
   });
   assert.deepEqual(decided(results), [{ layer: 'a', status: 'green', mode: 'run' }]);
   assert.deepEqual(JSON.parse(readFileSync(capture, 'utf8')), { p: 'oly-r1', s: 'static-1' });
+});
+
+// -- what the flake filter's re-run asks for ---------------------------------
+//
+// The re-run buys the failure and nothing else: the parts the replaced attempt
+// did not pass, and the files those parts named. The parts it passed ride the
+// second attempt's record, so the merged table is one complete answer at one
+// sha with the attempt behind every line of it.
+
+/**
+ * A command that runs its parts in the marker protocol, honours both
+ * narrowings, and writes down what each invocation really ran — part by part
+ * and file by file. Its first invocation fails the files it is told to fail
+ * and every later one passes, which is a flake exactly.
+ *
+ * `nameFiles: false` fails without saying which files did, which is the runner
+ * that has not adopted the line, or one whose framework changed its summary.
+ */
+function narrowingCmd(logFile, table, { nameFiles = true, alwaysRed = false } = {}) {
+  const body = [
+    "const fs = require('fs');",
+    `const table = ${JSON.stringify(table)};`,
+    `const log = ${JSON.stringify(logFile)};`,
+    'const first = !fs.existsSync(log);',
+    "const only = (process.env.OLYMPUS_PARTS || '').split(',').filter(Boolean);",
+    'const narrow = new Map();',
+    "for (const entry of (process.env.OLYMPUS_FAILED_FILES || '').split(';')) {",
+    "  const at = entry.indexOf('=');",
+    '  if (at <= 0) continue;',
+    "  const paths = entry.slice(at + 1).split(',').filter(Boolean);",
+    '  if (paths.length > 0) narrow.set(entry.slice(0, at), paths);',
+    '}',
+    'const ran = [];',
+    'let bad = 0;',
+    'for (const part of table) {',
+    '  if (only.length > 0 && !only.includes(part.name)) continue;',
+    '  const asked = narrow.get(part.name);',
+    '  const files = asked ? part.files.filter((f) => asked.includes(f)) : part.files;',
+    "  ran.push(part.name + ':' + files.join('+'));",
+    "  console.log('::olympus part ' + part.name);",
+    "  console.log('::olympus part-inputs ' + part.inputs.join(' '));",
+    "  console.log(part.name + ' ran ' + files.join('+'));",
+    `  const red = (first || ${alwaysRed}) ? files.filter((f) => part.red.includes(f)) : [];`,
+    '  if (red.length > 0) {',
+    ...(nameFiles
+      ? ["    console.log('::olympus part-failed-files ' + part.name + ' ' + red.join(','));"]
+      : []),
+    "    console.log('::olympus part-failed ' + part.name);",
+    '    bad = 1;',
+    '  } else {',
+    "    console.log('::olympus part-ok ' + part.name);",
+    '  }',
+    '}',
+    "fs.appendFileSync(log, JSON.stringify(ran) + '\\n');",
+    'process.exitCode = bad;',
+  ].join('\n');
+  return ['node', '-e', body];
+}
+
+const NARROW_TABLE = [
+  { name: 'alpha', inputs: ['apps/alpha'], files: ['a1', 'a2'], red: ['a1'] },
+  { name: 'beta', inputs: ['apps/beta'], files: ['b1'], red: [] },
+];
+
+function ranOf(file) {
+  return readFileSync(file, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+async function narrowed(t, table, opts = {}) {
+  const { root, ctx } = fixture(t);
+  const log = join(root, 'ran.log');
+  const { results } = await runSpectrum(ctx, {
+    layers: [{ name: 'acceptance', command: 'parts' }],
+    commands: { parts: narrowingCmd(log, table, opts) },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'sha1',
+    ...(opts.flakeRerun && { flakeRerun: opts.flakeRerun }),
+  });
+  return { ctx, results, ran: ranOf(log) };
+}
+
+test('the re-run asks for the parts that failed and for the files they named', async (t) => {
+  const { ctx, results, ran } = await narrowed(t, NARROW_TABLE);
+  // The first attempt ran everything; the re-run bought one file of one part.
+  assert.deepEqual(ran, [['alpha:a1+a2', 'beta:b1'], ['alpha:a1']]);
+  assert.equal(results[0].status, 'green');
+  assert.deepEqual(results[0].narrowedTo, { parts: ['alpha'], files: 1 });
+  // One complete part table at this sha, and every part names the attempt
+  // that earned it. Nothing in it is carried: both greens are of this sha.
+  assert.deepEqual(
+    results[0].parts.map((p) => [p.name, p.status, p.attempt, p.carriedFrom]),
+    [
+      ['alpha', 'green', 2, undefined],
+      ['beta', 'green', 1, undefined],
+    ],
+  );
+  const stamped = events(ctx).filter((e) => e.event === 'layer-result');
+  assert.deepEqual(stamped[0].parts, results[0].parts);
+  assert.equal(stamped[0].narrowedTo.files, 1);
+  // A green re-run is still a flake, and the replaced attempt still says so.
+  assert.equal(events(ctx).filter((e) => e.event === 'flake').length, 1);
+  assert.equal(
+    events(ctx).find((e) => e.event === 'layer-abandoned').reason,
+    'superseded-by-rerun',
+  );
+});
+
+test('a part that named no failing file re-runs whole', async (t) => {
+  const { results, ran } = await narrowed(t, NARROW_TABLE, { nameFiles: false });
+  // The part still narrows to itself — the green beside it is proven — but it
+  // buys every file of itself, because nothing said which one failed.
+  assert.deepEqual(ran, [['alpha:a1+a2', 'beta:b1'], ['alpha:a1+a2']]);
+  assert.deepEqual(results[0].narrowedTo, { parts: ['alpha'], files: 0 });
+});
+
+test('a layer whose parts all failed re-runs whole, and says it narrowed nothing', async (t) => {
+  const table = [
+    { name: 'alpha', inputs: ['apps/alpha'], files: ['a1'], red: ['a1'] },
+    { name: 'beta', inputs: ['apps/beta'], files: ['b1'], red: ['b1'] },
+  ];
+  const { results, ran } = await narrowed(t, table, { nameFiles: false });
+  assert.deepEqual(ran, [['alpha:a1', 'beta:b1'], ['alpha:a1', 'beta:b1']]);
+  assert.equal(results[0].narrowedTo, undefined);
+  assert.deepEqual(results[0].parts.map((p) => p.attempt), [undefined, undefined]);
+});
+
+test('a layer that named no part at all is left exactly as it was', async (t) => {
+  const { root, ctx } = fixture(t);
+  const log = join(root, 'env.log');
+  const silent = [
+    'node',
+    '-e',
+    `require('fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify([` +
+      "process.env.OLYMPUS_PARTS || '', process.env.OLYMPUS_FAILED_FILES || '']) + '\\n');" +
+      "console.log('boom');process.exit(1);",
+  ];
+  const { results } = await runSpectrum(ctx, {
+    layers: [{ name: 'acceptance', command: 'silent' }],
+    commands: { silent },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'sha1',
+  });
+  // Two attempts, and neither was narrowed by anything.
+  assert.deepEqual(ranOf(log), [['', ''], ['', '']]);
+  assert.equal(results[0].narrowedTo, undefined);
+  assert.equal(results[0].parts, undefined);
+});
+
+test('gates.flakeRerun "whole" runs the layer again, exactly as it did before', async (t) => {
+  const { results, ran } = await narrowed(t, NARROW_TABLE, { flakeRerun: 'whole' });
+  assert.deepEqual(ran, [
+    ['alpha:a1+a2', 'beta:b1'],
+    ['alpha:a1+a2', 'beta:b1'],
+  ]);
+  assert.equal(results[0].narrowedTo, undefined);
+  assert.deepEqual(
+    results[0].parts.map((p) => [p.name, p.status, p.attempt]),
+    [
+      ['alpha', 'green', undefined],
+      ['beta', 'green', undefined],
+    ],
+  );
+});
+
+test('a narrowed re-run that stays red is the layer answer, with the failure on it', async (t) => {
+  const { results, ran } = await narrowed(t, NARROW_TABLE, { alwaysRed: true });
+  assert.deepEqual(ran, [['alpha:a1+a2', 'beta:b1'], ['alpha:a1']]);
+  assert.equal(results[0].status, 'red');
+  assert.deepEqual(
+    results[0].parts.map((p) => [p.name, p.status, p.attempt]),
+    [
+      ['alpha', 'red', 2],
+      ['beta', 'green', 1],
+    ],
+  );
+  // The red part is the evidence of the red layer; the kept green prints
+  // nothing, because it printed nothing in this attempt.
+  assert.match(results[0].parts[0].output, /alpha ran a1/);
+  assert.equal(results[0].parts[1].output, undefined);
+});
+
+test('a confirmation whose own re-run narrows keeps the word that says who ran what', async (t) => {
+  const { root, ctx } = fixture(t);
+  const log = join(root, 'ran.log');
+  // A result of this cycle that ran one part and carried two. The sweep buys
+  // the two, its first attempt fails one of them, and its re-run buys that one.
+  ctx.store.append('layer-result', {
+    actor: 'daemon',
+    cycle: 1,
+    layer: 'acceptance',
+    status: 'green',
+    sha: 'sha1',
+    attempt: 1,
+    parts: [
+      { name: 'alpha', status: 'green', reason: 'touched' },
+      { name: 'beta', status: 'green', carriedFrom: 1 },
+      { name: 'gamma', status: 'green', carriedFrom: 1 },
+    ],
+  });
+  const { results } = await runSpectrum(ctx, {
+    layers: [{ name: 'acceptance', command: 'parts' }],
+    commands: {
+      parts: narrowingCmd(log, [
+        { name: 'alpha', inputs: ['apps/alpha'], files: ['a1'], red: [] },
+        { name: 'beta', inputs: ['apps/beta'], files: ['b1'], red: [] },
+        { name: 'gamma', inputs: ['apps/gamma'], files: ['g1'], red: ['g1'] },
+      ]),
+    },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'sha1',
+    confirmation: true,
+  });
+  assert.deepEqual(ranOf(log), [['beta:b1', 'gamma:g1'], ['gamma:g1']]);
+  assert.deepEqual(results[0].narrowedTo, { parts: ['gamma'], files: 1 });
+  // Both parts the sweep bought say so, whichever of its attempts bought them,
+  // and the part it kept from the pass before it says which pass that was.
+  assert.deepEqual(
+    results[0].parts.map((p) => [p.name, p.confirmation === true, p.attempt, p.carriedFrom]),
+    [
+      ['gamma', true, 2, undefined],
+      ['alpha', false, 1, undefined],
+      ['beta', true, 1, undefined],
+    ],
+  );
+  assert.deepEqual(confirmationTally(results), { ran: 2, kept: 1 });
 });
 
 // -- the cycle plan ----------------------------------------------------------
