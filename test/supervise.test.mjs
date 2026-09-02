@@ -304,6 +304,31 @@ test('a seat that executes the suite keeps the environment whole', async (t) => 
   assert.equal(spawned.envStripped, undefined);
 });
 
+// The store hands a fresh credential to the run's environment, and that
+// environment is what a seat is spawned with. The strip is what decides which
+// seats may hold it, and it decides the same way for a value read a second ago
+// as for one the daemon inherited (ADR-0064).
+test('a credential read from the store reaches the suite seat and no other', async (t) => {
+  const { store } = setup(t);
+  const stored = 'sk-read-from-the-machine-store';
+  const inherited = process.env.PAY_SECRET_KEY;
+  process.env.PAY_SECRET_KEY = 'sk-the-window-copy';
+  t.after(() => {
+    if (inherited === undefined) delete process.env.PAY_SECRET_KEY;
+    else process.env.PAY_SECRET_KEY = inherited;
+  });
+  const env = { ...MACHINE_ENV, PAY_SECRET_KEY: stored };
+  const gate = await spawnedEnv(t, store, { seat: 'spec-gate', env, secretEnv: SECRET_PATTERNS });
+  const dev = await spawnedEnv(t, store, { seat: 'dev', env, secretEnv: SECRET_PATTERNS });
+  // The seat that runs the suite gets the stored value, not the stale copy.
+  assert.equal(dev.PAY_SECRET_KEY, stored);
+  // The seat that runs no suite gets neither.
+  assert.equal(gate.PAY_SECRET_KEY, undefined);
+  // And the daemon's own copy is never written, so nothing reaches a stripped
+  // seat through the parent.
+  assert.equal(process.env.PAY_SECRET_KEY, 'sk-the-window-copy');
+});
+
 test('without patterns every seat inherits the same environment', async (t) => {
   const { paths, store } = setup(t);
   const gate = await spawnedEnv(t, store, { seat: 'spec-gate', env: MACHINE_ENV });

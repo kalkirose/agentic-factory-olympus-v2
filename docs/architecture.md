@@ -132,9 +132,10 @@ Two levels; the ownership test decides placement.
   ledger home, notification-stream wiring, the push `notifier` target, slot
   caps keyed by project, the name patterns this host holds credentials in
   (`secretEnv`), the exact names a judgment seat's replay probe may carry
-  (`probeCredentials`), and how long a seat child of this host may emit nothing
-  before it is taken to be dead (`seatSilenceMs`). The console edits it live;
-  no PR.
+  (`probeCredentials`), where this host keeps the values of the credentials
+  the projects declare (`credentialStore`), and how long a seat child of this
+  host may emit nothing before it is taken to be dead (`seatSilenceMs`). The
+  console edits it live; no PR.
 - **Project config** — one JSON versioned in the project repo: repo facts,
   commands, gates, conventions, the judgment panel (`review.lenses`), lane
   specifics, per-lane budget thresholds,
@@ -211,6 +212,21 @@ Two levels; the ownership test decides placement.
   instance-config `secretEnv` pattern removed, and `seat-spawned` carries how
   many went (never which). Project-config commands always run with the full
   environment (ADR-0023).
+- **The credential store.** A home that names `credentialStore` reads the value
+  of every declared credential from the machine at the moment it uses it, and
+  not from the copy the daemon inherited from the window that started it: the
+  Windows kind reads `HKCU\Environment` through `reg.exe`, the file kind reads
+  a dotenv file. The fresh values ride the environment of each spawn, so the
+  strip above still decides which seats may hold them, and the daemon's own
+  `process.env` is never written. Every read leaves a fingerprint, which is
+  twelve hex characters of a hash and never a value: `credential-fingerprints`
+  at the start names each declared variable's source (store, inherited or
+  absent), `credential-rotated` says a stored value moved, and
+  `credential-probe` carries the fingerprint of the value it asked about. A
+  refused probe parks with the fingerprint's answer to which of the two
+  failures it is: a value that never changed and a service that now refuses it,
+  or a value that changed on this host. A home that names no store inherits as
+  it always did and stamps none of these (ADR-0064).
 - **The replay probe.** A stripped judgment seat (verdict triage, the Fury
   verifier) may ask the daemon to run one Tier-1 layer of its own run again and
   read the output. It names a layer, never a command; the daemon runs it as the
@@ -837,6 +853,14 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   refused to do, and an ack cannot perform an action that did not happen, so
   none of them offers it. `WORLD_GATES` in `src/lanes/shared.mjs` is the whole
   scope rule, and a structural test holds the set against the park sites.
+- **A refused credential names which of the two failures it is** (ADR-0064). A
+  probe that answers no has two causes with opposite repairs, and the park says
+  which by reading the last probe of that variable that answered yes, over
+  every run of the project. A fingerprint that matches that pass reads as a
+  value the service now refuses, so the credential itself needs replacing. A
+  fingerprint that differs reads as a value that changed on this host, so what
+  was placed here is what to look at. Before the first recorded pass the park
+  says what it always said, and the options stay `retry` and `abandon`.
 - **A run can adopt a project config that exists** (ADR-0061). `olympusctl
   reconfigure --run <id> [--blob <sha>] --reason <text>` repins one open run:
   the daemon resolves the config on the default branch at the time of the

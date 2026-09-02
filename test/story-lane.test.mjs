@@ -12,6 +12,7 @@ import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
 import { storyLane } from '../src/lanes/story.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
+import { fingerprint } from '../src/daemon/credentials.mjs';
 import { OWNER_PIN_MARKER } from '../src/lanes/supersede.mjs';
 import { FORESEEN_HEADING, FORESEEN_MARKER } from '../src/lanes/card.mjs';
 import {
@@ -92,9 +93,19 @@ test('f doubles when present', async () => {
 // can be searched for it.
 const PROBE_VAR = 'OLYMPUS_FIXTURE_CREDENTIAL';
 const PROBE_LEAK = 'sk_fixture_never_record_me';
+// The value an owner places on the host after a rotation. The probe refuses it,
+// and no ledger and no park text may hold it.
+const ROTATED = 'sk_fixture_rotated_never_record_me';
 const PROBE_SCRIPT =
   `console.log('probe sent ${PROBE_LEAK}');` +
   `process.exit(process.env.${PROBE_VAR} === 'live' ? 0 : 1);`;
+
+// A probe that answers no when the service has revoked a key the host still
+// holds. The stored value is untouched; only the service's answer changes.
+const BREAK_VAR = 'OLYMPUS_FIXTURE_SERVICE_REVOKED';
+const REVOKING_PROBE_SCRIPT =
+  `console.log('probe sent ${PROBE_LEAK}');` +
+  `process.exit(process.env.${PROBE_VAR} === 'live' && !process.env.${BREAK_VAR} ? 0 : 1);`;
 
 /** Sets the fixture credential for one test and restores it afterwards. */
 function heldCredential(t, value) {
@@ -106,6 +117,31 @@ function heldCredential(t, value) {
   set(value);
   t.after(() => set(previous));
   return set;
+}
+
+/**
+ * The machine's own store of the fixture credential, and the way to replace the
+ * value in it while the daemon runs. It is the file kind, which is the kind CI
+ * and every non-Windows host uses; the registry kind is read in
+ * `credentials.test.mjs` against a real `reg.exe`.
+ */
+function storedCredential(t, value) {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const path = join(dir, 'creds.env');
+  const set = (next) => writeFileSync(path, next === undefined ? '' : `${PROBE_VAR}="${next}"\n`);
+  set(value);
+  return { instance: { credentialStore: { kind: 'env-file', path } }, set };
+}
+
+/** Sets a plain host variable for one test and restores it afterwards. */
+function heldVariable(t, name, value) {
+  const previous = process.env[name];
+  process.env[name] = value;
+  t.after(() => {
+    if (previous === undefined) delete process.env[name];
+    else process.env[name] = previous;
+  });
 }
 
 // -- fixture machinery -------------------------------------------------------
@@ -255,7 +291,19 @@ function seatFixture(seats) {
 // which is the one wave a round runs today.
 function storyFixture(
   t,
-  { seats, card = DEFAULT_CARD, config, composeRunner, files = {}, waves, ciSecrets = null },
+  {
+    seats,
+    card = DEFAULT_CARD,
+    config,
+    composeRunner,
+    files = {},
+    waves,
+    ciSecrets = null,
+    // Machine-scoped keys this fixture's home declares, over the defaults. The
+    // credential store is one: it says where this host keeps the values the
+    // project declares (ADR-0064).
+    instance = {},
+  },
 ) {
   const root = tempDir();
   // `config` may be a function of the fixture root, for absolute probe paths.
@@ -280,7 +328,11 @@ function storyFixture(
   const paths = scaffoldHome(join(root, 'home'));
   writeFileSync(
     paths.instanceConfig,
-    JSON.stringify({ version: 1, projects: { proj: { repoUrl: origin, slotCap: 2 } } }) + '\n',
+    JSON.stringify({
+      version: 1,
+      projects: { proj: { repoUrl: origin, slotCap: 2 } },
+      ...instance,
+    }) + '\n',
   );
   const lanes = {
     story: storyLane({
@@ -689,6 +741,120 @@ test('an absent credential variable parks without running the probe', async (t) 
   await waitParked(fx.paths, runId, 'spec-gate-stalled');
   fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   await waitClosed(fx.paths, runId);
+});
+
+// -- the machine's store, not the window's copy -------------------------------
+
+test('the gate asks the value the machine stores, not the copy the daemon inherited', async (t) => {
+  // The window that started this daemon holds a value that no longer works.
+  heldCredential(t, 'stale');
+  const store = storedCredential(t, 'live');
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
+  const fx = storyFixture(t, {
+    seats,
+    instance: store.instance,
+    config: {
+      commands: { probe: [process.execPath, '-e', PROBE_SCRIPT] },
+      credentials: [{ name: 'payments', env: PROBE_VAR, probe: 'probe' }],
+    },
+  });
+  const runId = await fx.launch();
+  // No provisioning park at all: the probe read the store and got a yes.
+  const stalled = await waitParked(fx.paths, runId, 'spec-gate-stalled');
+  assert.ok(stalled.question.includes('not converging'));
+  const events = readEvents(runLedgerPath(fx.paths, runId));
+  const probe = events.find((e) => e.event === 'credential-probe');
+  assert.equal(probe.ok, true);
+  assert.equal(probe.fingerprint, fingerprint('live'));
+  assert.ok(!events.some((e) => e.event === 'park' && e.type === 'provisioning-gate'));
+  // The read is recorded, and the daemon's own copy is left where it was.
+  const read = readEvents(fx.paths.instanceLedger).find(
+    (e) => e.event === 'credential-fingerprints',
+  );
+  assert.deepEqual(read.variables, [
+    { name: PROBE_VAR, source: 'store', fingerprint: fingerprint('live') },
+  ]);
+  assert.equal(process.env[PROBE_VAR], 'stale');
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
+});
+
+test('a value replaced in the store is read at the next gate and named as a rotation', async (t) => {
+  heldCredential(t, 'stale');
+  const store = storedCredential(t, 'live');
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
+  const fx = storyFixture(t, {
+    seats,
+    instance: store.instance,
+    config: {
+      commands: { probe: [process.execPath, '-e', PROBE_SCRIPT] },
+      credentials: [{ name: 'payments', env: PROBE_VAR, probe: 'probe' }],
+    },
+  });
+  const first = await fx.launch();
+  await waitParked(fx.paths, first, 'spec-gate-stalled');
+  // The owner places a new value on this host. Nothing is restarted.
+  store.set(ROTATED);
+  const { runId } = await fx.daemon.launchRun({
+    project: 'proj',
+    lane: 'story',
+    card: 'stories/alpha.md',
+  });
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  // The park says which of the two failures this is: the value moved.
+  assert.match(park.question, /The stored value changed since it last passed on \d{4}-\d{2}-\d{2}/);
+  assert.match(park.question, /check the value placed on this host/);
+  const rotated = readEvents(fx.paths.instanceLedger).find(
+    (e) => e.event === 'credential-rotated',
+  );
+  assert.equal(rotated.name, PROBE_VAR);
+  assert.equal(rotated.from, fingerprint('live'));
+  assert.equal(rotated.to, fingerprint(ROTATED));
+  assert.equal(rotated.source, 'store');
+  // Fingerprints, never values: neither the ledger nor the park text holds one.
+  assert.ok(!readFileSync(fx.paths.instanceLedger, 'utf8').includes(ROTATED));
+  assert.ok(!park.question.includes(ROTATED));
+  const refused = readEvents(runLedgerPath(fx.paths, runId)).find(
+    (e) => e.event === 'credential-probe',
+  );
+  assert.equal(refused.ok, false);
+  assert.equal(refused.fingerprint, fingerprint(ROTATED));
+  for (const id of [first, runId]) {
+    fx.daemon.engine.answer({ runId: id, actor: 'operator', option: 'abandon' });
+    await waitClosed(fx.paths, id);
+  }
+});
+
+test('a refused value that never moved names the credential, not the host', async (t) => {
+  heldCredential(t, 'stale');
+  const store = storedCredential(t, 'live');
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
+  const fx = storyFixture(t, {
+    seats,
+    instance: store.instance,
+    config: {
+      commands: { probe: [process.execPath, '-e', REVOKING_PROBE_SCRIPT] },
+      credentials: [{ name: 'payments', env: PROBE_VAR, probe: 'probe' }],
+    },
+  });
+  const first = await fx.launch();
+  await waitParked(fx.paths, first, 'spec-gate-stalled');
+  // The service revokes the key. The value on this host is the one that passed.
+  heldVariable(t, BREAK_VAR, '1');
+  const { runId } = await fx.daemon.launchRun({
+    project: 'proj',
+    lane: 'story',
+    card: 'stories/alpha.md',
+  });
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  assert.match(park.question, /The stored value is unchanged since it last passed on \d{4}-\d{2}-\d{2}/);
+  assert.match(park.question, /the credential itself needs replacing/);
+  // A value that did not move is no rotation.
+  assert.ok(!readEvents(fx.paths.instanceLedger).some((e) => e.event === 'credential-rotated'));
+  for (const id of [first, runId]) {
+    fx.daemon.engine.answer({ runId: id, actor: 'operator', option: 'abandon' });
+    await waitClosed(fx.paths, id);
+  }
 });
 
 // -- credential parity across surfaces ---------------------------------------

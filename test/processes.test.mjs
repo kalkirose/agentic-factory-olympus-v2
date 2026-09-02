@@ -174,6 +174,9 @@ test('the audit reads the sites it claims to read', () => {
     }
   }
   assert.deepEqual(found.sort(), [
+    // The one read of the machine's credential store that starts a process:
+    // `reg.exe`, one variable per query, windowless like every other site.
+    'src/daemon/credentials.mjs: spawnSync',
     'src/daemon/launch.mjs: spawnImpl',
     'src/daemon/notifier.mjs: spawnImpl',
     'src/engine/processes.mjs: execFile',

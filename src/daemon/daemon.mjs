@@ -57,6 +57,7 @@ import { EvalScheduler } from '../eval/review.mjs';
 import { Notifier } from './notifier.mjs';
 import { OperatorHold } from './hold.mjs';
 import { checkSeatEnvironment } from './environment.mjs';
+import { declaredNames, readCredentials } from './credentials.mjs';
 import { scaffoldHome, homePaths, runLedgerPath, repairTicketPath } from './home.mjs';
 import { acquireLock } from './lock.mjs';
 
@@ -383,6 +384,7 @@ export class Daemon {
         runsResumed,
       });
       await this.stampSeatEnvironment();
+      await this.stampCredentialFingerprints();
       await this.sweepOrphanWorkspaces();
       this.archiveStaleControlFiles(queuedWhileDown);
       this.watchConfig();
@@ -437,6 +439,59 @@ export class Daemon {
     for (const finding of findings) {
       this.ledger.append('seat-environment', { actor: ACTOR, ...finding });
     }
+  }
+
+  /**
+   * What this instance holds for each project's declared credentials, stamped
+   * once behind the start.
+   *
+   * The record is what makes a stale copy visible before a story tries the
+   * door: a variable whose source reads `inherited` is one the machine's store
+   * could not answer for, and the status page counts them. It is also the
+   * baseline a later read compares against, so the first read that finds a
+   * different value can say a password changed rather than only that a probe
+   * failed (ADR-0064).
+   *
+   * A home that declares no store stamps nothing, because it holds no store to
+   * be right or wrong about. A project whose clone this host does not hold yet
+   * declares nothing this start can read, and the start after its first launch
+   * records it.
+   */
+  async stampCredentialFingerprints() {
+    const store = this.config.credentialStore;
+    if (!store) return;
+    for (const project of Object.keys(this.config.projects)) {
+      let names;
+      try {
+        names = await this.readDeclaredCredentials(project);
+      } catch {
+        continue;
+      }
+      if (names.length === 0) continue;
+      const { records } = readCredentials(store, names);
+      this.ledger.append('credential-fingerprints', {
+        actor: ACTOR,
+        project,
+        store: store.kind,
+        variables: records,
+      });
+    }
+  }
+
+  /**
+   * The credential variables a project declares, read from the bare clone as it
+   * stands, without fetching — this reader never advances the clone either.
+   * No clone yet = no launch happened = throws.
+   */
+  async readDeclaredCredentials(project) {
+    const entry = this.config.projects[project];
+    if (!entry) return [];
+    return this.isolation.withClone(project, async () => {
+      const dir = cloneDir(this.paths, project);
+      const { text } = await readBlobFromBranch(dir, entry.defaultBranch, entry.projectConfigPath);
+      const source = `${entry.defaultBranch}:${entry.projectConfigPath}`;
+      return declaredNames(parseProjectConfig(text, source));
+    });
   }
 
   // -- run launch + workspace teardown --------------------------------------
