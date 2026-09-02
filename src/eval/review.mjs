@@ -1,4 +1,4 @@
-// The eval review. Every five story-lane ships the daemon fires one eval
+// The eval review. Every five ships of any lane the daemon fires one eval
 // seat: Fable 5 at xhigh, instance-scoped — no worktree, no stack, seat
 // events in the instance ledger. The seat reads the ledgers since the last
 // review and reports proposals only; every change lands by PR or a
@@ -6,11 +6,16 @@
 // report artifact and the queued `eval-review` event, and no code path
 // parses a proposal into an action.
 //
-// Event-keyed: a story-lane run that closes shipped notifies the scheduler;
+// Event-keyed: a run of any lane that closes shipped notifies the scheduler;
 // daemon start notifies once, which fires a review owed from before a
 // restart. A failed seat stamps seat-failure and leaves the trigger owed —
 // the next matching event retries with a fresh session. Wall-clock never
 // triggers.
+//
+// The window is every ship merged after the newest ship the last review
+// named. It is derived from the run ids on the last `eval-review` stamp,
+// never from a count: a repair that merged in the past enters the ship list
+// beside the stories, and a count-based slice would push a story out for it.
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
@@ -22,7 +27,7 @@ import { superviseSeat } from '../engine/supervise.mjs';
 const ACTOR = 'eval-scheduler';
 const GIST_MAX = 120;
 
-// Story-lane ships between reviews, counted across the whole instance.
+// Ships between reviews, any lane, counted across the whole instance.
 export const EVAL_INTERVAL = 5;
 
 // The proposal shapes are a closed set — a report that names anything else
@@ -90,7 +95,7 @@ export class EvalScheduler {
   }
 
   /**
-   * The event key: a story-lane ship close, or daemon start. Checks chain,
+   * The event key: a ship close of any lane, or daemon start. Checks chain,
    * so a ship that lands while a review runs re-checks after it completes —
    * an accumulated backlog fires the next review without a new event.
    */
@@ -112,10 +117,9 @@ export class EvalScheduler {
     if (this.stopped) return;
     const ships = listShips(this.paths);
     const last = lastEvalReview(this.paths);
-    const covered = last?.shipCount ?? 0;
-    if (ships.length - covered < EVAL_INTERVAL) return;
+    const window = evalWindow(ships, last);
+    if (window.length < EVAL_INTERVAL) return;
     const review = (last?.review ?? 0) + 1;
-    const window = ships.slice(covered);
     const reportPath = evalReportPath(this.paths, review);
     // A failed attempt can leave a stale file; it must never validate as a
     // fresh report.
@@ -140,17 +144,50 @@ export class EvalScheduler {
     // A failed seat already stamped seat-failure; the trigger stays owed.
     if (!result.ok) return;
     const proposals = result.report.proposals.length;
+    const lanes = lanesOf(window);
     this.ledger.append('eval-review', {
       actor: ACTOR,
       review,
+      // The total at dispatch. Information for a reader; the next window is
+      // derived from `ships`, never from this number.
       shipCount: ships.length,
       ships: window.map((s) => s.runId),
+      lanes,
       report: reportPath,
       proposals,
       ...(typeof result.model === 'string' && { model: result.model }),
-      gist: gist(`eval review ${review}: ${window.length} ships, ${proposals} proposals`),
+      gist: gist(
+        `eval review ${review}: ${window.length} ships ` +
+          `(${lanes.story} story, ${lanes.repair} repair), ${proposals} proposals`,
+      ),
     });
   }
+}
+
+/**
+ * The ships a review owes: every ship merged after the newest ship the last
+ * review named, in ship order. With no last review, every ship. The boundary
+ * is resolved from the run ids the stamp holds to their merge time, so an
+ * old stamp needs no new field, and a ship the last review named is never
+ * reviewed twice even when it shares a merge time with the boundary.
+ * @param {ReturnType<typeof listShips>} ships in ship order
+ * @param {object|null} last the last `eval-review` stamp
+ */
+export function evalWindow(ships, last) {
+  const named = new Set(Array.isArray(last?.ships) ? last.ships : []);
+  let boundary = null;
+  for (const ship of ships) {
+    if (named.has(ship.runId) && (boundary === null || ship.ts > boundary)) boundary = ship.ts;
+  }
+  if (boundary === null) return ships;
+  return ships.filter((s) => s.ts >= boundary && !named.has(s.runId));
+}
+
+/** Ships per lane over a window. Story and repair always appear, zero-filled. */
+function lanesOf(window) {
+  const lanes = { story: 0, repair: 0 };
+  for (const ship of window) lanes[ship.lane] = (lanes[ship.lane] ?? 0) + 1;
+  return lanes;
 }
 
 function roleBlock({ review, window, last, paths }) {
@@ -159,8 +196,14 @@ function roleBlock({ review, window, last, paths }) {
     : 'This is the first review; no prior report exists.';
   return [
     `You are eval review ${review} over the harness ledgers.`,
-    `The window: ${window.length} story-lane ships since the last review:`,
-    ...window.map((s) => `- ${s.runId} (${s.project}, merged ${s.ts})`),
+    `The window: ${window.length} ships since the last review, every lane:`,
+    ...window.map((s) => `- ${s.runId} (${s.project}, ${s.lane}${repairNote(s)}, merged ${s.ts})`),
+    'The rule: a story run has a card; a repair run has a ticket; a repair',
+    'with an escape is a fix of a defect the harness already counted, and a',
+    'maintenance repair is a ticket launched with no escape behind it.',
+    'Judge the repairs on their own line: the drift between the ticket and',
+    'the diff, the rounds spent, and whether a maintenance repair should have',
+    'been a story.',
     'Read these stores as read-only evidence:',
     `- instance ledger: ${paths.instanceLedger}`,
     `- escapes ledger: ${paths.escapesLedger}`,
@@ -193,6 +236,12 @@ function roleBlock({ review, window, last, paths }) {
     'Cite ledger evidence in every proposal. An empty proposal list is valid.',
     'You execute nothing; every change lands by PR or a map-level decision.',
   ].join('\n');
+}
+
+/** The repair qualifier on a ship line: the escape it fixes, or maintenance. */
+function repairNote(ship) {
+  if (ship.lane !== 'repair') return '';
+  return Number.isInteger(ship.escapeSeq) ? `, escape #${ship.escapeSeq}` : ', maintenance';
 }
 
 function gist(text) {

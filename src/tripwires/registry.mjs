@@ -9,9 +9,9 @@
  * params the entry must carry. Windows count state, never wall-clock.
  */
 export const TRIPWIRE_METRICS = {
-  // Escaped defects per story: counted escapes over the last N shipped
-  // story-lane runs, divided by the window size. Recency-based — unknown
-  // origin still counts.
+  // Escaped defects per ship: counted escapes over the last N shipped runs
+  // of any lane, divided by the window size. Recency-based — unknown origin
+  // still counts.
   'escapes-window': {
     unit: 'ships',
     defaultWindow: 10,
@@ -19,7 +19,7 @@ export const TRIPWIRE_METRICS = {
   },
   // Defects that reached the default branch through a ship which carried its
   // certification over a moved base (ADR-0056), counted over the last N
-  // shipped story-lane runs. The reading is what turns the owner's
+  // shipped runs of any lane. The reading is what turns the owner's
   // speed-over-residual-safety trade into a number, and the band is where the
   // trade stops paying.
   'fast-path-escapes': {

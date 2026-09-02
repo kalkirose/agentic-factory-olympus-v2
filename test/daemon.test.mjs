@@ -799,6 +799,9 @@ test('the daemon reads its projects watched workflows and stamps a red loud', as
     async latestCompletedRun(workflow, branch) {
       return { id: '77', conclusion: 'failure', url: `https://forge/${workflow}/${branch}` };
     },
+    async runJobs(id) {
+      return [{ name: `acceptance-${id}`, conclusion: 'failure' }];
+    },
   };
   const daemon = new Daemon(home, { forgeFor: () => forge });
   t.after(async () => {
@@ -816,6 +819,7 @@ test('the daemon reads its projects watched workflows and stamps a red loud', as
   assert.equal(red.workflow, 'nightly.yml');
   assert.equal(red.run, '77');
   assert.equal(red.branch, 'main');
+  assert.deepEqual(red.jobs, [{ name: 'acceptance-77', conclusion: 'failure' }]);
   assert.deepEqual(openLoud(homePaths(home)).map((e) => e.event), ['workflow-red']);
   // The stop takes the watcher with it: no timer and no poll outlives it.
   await daemon.stop();

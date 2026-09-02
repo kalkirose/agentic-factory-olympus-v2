@@ -45,6 +45,16 @@ this one has no run behind it at all. The same red run, polled again, is the
 same piece of news and stamps nothing. A newer red run is news again, and the
 older record stays open.
 
+**The red names its jobs.** The record carries `jobs`: the jobs of that run
+whose conclusion is not green, each as `{name, conclusion}`, read through
+`runJobs(id)` on the same forge client the run came from. The gist names them
+too, so the loud line reads "acceptance red" and not "nightly red". A workflow
+with several jobs is several questions, and the reader opens the one that
+failed. A job list the forge would not answer leaves `jobs` empty and the
+record standing on the run's own conclusion: the job names are the address of
+the red, not the evidence for it. The list is read once, when the record is
+stamped; a later poll of the same run asks for nothing.
+
 **A green closes it, through the record that carries the evidence.** A
 completed green run while a red of that workflow is open stamps
 `workflow-recovered` — quiet, naming the green run and the records it closes —

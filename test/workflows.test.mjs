@@ -24,16 +24,25 @@ function home(t) {
 /**
  * A forge whose answer for the watched workflow is whatever `answers` holds
  * at poll time: a run object, null for a list nobody could read, or an Error
- * to throw.
+ * to throw. `answers.jobs` is the job list of any run it is asked about, in
+ * the same three forms.
  */
 function fakeForge(answers) {
   const calls = [];
+  const jobCalls = [];
   return {
     calls,
+    jobCalls,
     forge: {
       async latestCompletedRun(workflow, branch) {
         calls.push({ workflow, branch });
         const answer = answers.current;
+        if (answer instanceof Error) throw answer;
+        return answer;
+      },
+      async runJobs(id) {
+        jobCalls.push(id);
+        const answer = answers.jobs ?? null;
         if (answer instanceof Error) throw answer;
         return answer;
       },
@@ -94,6 +103,51 @@ test('a red watched workflow opens one loud item, however often it is polled', a
       ['102', 'timed_out'],
     ],
   );
+});
+
+test('a red names the jobs of the run that were not green', async (t) => {
+  const paths = home(t);
+  const ledger = openInstanceStore(paths);
+  t.after(() => ledger.close());
+  const answers = {
+    current: run('101', 'failure'),
+    jobs: [
+      { name: 'acceptance', conclusion: 'failure' },
+      { name: 'email-send', conclusion: 'success' },
+      { name: 'deployed', conclusion: 'skipped' },
+      { name: 'stamp', conclusion: null },
+    ],
+  };
+  const { forge, jobCalls } = fakeForge(answers);
+  const w = watcher(ledger, forge);
+  await w.poll();
+  assert.deepEqual(jobCalls, ['101']);
+  const red = eventsOf(paths, 'workflow-red')[0];
+  // The green and the skipped job are not news; the failed job and the one
+  // the forge never concluded are what the reader opens.
+  assert.deepEqual(red.jobs, [
+    { name: 'acceptance', conclusion: 'failure' },
+    { name: 'stamp', conclusion: null },
+  ]);
+  assert.equal(red.gist, 'nightly.yml run 101 on main: failure (acceptance, stamp)');
+  // The same red run, polled again, asks for nothing.
+  await w.poll();
+  assert.deepEqual(jobCalls, ['101']);
+  // A job list the forge would not answer, and one it could not be asked for,
+  // both leave the red standing on the run's own conclusion.
+  answers.current = run('102', 'failure');
+  answers.jobs = null;
+  await w.poll();
+  answers.current = run('103', 'failure');
+  answers.jobs = new Error('gh could not run');
+  await w.poll();
+  const reds = eventsOf(paths, 'workflow-red');
+  assert.deepEqual(reds.map((e) => [e.run, e.jobs]), [
+    ['101', red.jobs],
+    ['102', []],
+    ['103', []],
+  ]);
+  assert.equal(reds[2].gist, 'nightly.yml run 103 on main: failure');
 });
 
 test('the red a restart reads back is the red the ledger holds, and it stamps nothing', async (t) => {
@@ -221,6 +275,35 @@ test('the gh adapter asks for one completed run of one workflow on one branch', 
     calls[0][2],
     'repos/acme/widgets/actions/workflows/nightly.yml/runs?branch=main&status=completed&per_page=1',
   );
+});
+
+test('the gh adapter lists the jobs of one run by name, paged', async () => {
+  const calls = [];
+  const runner = async (argv) => {
+    calls.push(argv);
+    return {
+      code: 0,
+      output: JSON.stringify({
+        jobs: [
+          { id: 1, name: 'acceptance', conclusion: 'failure' },
+          { id: 2, name: 'stamp', conclusion: null },
+          { id: 3, conclusion: 'success' },
+        ],
+      }),
+    };
+  };
+  const forge = gitHubForge({ repo: 'acme/widgets', runner });
+  assert.deepEqual(await forge.runJobs('42'), [
+    { name: 'acceptance', conclusion: 'failure' },
+    { name: 'stamp', conclusion: null },
+  ]);
+  assert.equal(calls[0][2], 'repos/acme/widgets/actions/runs/42/jobs');
+  assert.ok(calls[0].includes('--paginate'));
+  const refused = gitHubForge({
+    repo: 'acme/widgets',
+    runner: async () => ({ code: 1, output: 'Not Found' }),
+  });
+  assert.equal(await refused.runJobs('42'), null);
 });
 
 test('the gh adapter answers null for a list it could not read and a run with no conclusion', async () => {

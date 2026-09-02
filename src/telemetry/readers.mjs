@@ -131,15 +131,33 @@ export function listLiveRuns(paths, { project } = {}) {
 }
 
 /**
- * Shipped story-lane runs, live and archived, in ship order (by the `merged`
- * stamp). Each entry: runId, project, ts of the merge, archived flag.
+ * Shipped runs of every lane, live and archived, in ship order (by the
+ * `merged` stamp). Each entry: runId, project, lane, ts of the merge, archived
+ * flag, and `escapeSeq` when the run was launched against a recorded escape.
+ * Both lane and escape come off `run-launched`; nothing is stamped for this.
+ *
+ * A repair that merged is a ship: it can escape, it can drift from its
+ * ticket, and it can repeat a pattern, so the eval window and the escape
+ * windows read it beside the stories. A reader that wants one lane filters
+ * on `lane`.
  * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ * @returns {Array<{runId: string, project: string, lane: string, ts: string,
+ *   archived: boolean, escapeSeq?: number}>}
  */
 export function listShips(paths) {
   const ships = [];
-  for (const { runId, archived, project, events } of listRunEvents(paths, { lane: 'story' })) {
+  for (const { runId, archived, project, lane, events } of listRunEvents(paths)) {
     const merged = events.find((e) => e.event === 'merged');
-    if (merged) ships.push({ runId, project, ts: merged.ts, archived });
+    if (!merged) continue;
+    const launch = events.find((e) => e.event === 'run-launched');
+    ships.push({
+      runId,
+      project,
+      lane,
+      ts: merged.ts,
+      archived,
+      ...(Number.isInteger(launch.escapeSeq) && { escapeSeq: launch.escapeSeq }),
+    });
   }
   return ships.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
 }

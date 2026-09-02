@@ -116,7 +116,7 @@ test('openBreaches lists unresolved tripwire breaches, not parks', (t) => {
   assert.equal(openBreaches(paths).length, 0);
 });
 
-test('listShips returns shipped story-lane runs in ship order, live and archived', (t) => {
+test('listShips returns shipped runs of every lane in ship order, with lane and escape', (t) => {
   const paths = home(t);
   const line = (seq, ts, event, extra = {}) => ({ seq, ts, event, actor: 'daemon', ...extra });
   // story run, merged second, live
@@ -130,19 +130,52 @@ test('listShips returns shipped story-lane runs in ship order, live and archived
     line(2, '2026-08-01T12:00:00Z', 'merged'),
     line(3, '2026-08-01T13:00:00Z', 'run-closed', { outcome: 'shipped' }),
   ]);
-  // repair run: never a ship
+  // repair run against a recorded escape: a ship, and it names the escape
   writeLedger(runLedgerPath(paths, 'c'), [
-    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'repair' }),
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', {
+      project: 'p',
+      lane: 'repair',
+      ticket: '/home/tickets/escape-4.md',
+      escapeSeq: 4,
+    }),
     line(2, '2026-08-03T00:00:00Z', 'merged'),
+  ]);
+  // maintenance repair, no escape behind it: a ship with no escape field
+  writeLedger(archivedRunLedgerPath(paths, 'e'), [
+    line(1, '2026-07-20T00:00:00Z', 'run-launched', {
+      project: 'p',
+      lane: 'repair',
+      ticket: '/home/tickets/chore.md',
+    }),
+    line(2, '2026-07-21T00:00:00Z', 'merged'),
   ]);
   // story run, not merged yet
   writeLedger(runLedgerPath(paths, 'd'), [
     line(1, '2026-08-04T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
   ]);
-  assert.deepEqual(listShips(paths), [
-    { runId: 'b', project: 'p', ts: '2026-08-01T12:00:00Z', archived: true },
-    { runId: 'a', project: 'p', ts: '2026-08-02T00:00:00Z', archived: false },
+  // repair run, not merged: a repair that never shipped is no ship either
+  writeLedger(runLedgerPath(paths, 'f'), [
+    line(1, '2026-08-04T00:00:00Z', 'run-launched', { project: 'p', lane: 'repair', escapeSeq: 9 }),
+    line(2, '2026-08-05T00:00:00Z', 'run-closed', { state: 'failed' }),
   ]);
+  assert.deepEqual(listShips(paths), [
+    { runId: 'e', project: 'p', lane: 'repair', ts: '2026-07-21T00:00:00Z', archived: true },
+    { runId: 'b', project: 'p', lane: 'story', ts: '2026-08-01T12:00:00Z', archived: true },
+    { runId: 'a', project: 'p', lane: 'story', ts: '2026-08-02T00:00:00Z', archived: false },
+    {
+      runId: 'c',
+      project: 'p',
+      lane: 'repair',
+      ts: '2026-08-03T00:00:00Z',
+      archived: false,
+      escapeSeq: 4,
+    },
+  ]);
+  // One lane is a filter on the list, never a second reader.
+  assert.deepEqual(
+    listShips(paths).filter((s) => s.lane === 'story').map((s) => s.runId),
+    ['b', 'a'],
+  );
 });
 
 test('a fast-path ship is found by its request number or by its merge commit', (t) => {
