@@ -38,6 +38,10 @@
 //                          one branch, or null when the forge would not answer
 //                          and when no run of it has completed. A null is
 //                          never a green: it says nobody read a conclusion
+//   runJobs(id)          → [{name, conclusion}] for the jobs of one workflow
+//                          run, or null when the forge would not answer. The
+//                          name is the job's own, which is what a reader of a
+//                          red run opens
 //   rerunFailed(sha)     → re-runs the failed jobs of the sha's runs
 //   checkOutput(sha, name) → failure-log tail for one check, or a parenthetical
 //                          saying why no log is retrievable — `noLogReason`
@@ -312,6 +316,25 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
         headSha: run.head_sha ?? null,
         completedAt: run.updated_at ?? null,
       };
+    },
+
+    /**
+     * The jobs of one workflow run, by name, with the conclusion each one
+     * carries. A job still running carries null. The list is paged, because a
+     * matrix can put more jobs on one run than one page holds.
+     */
+    async runJobs(id) {
+      const data = await ghJson(
+        [
+          'api', `repos/${repo}/actions/runs/${id}/jobs`, '--paginate',
+          '-q', '{jobs: [.jobs[]]}',
+        ],
+        { allowFail: true }, // an unreadable list names no job
+      );
+      if (!Array.isArray(data?.jobs)) return null;
+      return data.jobs
+        .filter((job) => typeof job?.name === 'string')
+        .map((job) => ({ name: job.name, conclusion: job.conclusion ?? null }));
     },
 
     async rerunFailed(sha) {

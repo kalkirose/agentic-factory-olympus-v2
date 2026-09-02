@@ -196,6 +196,52 @@ test('escapes-window counts escapes after the oldest ship of the project', async
   assert.equal(empty.eligible, false);
 });
 
+test('a shipped repair stands in the escape windows like a story', async (t) => {
+  const paths = home(t);
+  // One repair ship, then one story ship. The repair is the oldest ship of the
+  // window, so an escape recorded between the two is inside it.
+  writeLedger(runLedgerPath(paths, 'r1'), [
+    line(1, '2026-07-19T00:00:00Z', 'run-launched', {
+      project: 'p',
+      lane: 'repair',
+      ticket: '/home/tickets/escape-1.md',
+      escapeSeq: 1,
+    }),
+    line(2, '2026-07-20T00:00:00Z', 'merged', { sha: 'rrr' }),
+  ]);
+  writeLedger(runLedgerPath(paths, 's1'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-02T00:00:00Z', 'merged', { sha: 'aaa' }),
+  ]);
+  const escape = (seq, ts, extra) =>
+    line(seq, ts, 'escape-recorded', {
+      category: 'product-escape',
+      defectLine: `escape ${seq}`,
+      detectionSource: 'human-report',
+      attribution: 'unattributed',
+      refs: { project: 'p' },
+      ...extra,
+    });
+  writeLedger(paths.escapesLedger, [
+    escape(1, '2026-07-01T00:00:00Z', {}), // before every ship
+    escape(2, '2026-07-25T00:00:00Z', {}), // after the repair shipped
+    escape(3, '2026-07-26T00:00:00Z', { kind: 'fast-path-escape' }),
+  ]);
+  const rate = await evaluateMetric('escapes-window', { paths, project: 'p', window: 10 });
+  assert.deepEqual(rate.detail, { ships: 2, counted: 2 });
+  assert.equal(rate.value, 0.2);
+  const fast = await evaluateMetric('fast-path-escapes', { paths, project: 'p', window: 10 });
+  assert.deepEqual(fast.detail, { ships: 2, counted: 1, escapes: [3] });
+  // A project whose only ship is a repair has a window, so it has a reading.
+  writeLedger(runLedgerPath(paths, 'q1'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'q', lane: 'repair' }),
+    line(2, '2026-08-02T00:00:00Z', 'merged', { sha: 'qqq' }),
+  ]);
+  const onlyRepair = await evaluateMetric('escapes-window', { paths, project: 'q', window: 10 });
+  assert.equal(onlyRepair.eligible, true);
+  assert.deepEqual(onlyRepair.detail, { ships: 1, counted: 0 });
+});
+
 test('fast-path-escapes counts only the kind, only inside the window', async (t) => {
   const paths = home(t);
   writeLedger(runLedgerPath(paths, 'f1'), [

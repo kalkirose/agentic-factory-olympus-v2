@@ -102,9 +102,9 @@ export class WorkflowWatcher {
   }
 
   /**
-   * One workflow, one verdict. A red opens a loud record once per red run; a
-   * green closes whatever this workflow has open, through the recovery record
-   * that owns it.
+   * One workflow, one verdict. A red opens a loud record once per red run,
+   * naming the jobs that were not green; a green closes whatever this
+   * workflow has open, through the recovery record that owns it.
    */
   async judge({ project, workflow, forge, branch }) {
     let run = null;
@@ -124,6 +124,8 @@ export class WorkflowWatcher {
       // reads the same answer.
       const last = mine.at(-1);
       if (last?.event === 'workflow-red' && last.run === run.id) return;
+      const jobs = await redJobs(forge, run.id);
+      const named = jobs.map((j) => j.name).join(', ');
       this.ledger.append('workflow-red', {
         actor: ACTOR,
         project,
@@ -131,9 +133,13 @@ export class WorkflowWatcher {
         run: run.id,
         conclusion: run.conclusion,
         branch,
+        jobs,
         ...(run.url && { url: run.url }),
         ...(run.headSha && { headSha: run.headSha }),
-        gist: gist(`${workflow} run ${run.id} on ${branch}: ${run.conclusion}`),
+        gist: gist(
+          `${workflow} run ${run.id} on ${branch}: ${run.conclusion}` +
+            (named ? ` (${named})` : ''),
+        ),
       });
       return;
     }
@@ -154,6 +160,25 @@ export class WorkflowWatcher {
     // happens where the stamp lands.
     settleOwnedLoud(this.ledger, { actor: ACTOR });
   }
+}
+
+/**
+ * The jobs of one run that were not green, as `{name, conclusion}`. The forge
+ * is asked once, through the same client the run came from. A list the forge
+ * would not answer reads as no job named: the red stands on the run's own
+ * conclusion, and a job list is what tells the reader which slice to open.
+ */
+async function redJobs(forge, runId) {
+  let jobs = null;
+  try {
+    jobs = await forge.runJobs(runId);
+  } catch {
+    jobs = null;
+  }
+  if (!Array.isArray(jobs)) return [];
+  return jobs
+    .filter((j) => typeof j?.name === 'string' && !GREEN.has(j.conclusion))
+    .map((j) => ({ name: j.name, conclusion: j.conclusion ?? null }));
 }
 
 function gist(text) {

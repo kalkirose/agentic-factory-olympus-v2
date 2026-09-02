@@ -344,7 +344,8 @@ export class Daemon {
         onClosed: (info) => {
           this.scheduleWorkspaceRelease(info);
           this.frontier.queueSweep(info.project);
-          if (info.lane === 'story' && info.state === 'shipped') this.evals.notify();
+          // Any lane: a repair that merged is a ship the review reads.
+          if (info.state === 'shipped') this.evals.notify();
         },
         onParked: (info) => this.frontier.queueSweep(info.project),
         semaphores: this.semaphores,

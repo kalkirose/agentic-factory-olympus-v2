@@ -234,8 +234,8 @@ export const FAST_PATH_ESCAPE_KIND = 'fast-path-escape';
 
 /**
  * The cost of the fast-path trade, counted. Window = the most recent shipped
- * story-lane runs; count = escapes recorded at or after the oldest ship of the
- * window whose kind names the fast path. A count and not a rate: the owner
+ * runs of any lane; count = escapes recorded at or after the oldest ship of
+ * the window whose kind names the fast path. A count and not a rate: the owner
  * turned the flag on knowing some defects would ship, and the question the
  * tripwire asks is how many, not what share.
  * @param {{ships: Array<{ts: string}>, escapes: ReturnType<typeof readEscapeSet>,
@@ -255,9 +255,10 @@ export function fastPathEscapesWindow({ ships, escapes, windowSize = 10 }) {
 }
 
 /**
- * The quality-bar window math. Window = the most recent shipped story-lane
- * runs by ledger order; count = escapes with final category in the counted
- * set, recorded at or after the oldest ship in the window. Recency-based,
+ * The quality-bar window math. Window = the most recent shipped runs of any
+ * lane by ledger order; count = escapes with final category in the counted
+ * set, recorded at or after the oldest ship in the window. A shipped repair
+ * is a ship that can escape, so it stands in the window like a story. Recency-based,
  * not attribution-based — unknown origin still counts. The divisor is the
  * window size even while fewer ships exist.
  * @param {{ships: Array<{ts: string}>, escapes: ReturnType<typeof readEscapeSet>,

@@ -437,12 +437,19 @@ export const INSTANCE_EVENTS = new Set([
   // run cannot change one (ADR-0034).
   'stage-overrun',
   'baseline-proposal',
+  // One eval review over a window of ships. `ships` names the run ids the
+  // window held, and the next window starts after the newest of them;
+  // `lanes` counts them per lane, so a window that held no repair while
+  // repairs shipped reads as the filter it is. `shipCount` is the total at
+  // dispatch, information only (ADR-0012).
   'eval-review',
   // A watched workflow's most recent completed run on the default branch came
   // back red. Loud, because the run is off every request path — no run waits
   // on it and no check watcher reads it — so this record is the only thing
   // between that red and nobody noticing. One per red run: the same run,
-  // polled again, is the same piece of news (ADR-0035).
+  // polled again, is the same piece of news. `jobs` names the jobs of that
+  // run that were not green, each with its conclusion, so the record says
+  // which slice went red and not only that the night did (ADR-0035).
   'workflow-red',
   // A watched workflow completed green while a red of the same workflow was
   // still open. Quiet: the record is the evidence the loud item is answered

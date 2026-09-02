@@ -36,10 +36,15 @@ Around the daemon:
   path covers: the workflows a project names in `watchedWorkflows`, on its
   default branch. It reads the forge's terminal conclusion on the most recent
   completed run, never an elapsed. A red opens one loud item per red run; the
-  next green records the recovery that answers it. It holds no run (ADR-0035).
-- **Eval seat** — an instance-scoped judgment seat fired every five story-lane
-  ships. Its report lands under `eval/` in the daemon home; the queued
-  `eval-review` event points to it. Proposals only; nothing self-executes.
+  next green records the recovery that answers it, and the red names the jobs
+  of the run that were not green. It holds no run (ADR-0035).
+- **Eval seat** — an instance-scoped judgment seat fired every five ships of
+  any lane. The window is every ship merged after the newest ship the last
+  review named; the ship list carries each run's lane and, for a repair, the
+  escape it was launched against. Its report lands under `eval/` in the
+  daemon home; the queued `eval-review` event points to it, with the window's
+  run ids and its count per lane. Proposals only; nothing self-executes
+  (ADR-0012).
 - **Notifier** — one optional push target (webhook or command argv) the
   instance config names. It sends parks, run closes and every loud record out
   of the daemon and does nothing else. Unconfigured, it is not there.
