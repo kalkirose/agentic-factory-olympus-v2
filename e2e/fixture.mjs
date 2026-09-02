@@ -167,20 +167,77 @@ console.log(\`lint: \${files.length} source file(s)\`);
 
 // The acceptance suite runner. A directory argument is not a recursive sweep
 // on every supported runtime, so the runner names the test files itself.
+//
+// It runs in parts, and it speaks both halves of the protocol the harness
+// narrows with. A part is one family of test files — the file name up to the
+// first '-' or '.', with the source module of the same name — and it declares
+// that ground, says whether it passed, and, when it failed, names the files
+// that failed. It honours `OLYMPUS_PARTS` (the parts to run) and
+// `OLYMPUS_FAILED_FILES` (the files to run inside a part), so a narrowed
+// re-run and a narrowed confirmation sweep are proved end to end here rather
+// than asserted about a fake command.
 const SUITE_GATE = `import { readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { mark } from './mark.mjs';
 
 mark('suite');
-const files = readdirSync('tests')
-  .filter((name) => name.endsWith('.mjs'))
-  .map((name) => \`tests/\${name}\`);
+const files = readdirSync('tests').filter((name) => name.endsWith('.test.mjs')).sort();
 if (files.length === 0) {
   console.error('suite: no test file under tests/');
   process.exit(1);
 }
-const run = spawnSync(process.execPath, ['--test', ...files], { stdio: 'inherit' });
-process.exit(run.status ?? 1);
+const family = new Map();
+for (const name of files) {
+  const part = name.split(/[-.]/)[0];
+  if (!family.has(part)) family.set(part, []);
+  family.get(part).push('tests/' + name);
+}
+const only = (process.env.OLYMPUS_PARTS || '').split(',').map((n) => n.trim()).filter(Boolean);
+const narrow = new Map();
+for (const entry of (process.env.OLYMPUS_FAILED_FILES || '').split(';')) {
+  const at = entry.indexOf('=');
+  if (at <= 0) continue;
+  const paths = entry.slice(at + 1).split(',').filter(Boolean);
+  if (paths.length > 0) narrow.set(entry.slice(0, at), paths);
+}
+let bad = 0;
+for (const [part, all] of family) {
+  if (only.length > 0 && !only.includes(part)) continue;
+  const asked = narrow.get(part);
+  const narrowed = asked ? all.filter((path) => asked.includes(path)) : [];
+  const paths = narrowed.length > 0 ? narrowed : all;
+  console.log('::olympus part ' + part);
+  console.log('::olympus part-inputs ' + all.join(' ') + ' src/' + part + '.mjs');
+  console.log('suite: ' + part + ', ' + paths.length + ' of ' + all.length + ' file(s)');
+  const failed = [];
+  for (const path of paths) {
+    const one = spawnSync(process.execPath, ['--test', path], { encoding: 'utf8' });
+    process.stdout.write((one.stdout || '') + (one.stderr || ''));
+    if ((one.status || 0) !== 0) failed.push(path);
+  }
+  if (failed.length > 0) {
+    console.log('::olympus part-failed-files ' + part + ' ' + failed.join(','));
+    console.log('::olympus part-failed ' + part);
+    bad = 1;
+  } else {
+    console.log('::olympus part-ok ' + part);
+  }
+}
+process.exit(bad);
+`;
+
+// A test the origin is born with: it belongs to a part of its own, and it is
+// therefore the green a narrowed cycle carries and the confirmation sweep has
+// to buy back. It asserts the shape of src/base.mjs and never its value, so a
+// scenario that moves that value on the default branch is testing what it came
+// to test rather than fighting this file.
+const BASE_TEST = `import test from 'node:test';
+import assert from 'node:assert/strict';
+
+test('the base module publishes a factor', async () => {
+  const { FACTOR } = await import('../src/base.mjs');
+  assert.equal(typeof FACTOR, 'number');
+});
 `;
 
 const SMOKE_GATE = `import { mark } from './mark.mjs';
@@ -224,6 +281,7 @@ export function fixtureTree() {
     'src/base.mjs': 'export const FACTOR = 2;\n',
     'src/greeting.mjs': "export const greet = () => 'hi';\n",
     'tests/.keep': 'The acceptance suite lives here.\n',
+    'tests/base.test.mjs': BASE_TEST,
     'README.md': '# Fixture project\n',
   };
 }

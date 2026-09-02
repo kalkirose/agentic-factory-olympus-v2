@@ -104,6 +104,25 @@ test('a project may turn part-level carrying off, and only with a boolean', () =
   assert.equal(withProjectDefaults(valid()).gates.partTargeting, undefined);
 });
 
+test('a project may send the flake re-run back over the whole layer, by name', () => {
+  // Absent is the decision — the re-run asks for the parts and the files that
+  // failed — and `whole` is the one-line revert to the re-run every project
+  // ran before the key existed. A word outside the pair is refused: a
+  // misspelling that read as "narrowed" would be a saving nobody asked for.
+  assert.equal(withProjectDefaults(valid()).gates.flakeRerun, undefined);
+  for (const word of ['narrowed', 'whole']) {
+    const set = valid();
+    set.gates.flakeRerun = word;
+    assert.deepEqual(validateProjectConfig(set), [], word);
+    assert.equal(withProjectDefaults(set).gates.flakeRerun, word);
+  }
+  for (const bad of ['none', false, 1, null]) {
+    const wrong = valid();
+    wrong.gates.flakeRerun = bad;
+    assert.deepEqual(errorPaths(wrong), ['gates.flakeRerun'], String(bad));
+  }
+});
+
 test('the fast path is off unless a project says otherwise, in a boolean', () => {
   // ADR-0056. Absent is the decision: a moved base costs the full re-verdict
   // it always cost, and the one-line revert is this flag going back to false.

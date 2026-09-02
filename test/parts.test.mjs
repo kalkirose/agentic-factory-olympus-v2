@@ -9,7 +9,7 @@
 // of the cycle's part work the cycle did not have to do.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { scaffoldHome, runLedgerPath } from '../src/daemon/home.mjs';
 import { openRunStore } from '../src/telemetry/stores.mjs';
@@ -22,7 +22,10 @@ import {
   partReasons,
   carriedParts,
   carryTally,
-  mergeCarried,
+  confirmationTally,
+  failedFileNarrowing,
+  keptParts,
+  mergeParts,
   withPartReasons,
 } from '../src/lanes/parts.mjs';
 import { runSpectrum } from '../src/lanes/spectrum.mjs';
@@ -327,30 +330,55 @@ test('a cycle that recorded no part has no share at all', () => {
 
 test('the parts an execution stated beat the parts a plan would have carried', () => {
   const ran = [{ name: 'beta', status: 'red', output: 'it failed after all' }];
-  const merged = mergeCarried(ran, [{ name: 'beta', status: 'green', carriedFrom: 1 }]);
+  const merged = mergeParts(ran, [{ name: 'beta', status: 'green', carriedFrom: 1 }]);
   assert.deepEqual(merged, ran);
   assert.deepEqual(carriedParts({ parts: merged }), []);
 });
 
 // -- the marker protocol -----------------------------------------------------
 
-/** A command that runs the parts it was asked for, in the marker protocol. */
-function partsCmd(table) {
+/**
+ * A command that runs the parts it was asked for, in the marker protocol.
+ * `logFile` is the fixture's own record of what each invocation really ran —
+ * the only way a test can tell a narrowing that was honoured from one that was
+ * ignored, because a record holds the same table either way.
+ */
+function partsCmd(table, logFile = null) {
   const body = [
+    "const fs = require('fs');",
     `const table = ${JSON.stringify(table)};`,
     `const only = (process.env.${PARTS_ENV} || '').split(',').filter(Boolean);`,
+    'const ran = [];',
     'let bad = 0;',
     'for (const part of table) {',
     '  if (only.length > 0 && !only.includes(part.name)) continue;',
+    '  ran.push(part.name);',
     "  console.log('::olympus part ' + part.name);",
     "  console.log('::olympus part-inputs ' + part.inputs.join(' '));",
     '  console.log(part.name + ((part.red) ? " failed" : " passed"));',
     "  console.log('::olympus part-' + (part.red ? 'failed' : 'ok') + ' ' + part.name);",
     '  if (part.red) bad = 1;',
     '}',
+    ...(logFile
+      ? [`fs.appendFileSync(${JSON.stringify(logFile)}, JSON.stringify(ran) + '\\n');`]
+      : []),
     'process.exitCode = bad;',
   ].join('\n');
   return ['node', '-e', body];
+}
+
+/** Where that record lives for one fixture, and what it holds. */
+function ranLog(ctx) {
+  return join(ctx.paths.runs, ctx.runId, 'parts-ran.log');
+}
+
+function ranParts(ctx) {
+  const file = ranLog(ctx);
+  if (!existsSync(file)) return [];
+  return readFileSync(file, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
 
 test('a part states its own outcome and its own input set', async () => {
@@ -368,6 +396,77 @@ test('a part states its own outcome and its own input set', async () => {
     ],
   );
   assert.ok(!run.output.includes('::olympus'), 'a marker reached the tail');
+});
+
+test('a part names the files that failed inside it, and the name may hold a space', async () => {
+  const run = await runCommand([
+    'node',
+    '-e',
+    "console.log('::olympus part unit suite');" +
+      "console.log('::olympus part-failed-files unit suite tests/a.mjs,tests/b.mjs');" +
+      "console.log('::olympus part-failed unit suite');process.exitCode = 1;",
+  ]);
+  assert.deepEqual(
+    run.parts.map((p) => [p.name, p.failed, p.failedFiles]),
+    [['unit suite', true, ['tests/a.mjs', 'tests/b.mjs']]],
+  );
+  assert.ok(!run.output.includes('::olympus'), 'a marker reached the tail');
+});
+
+test('a failed-files line that names no file states nothing', async () => {
+  // The line the runner prints when its framework changed its summary, or when
+  // it has nothing to say. Both leave the part with no files, and a part with
+  // no files re-runs whole.
+  const run = await runCommand([
+    'node',
+    '-e',
+    "console.log('::olympus part alpha');console.log('::olympus part-failed-files alpha ,,');" +
+      "console.log('::olympus part-failed-files alpha');" +
+      "console.log('::olympus part-failed alpha');process.exitCode = 1;",
+  ]);
+  assert.deepEqual(run.parts.map((p) => [p.name, p.failedFiles]), [['alpha', []]]);
+});
+
+test('the narrowing a re-run asks for states only what the encoding can carry', () => {
+  assert.deepEqual(
+    failedFileNarrowing([
+      { name: 'alpha', failedFiles: ['a1', 'a2'] },
+      { name: 'beta', failedFiles: [] },
+      { name: 'gamma' },
+    ]),
+    { value: 'alpha=a1,a2', files: 2 },
+  );
+  // A name or a path holding a separator cannot be stated in this vocabulary,
+  // so it is left out and the part re-runs whole. Doubt runs everything here
+  // as it does everywhere else in this module.
+  assert.deepEqual(
+    failedFileNarrowing([
+      { name: 'a=b', failedFiles: ['a1'] },
+      { name: 'delta', failedFiles: ['one,two'] },
+    ]),
+    { value: '', files: 0 },
+  );
+  assert.deepEqual(failedFileNarrowing([]), { value: '', files: 0 });
+});
+
+test('a kept part names the attempt and the result that earned it', () => {
+  const record = {
+    seq: 42,
+    attempt: 2,
+    parts: [
+      { name: 'alpha', status: 'green', reason: 'touched' },
+      { name: 'beta', status: 'green', attempt: 1 },
+      { name: 'gamma', status: 'green', carriedFrom: 1 },
+    ],
+  };
+  // A carried part is not a keep: it is an older sha's green, and the sweep
+  // that keeps this table is the pass that has to buy it.
+  assert.deepEqual(keptParts(record), [
+    { name: 'alpha', status: 'green', reason: 'touched', attempt: 2, seq: 42 },
+    { name: 'beta', status: 'green', attempt: 1, seq: 42 },
+  ]);
+  assert.deepEqual(keptParts({ parts: [] }), []);
+  assert.deepEqual(keptParts(undefined), []);
 });
 
 test('an input line with no part open belongs to nothing', async () => {
@@ -390,7 +489,7 @@ const TABLE = [
 async function spectrum(ctx, opts) {
   return runSpectrum(ctx, {
     layers: [{ name: 'acceptance', command: 'parts' }],
-    commands: { parts: partsCmd(TABLE) },
+    commands: { parts: partsCmd(TABLE, ranLog(ctx)) },
     cwd: process.cwd(),
     cycle: 1,
     sha: 'sha1',
@@ -418,16 +517,19 @@ test('a red layer carries only the parts that passed on their own word', async (
     },
   });
   assert.equal(results[0].status, 'red');
+  // The re-run bought the red part alone, so the merged table leads with what
+  // this attempt ran and holds the green it kept behind it, each naming the
+  // attempt that earned it.
   assert.deepEqual(
-    results[0].parts.map((p) => [p.name, p.status]),
+    results[0].parts.map((p) => [p.name, p.status, p.attempt]),
     [
-      ['alpha', 'green'],
-      ['beta', 'red'],
+      ['beta', 'red', 2],
+      ['alpha', 'green', 1],
     ],
   );
   // The red part is the evidence; the passed one prints nothing here.
-  assert.equal(results[0].parts[0].output, undefined);
-  assert.match(results[0].parts[1].output, /beta failed/);
+  assert.match(results[0].parts[0].output, /beta failed/);
+  assert.equal(results[0].parts[1].output, undefined);
 });
 
 test('a part inside a failure that said nothing about itself is unknown, and never carries', async (t) => {
@@ -698,30 +800,76 @@ test('a range git cannot answer runs the layer whole', async (t) => {
   assert.equal(targets, null);
 });
 
-test('the confirmation sweep refuses a result that carried a part, and runs the layer whole', async (t) => {
+test('the confirmation sweep runs the parts a result carried and keeps the parts it ran', async (t) => {
   const { ctx } = fixture(t);
   const carry = [{ name: 'beta', status: 'green', inputs: ['apps/beta'], carriedFrom: 1 }];
   const narrowed = layerPlan({ run: ['alpha'], carry, reasons: { alpha: 'touched' } });
-  await spectrum(ctx, { parts: narrowed });
+  const first = await spectrum(ctx, { parts: narrowed });
+  assert.deepEqual(first.results[0].parts.map((p) => p.carriedFrom), [undefined, 1]);
   const { results } = await spectrum(ctx, {
     confirmation: true,
     parts: narrowed,
   });
-  // Every part ran at this sha, and nothing on the result is carried.
+  // Every part is proven at this sha and nothing on the result is carried. The
+  // sweep bought beta, which nothing had run here; alpha it kept, with the
+  // attempt and the ledger seq of the pass that earned it.
+  const stamps = events(ctx).filter((e) => e.event === 'layer-result');
   assert.deepEqual(
-    results[0].parts.map((p) => [p.name, p.status, p.carriedFrom]),
+    results[0].parts.map((p) => [p.name, p.status, p.carriedFrom, p.confirmation, p.attempt]),
     [
-      ['alpha', 'green', undefined],
-      ['beta', 'green', undefined],
+      ['beta', 'green', undefined, true, undefined],
+      ['alpha', 'green', undefined, undefined, 1],
     ],
   );
-  const stamps = events(ctx).filter((e) => e.event === 'layer-result');
+  assert.equal(results[0].parts[1].seq, stamps[0].seq);
   assert.equal(stamps.length, 2);
   assert.equal(carriedParts(stamps[1]).length, 0);
   assert.equal(stamps[1].confirmation, true);
+  assert.deepEqual(confirmationTally(results), { ran: 1, kept: 1 });
+  // The command was asked for the carried part and for nothing else.
+  assert.deepEqual(ranParts(ctx), [['alpha'], ['beta']]);
   // Re-entering the sweep is idempotent: the second stamp carries nothing, so
   // a daemon that comes back reads a full result and runs no layer again.
   const again = await spectrum(ctx, { confirmation: true });
   assert.equal(again.results[0].mode, 'run');
   assert.equal(events(ctx).filter((e) => e.event === 'layer-result').length, 2);
+});
+
+test('a confirmation over a result that ran none of its own parts runs the layer whole', async (t) => {
+  const { ctx } = fixture(t);
+  // Every part of the standing result was carried, so this cycle proved no
+  // part of this layer at this sha and there is nothing to keep.
+  ctx.store.append('layer-result', {
+    actor: 'daemon',
+    cycle: 1,
+    layer: 'acceptance',
+    status: 'green',
+    sha: 'sha1',
+    attempt: 1,
+    parts: [
+      { name: 'alpha', status: 'green', carriedFrom: 1 },
+      { name: 'beta', status: 'green', carriedFrom: 1 },
+    ],
+  });
+  const { results } = await spectrum(ctx, { confirmation: true });
+  assert.deepEqual(
+    results[0].parts.map((p) => [p.name, p.carriedFrom, p.confirmation]),
+    [
+      ['alpha', undefined, undefined],
+      ['beta', undefined, undefined],
+    ],
+  );
+  assert.deepEqual(ranParts(ctx), [['alpha', 'beta']]);
+  assert.equal(confirmationTally(results), null);
+});
+
+test('a same-cycle result that carried nothing is kept untouched by the confirmation', async (t) => {
+  const { ctx } = fixture(t);
+  await spectrum(ctx);
+  const { results } = await spectrum(ctx, { confirmation: true });
+  // The layer ran whole in this cycle already, so the sweep stands on it and
+  // spawns nothing at all.
+  assert.equal(results[0].mode, 'run');
+  assert.equal(events(ctx).filter((e) => e.event === 'layer-result').length, 1);
+  assert.deepEqual(ranParts(ctx), [['alpha', 'beta']]);
 });

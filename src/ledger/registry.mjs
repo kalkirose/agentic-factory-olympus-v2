@@ -199,6 +199,15 @@ export const RUN_EVENTS = new Set([
   // never state: the spectrum resumes off `layer-result` alone, so a restart
   // mid-layer stamps a fresh start for the execution it begins (ADR-0034).
   'layer-started',
+  // What one gate layer decided, and the whole part table behind it. A part
+  // carries `carriedFrom` where an older cycle earned its green (ADR-0046),
+  // `attempt` and `seq` where an earlier execution of THIS cycle earned it —
+  // the attempt the flake filter replaced, or the pass a confirmation sweep is
+  // confirming — and `confirmation` where the sweep itself ran it. A table
+  // holding either of the last two holds no `carriedFrom`: every part of it
+  // ran at this sha. `narrowedTo` (parts, files) rides the flake filter's
+  // re-run alone and says what that attempt was asked for, so a re-run that
+  // answered a failure never reads as a re-run of the layer.
   'layer-result',
   // The attempt that ended without a verdict about the tree: the red the flake
   // filter's re-run replaced, a command that could not run, a child a signal
@@ -210,6 +219,11 @@ export const RUN_EVENTS = new Set([
   'layer-abandoned',
   'flake',
   'finding',
+  // The cycle boundary, and what the cycle did not have to buy. `partsRun`,
+  // `partsCarried` and `carryShare` are the cycle's carry (ADR-0058);
+  // `confirmationParts` (ran, kept) is the confirmation sweep's, over the
+  // layers it narrowed — what it executed, and what an earlier pass of the same
+  // cycle had already proven at this sha (ADR-0046).
   'verdict-rendered',
   // The one retry a repeated cycle fingerprint is worth, spent. The stamp
   // names the fingerprint, the render it was granted for and the cycles that
