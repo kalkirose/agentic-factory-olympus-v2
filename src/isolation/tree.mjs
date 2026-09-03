@@ -503,6 +503,41 @@ export async function filesAt(tree, sha, entries) {
   return files.filter((file) => entries.some((entry) => underEntry(file, entry)));
 }
 
+/**
+ * Every tracked path at a sha, or in the working tree's index when the sha is
+ * null. The spec lint reads it to tell a path the tree holds from one the spec
+ * invented (ADR-0067). NUL-separated, so a bracket or a parenthesis in a route
+ * directory arrives as itself and not as a quoted escape.
+ */
+export async function treeFiles(tree, sha) {
+  const args = sha ? ['ls-tree', '-r', '--name-only', '-z', sha] : ['ls-files', '-z'];
+  const out = await git(args, { cwd: tree, maxBuffer: MAX_DIFF_BYTES });
+  return out.split('\0').filter((line) => line.length > 0);
+}
+
+/**
+ * The tracked files under the given path entries that hold a literal string,
+ * at a sha or in the working tree when the sha is null. A glob entry rides
+ * git's `:(glob)` pathspec magic like every other read here; a plain prefix
+ * stays a bare pathspec. Binary files are skipped, and "nothing found" is the
+ * empty list, which git reports as exit status 1 rather than as output.
+ */
+export async function filesMentioning(tree, sha, needle, entries) {
+  const pathspecs = entries.map((e) => (isGlobEntry(e) ? `:(glob)${e}` : e));
+  const args = ['grep', '-l', '-F', '-I', '-z', '-e', needle, ...(sha ? [sha] : []), '--', ...pathspecs];
+  let out;
+  try {
+    out = await git(args, { cwd: tree, maxBuffer: MAX_DIFF_BYTES });
+  } catch (error) {
+    if (error.exitCode === 1) return [];
+    throw error;
+  }
+  return out
+    .split('\0')
+    .filter((line) => line.length > 0)
+    .map((line) => (sha && line.startsWith(`${sha}:`) ? line.slice(sha.length + 1) : line));
+}
+
 function unquote(path) {
   const match = /^"(.*)"$/.exec(path);
   return match ? match[1] : path;

@@ -103,7 +103,11 @@ function run(argv, args, { cwd, env, maxBuffer, timeout, capped = false }) {
         const why = error.killed
           ? `timed out after ${timeout}ms`
           : String(stderr).trim() || error.message;
-        reject(new Error(`git ${args.join(' ')} failed: ${why}`));
+        const failure = new Error(`git ${args.join(' ')} failed: ${why}`);
+        // The exit status, for the one caller whose command answers "nothing
+        // found" with a status rather than with empty output (`git grep`).
+        if (typeof error.code === 'number') failure.exitCode = error.code;
+        reject(failure);
       } else {
         resolve(capped ? { text: stdout, truncated: false } : stdout);
       }

@@ -32,6 +32,10 @@ import { underEntry } from '../config/project.mjs';
 const FENCE_OPEN = /^```touched-paths\s*$/;
 const FENCE_CLOSE = /^```/;
 const OWNER_SUFFIX = /^(.*?)\s+[—–-]\s+(.*)$/;
+// The marker a spec writes after a path the work creates: the tree at the
+// spec's base holds no such file, and the lint is told so instead of refuting
+// the path (ADR-0067). It stands between the path and the owner suffix.
+const NEW_MARKER = /^(.*\S)\s+\(new\)$/i;
 
 const patternCache = new Map();
 
@@ -48,9 +52,10 @@ const patternCache = new Map();
  * it found.
  *
  * @param {string} text spec (or ticket) text
- * @returns {{entries: {path: string, raw: string, owner: string|null}[],
+ * @returns {{entries: {path: string, raw: string, owner: string|null, isNew: boolean}[],
  *   blocks: number, unterminated: boolean}} entries in document order; `path`
- *   is slash-normalized, `raw` is the line as written
+ *   is slash-normalized and carries no marker, `raw` is the line as written
+ *   without its owner suffix, `isNew` is the `(new)` marker
  */
 export function parseTouchedBlock(text) {
   if (typeof text !== 'string') return { entries: [], blocks: 0, unterminated: false };
@@ -74,7 +79,9 @@ export function parseTouchedBlock(text) {
     const owned = OWNER_SUFFIX.exec(trimmed);
     const raw = (owned ? owned[1] : trimmed).trim();
     if (raw.length === 0) continue;
-    block.push({ path: raw.replaceAll('\\', '/'), raw, owner: owned ? owned[2].trim() : null });
+    const marked = NEW_MARKER.exec(raw);
+    const path = (marked ? marked[1] : raw).replaceAll('\\', '/');
+    block.push({ path, raw, owner: owned ? owned[2].trim() : null, isNew: marked !== null });
   }
   return { entries, blocks, unterminated: block !== null };
 }

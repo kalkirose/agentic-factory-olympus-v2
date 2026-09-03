@@ -11,6 +11,7 @@ import {
   dropLine,
   laneDiffPolicy,
   namesOnlyRecapturable,
+  parseTouchedBlock,
   parseTouchedPaths,
   pathTokens,
   recaptureGist,
@@ -80,6 +81,28 @@ test('a second block adds to the first, and CRLF text parses the same', () => {
   const two = SPEC + '\n```touched-paths\napps/api/handler.ts\n```\n';
   assert.deepEqual(parseTouchedPaths(two).at(-1), 'apps/api/handler.ts');
   assert.deepEqual(parseTouchedPaths(SPEC.replaceAll('\n', '\r\n')), parseTouchedPaths(SPEC));
+});
+
+test('the (new) marker is read off the entry and never reaches the path', () => {
+  const text = [
+    '```touched-paths',
+    'src/new.mjs (new) — dev',
+    'src/NEW.mjs (NEW) — dev',
+    'src/old.mjs — dev',
+    'src/bare.mjs (new)',
+    '```',
+  ].join('\n');
+  assert.deepEqual(
+    parseTouchedBlock(text).entries.map((e) => [e.path, e.owner, e.isNew, e.raw]),
+    [
+      ['src/new.mjs', 'dev', true, 'src/new.mjs (new)'],
+      ['src/NEW.mjs', 'dev', true, 'src/NEW.mjs (NEW)'],
+      ['src/old.mjs', 'dev', false, 'src/old.mjs'],
+      ['src/bare.mjs', null, true, 'src/bare.mjs (new)'],
+    ],
+  );
+  // The gate's view is the path alone: a new file is declared like any other.
+  assert.deepEqual(parseTouchedPaths(text), ['src/new.mjs', 'src/NEW.mjs', 'src/old.mjs', 'src/bare.mjs']);
 });
 
 test('a backslash path normalizes, and an owner suffix drops', () => {

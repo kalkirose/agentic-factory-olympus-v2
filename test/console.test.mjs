@@ -95,6 +95,36 @@ test('status carries what this start found in the seat environment', (t) => {
   assert.ok(!after.includes('runner-trust'));
 });
 
+test('status renders the last five refused launches, newest first, with their reasons', (t) => {
+  // ADR-0067. A refusal's reason file reaches only the console that asked;
+  // the status page is where everyone else reads that a slot was asked for
+  // and not given.
+  const { paths } = seededHome(t);
+  assert.ok(!renderStatus(paths).includes('REJECTED'));
+  const instance = openInstanceStore(paths);
+  for (let i = 1; i <= 7; i++) {
+    instance.append('launch-rejected', {
+      actor: 'daemon',
+      requestedBy: i === 7 ? 'frontier' : 'console:ana',
+      project: 'alpha',
+      lane: i % 2 === 0 ? 'repair' : 'story',
+      ...(i % 2 === 0
+        ? { ticket: `.olympus/tickets/t${i}.md` }
+        : { card: `.olympus/cards/c${i}.md` }),
+      reason: `refusal number ${i}`,
+    });
+  }
+  instance.close();
+  const status = renderStatus(paths);
+  assert.match(status, /REJECTED \(last 5\)/);
+  const shown = [...status.matchAll(/refusal number (\d)/g)].map((m) => Number(m[1]));
+  assert.deepEqual(shown, [7, 6, 5, 4, 3]);
+  assert.match(status, /alpha story \.olympus\/cards\/c7\.md \(frontier\) — refusal number 7/);
+  assert.match(status, /alpha repair \.olympus\/tickets\/t6\.md \(console:ana\) — refusal number 6/);
+  // The section sits after the runs and before the config line.
+  assert.ok(status.indexOf('RUNS') < status.indexOf('REJECTED'));
+});
+
 test('a run in verdict carries the share of its part work it did not do', (t) => {
   // ADR-0058. The stage that spends gate-command hours is the one stage where
   // the carry is worth a place on the status page.

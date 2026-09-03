@@ -226,8 +226,8 @@ Supersedes:
 ## Touched paths
 
 \`\`\`touched-paths
-src/feature.mjs - dev
-tests/exports.test.mjs - suite
+src/feature.mjs (new) - dev
+tests/exports.test.mjs (new) - suite
 \`\`\`
 
 ## Environment
@@ -235,6 +235,8 @@ tests/exports.test.mjs - suite
 None; the card names none.
 `;
 
+// Beta launches after alpha shipped, so both files exist at its base and its
+// block carries no marker; the pin alpha left on src/feature.mjs is declared.
 const BETA_SPEC = `# beta-1 spec
 
 Base sha: the launch base. Scope exclusions: none beyond the card boundary.

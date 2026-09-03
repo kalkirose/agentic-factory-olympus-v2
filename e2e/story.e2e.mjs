@@ -62,9 +62,9 @@ Supersedes:
 ## Touched paths
 
 \`\`\`touched-paths
-src/feature.mjs — dev
-tests/feature.test.mjs — suite
-tests/feature-guard.test.mjs — suite
+src/feature.mjs (new) — dev
+tests/feature.test.mjs (new) — suite
+tests/feature-guard.test.mjs (new) — suite
 \`\`\`
 
 ## Environment
@@ -93,8 +93,23 @@ test('f is a function', async () => {
 });
 `;
 
+// The first draft the birth seat writes, with the three mistakes a script can
+// see planted in it (ADR-0067): a touched path the tree does not hold and the
+// spec does not mark new, a touched path a frozen test pins by name with the
+// pin declared nowhere, and a route id under no directory of the routes root.
+// The lint refuses it on the birth seat's own check; the corrective round
+// carries the three rules, and the seat writes the spec above.
+const SPEC_FIRST_DRAFT = SPEC.replace(
+  'src/feature.mjs (new) — dev\n',
+  'src/feature.mjs — dev\nsrc/base.mjs — dev\n',
+).replace(
+  'None; the card names none.',
+  'None; the card names none. The storefront serves the result at `/[lang=lang]/cart`.',
+);
+
 const SCENARIO = {
   spec: SPEC,
+  specFirstDraft: SPEC_FIRST_DRAFT,
   suiteFiles: { 'tests/feature.test.mjs': SUITE, 'tests/feature-guard.test.mjs': GUARD },
   suiteReds: [
     { test: 'f doubles its input', class: 'feature-absence' },
@@ -385,6 +400,33 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
   const calls = seatCalls(fx);
   for (const call of calls) assertSeatArgv(assert, call);
   const seats = calls.map((c) => c.seat);
+
+  // -- the spec lint refused the first draft on the birth seat's own check --
+  // Three planted mistakes, three rules named, one corrective round, and no
+  // gate round spent on any of them (ADR-0067).
+  const births = calls.filter((c) => c.seat === 'spec-birth');
+  assert.equal(births.length, 2, 'the birth seat did not get exactly one corrective round');
+  assert.ok(!births[0].prompt.includes('Correction brief'));
+  assert.ok(births[1].prompt.includes('Correction brief'), 'the second birth carried no brief');
+  assert.match(
+    births[1].prompt,
+    /the touched-paths entry src\/feature\.mjs names no path in the tree at the spec's base sha; a path the story creates carries the marker \(new\)/,
+  );
+  assert.match(
+    births[1].prompt,
+    /the spec touches src\/base\.mjs; the test file tests\/base\.test\.mjs mentions that path, and the spec neither lists tests\/base\.test\.mjs in the touched-paths block nor names it in a Supersedes clause/,
+  );
+  assert.match(
+    births[1].prompt,
+    /the spec names the route \/\[lang=lang\]\/cart, and no such path exists under routes at the spec's base sha/,
+  );
+  assert.ok(!births[1].prompt.includes('/[lang=lang]/shop'), 'a route the tree holds was refused');
+  assert.equal(events.filter((e) => e.event === 'spec-born').length, 1);
+  assert.ok(!events.some((e) => e.event === 'seat-failure' && e.seat === 'spec-birth'));
+  // The seat that writes the block was told the marker and the two rules.
+  assert.ok(births[0].prompt.includes('with the marker (new) between the path and the owner'));
+  assert.ok(births[0].prompt.includes('is a pin on it'));
+  assert.ok(births[0].prompt.includes('names a directory under the routes root'));
   for (const seat of [
     'spec-birth',
     'spec-gate',

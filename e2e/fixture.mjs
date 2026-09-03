@@ -40,6 +40,10 @@ export const REPO_URL = 'https://github.com/olympus-e2e/fixture.git';
 export const PROJECT = 'fixture';
 export const CARD_PATH = '.olympus/cards/alpha-1.md';
 export const TICKET_PATH = '.olympus/tickets/greeting.md';
+// A ticket whose touched-paths block names ground the repair lane is denied.
+// The daemon refuses it at launch (ADR-0067).
+export const FORBIDDEN_TICKET_PATH = '.olympus/tickets/forbidden.md';
+export const DENIED_GATES = '.olympus/gates';
 export const SECRET_NAME = 'E2E_SECRET_TOKEN';
 export const REQUIRED_CHECK = 'ci';
 
@@ -59,7 +63,9 @@ const SMOKE_HOLD_MS = 1400;
  * needs a different section can amend that one and keep the rest. */
 export const PROJECT_CONFIG = {
   version: 1,
-  repo: { testPaths: ['tests'], uiPaths: [] },
+  // The routes root is where a route id in a spec resolves (ADR-0067); the
+  // fixture tree holds one route under it.
+  repo: { testPaths: ['tests'], uiPaths: [], routesRoot: 'routes' },
   commands: {
     lint: ['node', '.olympus/gates/lint.mjs'],
     suite: ['node', '.olympus/gates/suite.mjs'],
@@ -81,8 +87,8 @@ export const PROJECT_CONFIG = {
   graph: { cardsDir: '.olympus/cards' },
   tripwires: [],
   diffPolicy: {
-    story: { deniedPaths: ['.olympus/gates'], declaredPaths: ['src'] },
-    repair: { declaredPaths: ['src'] },
+    story: { deniedPaths: [DENIED_GATES], declaredPaths: ['src'] },
+    repair: { deniedPaths: [DENIED_GATES], declaredPaths: ['src'] },
   },
   budgets: { story: 50, repair: 50 },
   constitutionPath: '.olympus/constitution.md',
@@ -120,6 +126,22 @@ greet() in src/greeting.mjs answers "hi". It must answer "hello".
 ## Scope
 
 Repair src/greeting.mjs and leave a regression test under tests/.
+`;
+
+// The ticket the daemon refuses: its block names a gate script, and the
+// repair lane's diff policy denies the gates directory.
+const FORBIDDEN_TICKET = `# Repair ticket: loosen the suite gate
+
+## The defect
+
+The suite gate is too strict.
+
+## Touched paths
+
+\`\`\`touched-paths
+.olympus/gates/suite.mjs — dev
+src/greeting.mjs — dev
+\`\`\`
 `;
 
 const CONSTITUTION = `# Constitution
@@ -273,6 +295,7 @@ export function fixtureTree() {
     '.olympus/constitution.md': CONSTITUTION,
     '.olympus/cards/alpha-1.md': CARD,
     '.olympus/tickets/greeting.md': TICKET,
+    [FORBIDDEN_TICKET_PATH]: FORBIDDEN_TICKET,
     '.olympus/gates/mark.mjs': MARK,
     '.olympus/gates/lint.mjs': LINT_GATE,
     '.olympus/gates/suite.mjs': SUITE_GATE,
@@ -280,6 +303,9 @@ export function fixtureTree() {
     '.olympus/gates/cardlint.mjs': CARD_LINT_GATE,
     'src/base.mjs': 'export const FACTOR = 2;\n',
     'src/greeting.mjs': "export const greet = () => 'hi';\n",
+    // One route under the routes root, so a spec that names a route the tree
+    // holds passes the lint and one that names a phantom is refused.
+    'routes/[lang=lang]/shop/+page.mjs': 'export const page = "shop";\n',
     'tests/.keep': 'The acceptance suite lives here.\n',
     'tests/base.test.mjs': BASE_TEST,
     'README.md': '# Fixture project\n',

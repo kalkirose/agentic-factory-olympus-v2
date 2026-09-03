@@ -90,10 +90,31 @@ function fixtureTree(t) {
 function lint(
   t,
   text,
-  { tier = null, testPaths = ['tests'], worktree = fixtureTree(t), on = card, baseFiles = null } = {},
+  {
+    tier = null,
+    testPaths = ['tests'],
+    worktree = fixtureTree(t),
+    on = card,
+    baseFiles = null,
+    ground = null,
+  } = {},
 ) {
-  return lintSpec(text, { card: on, cardPath: CARD_PATH, worktree, testPaths, tier, baseFiles });
+  return lintSpec(text, { card: on, cardPath: CARD_PATH, worktree, testPaths, tier, baseFiles, ground });
 }
+
+/** The tree the fixture spec is written against, as the lane hands it over. */
+function groundOf({ files = TREE_FILES, pins = new Map(), routesRoot = 'routes' } = {}) {
+  return { files, pins, routesRoot };
+}
+
+const TREE_FILES = [
+  'src/feature.mjs',
+  'src/base.mjs',
+  'tests/feature.test.mjs',
+  'tests/layout.test.mjs',
+  'routes/[lang=lang]/shop/+page.svelte',
+  'routes/[lang=lang]/(account)/orders/+page.svelte',
+];
 
 // -- the clean spec ----------------------------------------------------------
 
@@ -431,6 +452,7 @@ test('(f) the lane asks git for the base sha, not the worktree it lints in', asy
   const dir = tempDir('olympus-speclint-base-');
   t.after(() => removeDir(dir));
   initOriginRepo(dir, {
+    'src/feature.mjs': 'export {};\n',
     'tests/feature.test.mjs': 'export {};\n',
     'tests/legacy.test.mjs': 'export {};\n',
   });
@@ -547,6 +569,174 @@ test('(h) a forbidden shape fails in the block and in a test mapping', (t) => {
   // Prose is never scanned: the same shape in a sentence says nothing.
   const prose = spec({ environment: '## Environment\n\nThe old src/loader-win32.mjs is gone.' });
   assert.deepEqual(lint(t, prose, { tier: TIER }), []);
+});
+
+// -- (j) every touched path is in the tree, or marked new --------------------
+
+test('(j) a touched path the tree holds passes; one it does not is named with the marker to write', (t) => {
+  assert.deepEqual(lint(t, spec(), { ground: groundOf() }), []);
+  const touched = ['```touched-paths', 'src/ghost.mjs — dev', 'tests/feature.test.mjs — suite', '```'].join('\n');
+  const defects = lint(t, spec({ touched }), { ground: groundOf() });
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(defects[0], /entry src\/ghost\.mjs names no path in the tree at the spec's base sha/);
+  assert.match(defects[0], /"src\/ghost\.mjs \(new\) — dev"/);
+});
+
+test('(j) the (new) marker admits a path the story creates, and is refused on one that exists', (t) => {
+  const created = ['```touched-paths', 'src/ghost.mjs (new) — dev', 'tests/feature.test.mjs — suite', '```'].join('\n');
+  assert.deepEqual(lint(t, spec({ touched: created }), { ground: groundOf() }), []);
+  const stale = ['```touched-paths', 'src/feature.mjs (new) — dev', 'tests/feature.test.mjs — suite', '```'].join('\n');
+  const defects = lint(t, spec({ touched: stale }), { ground: groundOf() });
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(
+    defects[0],
+    /src\/feature\.mjs \(new\) is marked \(new\), and the tree at the spec's base sha already holds that path; drop the marker/,
+  );
+});
+
+test('(j) a directory entry resolves through the files under it, and no tree turns the rule off', (t) => {
+  const dir = ['```touched-paths', 'src — dev', 'tests/feature.test.mjs — suite', '```'].join('\n');
+  assert.deepEqual(lint(t, spec({ touched: dir }), { ground: groundOf() }), []);
+  const ghost = ['```touched-paths', 'src/ghost.mjs — dev', 'tests/feature.test.mjs — suite', '```'].join('\n');
+  assert.deepEqual(lint(t, spec({ touched: ghost }), { ground: groundOf({ files: null }) }), []);
+  assert.deepEqual(lint(t, spec({ touched: ghost })), []);
+});
+
+// -- (k) every pin on a touched path is declared, or superseded --------------
+
+test('(k) a test file that mentions a touched path is a pin the spec has to declare or supersede', (t) => {
+  const pins = new Map([['src/feature.mjs', ['tests/layout.test.mjs', 'tests/feature.test.mjs']]]);
+  const defects = lint(t, spec(), { ground: groundOf({ pins }) });
+  // tests/feature.test.mjs is in the block; tests/layout.test.mjs is not.
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(
+    defects[0],
+    /the spec touches src\/feature\.mjs; the test file tests\/layout\.test\.mjs mentions that path, and the spec neither lists tests\/layout\.test\.mjs in the touched-paths block nor names it in a Supersedes clause\. Declare the pin, or state the supersede\./,
+  );
+  // Declared in the block: clean.
+  const declared = [
+    '```touched-paths',
+    'src/feature.mjs — dev',
+    'tests/feature.test.mjs — suite',
+    'tests/layout.test.mjs — suite',
+    '```',
+  ].join('\n');
+  assert.deepEqual(lint(t, spec({ touched: declared }), { ground: groundOf({ pins }) }), []);
+  // Named as a supersede target: clean.
+  const sections = [
+    section('AC-1', ['tests/feature.test.mjs — f(2) is 4'], {
+      supersedes: ['tests/layout.test.mjs — supersede — AC-1 moves the module'],
+    }),
+    section('AC-2', ['tests/feature.test.mjs — f("x") throws']),
+  ].join('\n');
+  assert.deepEqual(
+    lint(t, spec({ sections }), { ground: groundOf({ pins }), baseFiles: ['tests/layout.test.mjs'] }),
+    [],
+  );
+  // No pin map turns the rule off.
+  assert.deepEqual(lint(t, spec(), { ground: groundOf({ pins: null }) }), []);
+});
+
+// -- (l) every route id resolves under the routes root, or is marked new -----
+
+test('(l) a route id in prose resolves to a directory under the routes root', (t) => {
+  const held = spec({
+    environment:
+      '## Environment\n\nThe shop lives at `/[lang=lang]/shop` and orders at /[lang=lang]/(account)/orders.',
+  });
+  assert.deepEqual(lint(t, held, { ground: groundOf() }), []);
+  const phantom = spec({
+    environment: '## Environment\n\nThe cart lives at `/[lang=lang]/cart` (see `/[lang=lang]/cart`).',
+  });
+  const defects = lint(t, phantom, { ground: groundOf() });
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(
+    defects[0],
+    /the spec names the route \/\[lang=lang\]\/cart, and no such path exists under routes at the spec's base sha; a route the story creates is written `\/\[lang=lang\]\/cart` \(new\)\./,
+  );
+});
+
+test('(l) the (new) marker admits a route the story creates, and is refused on one that exists', (t) => {
+  const created = spec({ environment: '## Environment\n\nThe cart lives at `/[lang=lang]/cart` (new).' });
+  assert.deepEqual(lint(t, created, { ground: groundOf() }), []);
+  const stale = spec({ environment: '## Environment\n\nThe shop lives at `/[lang=lang]/shop` (new).' });
+  const defects = lint(t, stale, { ground: groundOf() });
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(
+    defects[0],
+    /marks the route \/\[lang=lang\]\/shop \(new\), and routes\/\[lang=lang\]\/shop already exists/,
+  );
+});
+
+test('(l) a repository path through the routes root is not a route id, and a missing root turns the rule off', (t) => {
+  const path = spec({
+    environment:
+      '## Environment\n\nThe file routes/[lang=lang]/cart/+page.svelte is new; see also apps/routes/[x]/y.',
+  });
+  assert.deepEqual(lint(t, path, { ground: groundOf() }), []);
+  const phantom = spec({ environment: '## Environment\n\nThe cart lives at `/[lang=lang]/cart`.' });
+  assert.deepEqual(lint(t, phantom, { ground: groundOf({ routesRoot: null }) }), []);
+  assert.deepEqual(lint(t, phantom, { ground: groundOf({ routesRoot: 'web/routes' }) }), []);
+});
+
+test('(j)(k)(l) the lane reads the tree at the base sha, the pins under the test paths, and the routes root', async (t) => {
+  // The wiring the three rules stand on, against a real repository.
+  const dir = tempDir('olympus-speclint-ground-');
+  t.after(() => removeDir(dir));
+  initOriginRepo(dir, {
+    'src/feature.mjs': 'export {};\n',
+    'tests/feature.test.mjs': 'export {};\n',
+    'tests/layout.test.mjs': "import { existsSync } from 'node:fs';\nexistsSync('src/feature.mjs');\n",
+    'routes/[lang=lang]/shop/+page.svelte': '<h1>shop</h1>\n',
+  });
+  const baseSha = gitSync(['rev-parse', 'HEAD'], dir).trim();
+  // The run's own commit adds the file the spec calls new and removes the
+  // pin: the rules read the base sha, not the worktree.
+  writeFileSync(join(dir, 'src', 'ghost.mjs'), 'export {};\n');
+  gitSync(['rm', '-q', 'tests/layout.test.mjs'], dir);
+  gitSync(['add', '-A'], dir);
+  gitSync(['-c', 'commit.gpgsign=false', 'commit', '-m', 'implement'], dir);
+  const specPath = join(dir, 'spec.md');
+  const touched = [
+    '```touched-paths',
+    'src/feature.mjs — dev',
+    'src/ghost.mjs (new) — dev',
+    'tests/feature.test.mjs — suite',
+    '```',
+  ].join('\n');
+  const environment =
+    '## Environment\n\nThe shop is `/[lang=lang]/shop`; the cart `/[lang=lang]/cart` (new).';
+  writeFileSync(specPath, spec({ touched, environment }));
+  const base = {
+    card,
+    cardPath: CARD_PATH,
+    worktree: dir,
+    testPaths: ['tests'],
+    tier: null,
+    specPath,
+    routesRoot: 'routes',
+  };
+  const defects = await specLintDefects({ ...base, baseSha });
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(defects[0], /the test file tests\/layout\.test\.mjs mentions that path/);
+  // Declared, the spec is clean against the same tree.
+  const declared = touched.replace('\n```', '\ntests/layout.test.mjs — suite\n```');
+  writeFileSync(specPath, spec({ touched: declared, environment }));
+  assert.deepEqual(await specLintDefects({ ...base, baseSha }), []);
+  // No base sha reads the worktree's index: the ghost exists there and the pin
+  // is gone, so the marker is stale and the declared pin names no path.
+  const fallback = await specLintDefects({ ...base, baseSha: null });
+  assert.equal(fallback.length, 2, fallback.join(' | '));
+  assert.match(fallback[0], /src\/ghost\.mjs \(new\) is marked \(new\), and the tree/);
+  assert.match(fallback[1], /entry tests\/layout\.test\.mjs names no path in the tree/);
+  // A worktree that is no repository turns the three rules off.
+  const plain = tempDir('olympus-speclint-plain-');
+  t.after(() => removeDir(plain));
+  writeFileSync(join(plain, 'spec.md'), spec({ touched, environment }));
+  assert.deepEqual(
+    await specLintDefects({ ...base, worktree: plain, specPath: join(plain, 'spec.md'), baseSha: null }),
+    [],
+  );
 });
 
 // -- the freeze's exclusions -------------------------------------------------

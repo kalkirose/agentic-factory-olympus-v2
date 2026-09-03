@@ -32,6 +32,7 @@ import {
   runEvents,
   readJson,
   attemptLimit,
+  boughtRetry,
   failureBrief,
   seatFail,
   underAny,
@@ -302,10 +303,11 @@ async function verifierSeat(ctx, base, { cycle, items }) {
 /** One verifier round: the contract loop, under the label the round names. */
 async function verifierRounds(ctx, base, { cycle, items, label, replays, budget }) {
   const limit = attemptLimit(runEvents(ctx), 'fury-verifier');
+  const bought = boughtRetry(runEvents(ctx), 'fury-verifier');
   const layers = (base.config?.gates?.tier1 ?? []).map((layer) => layer.name);
-  let brief = limit === 1 ? failureBrief(runEvents(ctx), 'fury-verifier') : null;
+  let brief = bought ? failureBrief(runEvents(ctx), 'fury-verifier') : null;
   for (let attempt = 1; ; attempt++) {
-    const corrective = attempt === 2 || limit === 1;
+    const corrective = attempt === 2 || bought;
     const outcome = await reviewSeat(ctx, {
       seat: 'fury-verifier',
       label: `${label}${corrective ? '-r' : ''}`,
@@ -314,7 +316,7 @@ async function verifierRounds(ctx, base, { cycle, items, label, replays, budget 
       cwd: base.worktree,
       env: base.env,
       constitution: base.constitution,
-      fresh: limit === 1,
+      fresh: bought,
     });
     if (outcome.fail) return outcome;
     // A report that asks for a probe it can still have is a request and not a

@@ -52,8 +52,12 @@ export function defaultProjectConfig() {
   return {
     version: 1,
     // repo facts the harness enforces: path entries relative to the repo
-    // root — plain prefixes, or glob patterns (see isGlobEntry)
-    repo: { testPaths: [], uiPaths: [] },
+    // root — plain prefixes, or glob patterns (see isGlobEntry). `routesRoot`
+    // is the directory a route id in a spec resolves under (ADR-0067): a plain
+    // repo-relative path, defaulted to the storefront layout, or null for a
+    // project whose specs name no routes. A root the tree does not hold turns
+    // the rule off for that project.
+    repo: { testPaths: [], uiPaths: [], routesRoot: 'apps/storefront/src/routes' },
     // command name → argv; the single home for every runnable command
     commands: {},
     // deterministic gate layers; `command` names a key in `commands`.
@@ -200,6 +204,13 @@ function validateRepo(repo, err) {
   }
   validateStringList(repo.testPaths, 'repo.testPaths', err);
   validateStringList(repo.uiPaths, 'repo.uiPaths', err);
+  if (repo.routesRoot !== undefined && repo.routesRoot !== null) {
+    if (typeof repo.routesRoot !== 'string' || repo.routesRoot.length === 0) {
+      err('repo.routesRoot', 'must be a non-empty repo-relative path, or null');
+    } else if (/^([A-Za-z]:)?[\\/]/.test(repo.routesRoot) || isGlobEntry(repo.routesRoot)) {
+      err('repo.routesRoot', 'must be a plain repo-relative directory path, not a glob');
+    }
+  }
 }
 
 function validateCommands(commands, err) {

@@ -541,16 +541,41 @@ export function commandFail(ctx, run) {
 }
 
 /**
- * The attempt budget of a lane contract loop. A bought retry is one fresh
- * invocation, not a second corrective round: the corrective round already ran
- * before the park that bought it.
+ * Whether the next invocation of a seat is the retry a human bought at its
+ * seat-failure park: the run's latest recovery park is that seat's, it is
+ * answered, and nothing has spawned since the answer. The bought invocation
+ * carries the failure evidence in its brief and never replays a stamped
+ * report, whatever failed.
  */
-export function attemptLimit(events, seat) {
+export function boughtRetry(events, seat) {
   const asked = lastRecoveryPark(events);
   if (!asked?.answer || asked.park.type !== 'seat-failure' || asked.park.detail?.seat !== seat) {
-    return 2;
+    return false;
   }
-  return events.some((e) => e.event === 'seat-spawned' && e.seq > asked.answer.seq) ? 2 : 1;
+  return !events.some((e) => e.event === 'seat-spawned' && e.seq > asked.answer.seq);
+}
+
+/**
+ * The attempt budget of a lane contract loop: one corrective round on a
+ * deterministic defect in the work product, so two attempts.
+ *
+ * A bought retry is one fresh invocation, not a second corrective round, when
+ * the corrective round already ran before the park that bought it. A crash
+ * retry is a different budget: a seat that never delivered a report (a spawn
+ * error, a provider outage, a silence kill) spent no corrective round, so the
+ * retry bought at that park still has one. The ledger tells the two apart by
+ * the stamp the contract loop leaves before its park — a `seat-failure` that
+ * carries the defect list — and a crash leaves no such stamp.
+ */
+export function attemptLimit(events, seat) {
+  if (!boughtRetry(events, seat)) return 2;
+  const parkSeq = lastRecoveryPark(events).park.seq;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.seq >= parkSeq || e.event !== 'seat-failure' || e.seat !== seat) continue;
+    return Array.isArray(e.defects) ? 1 : 2;
+  }
+  return 2;
 }
 
 /**
@@ -560,7 +585,9 @@ export function attemptLimit(events, seat) {
  * failing, so the human buys the retry or abandons the run.
  *
  * A retry bought at that park is one invocation carrying the defect list, not
- * a second corrective round. `defectReason` names the failure in the ledger.
+ * a second corrective round; a retry bought at a crash park keeps its
+ * corrective round (`attemptLimit`). `defectReason` names the failure in the
+ * ledger.
  */
 export async function seatWithChecks(
   ctx,
@@ -578,7 +605,9 @@ export async function seatWithChecks(
   },
 ) {
   const limit = attemptLimit(runEvents(ctx), seat);
-  let brief = limit === 1 ? failureBrief(runEvents(ctx), seat) : null;
+  // The evidence rides every bought retry, crash or defect: the park promised
+  // it, and the seat that crashed is briefed on what ended its predecessor.
+  let brief = boughtRetry(runEvents(ctx), seat) ? failureBrief(runEvents(ctx), seat) : null;
   for (let attempt = 1; ; attempt++) {
     const events = runEvents(ctx);
     const n = invocationCount(events, seat) + 1;

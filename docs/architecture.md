@@ -77,7 +77,8 @@ Two lanes share the machinery:
 - **Repair lane** — for defects and chores: no spec birth (the intake ticket
   is the spec), no adversary. Fix + regression test + full deterministic gates
   + one generalist review round + one verdict + ship. Writes the run ledger
-  and the escapes-ledger entry at close.
+  and the escapes-ledger entry at close. A ticket whose `touched-paths` block
+  names ground the lane's diff policy denies is refused at launch (ADR-0067).
 
 A story launch may **resume from a prior run's freeze**: it starts on the
 frozen commit, carries the born spec and the freeze record over, stamps
@@ -148,8 +149,10 @@ Two levels; the ownership test decides placement.
   the machine together (`gates.concurrencyGroups`), the ground the project
   states no suite of it reads (`gates.groundlessPaths`), what a flake re-run
   asks for (`gates.flakeRerun`), the project's own declared-ground check for
-  its suite (`lanes.story.groundCommand`), and whether a run's commands are
-  offered a cache directory (`runCache`).
+  its suite (`lanes.story.groundCommand`), whether a run's commands are
+  offered a cache directory (`runCache`), and the directory a route id in a
+  spec resolves under (`repo.routesRoot`, default `apps/storefront/src/routes`,
+  `null` for a project whose specs name no routes).
   The daemon reads it from `main` in its bare clone at each run launch, so
   config changes ship through the same PR path as the code they describe. A run
   holds the blob it launched with until an operator repins it on the record
@@ -272,9 +275,16 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   superseded file existed in the worktree or at the run's base sha — the
   candidate's own work deletes what a criterion supersedes, and that deletion
   is the supersede — a dev-owned test-path entry names one file, and
-  every test mapping is one bullet on one line with its path first. A
-  failure is a work-product defect — one corrective invocation, then the
-  `seat-failure` park — and never spends a gate round.
+  every test mapping is one bullet on one line with its path first. Three
+  rules read the tree at the base sha (ADR-0067): every touched path exists
+  there or carries the marker `(new)` between the path and the owner; every
+  test file under the test paths that names a touched path by its literal
+  repo-relative path is a pin the block lists or a Supersedes clause names;
+  every route id in the spec (`/[param]/...`) is a directory under
+  `repo.routesRoot` or is marked `(new)`. The route rule runs only where the
+  tree holds the routes root; a tree git cannot read turns the three rules
+  off for that lint. A failure is a work-product defect — one corrective
+  invocation, then the `seat-failure` park — and never spends a gate round.
 - **Spec gate**: one fresh-context round on the born spec (grounding
   spot-checks, scope against the card, AC encodability), evidence-cited. The
   birth seat amends; the gate re-checks amended sections only. Cap 2 rounds.
@@ -492,7 +502,17 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   env, or harness, with cited evidence. A harness finding also writes a
   gate-integrity line, unless it names only take-backs the capture classed
   re-capturable: that class was settled at the capture and is not re-judged
-  here. Triage classifies, never executes.
+  here. Triage classifies, never executes. The report shape follows the
+  cycle (ADR-0067): a first cycle has no prior findings and its schema has no
+  `persisting` field; a later cycle requires the field and the brief lists
+  the open ids it may hold. Every check defect states the rule beside the
+  entry. The ship stage's CI triage is the same step with the same shape.
+- **Corrective rounds and crash retries** are two budgets (ADR-0067). Every
+  lane contract loop has one corrective round on a work-product defect, then
+  the `seat-failure` park. A retry bought at that park is one invocation
+  when the corrective round ran, and two when the seat crashed before it
+  answered; the stamp the loop leaves before its park tells them apart.
+  Every bought invocation carries the failure evidence in its brief.
 - **Response ladder.** Code-defect → repair round on the candidate tree
   (progress-gated: each round must strictly shrink the open finding set; cap
   3). Stall or a verified approach-level finding → one fresh pass per run,
@@ -1031,6 +1051,15 @@ Owed decision-record reconciliations launch second, after repairs and
 before stories (ADR-0026): shipped runs judged owed at close-out, minus
 those a reconciliation run's launch stamp already names — derived from the
 run ledgers at every sweep, stored nowhere, restart-idempotent.
+
+A repair ticket is read at launch, before a slot or a workspace is spent
+(ADR-0067). Its `touched-paths` block is judged against the repair lane's
+`deniedPaths` and `forbiddenPatterns`; one offending entry refuses the launch,
+and the reason names every offending entry and its rule. A ticket with no
+block launches as it always did, and the capture gate and the review seat
+still read the whole ticket. Every refused launch, console or frontier, is a
+`launch-rejected` stamp on the instance ledger with the card or ticket it
+named, and `olympusctl status` prints the last five under `REJECTED`.
 
 ## Tripwires
 
