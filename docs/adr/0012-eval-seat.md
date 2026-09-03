@@ -40,9 +40,11 @@ has these shapes.
   (`runSeat`) against the instance store: seat events, the one corrective
   re-prompt, and the model-integrity checks all apply unchanged. No
   worktree, no stack; the child's working directory is the daemon home.
-  The default model's semaphore applies, so the eval seat queues behind
-  every other seat in flight on it. Daemon stop terminates an in-flight eval seat (`seat-terminated`)
-  and drains the chain before the ledger closes.
+  A per-model semaphore, where the instance file sets one, applies to the
+  eval seat like any other; by default no model is capped and the eval seat
+  runs alongside whatever is in flight (ADR-0005). Daemon stop terminates
+  an in-flight eval seat (`seat-terminated`) and drains the chain before
+  the ledger closes.
 - **Report contract.** The report schema is the closed proposal-shape set:
   `cut-candidate`, `new-tripwire`, `band-change`, `vocabulary-promotion`,
   `duration-drift`. Each proposal carries a title, its ledger evidence,

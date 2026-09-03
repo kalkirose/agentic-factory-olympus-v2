@@ -171,8 +171,8 @@ test('a rejected model degrades to the fallback model at the same effort', async
   assert.equal(calls[0].model, DEFAULT_MODEL);
   assert.equal(calls[1].model, FALLBACK_MODEL);
   // Effort never drops: the fallback lowers the model, never the effort.
-  assert.equal(calls[0].effort, 'xhigh');
-  assert.equal(calls[1].effort, 'xhigh');
+  assert.equal(calls[0].effort, 'high');
+  assert.equal(calls[1].effort, 'high');
   // The rejected attempt wrote no transcript worth resuming into.
   assert.equal(calls[1].resume, undefined);
   assert.equal(calls[1].attempt, 1);
@@ -502,14 +502,14 @@ test('a fixture seat completes the contract loop end to end', async (t) => {
   assert.equal(result.cost, 2);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].model, DEFAULT_MODEL);
-  assert.equal(calls[0].effort, 'xhigh');
+  assert.equal(calls[0].effort, 'high');
   assert.ok(calls[0].prompt.includes('You are the dev seat'));
   assert.ok(calls[0].prompt.includes(reportPath));
   const events = readEvents(runLedgerPath(paths, 'r1'));
   const spawned = events.filter((e) => e.event === 'seat-spawned');
   assert.equal(spawned.length, 1);
   assert.equal(spawned[0].model, DEFAULT_MODEL);
-  assert.equal(spawned[0].effort, 'xhigh');
+  assert.equal(spawned[0].effort, 'high');
   assert.equal(spawned[0].attempt, 1);
   const report = events.find((e) => e.event === 'seat-report');
   assert.equal(report.actor, 'dev');

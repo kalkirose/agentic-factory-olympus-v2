@@ -12,7 +12,9 @@ export function defaultInstanceConfig() {
   return {
     version: 1,
     logLevel: 'info',
-    // model id → max concurrent seats across all runs
+    // model id → max concurrent seats across all runs. Empty by default, and
+    // an absent key reads the same: no model is capped, every seat runs at
+    // once. A project that wants a cap adds one key per model id (ADR-0005).
     semaphores: {},
     // argv that runs compose on this machine
     composeCommand: ['docker', 'compose'],

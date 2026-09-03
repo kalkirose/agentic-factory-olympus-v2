@@ -1,6 +1,6 @@
 # ADR-0005: Seat runtime shapes
 
-Status: accepted (2026-08-10, seat models 2026-09-03)
+Status: accepted (2026-08-10, seat models, effort, and cap 2026-09-03)
 
 ## Decision
 
@@ -9,7 +9,7 @@ assembly, and the headless runner — gets these concrete shapes:
 
 - **Seat map as code.** `src/seats/seatmap.mjs` is a closed registry: seat →
   model, effort, web-tool allowance, Explore-subagent allowance. Every seat
-  runs Claude Fable 5.1 (`claude-fable-5-1`) at xhigh effort. There are no
+  runs Claude Fable 5.1 (`claude-fable-5-1`) at high effort. There are no
   named exceptions: the certification spine (verdict triage, the Fury
   verifier, the eval seat) shares the default by decision, and the map says
   so through `CERTIFICATION_MODEL`, which names the same id. Claude Opus 5
@@ -45,21 +45,25 @@ assembly, and the headless runner — gets these concrete shapes:
   default is open — the explicit boolean keeps owned validation identical
   to any draft-07 validator). The runner refuses a schema outside the
   subset before any spawn.
-- **Semaphores.** `ModelSemaphores` holds one global counter per model id,
-  limits from instance config, across all runs. Stamps go to the acquiring
+- **No model is capped by default.** The instance file carries no
+  `semaphores` entry, and every seat runs at once: a run spawns each seat
+  the moment its stage is ready, and the only bounds on concurrency are the
+  project's slot cap and the vendor's own limits. `ModelSemaphores` stays
+  in the daemon as the mechanism a project reaches for when it wants a cap:
+  one global counter per model id, limits from instance config, across all
+  runs. An absent key and an empty object read the same, and the runner
+  treats an absent semaphore set the same way: `acquire` finds no limit and
+  returns at once, no seat waits, and no `semaphore-wait` or
+  `semaphore-granted` is stamped. Under a cap, stamps go to the acquiring
   seat's own ledger: `semaphore-wait` when the seat must wait (holders +
-  queue depth), `semaphore-granted` at every grant under a cap (`waited`,
-  and `waitSeq` pairing the wait stamp). Waiters are granted first come,
-  first served. A model without a configured limit has no semaphore and no
-  stamps. The limits are keyed by exact model id, so the cap that bounds
-  the harness is the instance file's `"semaphores": { "claude-fable-5-1":
-  <n> }`; a key under `"claude-opus-5"` bounds degraded and substitute
-  seats only. When the default model's key is absent, `acquire` finds no
-  limit and returns at once: every seat on it runs in parallel, no seat
-  waits, and no `semaphore-wait` or `semaphore-granted` is stamped. A live
-  config edit re-arms the limits and grants what a raised cap allows; seats
-  granted while a model was uncapped are not counted against a cap added
-  later.
+  queue depth), `semaphore-granted` at every grant (`waited`, and
+  `waitSeq` pairing the wait stamp). Waiters are granted first come, first
+  served. The limits are keyed by exact model id, so a cap that bounds the
+  harness is `"semaphores": { "claude-fable-5-1": <n> }`; a key under
+  `"claude-opus-5"` bounds degraded and substitute seats only. A live
+  config edit re-arms the limits: a removed key or a raised cap grants what
+  it allows, and seats granted while a model was uncapped are not counted
+  against a cap added later.
 - **Model integrity.** A substitute dispatch (outage route, chosen by the
   orchestrator) stamps `model-substituted` (new registry event) with
   `from`, `to`, and a required reason — before the spawn. The supervisor
@@ -187,21 +191,47 @@ The two structured fields are the only stable signal, and they are the whole
 signal. Message text is user-facing copy and can be rewritten at any release,
 so matching on it would make a release note a harness outage.
 
-## Why every seat runs one model at xhigh
+## Why every seat runs one model at high
 
-The harness runs every seat on Claude Fable 5.1 at xhigh effort. The
+The harness runs every seat on Claude Fable 5.1 at high effort. The
 decision is the owner's: all agents in the harness run on Fable 5.1 at high
-effort. The effort floor of xhigh, in force since the first seat map,
-satisfies that instruction and stays; no seat sits below xhigh, and no seat
-is raised above it, so effort remains the one cost control.
+effort, and high names the level itself, not a floor a higher level may
+satisfy. The floor is high: no seat sits below it, and no seat is raised
+above it, so effort remains the one cost control and it is the same level
+on every seat. A level above the one named would spend more than the
+decision authorizes on every seat of every run.
 
 One model for all seats removes a split the previous map carried. Under that
 map the judging seats ran on a more capable model than the seats they
 judged, and the runner held a rule for what a judging seat becomes when its
-model is refused. With one default the rule is the same for every seat, the
-semaphore that bounds the harness is one key in the instance file, and a
-ledger reader who sees `claude-fable-5-1` on a `seat-spawned` stamp knows it
-was the configured model and not a promotion.
+model is refused. With one default the rule is the same for every seat, a
+cap on the harness, when a project wants one, is one key in the instance
+file, and a ledger reader who sees `claude-fable-5-1` on a `seat-spawned`
+stamp knows it was the configured model and not a promotion.
+
+## Why no model is capped by default
+
+The per-model cap exists because of one incident: on 2026-07-09 a fan-out
+of Fable subagents, all spawned at once, burned a session limit and stopped
+every seat behind it. The semaphore was the answer: a global counter per
+model id, so a factory could not exhaust its own vendor window by spawning
+faster than the window refilled.
+
+The owner retired the cap on 2026-09-03. The condition it guarded against
+now has a better answer inside the harness: a refused model is read from
+the stream, the seat degrades to the fallback model at the same effort, and
+a run that holds the vendor's reset instant degrades later seats at the
+spawn (ADR-0021). A rejected request costs nothing, and the ledger records
+every degrade. Against that, the cap cost real time on every run: a
+verdict stage spawns its Fury seats together, and a cap of four on the one
+model every seat runs serialized what was designed to run in parallel. The
+owner's instruction is to run every seat at once, so the instance file
+carries no `semaphores` key and nothing waits.
+
+The mechanism stays because the reason for it is a property of a vendor
+window, not of this harness, and another project on another window may
+want the counter back. Removing it would make that a code change; keeping
+it makes it one instance-file key.
 
 `CERTIFICATION_MODEL` stays exported and names the same id. The three seats
 that carry it still read as the certification spine in the map; the export
@@ -303,10 +333,25 @@ the next seat after the reset instant runs on the default again.
 If the default has to move (Claude Fable 5.1 withdrawn, or the owner names
 another model), `DEFAULT_MODEL` in `src/seats/seatmap.mjs` is one line, and
 `CERTIFICATION_MODEL` follows it. `FALLBACK_MODEL` must then name a model
-that is not the new default, or the degrade has nowhere to go. The instance
-file needs its `semaphores` key renamed to the new id, or the new default
-runs uncapped. Trigger: the owner's decision. Reversal cost: one line, one
-instance-file key, and this ADR.
+that is not the new default, or the degrade has nowhere to go. An instance
+file that caps the old id has to rename the key, or the cap it meant stops
+applying. Trigger: the owner's decision. Reversal cost: one line, this ADR,
+and one instance-file key where a cap is set.
+
+If one seat needs a different effort, `seat()` in the map already takes an
+`effort` override, the same way it takes `web` and `explore`; the runner
+passes whatever the map names and holds it for the session. Trigger: the
+owner names a seat and a level. Reversal cost: one field on one seat, and
+this ADR, because the map is closed and a change enters by decision.
+
+If a model has to be capped again (a vendor window that refuses a fan-out
+faster than the degrade route can absorb, or a project on a shared key),
+add `"semaphores": { "<model id>": <n> }` to the instance file. The daemon
+picks the edit up live, the counter arms for grants after the edit, and
+seats already in flight are not counted against it. Trigger: repeated
+`model-degraded` stamps whose `resetsAt` the run keeps crossing, or a
+vendor limit the owner wants to stay under. Reversal cost: none; the
+mechanism is in place and the key is one edit, removed the same way.
 
 If prompt-level subagent caps leak (a dev seat spawns more than 2 or a
 non-Explore subagent), enforce at the tool level with a deny hook in the

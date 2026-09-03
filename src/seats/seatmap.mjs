@@ -2,17 +2,18 @@
 // event registry: a new seat or a policy change enters only by a
 // design-level decision recorded in an ADR, never ad hoc from a call site.
 //
-// Every seat runs Claude Fable 5.1 at xhigh. One model, one effort, no named
-// exceptions. The certification spine (verdict triage, the Fury verifier, the
+// Every seat runs Claude Fable 5.1 at high effort. One model, one effort, no
+// named exceptions. The certification spine (verdict triage, the Fury verifier, the
 // eval seat) is still named through CERTIFICATION_MODEL so the map states that
 // those seats share the default by decision, not by omission. FALLBACK_MODEL
 // is the substitute the runner spawns when the vendor refuses the default
 // model; it is never the default for any seat. Effort is the cost control and
-// stays constant inside a seat session; no seat sits below xhigh (ADR-0005).
+// stays constant inside a seat session; the floor is high, and no seat sits
+// below it (ADR-0005).
 export const DEFAULT_MODEL = 'claude-fable-5-1';
 export const CERTIFICATION_MODEL = DEFAULT_MODEL;
 export const FALLBACK_MODEL = 'claude-opus-5';
-export const DEFAULT_EFFORT = 'xhigh';
+export const DEFAULT_EFFORT = 'high';
 
 // web: web search allowed (spec birth and the two dev seats only).
 // explore: max read-only Explore subagents; 0 = all subagents banned.
