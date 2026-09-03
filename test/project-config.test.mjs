@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_CONSTITUTION_PATH,
   DEFAULT_DIFF_EXCLUSIONS,
+  DEFAULT_EXCERPT_CHARS,
   validateProjectConfig,
   withProjectDefaults,
   parseProjectConfig,
@@ -215,6 +216,7 @@ test('defaults fill every missing section', () => {
   assert.deepEqual(filled.review, {
     lenses: ['spec', 'operational', 'security', 'interface'],
     excludeFromDiff: DEFAULT_DIFF_EXCLUSIONS,
+    excerptChars: DEFAULT_EXCERPT_CHARS,
   });
   assert.deepEqual(filled.lanes, {});
   assert.equal(filled.stack, null);
@@ -265,6 +267,24 @@ test('the review diff exclusions take a path list, and refuse anything else', ()
   assert.deepEqual(errorPaths({ ...valid(), review: { excludeFromDiff: ['a', ''] } }), [
     'review.excludeFromDiff',
   ]);
+});
+
+// How much of the candidate diff the brief carries inline. It bounds the brief
+// and nothing else: the whole diff is a file the brief names at every value.
+test('the review excerpt takes a positive integer of characters', () => {
+  assert.deepEqual(validateProjectConfig({ ...valid(), review: { excerptChars: 40_000 } }), []);
+  assert.equal(
+    withProjectDefaults({ version: 1, review: { excerptChars: 40_000 } }).review.excerptChars,
+    40_000,
+  );
+  assert.equal(withProjectDefaults({ version: 1 }).review.excerptChars, DEFAULT_EXCERPT_CHARS);
+  for (const excerptChars of [0, -1, 1.5, '12000', null]) {
+    assert.deepEqual(
+      errorPaths({ ...valid(), review: { excerptChars } }),
+      ['review.excerptChars'],
+      `${excerptChars} passed validation`,
+    );
+  }
 });
 
 test('the close-out learning block takes two absolute paths, or is absent', () => {

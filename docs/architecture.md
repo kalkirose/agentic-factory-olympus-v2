@@ -569,17 +569,24 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - **Repair-lane review.** Deterministic gates in full; judgment collapses to
   one generalist review seat (the same panel on one seat, diff-scoped,
   per-lens reporting). The verifier fires only when HIGHs exist.
-- **The candidate diff a seat reads** (ADR-0066). Every full-text diff read in
-  the harness carries one explicit output cap, 256 MB, and a read past it
-  answers with the bytes that fit instead of throwing: a throw in a stage
-  handler is a liveness violation, and a lockfile change alone clears the
-  runner's one-megabyte default. The patch leaves out the paths a project lists
+- **The candidate diff a seat reads** (ADR-0066). The whole diff is written to
+  `<run dir>/reviews/diff-c<cycle>.patch` before any judgment seat spawns, and
+  the brief carries the first `review.excerptChars` characters of it (12,000 by
+  default) above the path, the byte count, the file count and the duty to read
+  the file. The seats run in the run worktree and open the file by absolute
+  path, as they open the spec. The patch leaves out the paths a project lists
   under `review.excludeFromDiff` (lockfiles and generated files by default),
-  and names each of them to the seat with its `git diff --stat` line instead.
-  A patch cut by either bound ends on a line naming the files the seat never
-  saw, and the cycle stamps `diffTruncated` on `verdict-rendered` and on every
-  finding the round raised. Name reads answer about every path, so the seats
-  the interface lens sits on and the diff policy's judgment are unchanged.
+  and names each of them to the seat with its `git diff --stat` line instead;
+  the file holds the same filtered text the excerpt comes from. Every full-text
+  diff read carries one explicit output cap, 256 MB, and a read past it answers
+  with the bytes that fit instead of throwing: a throw in a stage handler is a
+  liveness violation, and a lockfile change alone clears the runner's
+  one-megabyte default. A diff the cap cut ends on a line naming the files that
+  reached neither the file nor the excerpt, and the cycle stamps
+  `diffTruncated` on `verdict-rendered` and on every finding the round raised.
+  An excerpt is never that stamp: the rest of the work is in the file. Name
+  reads answer about every path, so the seats the interface lens sits on and
+  the diff policy's judgment are unchanged.
 
 ## Ship step
 

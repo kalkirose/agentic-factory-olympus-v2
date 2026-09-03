@@ -219,21 +219,23 @@ export const RUN_EVENTS = new Set([
   'layer-abandoned',
   'flake',
   // One judgment, and what the seat that made it was reading.
-  // `diffTruncated: true` says the candidate diff was cut before the seat saw
-  // the end of it, so the finding rests on part of the work rather than all of
-  // it. Absent means the seat held the whole patch. A reader weighs a finding
-  // by its evidence, and the completeness of that evidence is not derivable
-  // from the finding itself (ADR-0066).
+  // `diffTruncated: true` says the read cap cut the candidate diff itself, so
+  // the end of the work is in no file the seat could open and the finding
+  // rests on part of it. Absent means the whole diff was there to read: the
+  // brief carries an excerpt of it either way, and an excerpt is not a cut.
+  // A reader weighs a finding by its evidence, and the completeness of that
+  // evidence is not derivable from the finding itself (ADR-0066).
   'finding',
   // The cycle boundary, and what the cycle did not have to buy. `partsRun`,
   // `partsCarried` and `carryShare` are the cycle's carry (ADR-0058);
   // `confirmationParts` (ran, kept) is the confirmation sweep's, over the
   // layers it narrowed — what it executed, and what an earlier pass of the same
   // cycle had already proven at this sha (ADR-0046). `diffTruncated: true` says
-  // this cycle's judgment seats read a cut diff; it is stamped here as well as
-  // on the findings, because a round that raised nothing raises nothing to
-  // carry the word, and a clean verdict over a partial diff is the one a reader
-  // most needs to be able to see (ADR-0066).
+  // the read cap cut this cycle's candidate diff, so its judgment seats could
+  // not reach the end of the work anywhere; it is stamped here as well as on
+  // the findings, because a round that raised nothing raises nothing to carry
+  // the word, and a clean verdict over a cut diff is the one a reader most
+  // needs to be able to see (ADR-0066).
   'verdict-rendered',
   // The one retry a repeated cycle fingerprint is worth, spent. The stamp
   // names the fingerprint, the render it was granted for and the cycles that

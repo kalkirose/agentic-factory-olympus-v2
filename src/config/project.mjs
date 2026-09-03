@@ -37,6 +37,17 @@ export const DEFAULT_DIFF_EXCLUSIONS = [
   '**/*.generated.*',
 ];
 
+/**
+ * How much of the candidate diff a review brief carries inline.
+ *
+ * The whole diff goes to a file the brief names, and this is the excerpt in
+ * front of it: enough that a seat starts reading the work in its first token,
+ * short enough that the lenses, the spec reference and the duties around it
+ * are not pushed out of the brief. The seat opens the file for the rest
+ * (ADR-0066).
+ */
+export const DEFAULT_EXCERPT_CHARS = 12_000;
+
 export function defaultProjectConfig() {
   return {
     version: 1,
@@ -65,7 +76,13 @@ export function defaultProjectConfig() {
     // leaves out is what puts it back. `excludeFromDiff` names the paths whose
     // content the review seat is not given (see DEFAULT_DIFF_EXCLUSIONS);
     // stating it replaces the default list rather than adding to it.
-    review: { lenses: [...DEFAULT_LENSES], excludeFromDiff: [...DEFAULT_DIFF_EXCLUSIONS] },
+    // `excerptChars` is how much of the diff the brief carries inline; the
+    // whole diff is a file the brief names, whatever this value is.
+    review: {
+      lenses: [...DEFAULT_LENSES],
+      excludeFromDiff: [...DEFAULT_DIFF_EXCLUSIONS],
+      excerptChars: DEFAULT_EXCERPT_CHARS,
+    },
     // lane name → lane-specific settings; consuming milestones validate deeper
     lanes: {},
     // compose template for the per-run stack; null = the project has no stack
@@ -420,8 +437,8 @@ function validateReview(review, err) {
     return;
   }
   for (const key of Object.keys(review)) {
-    if (key !== 'lenses' && key !== 'excludeFromDiff') {
-      err(`review.${key}`, 'unknown key: lenses | excludeFromDiff');
+    if (key !== 'lenses' && key !== 'excludeFromDiff' && key !== 'excerptChars') {
+      err(`review.${key}`, 'unknown key: lenses | excludeFromDiff | excerptChars');
     }
   }
   // A value that is not a list of path entries is refused rather than ignored,
@@ -429,6 +446,16 @@ function validateReview(review, err) {
   // diff the project meant to keep out of it, and the round still says green.
   if (review.excludeFromDiff !== undefined && !isStringList(review.excludeFromDiff)) {
     err('review.excludeFromDiff', 'must be an array of non-empty path entries');
+  }
+  // The inline excerpt is a length, and a length is a positive integer. Zero
+  // and below are refused because the brief would open on nothing at all: the
+  // seat's first read of the work is the excerpt, and the file behind it is
+  // what a seat opens second.
+  if (
+    review.excerptChars !== undefined &&
+    (!Number.isInteger(review.excerptChars) || review.excerptChars < 1)
+  ) {
+    err('review.excerptChars', 'must be a positive integer: characters of the diff carried inline');
   }
   if (review.lenses === undefined) return;
   if (!isStringList(review.lenses) || review.lenses.length === 0) {

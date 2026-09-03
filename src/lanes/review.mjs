@@ -101,7 +101,7 @@ export const VERIFIER_SCHEMA = {
  * seats run in parallel. HIGHs go to the verifier; findings stamp once per
  * cycle. Returns the confirmed HIGHs.
  */
-export async function furyRound(ctx, base, { cycle, diffText, diffFiles, diffTruncated = false }) {
+export async function furyRound(ctx, base, { cycle, diff, diffFiles }) {
   const panel = furyPanel(base.lenses);
   const supersedes = authorizedSupersedes(runEvents(ctx));
   const seats = Object.keys(panel).filter(
@@ -115,7 +115,7 @@ export async function furyRound(ctx, base, { cycle, diffText, diffFiles, diffTru
         seat,
         label: `${seat}-c${cycle}`,
         schema: reviewSchema(panel[seat]),
-        roleBlock: furyRole(panel[seat], base, diffText, supersedes),
+        roleBlock: furyRole(panel[seat], base, diff, supersedes),
         cwd: base.worktree,
         env: base.env,
         constitution: base.constitution,
@@ -127,7 +127,12 @@ export async function furyRound(ctx, base, { cycle, diffText, diffFiles, diffTru
   const collected = outcomes.flatMap((o, i) =>
     o.report.findings.map((f) => ({ ...f, source: seats[i] })),
   );
-  return settleFindings(ctx, base, { cycle, collected, priorConfirmed: [], diffTruncated });
+  return settleFindings(ctx, base, {
+    cycle,
+    collected,
+    priorConfirmed: [],
+    diffTruncated: diff.truncated === true,
+  });
 }
 
 /**
@@ -136,19 +141,24 @@ export async function furyRound(ctx, base, { cycle, diffText, diffFiles, diffTru
  * The verifier fires only when HIGHs exist or prior confirmed HIGHs need a
  * resolution-check, so a clean small fix costs one review agent.
  */
-export async function generalistReview(ctx, base, { cycle, diffText, priorConfirmed, diffTruncated = false }) {
+export async function generalistReview(ctx, base, { cycle, diff, priorConfirmed }) {
   const outcome = await reviewSeat(ctx, {
     seat: 'generalist-review',
     label: `generalist-review-c${cycle}`,
     schema: reviewSchema(base.lenses),
-    roleBlock: generalistRole(base, diffText, authorizedSupersedes(runEvents(ctx))),
+    roleBlock: generalistRole(base, diff, authorizedSupersedes(runEvents(ctx))),
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
   });
   if (outcome.fail) return { fail: outcome.fail };
   const collected = outcome.report.findings.map((f) => ({ ...f, source: 'generalist-review' }));
-  return settleFindings(ctx, base, { cycle, collected, priorConfirmed, diffTruncated });
+  return settleFindings(ctx, base, {
+    cycle,
+    collected,
+    priorConfirmed,
+    diffTruncated: diff.truncated === true,
+  });
 }
 
 /**
@@ -347,7 +357,7 @@ function verifierCoverageDefects(items, results) {
 
 // -- role blocks -------------------------------------------------------------
 
-function furyRole(lenses, base, diffText, supersedes = []) {
+function furyRole(lenses, base, diff, supersedes = []) {
   return [
     `Review the candidate implementation diff through these lenses, and label every finding with its lens:`,
     ...lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
@@ -356,12 +366,11 @@ function furyRole(lenses, base, diffText, supersedes = []) {
     'Severity HIGH means the finding must block the ship. Cite evidence (file and line, or spec section) for every finding.',
     'Set "approach": true only when the finding names the implementation structure as wrong against the spec.',
     ...(lenses.includes('spec') ? supersedeDutyLines(base, supersedes) : []),
-    'Diff:',
-    diffText,
+    ...diffLines(diff),
   ].join('\n');
 }
 
-function generalistRole(base, diffText, supersedes = []) {
+function generalistRole(base, diff, supersedes = []) {
   return [
     'Review the diff below through these lenses, and label every finding with its lens:',
     ...base.lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
@@ -370,9 +379,44 @@ function generalistRole(base, diffText, supersedes = []) {
     'Severity HIGH means the finding must block the ship. Cite evidence (file and line, or spec section) for every finding.',
     'Set "approach": true only when the finding names the implementation structure as wrong against the spec.',
     ...(base.lenses.includes('spec') ? supersedeDutyLines(base, supersedes) : []),
-    'Diff:',
-    diffText,
+    ...diffLines(diff),
   ].join('\n');
+}
+
+/**
+ * The diff the seat is given: how much of it is in the brief, how much of it
+ * there is, and where the rest of it is.
+ *
+ * A seat handed the first few thousand characters of a diff with no statement
+ * about the cut judges what it can see and reports as if it had seen the work.
+ * So the excerpt opens with what it is: the size of the whole diff in bytes,
+ * the number of files in it, the path of the file that holds it, and the duty
+ * to read that file. The seats run with the run worktree as their working
+ * directory and the file sits on the daemon home, so the path is absolute and
+ * the seat opens it exactly as it opens the spec.
+ *
+ * An excerpt that IS the diff says so in one line. It names the file anyway,
+ * because the file is always written and a brief that named it only sometimes
+ * would teach a seat that the absence of a path means something (ADR-0066).
+ */
+function diffLines(diff) {
+  const files = `${diff.files} ${diff.files === 1 ? 'file' : 'files'}`;
+  if (!diff.partial) {
+    return [
+      `The whole diff is below: ${diff.bytes} bytes across ${files}. ` +
+        `The same text is on disk at ${diff.path}.`,
+      'Diff:',
+      diff.text,
+    ];
+  }
+  return [
+    `The excerpt below is the first ${diff.chars} characters of a ${diff.bytes}-byte diff ` +
+      `across ${files}.`,
+    `The whole diff is at ${diff.path}.`,
+    'Read the whole file before you judge; a finding must cite the file and hunk it comes from.',
+    'Excerpt:',
+    diff.text,
+  ];
 }
 
 /**
