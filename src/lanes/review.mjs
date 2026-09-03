@@ -101,7 +101,7 @@ export const VERIFIER_SCHEMA = {
  * seats run in parallel. HIGHs go to the verifier; findings stamp once per
  * cycle. Returns the confirmed HIGHs.
  */
-export async function furyRound(ctx, base, { cycle, diffText, diffFiles }) {
+export async function furyRound(ctx, base, { cycle, diffText, diffFiles, diffTruncated = false }) {
   const panel = furyPanel(base.lenses);
   const supersedes = authorizedSupersedes(runEvents(ctx));
   const seats = Object.keys(panel).filter(
@@ -127,7 +127,7 @@ export async function furyRound(ctx, base, { cycle, diffText, diffFiles }) {
   const collected = outcomes.flatMap((o, i) =>
     o.report.findings.map((f) => ({ ...f, source: seats[i] })),
   );
-  return settleFindings(ctx, base, { cycle, collected, priorConfirmed: [] });
+  return settleFindings(ctx, base, { cycle, collected, priorConfirmed: [], diffTruncated });
 }
 
 /**
@@ -136,7 +136,7 @@ export async function furyRound(ctx, base, { cycle, diffText, diffFiles }) {
  * The verifier fires only when HIGHs exist or prior confirmed HIGHs need a
  * resolution-check, so a clean small fix costs one review agent.
  */
-export async function generalistReview(ctx, base, { cycle, diffText, priorConfirmed }) {
+export async function generalistReview(ctx, base, { cycle, diffText, priorConfirmed, diffTruncated = false }) {
   const outcome = await reviewSeat(ctx, {
     seat: 'generalist-review',
     label: `generalist-review-c${cycle}`,
@@ -148,7 +148,7 @@ export async function generalistReview(ctx, base, { cycle, diffText, priorConfir
   });
   if (outcome.fail) return { fail: outcome.fail };
   const collected = outcome.report.findings.map((f) => ({ ...f, source: 'generalist-review' }));
-  return settleFindings(ctx, base, { cycle, collected, priorConfirmed });
+  return settleFindings(ctx, base, { cycle, collected, priorConfirmed, diffTruncated });
 }
 
 /**
@@ -156,7 +156,7 @@ export async function generalistReview(ctx, base, { cycle, diffText, priorConfir
  * stamps every finding once per cycle, and returns the confirmed HIGHs plus
  * the resolution results for prior confirmed findings.
  */
-async function settleFindings(ctx, base, { cycle, collected, priorConfirmed }) {
+async function settleFindings(ctx, base, { cycle, collected, priorConfirmed, diffTruncated = false }) {
   const highs = collected.filter((f) => f.severity === 'HIGH');
   const advisory = collected.filter((f) => f.severity !== 'HIGH');
   const items = [
@@ -208,7 +208,7 @@ async function settleFindings(ctx, base, { cycle, collected, priorConfirmed }) {
       approach: isConfirmed && (result.approach ?? f.approach ?? false),
       confirmed: isConfirmed,
     };
-    stampReviewFinding(ctx, cycle, finding, { advisory: !isConfirmed });
+    stampReviewFinding(ctx, cycle, finding, { advisory: !isConfirmed, diffTruncated });
     if (isConfirmed) confirmed.push(finding);
   }
   for (const f of advisory) {
@@ -223,7 +223,7 @@ async function settleFindings(ctx, base, { cycle, collected, priorConfirmed }) {
         summary: f.finding,
         evidence: f.evidence,
       },
-      { advisory: true },
+      { advisory: true, diffTruncated },
     );
   }
   const resolved = priorConfirmed
@@ -232,7 +232,7 @@ async function settleFindings(ctx, base, { cycle, collected, priorConfirmed }) {
   return { confirmed, resolved };
 }
 
-function stampReviewFinding(ctx, cycle, finding, { advisory }) {
+function stampReviewFinding(ctx, cycle, finding, { advisory, diffTruncated = false }) {
   ctx.store.append('finding', {
     actor: ACTOR,
     cycle,
@@ -245,6 +245,7 @@ function stampReviewFinding(ctx, cycle, finding, { advisory }) {
     ...(advisory ? { advisory: true } : {}),
     ...(finding.confirmed !== undefined && { confirmed: finding.confirmed }),
     ...(finding.approach && { approach: true }),
+    ...(diffTruncated && { diffTruncated: true }),
   });
 }
 

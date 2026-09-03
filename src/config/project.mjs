@@ -17,6 +17,26 @@ export const DEFAULT_CONSTITUTION_PATH = '.olympus/constitution.md';
 // and this is what it requires.
 const ABSOLUTE_PATH = /^([a-zA-Z]:)?[\\/]/;
 
+/**
+ * The paths whose content no review seat is given: lockfiles and files a
+ * generator wrote. A judgment seat reviews what a person wrote. A lockfile
+ * records what a package manager decided, in thousands of lines nobody reads,
+ * and it lands in the same candidate diff as the twenty lines under judgment.
+ * The seat is still told these files changed and by how much; only the patch
+ * text is held back (ADR-0066).
+ *
+ * Each pattern opens with a recursive segment because a lockfile belongs to
+ * whatever package it sits beside: a monorepo holds one per workspace, and a
+ * list anchored at the repo root would filter the top one and hand the seat
+ * the rest.
+ */
+export const DEFAULT_DIFF_EXCLUSIONS = [
+  '**/pnpm-lock.yaml',
+  '**/package-lock.json',
+  '**/yarn.lock',
+  '**/*.generated.*',
+];
+
 export function defaultProjectConfig() {
   return {
     version: 1,
@@ -42,8 +62,10 @@ export function defaultProjectConfig() {
     // one convention per line; prompt assembly consumes these
     conventions: [],
     // the lenses the judgment review carries; naming a lens the default panel
-    // leaves out is what puts it back
-    review: { lenses: [...DEFAULT_LENSES] },
+    // leaves out is what puts it back. `excludeFromDiff` names the paths whose
+    // content the review seat is not given (see DEFAULT_DIFF_EXCLUSIONS);
+    // stating it replaces the default list rather than adding to it.
+    review: { lenses: [...DEFAULT_LENSES], excludeFromDiff: [...DEFAULT_DIFF_EXCLUSIONS] },
     // lane name → lane-specific settings; consuming milestones validate deeper
     lanes: {},
     // compose template for the per-run stack; null = the project has no stack
@@ -398,7 +420,15 @@ function validateReview(review, err) {
     return;
   }
   for (const key of Object.keys(review)) {
-    if (key !== 'lenses') err(`review.${key}`, 'unknown key: lenses');
+    if (key !== 'lenses' && key !== 'excludeFromDiff') {
+      err(`review.${key}`, 'unknown key: lenses | excludeFromDiff');
+    }
+  }
+  // A value that is not a list of path entries is refused rather than ignored,
+  // for the reason an unknown lens is: a filter nobody applied hands the seat a
+  // diff the project meant to keep out of it, and the round still says green.
+  if (review.excludeFromDiff !== undefined && !isStringList(review.excludeFromDiff)) {
+    err('review.excludeFromDiff', 'must be an array of non-empty path entries');
   }
   if (review.lenses === undefined) return;
   if (!isStringList(review.lenses) || review.lenses.length === 0) {

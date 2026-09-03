@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_CONSTITUTION_PATH,
+  DEFAULT_DIFF_EXCLUSIONS,
   validateProjectConfig,
   withProjectDefaults,
   parseProjectConfig,
@@ -211,7 +212,10 @@ test('defaults fill every missing section', () => {
   assert.deepEqual(filled.commands, {});
   assert.deepEqual(filled.gates, { tier1: [] });
   assert.deepEqual(filled.conventions, []);
-  assert.deepEqual(filled.review, { lenses: ['spec', 'operational', 'security', 'interface'] });
+  assert.deepEqual(filled.review, {
+    lenses: ['spec', 'operational', 'security', 'interface'],
+    excludeFromDiff: DEFAULT_DIFF_EXCLUSIONS,
+  });
   assert.deepEqual(filled.lanes, {});
   assert.equal(filled.stack, null);
   assert.deepEqual(filled.tripwires, []);
@@ -237,6 +241,30 @@ test('the review panel takes lens names from the closed set, and a declared set 
   assert.deepEqual(errorPaths({ ...valid(), review: { lenses: [] } }), ['review.lenses']);
   assert.deepEqual(errorPaths({ ...valid(), review: { lens: ['spec'] } }), ['review.lens']);
   assert.deepEqual(errorPaths({ ...valid(), review: ['spec'] }), ['review']);
+});
+
+// The paths whose content the review seat is not given. A value that is not a
+// list of path entries is refused rather than ignored: an ignored filter hands
+// the seat the diff the project meant to keep out of it, and the round still
+// says green.
+test('the review diff exclusions take a path list, and refuse anything else', () => {
+  const excludeFromDiff = ['**/pnpm-lock.yaml', 'build/**'];
+  assert.deepEqual(validateProjectConfig({ ...valid(), review: { excludeFromDiff } }), []);
+  assert.deepEqual(
+    withProjectDefaults({ version: 1, review: { excludeFromDiff } }).review.excludeFromDiff,
+    excludeFromDiff,
+  );
+  // An empty list is a project that filters nothing, and it is legal.
+  assert.deepEqual(validateProjectConfig({ ...valid(), review: { excludeFromDiff: [] } }), []);
+  assert.deepEqual(errorPaths({ ...valid(), review: { excludeFromDiff: 'pnpm-lock.yaml' } }), [
+    'review.excludeFromDiff',
+  ]);
+  assert.deepEqual(errorPaths({ ...valid(), review: { excludeFromDiff: { '0': 'a' } } }), [
+    'review.excludeFromDiff',
+  ]);
+  assert.deepEqual(errorPaths({ ...valid(), review: { excludeFromDiff: ['a', ''] } }), [
+    'review.excludeFromDiff',
+  ]);
 });
 
 test('the close-out learning block takes two absolute paths, or is absent', () => {
