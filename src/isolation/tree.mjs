@@ -1,9 +1,14 @@
 // Working-tree operations the lanes use: change detection, commits,
 // restore-from-sha, evidence diffs. Commits carry a fixed daemon identity so
 // a run never depends on machine-level git config.
-import { rmSync } from 'node:fs';
-import { join } from 'node:path';
-import { DEFAULT_DIFF_EXCLUSIONS, isGlobEntry, underEntry } from '../config/project.mjs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import {
+  DEFAULT_DIFF_EXCLUSIONS,
+  DEFAULT_EXCERPT_CHARS,
+  isGlobEntry,
+  underEntry,
+} from '../config/project.mjs';
 import { MAX_DIFF_BYTES, git, gitCapped } from './git.mjs';
 import { longPath } from './removal.mjs';
 
@@ -160,50 +165,92 @@ export async function evidenceDiff(tree, { limit = 8000 } = {}) {
 }
 
 /**
- * The committed diff between two shas, as a review seat is given it.
+ * The committed diff between two shas, written whole to `path` and excerpted
+ * for the brief that goes with it.
  *
- * Three things separate this from a plain range diff, and each is a rule about
+ * Four things separate this from a plain range diff, and each is a rule about
  * what a judgment seat should be reading.
+ *
+ * The whole diff goes to a file. A story's diff is larger than a prompt, and a
+ * seat handed the first `excerptChars` of one judges the work it can see and
+ * says nothing about the rest. So the file is the diff and the brief is the
+ * way in: the caller names the file to the seat, and the seat reads it. The
+ * write happens here, before the caller can spawn anything, so no seat is ever
+ * pointed at a file that does not exist yet.
  *
  * The patch leaves out the paths in `exclude` — lockfiles and generated files
  * by default (see DEFAULT_DIFF_EXCLUSIONS). Those files are named to the seat
  * instead, one `git diff --stat` line each, so the seat knows they changed and
- * by how much without spending its window on them. Name-status reads answer
- * about every path and are untouched by this: what a file set is derived from
- * stays the whole file set.
+ * by how much without spending its window on them. The file holds the filtered
+ * diff, not the raw one: the excerpt and the file are the same text. Name-status
+ * reads answer about every path and are untouched by this: what a file set is
+ * derived from stays the whole file set.
  *
  * The read carries the diff cap (`cap`), so a patch larger than the runner's
  * default is a short answer rather than a throw at the caller. A throw here is
  * a throw in a stage handler, which the engine reads as a liveness violation,
  * which leaves a run inert over the size of a file.
  *
- * A patch past `cap` or past `limit` is cut and says so, naming the files whose
- * text did not fit. The caller takes `truncated` out to the ledger, because a
- * seat that judged part of a diff and a seat that judged all of it read the
- * same afterwards otherwise.
+ * `truncated` is that cap and nothing else: the file itself is short, and the
+ * work past it is nowhere. The caller takes it out to the ledger, because a
+ * seat that could not reach the end of a diff and a seat that could read the
+ * same afterwards otherwise. An excerpt shorter than the diff is not
+ * truncation. The rest is in the file, and `partial` is the word for it.
  *
- * @returns {Promise<{text: string, truncated: boolean, excluded: string[]}>}
+ * @returns {Promise<{text: string, path: string, bytes: number, files: number,
+ *   chars: number, partial: boolean, truncated: boolean, excluded: string[]}>}
  */
 export async function reviewDiff(
   tree,
   from,
   to,
-  { limit = 12000, cap = MAX_DIFF_BYTES, exclude = DEFAULT_DIFF_EXCLUSIONS } = {},
+  {
+    path,
+    excerptChars = DEFAULT_EXCERPT_CHARS,
+    cap = MAX_DIFF_BYTES,
+    exclude = DEFAULT_DIFF_EXCLUSIONS,
+  } = {},
 ) {
+  // The file is the diff. A caller with nowhere to put it would get an excerpt
+  // and a brief that could only point at itself, which is the defect this
+  // function exists to close, so it is refused at the call instead.
+  if (typeof path !== 'string' || path.length === 0) {
+    throw new Error('reviewDiff needs a path to write the whole diff to');
+  }
   const range = `${from}..${to}`;
   const changed = await changedInRange(tree, from, to);
   const entries = exclude ?? DEFAULT_DIFF_EXCLUSIONS;
   const { pathspec, excluded } = await exclusions(tree, range, changed, entries);
   const read = await gitCapped(['diff', range, ...pathspec], { cwd: tree, maxBuffer: cap });
-  const kept = read.text.length > limit ? read.text.slice(0, limit) : read.text;
-  const truncated = read.truncated || read.text.length > limit;
-  const parts = [kept];
-  if (truncated) parts.push(truncationLine(kept, changed, excluded));
+  const whole = read.text;
+  mkdirSync(dirname(path), { recursive: true });
+  // The patch text and nothing else. A note appended here would be a note
+  // inside a file the seat reads as a patch, and so does every other reader:
+  // an operator, an editor, `git apply`.
+  writeFileSync(path, whole);
+  const partial = whole.length > excerptChars;
+  const excerpt = partial ? whole.slice(0, excerptChars) : whole;
+  const parts = [excerpt];
+  if (partial) parts.push(excerptEndLine(excerpt, path));
+  if (read.truncated) parts.push(capLine(whole, changed, excluded, cap));
   if (excluded.length > 0) parts.push(await excludedStat(tree, range, excluded));
-  return { text: parts.join('\n'), truncated, excluded };
+  return {
+    text: parts.join('\n'),
+    path,
+    bytes: Buffer.byteLength(whole),
+    // The files whose patch text is in the file: what changed, minus what the
+    // exclusions held back. The excluded paths are named below the excerpt
+    // under their own heading, and counting them here would tell the seat to
+    // look in the file for text that is not in it.
+    files: changed.length - excluded.length,
+    chars: excerpt.length,
+    partial,
+    truncated: read.truncated,
+    excluded,
+  };
 }
 
-/** How many unshown file names the truncation line prints before it stops. */
+/** How many unshown file names the cap line prints before it stops. */
 const TRUNCATION_NAMES = 20;
 
 /**
@@ -249,19 +296,33 @@ async function exclusions(tree, range, changed, entries) {
 }
 
 /**
- * The one line a cut patch ends on: where it was cut, and which files the seat
- * therefore never saw. A file counts as shown when its own patch header is in
- * the text that survived; the header is what a reader of the patch would look
- * for, so this counts exactly what the seat can find.
+ * The one line an excerpt ends on: where the brief stops, and where the diff
+ * carries on. It repeats the path the brief already named, because this is the
+ * end of the text the seat is reading and a reader who has arrived here is
+ * looking for the next thing to read.
  */
-function truncationLine(kept, changed, excluded) {
+function excerptEndLine(excerpt, path) {
+  return `[excerpt ends at ${excerpt.length} characters; the whole diff is at ${path}]`;
+}
+
+/**
+ * The one line a cut diff file ends on: where the read stopped, and which
+ * files are therefore in neither the file nor the excerpt. A file counts as
+ * present when its own patch header is in the text that survived; the header
+ * is what a reader of the patch would look for, so this counts exactly what
+ * the seat can find.
+ */
+function capLine(whole, changed, excluded, cap) {
   const held = new Set(excluded);
   const missing = changed.filter(
-    (file) => !held.has(file) && !kept.includes(`diff --git a/${file} `),
+    (file) => !held.has(file) && !whole.includes(`diff --git a/${file} `),
   );
   const names = missing.slice(0, TRUNCATION_NAMES).join(', ');
   const more = missing.length > TRUNCATION_NAMES ? ', ...' : '';
-  return `[diff truncated at ${kept.length} bytes; ${missing.length} files not shown: ${names}${more}]`;
+  return (
+    `[the diff file stopped at the ${cap}-byte read cap, ${whole.length} bytes in; ` +
+    `${missing.length} files are in neither it nor this excerpt: ${names}${more}]`
+  );
 }
 
 /**

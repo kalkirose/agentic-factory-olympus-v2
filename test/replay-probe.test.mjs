@@ -406,7 +406,15 @@ test('the Fury verifier spends a round the same way triage does', async (t) => {
   ctx.runSeat = seatQueue(ctx, [review, askThen, verdicts]);
   const outcome = await generalistReview(ctx, baseFor(), {
     cycle: 1,
-    diffText: 'diff',
+    diff: {
+      text: 'diff',
+      path: 'runs/r1/reviews/diff-c1.patch',
+      bytes: 4,
+      files: 1,
+      chars: 4,
+      partial: false,
+      truncated: false,
+    },
     priorConfirmed: [],
   });
 

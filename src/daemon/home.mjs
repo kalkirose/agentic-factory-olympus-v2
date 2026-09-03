@@ -150,6 +150,22 @@ export function commandLogPath(paths, runId, name) {
 }
 
 /**
+ * Where one verdict cycle's whole candidate diff is written. It is a run
+ * artifact that archives with the run, beside the reports and the verdict
+ * record.
+ *
+ * A file and not a brief field: a story's diff is larger than a prompt, so the
+ * brief carries an excerpt and names this path for the rest. It is evidence
+ * as much as the verdict record is, so nothing deletes it: what a seat judged
+ * is readable after the run from the same directory as the judgment
+ * (ADR-0066).
+ * @param {ReturnType<typeof homePaths>} paths
+ */
+export function reviewDiffPath(paths, runId, name) {
+  return join(paths.runs, runId, 'reviews', `${pathPart(name)}.patch`);
+}
+
+/**
  * Where one replay probe's output is written for the seat that asked for it —
  * a run artifact that archives with the run, beside the reports.
  *

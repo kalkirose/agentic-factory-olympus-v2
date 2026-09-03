@@ -27,7 +27,7 @@
 // state, so a daemon restart resumes mid-verdict without memory.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join } from 'node:path';
-import { runReportPath } from '../daemon/home.mjs';
+import { reviewDiffPath, runReportPath } from '../daemon/home.mjs';
 import {
   carryPaths,
   changedFiles,
@@ -375,42 +375,36 @@ async function runCycle(ctx, base, mode, { cycle }) {
     : null;
   const priorConfirmed = priorOpen.filter((f) => f.confirmed);
   let reviewOpen = priorConfirmed;
-  // What the judgment seats of this cycle were actually given. A cut diff is a
-  // seat that judged part of the work, and the ledger carries the word for it:
-  // on the findings it raised, and on the cycle record, which is stamped even
-  // when the round came out clean (ADR-0066).
+  // What the judgment seats of this cycle were actually given. The whole diff
+  // is written to the run's own directory before any seat spawns, and the brief
+  // names it; the seats read the file. A diff the read cap cut is a diff whose
+  // end is nowhere, which is a seat judging part of the work, and the ledger
+  // carries the word for it: on the findings it raised, and on the cycle
+  // record, which is stamped even when the round came out clean (ADR-0066).
   let diffTruncated = false;
   const readDiff = async (from, to) => {
     const diff = await reviewDiff(base.worktree, from, to, {
+      path: reviewDiffPath(ctx.paths, ctx.runId, `diff-c${cycle}`),
       exclude: base.config?.review?.excludeFromDiff,
+      excerptChars: base.config?.review?.excerptChars,
     });
     if (diff.truncated) diffTruncated = true;
-    return diff.text;
+    return diff;
   };
   if (newTree) {
-    const diffText = await readDiff(impl.baseSha, impl.sha);
+    const diff = await readDiff(impl.baseSha, impl.sha);
     // Name-only, and so the whole file set: what a panel seat is shown and what
     // decides which seats sit are different questions (ADR-0066).
     const diffFiles = await changedInRange(base.worktree, impl.baseSha, impl.sha);
     const round =
       mode === 'story'
-        ? await furyRound(ctx, base, { cycle, diffText, diffFiles, diffTruncated })
-        : await generalistReview(ctx, base, {
-            cycle,
-            diffText,
-            diffTruncated,
-            priorConfirmed: [],
-          });
+        ? await furyRound(ctx, base, { cycle, diff, diffFiles })
+        : await generalistReview(ctx, base, { cycle, diff, priorConfirmed: [] });
     if (round.fail) return { directive: round.fail };
     reviewOpen = round.confirmed;
   } else if (repaired) {
-    const diffText = await readDiff(impl.baseSha, impl.sha);
-    const round = await generalistReview(ctx, base, {
-      cycle,
-      diffText,
-      diffTruncated,
-      priorConfirmed,
-    });
+    const diff = await readDiff(impl.baseSha, impl.sha);
+    const round = await generalistReview(ctx, base, { cycle, diff, priorConfirmed });
     if (round.fail) return { directive: round.fail };
     reviewOpen = [
       ...priorConfirmed.filter((f) => !round.resolved.includes(f.id)),
@@ -422,13 +416,8 @@ async function runCycle(ctx, base, mode, { cycle }) {
     // proves the words are in the card, and whether the words reach the
     // assertion that changed is a judgment. So the panel reads that amendment's
     // own diff — one seat, only where nobody was asked (ADR-0044).
-    const diffText = await readDiff(cardRuled.baseSha, cardRuled.sha);
-    const round = await generalistReview(ctx, base, {
-      cycle,
-      diffText,
-      diffTruncated,
-      priorConfirmed,
-    });
+    const diff = await readDiff(cardRuled.baseSha, cardRuled.sha);
+    const round = await generalistReview(ctx, base, { cycle, diff, priorConfirmed });
     if (round.fail) return { directive: round.fail };
     reviewOpen = [
       ...priorConfirmed.filter((f) => !round.resolved.includes(f.id)),
