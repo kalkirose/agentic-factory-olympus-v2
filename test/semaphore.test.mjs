@@ -4,9 +4,12 @@ import { ModelSemaphores } from '../src/seats/semaphore.mjs';
 import { openRunStore } from '../src/telemetry/stores.mjs';
 import { scaffoldHome, runLedgerPath } from '../src/daemon/home.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
+import { DEFAULT_MODEL, FALLBACK_MODEL } from '../src/seats/seatmap.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
-const MODEL = 'claude-opus-5';
+// The instance file keys its caps by model id, so the cap that bounds the
+// harness is the one under the default model's id.
+const MODEL = DEFAULT_MODEL;
 
 function setup(t) {
   const home = tempDir();
@@ -24,6 +27,27 @@ test('an uncapped model grants without stamps', async (t) => {
   const semaphores = new ModelSemaphores({});
   const release = await semaphores.acquire(MODEL, { store, seat: 'dev' });
   release();
+  assert.equal(readEvents(runLedgerPath(paths, 'r1')).length, 0);
+});
+
+// A cap keyed by another model's id does nothing for the default model: the
+// lookup is by exact id, and an absent key means no semaphore at all. Every
+// seat is granted at once, nothing waits, nothing is stamped.
+test('an absent key for the default model caps nothing, whatever other keys say', async (t) => {
+  const { paths, store } = setup(t);
+  const semaphores = new ModelSemaphores({ [FALLBACK_MODEL]: 1, 'claude-fable-5': 1 });
+  const releases = [];
+  for (const seat of ['fury-spec', 'fury-operational', 'fury-interface']) {
+    let granted = false;
+    const grant = semaphores.acquire(MODEL, { store, seat }).then((r) => {
+      granted = true;
+      return r;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(granted, true, seat);
+    releases.push(await grant);
+  }
+  for (const release of releases) release();
   assert.equal(readEvents(runLedgerPath(paths, 'r1')).length, 0);
 });
 

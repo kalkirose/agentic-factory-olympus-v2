@@ -157,10 +157,12 @@ Two levels; the ownership test decides placement.
 
 ## Seats
 
-- **Seat map.** Default: Claude Opus 5 at xhigh effort, all seats. Named
-  exceptions run on Fable 5 at xhigh: verdict triage, the Fury verifier, and
-  the eval seat — the certification spine. `max_tokens` = model max; effort is
-  the cost control. Effort stays constant inside a seat session.
+- **Seat map.** Every seat runs Claude Fable 5.1 (`claude-fable-5-1`) at
+  xhigh effort. No named exceptions: the certification spine (verdict triage,
+  the Fury verifier, the eval seat) shares the default by decision. Claude
+  Opus 5 (`claude-opus-5`) is the fallback model only; no seat defaults to it
+  (ADR-0005). `max_tokens` = model max; effort is the cost control. Effort
+  stays constant inside a seat session.
 - **File contracts.** No structured-output tool anywhere. The seat writes its
   JSON report to the named ledger path; a deterministic process validates it
   (flat, draft-07-safe schemas). One corrective re-prompt, then seat-failure.
@@ -188,10 +190,11 @@ Two levels; the ownership test decides placement.
   The report is written before the seat stops.
 - **Model integrity.** Model-switch flags off on every seat; a classifier flag
   is a seat-failure on the harness route, never a silent downgrade. Outage →
-  orchestrator re-dispatch on the default model, recorded with the substitute
+  orchestrator re-dispatch on the fallback model, recorded with the substitute
   named. A model that refuses the work (read from the seat's own stream, not
-  from an exit code) degrades to the default model at the same effort, stamped
-  `model-degraded`; the default model refusing too is a loud failure. A run
+  from an exit code) degrades to the fallback model, Claude Opus 5, at the
+  same effort, stamped `model-degraded`; the fallback model refusing too is a
+  loud failure. A run
   that already holds a rejection for a model, with the vendor's reset instant
   still ahead, degrades the next seat at the spawn — the same stamp, marked as
   standing on the run's own record (ADR-0021). The ledger records the actual
@@ -204,7 +207,12 @@ Two levels; the ownership test decides placement.
   defect, once per instance; a clean host says nothing, and no finding stops
   the start (ADR-0030).
 - **Semaphores.** The daemon holds a global concurrency semaphore per model
-  across all runs. A seat waits on the semaphore; it never fails on it.
+  across all runs. A seat waits on the semaphore; it never fails on it. The
+  instance file keys each cap by the exact model id, so the cap that bounds
+  the harness sits under `"claude-fable-5-1"` (`"semaphores": {
+  "claude-fable-5-1": <n> }`); a cap under `"claude-opus-5"` bounds degraded
+  seats only. A model id with no key has no semaphore: every seat on it is
+  granted at once, nothing waits, and nothing is stamped.
 - **Web tools.** Web search on spec-birth and dev seats only. Judgment seats
   get none.
 - **Secrets.** The machine's credentials follow suite execution. A seat marked

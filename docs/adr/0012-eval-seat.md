@@ -40,8 +40,8 @@ has these shapes.
   (`runSeat`) against the instance store: seat events, the one corrective
   re-prompt, and the model-integrity checks all apply unchanged. No
   worktree, no stack; the child's working directory is the daemon home.
-  The Fable semaphore applies, so the eval seat queues behind verdict
-  seats. Daemon stop terminates an in-flight eval seat (`seat-terminated`)
+  The default model's semaphore applies, so the eval seat queues behind
+  every other seat in flight on it. Daemon stop terminates an in-flight eval seat (`seat-terminated`)
   and drains the chain before the ledger closes.
 - **Report contract.** The report schema is the closed proposal-shape set:
   `cut-candidate`, `new-tripwire`, `band-change`, `vocabulary-promotion`,

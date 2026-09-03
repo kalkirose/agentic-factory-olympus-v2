@@ -6,6 +6,7 @@ import {
   seatExecutesSuite,
   DEFAULT_MODEL,
   CERTIFICATION_MODEL,
+  FALLBACK_MODEL,
   DEFAULT_EFFORT,
 } from '../src/seats/seatmap.mjs';
 import { assembleSeatPrompt, correctivePrompt, ONE_TURN_RULE } from '../src/seats/prompt.mjs';
@@ -18,17 +19,32 @@ const SCHEMA = {
   required: ['verdict'],
 };
 
-test('every seat holds the xhigh effort floor', () => {
+// The ids are pinned as literals on purpose: a seat map that quietly moved to
+// another model or a lower effort would still agree with its own constants.
+test('every seat runs Claude Fable 5.1 at xhigh', () => {
+  assert.equal(DEFAULT_MODEL, 'claude-fable-5-1');
+  assert.equal(DEFAULT_EFFORT, 'xhigh');
   for (const [name, def] of Object.entries(SEATS)) {
-    assert.equal(def.effort, DEFAULT_EFFORT, name);
+    assert.equal(def.model, 'claude-fable-5-1', name);
+    assert.equal(def.effort, 'xhigh', name);
   }
 });
 
-test('the certification spine runs on Fable; everything else on the default model', () => {
-  const certification = ['verdict-triage', 'fury-verifier', 'eval'];
+test('the certification spine shares the default model by decision', () => {
+  assert.equal(CERTIFICATION_MODEL, DEFAULT_MODEL);
+  for (const name of ['verdict-triage', 'fury-verifier', 'eval']) {
+    assert.equal(seatDef(name).model, CERTIFICATION_MODEL, name);
+  }
+});
+
+// The substitute is a real Opus id, and it is nobody's default: the only way
+// a seat lands on it is a degrade the ledger stamped or a substitute dispatch
+// with a reason.
+test('the fallback model is Claude Opus 5 and no seat defaults to it', () => {
+  assert.equal(FALLBACK_MODEL, 'claude-opus-5');
+  assert.notEqual(FALLBACK_MODEL, DEFAULT_MODEL);
   for (const [name, def] of Object.entries(SEATS)) {
-    const expected = certification.includes(name) ? CERTIFICATION_MODEL : DEFAULT_MODEL;
-    assert.equal(def.model, expected, name);
+    assert.notEqual(def.model, FALLBACK_MODEL, name);
   }
 });
 
@@ -169,9 +185,9 @@ test('the claude argv names the model and blocks tools per policy, never a fallb
 
 test('the stream-json parser maps init, assistant, and result lines', () => {
   const init = parseClaudeLine(
-    JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-opus-5', session_id: 's1' }),
+    JSON.stringify({ type: 'system', subtype: 'init', model: DEFAULT_MODEL, session_id: 's1' }),
   );
-  assert.deepEqual(init, { meta: { model: 'claude-opus-5', sessionId: 's1' } });
+  assert.deepEqual(init, { meta: { model: DEFAULT_MODEL, sessionId: 's1' } });
   const note = parseClaudeLine(
     JSON.stringify({
       type: 'assistant',
@@ -250,7 +266,7 @@ test('a healthy stream never marks a model unavailable', () => {
   const turn = parseClaudeLine(
     JSON.stringify({
       type: 'assistant',
-      message: { model: 'claude-opus-5', content: [{ type: 'text', text: 'reading the diff' }] },
+      message: { model: DEFAULT_MODEL, content: [{ type: 'text', text: 'reading the diff' }] },
     }),
   );
   assert.equal(turn.note, 'reading the diff');
