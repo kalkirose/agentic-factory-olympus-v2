@@ -21,30 +21,34 @@ const SCHEMA = {
 
 // The ids are pinned as literals on purpose: a seat map that quietly moved to
 // another model or a lower effort would still agree with its own constants.
-test('every seat runs Claude Fable 5.1 at high', () => {
-  assert.equal(DEFAULT_MODEL, 'claude-fable-5-1');
+const CERTIFICATION_SEATS = ['verdict-triage', 'fury-verifier', 'eval'];
+
+test('seats run Claude Opus 5 at high, except the certification spine', () => {
+  assert.equal(DEFAULT_MODEL, 'claude-opus-5');
   assert.equal(DEFAULT_EFFORT, 'high');
   for (const [name, def] of Object.entries(SEATS)) {
-    assert.equal(def.model, 'claude-fable-5-1', name);
+    const expected = CERTIFICATION_SEATS.includes(name) ? 'claude-fable-5-1' : 'claude-opus-5';
+    assert.equal(def.model, expected, name);
     assert.equal(def.effort, 'high', name);
   }
 });
 
-test('the certification spine shares the default model by decision', () => {
-  assert.equal(CERTIFICATION_MODEL, DEFAULT_MODEL);
-  for (const name of ['verdict-triage', 'fury-verifier', 'eval']) {
+test('the certification spine runs Claude Fable 5.1', () => {
+  assert.equal(CERTIFICATION_MODEL, 'claude-fable-5-1');
+  assert.notEqual(CERTIFICATION_MODEL, DEFAULT_MODEL);
+  for (const name of CERTIFICATION_SEATS) {
     assert.equal(seatDef(name).model, CERTIFICATION_MODEL, name);
   }
 });
 
-// The substitute is a real Opus id, and it is nobody's default: the only way
-// a seat lands on it is a degrade the ledger stamped or a substitute dispatch
-// with a reason.
-test('the fallback model is Claude Opus 5 and no seat defaults to it', () => {
+// Opus 5 is what a refused certification seat degrades to. A seat already on
+// Opus 5 has nothing below it, which is why the substitute and the default
+// name the same id.
+test('Claude Opus 5 is the substitute for a refused certification seat', () => {
   assert.equal(FALLBACK_MODEL, 'claude-opus-5');
-  assert.notEqual(FALLBACK_MODEL, DEFAULT_MODEL);
-  for (const [name, def] of Object.entries(SEATS)) {
-    assert.notEqual(def.model, FALLBACK_MODEL, name);
+  assert.equal(FALLBACK_MODEL, DEFAULT_MODEL);
+  for (const name of CERTIFICATION_SEATS) {
+    assert.notEqual(seatDef(name).model, FALLBACK_MODEL, name);
   }
 });
 

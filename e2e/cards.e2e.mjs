@@ -369,7 +369,7 @@ function buildCardsFixture() {
       {
         version: 1,
         logLevel: 'info',
-        semaphores: { 'claude-fable-5-1': 2, 'claude-opus-5': 2 },
+        semaphores: { 'claude-opus-5': 2, 'claude-fable-5-1': 2 },
         claudeCommand: ['node', SEAT_STUB],
         ghCommand: ['node', GH_STUB],
         projects: {

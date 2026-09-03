@@ -24,11 +24,11 @@
 // Availability degrade: a seat whose model refuses the work (the stream says
 // the model is unavailable) retries once on FALLBACK_MODEL (Claude Opus 5) at
 // the same effort, and stamps `model-degraded` first. Effort never drops. The
-// fallback moves a seat from the default model (Claude Fable 5.1) down to the
+// fallback moves a certification seat from Claude Fable 5.1 down to the
 // substitute, which lowers capability and holds the effort floor, so the
 // stamp is the record a reader needs to see who judged the work. A seat
-// already on the fallback model (by substitute dispatch) has nowhere to go:
-// the fallback model refusing is a loud failure, not a second retry.
+// already on the fallback model, which every default seat is, has nowhere to
+// go: the fallback model refusing is a loud failure, not a second retry.
 //
 // Quota memo: a run that already watched the vendor refuse a model, and holds
 // the reset instant the vendor declared, degrades at the spawn instead of

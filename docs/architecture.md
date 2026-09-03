@@ -160,12 +160,12 @@ Two levels; the ownership test decides placement.
 
 ## Seats
 
-- **Seat map.** Every seat runs Claude Fable 5.1 (`claude-fable-5-1`) at
-  high effort. No named exceptions: the certification spine (verdict triage,
-  the Fury verifier, the eval seat) shares the default by decision. Claude
-  Opus 5 (`claude-opus-5`) is the fallback model only; no seat defaults to it
-  (ADR-0005). `max_tokens` = model max; effort is the cost control. Effort
-  stays constant inside a seat session.
+- **Seat map.** Seats run Claude Opus 5 (`claude-opus-5`) at high effort. The
+  certification spine (verdict triage, the Fury verifier, the eval seat) runs
+  Claude Fable 5.1 (`claude-fable-5-1`). Opus 5 is also the fallback model, so
+  a refused certification seat degrades to it and a refused Opus 5 seat has no
+  substitute (ADR-0005). `max_tokens` = model max; effort is the cost control.
+  Effort stays constant inside a seat session.
 - **File contracts.** No structured-output tool anywhere. The seat writes its
   JSON report to the named ledger path; a deterministic process validates it
   (flat, draft-07-safe schemas). One corrective re-prompt, then seat-failure.
@@ -213,8 +213,8 @@ Two levels; the ownership test decides placement.
   no `semaphores` entry, every seat runs at once, and nothing is stamped
   (ADR-0005). The mechanism stays for a project that wants a cap: a global
   concurrency semaphore per model across all runs, keyed by the exact model
-  id (`"semaphores": { "claude-fable-5-1": <n> }`; a key under
-  `"claude-opus-5"` bounds degraded seats only). A seat waits on the
+  id (`"semaphores": { "claude-opus-5": <n> }`; a key under
+  `"claude-fable-5-1"` bounds the certification spine only). A seat waits on the
   semaphore; it never fails on it. A model id with no key has no semaphore.
 - **Web tools.** Web search on spec-birth and dev seats only. Judgment seats
   get none.
