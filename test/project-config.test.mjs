@@ -45,6 +45,27 @@ test('a full config validates clean', () => {
   assert.deepEqual(validateProjectConfig(valid()), []);
 });
 
+test('repo.routesRoot is a plain repo-relative path, or null to turn the route rule off', () => {
+  // The default stands for a project that names none, and a project's own
+  // value replaces it. Null is the explicit "no routes root".
+  assert.equal(withProjectDefaults({ version: 1 }).repo.routesRoot, 'apps/storefront/src/routes');
+  assert.equal(
+    withProjectDefaults({ version: 1, repo: { routesRoot: 'web/routes' } }).repo.routesRoot,
+    'web/routes',
+  );
+  assert.equal(withProjectDefaults({ version: 1, repo: { routesRoot: null } }).repo.routesRoot, null);
+  for (const routesRoot of ['web/routes', null]) {
+    const config = valid();
+    config.repo.routesRoot = routesRoot;
+    assert.deepEqual(validateProjectConfig(config), []);
+  }
+  for (const routesRoot of ['', 7, '/abs/routes', 'C:\\routes', 'apps/*/routes']) {
+    const config = valid();
+    config.repo.routesRoot = routesRoot;
+    assert.deepEqual(errorPaths(config), ['repo.routesRoot'], String(routesRoot));
+  }
+});
+
 test('version must be 1', () => {
   assert.deepEqual(errorPaths({ ...valid(), version: 2 }), ['version']);
 });
@@ -209,7 +230,11 @@ test('stack: composeFile must be repo-relative, env values strings', () => {
 
 test('defaults fill every missing section', () => {
   const filled = withProjectDefaults({ version: 1 });
-  assert.deepEqual(filled.repo, { testPaths: [], uiPaths: [] });
+  assert.deepEqual(filled.repo, {
+    testPaths: [],
+    uiPaths: [],
+    routesRoot: 'apps/storefront/src/routes',
+  });
   assert.deepEqual(filled.commands, {});
   assert.deepEqual(filled.gates, { tier1: [] });
   assert.deepEqual(filled.conventions, []);

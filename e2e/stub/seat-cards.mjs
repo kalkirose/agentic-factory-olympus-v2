@@ -106,8 +106,9 @@ function specBirth() {
       report: { amendedSections: ['AC-1'], summary: 'amended' },
     };
   }
+  const draft = plan().specFirstDraft && !prompt.includes('Correction brief');
   return {
-    files: { [path]: plan().spec },
+    files: { [path]: draft ? plan().specFirstDraft : plan().spec },
     report: { outcome: 'spec-born', summary: 'the spec answers AC-1' },
   };
 }
@@ -158,7 +159,10 @@ function suiteSeat() {
 
 function triage() {
   const layers = [...prompt.matchAll(/^- layer (.+):$/gm)].map((m) => m[1].trim());
-  if (layers.length === 0) return { report: { findings: [], persisting: [], summary: 'no red' } };
+  // A first cycle has no prior findings and takes no field for them; a later
+  // cycle lists the open ids and requires the field.
+  const persisting = prompt.includes('Prior open findings') ? { persisting: [] } : {};
+  if (layers.length === 0) return { report: { findings: [], ...persisting, summary: 'no red' } };
   return {
     report: {
       findings: [
@@ -169,7 +173,7 @@ function triage() {
           evidence: `red layers: ${layers.join(', ')}`,
         },
       ],
-      persisting: [],
+      ...persisting,
       summary: `${layers.length} red layer(s) classed`,
     },
   };

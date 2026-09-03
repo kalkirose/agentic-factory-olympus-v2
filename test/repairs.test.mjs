@@ -78,12 +78,12 @@ function seedEscape(paths, { project = 'alpha', defectLine = 'f(3) returns 5' } 
   return recorded.seq;
 }
 
-function fixture(t, { cards = ['s1'], slotCap = 1, storyHeld = null } = {}) {
+function fixture(t, { cards = ['s1'], slotCap = 1, storyHeld = null, config = {}, tree = {} } = {}) {
   const root = tempDir();
   const launched = [];
-  const files = { 'compose.harness.yml': 'services: {}\n' };
+  const files = { 'compose.harness.yml': 'services: {}\n', ...tree };
   for (const key of cards) files[`stories/${key}.md`] = cardFile(key);
-  files[CONFIG_PATH] = projectConfigJson({ graph: { cardsDir: 'stories' } });
+  files[CONFIG_PATH] = projectConfigJson({ graph: { cardsDir: 'stories' }, ...config });
   const origin = initOriginRepo(join(root, 'origin'), files);
   const paths = scaffoldHome(join(root, 'home'));
   writeFileSync(
@@ -300,6 +300,133 @@ test('a console launch that names no open escape is refused, loud, before a slot
     owedRepairs(fx.paths, 'alpha').map((e) => e.seq),
     [seq],
   );
+});
+
+// -- the ticket check at the door (ADR-0067) ----------------------------------
+
+const REPAIR_POLICY = {
+  diffPolicy: {
+    repair: { deniedPaths: ['.olympus/project.json', '.github'], forbiddenPatterns: ['\\.env$'] },
+  },
+};
+
+function ticket(block) {
+  return [
+    '# Repair ticket: the greeting',
+    '',
+    '## The defect',
+    '',
+    'greet() answers "hi"; it must answer "hello".',
+    '',
+    ...(block ? ['```touched-paths', ...block, '```', ''] : []),
+  ].join('\n');
+}
+
+test('a console ticket whose block names forbidden ground is refused before a slot, with the entry and the rule', async (t) => {
+  const fx = fixture(t, {
+    cards: ['s1'],
+    slotCap: 2,
+    config: REPAIR_POLICY,
+    tree: {
+      '.olympus/tickets/forbidden.md': ticket([
+        'src/greeting.mjs',
+        '.olympus/project.json — dev',
+        'config/.env',
+      ]),
+      '.olympus/tickets/plain.md': ticket(null),
+      '.olympus/tickets/allowed.md': ticket(['src/greeting.mjs — dev', 'tests/greeting.test.mjs']),
+    },
+  });
+  await fx.daemon.start();
+  writeControlCommand(fx.paths, {
+    command: 'launch',
+    actor: 'console:operator',
+    project: 'alpha',
+    lane: 'repair',
+    ticket: '.olympus/tickets/forbidden.md',
+  });
+  const rejected = await waitFor(
+    () => readEvents(fx.paths.instanceLedger).find((e) => e.event === 'launch-rejected'),
+    { ...WAIT, label: 'the launch was refused' },
+  );
+  assert.equal(rejected.requestedBy, 'console:operator');
+  assert.equal(rejected.lane, 'repair');
+  assert.equal(rejected.ticket, '.olympus/tickets/forbidden.md');
+  assert.match(
+    rejected.reason,
+    /the ticket \.olympus\/tickets\/forbidden\.md names ground the repair lane may not touch: \.olympus\/project\.json \(deniedPaths: \.olympus\/project\.json\); config\/\.env \(forbiddenPatterns: \\\.env\$\)\. Remove those entries/,
+  );
+  assert.ok(!rejected.reason.includes('src/greeting.mjs'), 'an ordinary entry is not named');
+  // Nothing was provisioned for it: no launch, no run, no workspace.
+  assert.deepEqual(fx.launched, []);
+  assert.ok(!readEvents(fx.paths.instanceLedger).some((e) => e.event === 'launch'));
+  assert.ok(!existsSync(join(fx.paths.worktrees, rejected.runId ?? 'none')));
+  assert.ok(existsSync(fx.paths.controlRejected));
+
+  // A ticket with no block launches, as it always did; so does a ticket whose
+  // block names only ground the lane may touch.
+  for (const path of ['.olympus/tickets/plain.md', '.olympus/tickets/allowed.md']) {
+    await fx.daemon.launchCommand({
+      actor: 'console:operator',
+      project: 'alpha',
+      lane: 'repair',
+      ticket: path,
+    });
+  }
+  await waitFor(() => fx.launched.length === 2, { ...WAIT, label: 'two repairs launched' });
+  assert.equal(
+    readEvents(fx.paths.instanceLedger).filter((e) => e.event === 'launch-rejected').length,
+    1,
+  );
+});
+
+test('an absolute ticket is read from the home, and the frontier stamps a refused repair launch', async (t) => {
+  const fx = fixture(t, { cards: ['s1'], slotCap: 2, config: REPAIR_POLICY });
+  await fx.daemon.start();
+  const seq = seedEscape(fx.paths);
+  // A harness-authored ticket carries no block; this one was edited by hand
+  // to name the file the repair lane is denied.
+  writeFileSync(repairTicketPath(fx.paths, seq), ticket(['.github/workflows/ci.yml — dev']));
+  fx.daemon.frontier.setArmed('alpha', true, 'human');
+  const rejected = await waitFor(
+    () => readEvents(fx.paths.instanceLedger).find((e) => e.event === 'launch-rejected'),
+    { ...WAIT, label: 'the sweep stamps the refusal' },
+  );
+  assert.equal(rejected.requestedBy, 'frontier');
+  assert.equal(rejected.project, 'alpha');
+  assert.equal(rejected.lane, 'repair');
+  assert.equal(rejected.ticket, repairTicketPath(fx.paths, seq));
+  assert.match(rejected.reason, /\.github\/workflows\/ci\.yml \(deniedPaths: \.github\)/);
+  // The escape stays owed, and the story frontier kept moving.
+  assert.deepEqual(
+    owedRepairs(fx.paths, 'alpha').map((e) => e.seq),
+    [seq],
+  );
+  await waitFor(() => fx.launched.includes('story:s1'), { ...WAIT, label: 'the story launched' });
+  assert.ok(!fx.launched.some((l) => l.startsWith('repair:')));
+});
+
+test('a repair lane with no diff policy accepts every block, and an unreadable ticket is left to the lane', async (t) => {
+  const fx = fixture(t, {
+    cards: ['s1'],
+    slotCap: 2,
+    tree: { '.olympus/tickets/anything.md': ticket(['.olympus/project.json — dev']) },
+  });
+  await fx.daemon.start();
+  await fx.daemon.launchCommand({
+    actor: 'console:operator',
+    project: 'alpha',
+    lane: 'repair',
+    ticket: '.olympus/tickets/anything.md',
+  });
+  await fx.daemon.launchCommand({
+    actor: 'console:operator',
+    project: 'alpha',
+    lane: 'repair',
+    ticket: '.olympus/tickets/no-such-ticket.md',
+  });
+  await waitFor(() => fx.launched.length === 2, { ...WAIT, label: 'both launched' });
+  assert.ok(!readEvents(fx.paths.instanceLedger).some((e) => e.event === 'launch-rejected'));
 });
 
 test('an operator fixed-mark retires the owed repair and the loud item', async (t) => {

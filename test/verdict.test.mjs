@@ -363,7 +363,14 @@ function triageSeat(classFor) {
         summary: `broken ${layer}`,
         evidence: `red output of ${layer}`,
       }));
-    return { report: { findings, persisting: persisting.map((p) => p.id), summary: 'triaged' } };
+    return {
+      report: {
+        findings,
+        // A first cycle has no prior findings and takes no field for them.
+        ...(prior.length > 0 && { persisting: persisting.map((p) => p.id) }),
+        summary: 'triaged',
+      },
+    };
   };
 }
 
@@ -719,7 +726,7 @@ function partTriageSeat() {
             summary: `broken part ${part}`,
             evidence: `red output of part ${part}`,
           })),
-        persisting: persisting.map((p) => p.id),
+        ...(prior.length > 0 && { persisting: persisting.map((p) => p.id) }),
         summary: 'triaged',
       },
     };
@@ -1150,7 +1157,7 @@ test('a suite defect re-freezes the tests without budget and without a new fury 
 test('spec-deep and intent-deep suite defects amend the spec; the intent conflict parks first', async (t) => {
   const seats = {
     dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
-    'verdict-triage': () => ({
+    'verdict-triage': ({ prompt }) => ({
       report: {
         findings: [
           {
@@ -1168,7 +1175,7 @@ test('spec-deep and intent-deep suite defects amend the spec; the intent conflic
             evidence: 'card vs spec',
           },
         ],
-        persisting: [],
+        ...(prompt.includes('Prior open findings') && { persisting: [] }),
         summary: 'triaged',
       },
     }),
@@ -1208,7 +1215,7 @@ test('an intent ruling that names a frozen test reaches the suite, once, on the 
   // names the file; the amendment is the only place that ruling can land.
   const seats = {
     dev: () => ({ files: { 'src/feature.mjs': PAIR_FEATURE }, report: { summary: 'implemented' } }),
-    'verdict-triage': () => ({
+    'verdict-triage': ({ prompt }) => ({
       report: {
         findings: [
           {
@@ -1219,7 +1226,7 @@ test('an intent ruling that names a frozen test reaches the suite, once, on the 
             evidence: 'tests/pinned.test.mjs pins the set closed',
           },
         ],
-        persisting: [],
+        ...(prompt.includes('Prior open findings') && { persisting: [] }),
         summary: 'triaged',
       },
     }),
@@ -2094,12 +2101,12 @@ test('a triage seat that fails its own checks parks the run; a judge is not the 
   const seats = {
     dev: () => ({ files: { 'src/feature.mjs': BAD_FEATURE }, report: { summary: 'implemented' } }),
     // Names a layer that is not a persistent red, and covers none that is.
-    'verdict-triage': () => ({
+    'verdict-triage': ({ prompt }) => ({
       report: {
         findings: [
           { class: 'code-defect', layers: ['ghost'], summary: 'broken ghost', evidence: 'none' },
         ],
-        persisting: [],
+        ...(prompt.includes('Prior open findings') && { persisting: [] }),
         summary: 'triaged',
       },
     }),
@@ -2622,7 +2629,7 @@ function triageAbout(surface) {
           evidence: `Nothing under ${surface} is tracked, and it ships from nowhere.`,
         },
       ],
-      persisting: [],
+      ...(prompt.includes('Prior open findings') && { persisting: [] }),
       summary: 'triaged',
     },
   });
@@ -2936,7 +2943,7 @@ const COVERING_CLAIM = {
 
 /** A triage behavior that reports the pin collision, with or without a claim. */
 function pinTriage(claim) {
-  return () => ({
+  return ({ prompt }) => ({
     report: {
       findings: [
         {
@@ -2948,7 +2955,7 @@ function pinTriage(claim) {
           ...claim,
         },
       ],
-      persisting: [],
+      ...(prompt.includes('Prior open findings') && { persisting: [] }),
       summary: 'triaged',
     },
   });

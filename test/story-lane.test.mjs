@@ -151,8 +151,8 @@ function specPathFrom(prompt) {
 }
 
 /** The fixture spec with its AC-1 section rewritten — one amendment's work. */
-function amendedSpec(n) {
-  return FIXTURE_SPEC.replace(
+function amendedSpec(n, base = FIXTURE_SPEC) {
+  return base.replace(
     'The suite asserts it on one number.',
     `The suite asserts it on one number. Amendment ${n} grounds it in src/base.mjs.`,
   );
@@ -162,16 +162,16 @@ function amendedSpec(n) {
  * A spec-birth behavior that writes the spec at birth and rewrites the AC-1
  * section on every amendment, so the gate's computed scope is never empty.
  */
-function amendingBirth() {
+function amendingBirth(spec = FIXTURE_SPEC) {
   let amendments = 0;
   return ({ prompt }) =>
     prompt.includes('Amend the born spec')
       ? {
-          files: { [specPathFrom(prompt)]: amendedSpec(++amendments) },
+          files: { [specPathFrom(prompt)]: amendedSpec(++amendments, spec) },
           report: { amendedSections: ['AC-1'], summary: 'amended' },
         }
       : {
-          files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
+          files: { [specPathFrom(prompt)]: spec },
           report: { outcome: 'spec-born', summary: 'born' },
         };
 }
@@ -1581,8 +1581,8 @@ The goal above states them.
 
 test('the freeze records the test-path files the spec gave the dev pass', async (t) => {
   const spec = FIXTURE_SPEC.replace(
-    'tests/feature.test.mjs — suite',
-    'tests/feature.test.mjs — suite\ntests/support/harness.mjs — dev',
+    'tests/feature.test.mjs (new) — suite',
+    'tests/feature.test.mjs (new) — suite\ntests/support/harness.mjs (new) — dev',
   );
   const seats = {
     'spec-birth': ({ prompt }) => ({
@@ -1744,9 +1744,16 @@ function collidingGate(claim) {
         };
 }
 
+// The repository pin on src/feature.mjs is a pin the spec has to declare
+// (ADR-0067): the born spec lists it, and the gate then judges the collision.
+const PINNED_SPEC = FIXTURE_SPEC.replace(
+  'tests/feature.test.mjs (new) — suite',
+  'tests/feature.test.mjs (new) — suite\ntests/pinned.test.mjs — suite',
+);
+
 function collisionSeats(gate) {
   return {
-    'spec-birth': amendingBirth(),
+    'spec-birth': amendingBirth(PINNED_SPEC),
     'spec-gate': gate,
     suite: () => ({
       files: { 'tests/feature.test.mjs': STRONG_TEST },

@@ -140,7 +140,10 @@ export class FrontierLauncher {
         await d.launchRun({ project, lane: 'story', card: card.path, storyKey: card.key });
       } catch (error) {
         // One failed launch ends the sweep — the next trigger retries; a
-        // tight retry loop would hammer a broken remote.
+        // tight retry loop would hammer a broken remote. The refusal is
+        // stamped like a console one, so a launch the harness asked for and
+        // did not get reads the same in the instance ledger and in status.
+        this.stampRejected({ project, lane: 'story', card: card.path }, error);
         this.settle(project, source, `launch of ${card.key} failed: ${error.message}`);
         return;
       }
@@ -173,13 +176,15 @@ export class FrontierLauncher {
           waiting = owed.length - i;
           break;
         }
+        const launch = repairLaunch(owed[i]);
         try {
-          await d.launchRun(repairLaunch(owed[i]));
-        } catch {
+          await d.launchRun(launch);
+        } catch (error) {
           // One failed launch ends the pass; the escape stays owed and the
-          // next trigger retries it. The refusal stamps itself, and the story
-          // frontier keeps moving — a repair that cannot launch at all must
-          // not stop everything else.
+          // next trigger retries it. The refusal is stamped here, and the
+          // story frontier keeps moving — a repair that cannot launch at all
+          // must not stop everything else.
+          this.stampRejected(launch, error);
           break;
         }
       }
@@ -213,15 +218,30 @@ export class FrontierLauncher {
         waiting = owed.length - i;
         break;
       }
+      const launch = reconciliationLaunch(owed[i]);
       try {
-        await d.launchRun(reconciliationLaunch(owed[i]));
-      } catch {
+        await d.launchRun(launch);
+      } catch (error) {
         // One failed launch ends the pass; the reconciliation stays owed and
         // the next trigger retries it. The story frontier keeps moving.
+        this.stampRejected(launch, error);
         break;
       }
     }
     return waiting;
+  }
+
+  /**
+   * A launch this sweep asked for and the daemon refused, stamped as the
+   * console path stamps its own: `launch-rejected` on the instance ledger with
+   * the project, the lane, the card or ticket, and the reason. The frontier is
+   * the requester.
+   */
+  stampRejected({ project, lane, card, ticket }, error) {
+    this.daemon.stampRejectedLaunch(
+      { command: 'launch', actor: 'frontier', project, lane, card, ticket },
+      error,
+    );
   }
 
   /**

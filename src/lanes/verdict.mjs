@@ -109,7 +109,7 @@ import {
   GATE_FORMS,
   withAbandonGuard,
   withTreeRefresh,
-  attemptLimit,
+  boughtRetry,
   answeredPath,
   blocked,
   commandError,
@@ -219,6 +219,26 @@ export const TRIAGE_SCHEMA = {
   },
   required: ['findings', 'persisting', 'summary'],
 };
+
+/**
+ * The triage report shape for one cycle. A cycle with open prior findings
+ * takes the full shape: `persisting` is required, and the brief lists the ids
+ * it may hold. A cycle with none takes a shape with no `persisting` field at
+ * all, because a mandatory list with nothing to put in it is a field the seat
+ * fills by invention. The schema validator refuses the extra key in session,
+ * so a seat that sends it anyway is corrected before any check reads the
+ * report.
+ * @param {object[]} priorOpen the findings still open from earlier cycles
+ */
+export function triageSchema(priorOpen) {
+  if (priorOpen.length > 0) return TRIAGE_SCHEMA;
+  const { persisting, ...properties } = TRIAGE_SCHEMA.properties;
+  return {
+    ...TRIAGE_SCHEMA,
+    properties,
+    required: TRIAGE_SCHEMA.required.filter((key) => key !== 'persisting'),
+  };
+}
 
 // -- implementation / fix (seat) ---------------------------------------------
 
@@ -635,9 +655,9 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
     label: `verdict-triage-c${cycle}`,
     base,
   };
-  // A retry the human bought re-invokes the seat: the stamped report is the
-  // one the checks refused, so replaying it buys nothing.
-  const retrying = attemptLimit(events, 'verdict-triage') === 1;
+  // A retry the human bought re-invokes the seat: the stamped report, where
+  // one exists, is the one the checks refused, so replaying it buys nothing.
+  const retrying = boughtRetry(events, 'verdict-triage');
   if (stamped.length > 0) {
     // Resumed after the stamp: rebuild, from the round the seat ended on.
     const report = readJson(runReportPath(ctx.paths, ctx.runId, finalReplayLabel(ctx, spec))) ?? {};
@@ -662,7 +682,7 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
     return seatWithChecks(ctx, {
       seat: 'verdict-triage',
       label,
-      schema: TRIAGE_SCHEMA,
+      schema: triageSchema(priorOpen),
       cwd: base.worktree,
       env: base.env,
       constitution: base.constitution,
@@ -721,7 +741,7 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
     }
     fresh.push(finding);
   }
-  const persisting = new Set(report.persisting);
+  const persisting = new Set(report.persisting ?? []);
   return { open: [...priorOpen.filter((f) => persisting.has(f.id)), ...fresh] };
 }
 
@@ -771,27 +791,55 @@ function recordedTakeBacks(events) {
   return { recaptured, held };
 }
 
+/**
+ * The deterministic rules a triage report meets. Every defect line states the
+ * rule beside the entry that broke it, so the corrective brief says what to
+ * write and not only what was refused.
+ */
 function triageChecks(report, { redLayers, priorOpen }) {
   const defects = [];
   const priorIds = new Set(priorOpen.map((f) => f.id));
-  for (const id of report.persisting) {
-    if (!priorIds.has(id)) defects.push(`persisting id is not an open prior finding: ${id}`);
+  const persisting = report.persisting ?? [];
+  if (priorOpen.length === 0 && report.persisting !== undefined) {
+    defects.push(
+      'the report carries a "persisting" field, and this cycle has no prior findings; ' +
+        'remove the field and report every red as a new finding.',
+    );
+  }
+  for (const id of persisting) {
+    if (!priorIds.has(id)) {
+      defects.push(
+        `persisting id ${id} is not an open prior finding; "persisting" takes only ids from ` +
+          `the open set, which is [${[...priorIds].join(', ')}].`,
+      );
+    }
   }
   const covered = new Set([
     ...report.findings.flatMap((f) => f.layers),
-    ...priorOpen.filter((f) => report.persisting.includes(f.id)).flatMap((f) => f.layers ?? []),
+    ...priorOpen.filter((f) => persisting.includes(f.id)).flatMap((f) => f.layers ?? []),
   ]);
   for (const layer of redLayers) {
-    if (!covered.has(layer)) defects.push(`persistent red layer not covered by a finding: ${layer}`);
+    if (!covered.has(layer)) {
+      defects.push(
+        `persistent red layer ${layer} is covered by no finding; every red layer below is ` +
+          'named in the "layers" of a new finding or of a persisting prior finding.',
+      );
+    }
   }
   for (const f of report.findings) {
     for (const layer of f.layers) {
       if (!redLayers.includes(layer)) {
-        defects.push(`finding names a layer that is not a persistent red: ${layer}`);
+        defects.push(
+          `the finding "${f.summary}" names the layer ${layer}, which is not a persistent ` +
+            `red; a finding names only red layers, which are [${redLayers.join(', ')}].`,
+        );
       }
     }
     if (f.class === 'suite-defect' && !f.depth) {
-      defects.push(`suite-defect finding needs a depth (test | spec | intent): ${f.summary}`);
+      defects.push(
+        `the suite-defect finding "${f.summary}" carries no depth; a suite-defect finding ` +
+          'takes "depth": "test", "spec" or "intent".',
+      );
     }
   }
   return defects;
@@ -1779,8 +1827,16 @@ function triageRole(base, reds, priorOpen, brief, dropped = [], recaptured = [],
       : []),
   ];
   if (priorOpen.length > 0) {
-    lines.push('Prior open findings — list the ids that persist in "persisting"; report only new findings in "findings":');
+    lines.push(
+      'Prior open findings — list the ids that persist in "persisting"; report only new findings in "findings".',
+      '"persisting" takes only ids from this list, verbatim:',
+    );
     for (const f of priorOpen) lines.push(`- [${f.id}] ${findingLine(f)}`);
+  } else {
+    lines.push(
+      'This is a first cycle: no prior finding is open, so every red below is a new finding.',
+      'The report takes no "persisting" field on this cycle; write "findings" and "summary" only.',
+    );
   }
   lines.push(...takenBackLines(dropped, recaptured));
   lines.push('Persistent reds:');
@@ -1990,6 +2046,7 @@ async function verdictBase(ctx, mode) {
       env: runEnv(ctx, config),
       testPaths: config.repo.testPaths,
       uiPaths: config.repo.uiPaths ?? [],
+      routesRoot: config.repo.routesRoot ?? null,
       // The judgment panel this run is judged by, pinned at the launch blob
       // like every other config value the lane reads (ADR-0038).
       lenses: panelLenses(config),

@@ -32,9 +32,11 @@ import {
   restorePaths,
   evidenceDiff,
   filesAt,
+  filesMentioning,
+  treeFiles,
 } from '../isolation/tree.mjs';
 import { testEditDenyRules } from '../seats/boundary.mjs';
-import { laneDiffPolicy } from '../seats/diffpolicy.mjs';
+import { laneDiffPolicy, parseTouchedBlock } from '../seats/diffpolicy.mjs';
 import { noCriteriaMessage, parseIntentCard } from './card.mjs';
 import { SECURITY_DIMENSIONS } from './lenses.mjs';
 import { runCommand } from './exec.mjs';
@@ -624,7 +626,36 @@ export async function specLintDefects(base) {
     testPaths: base.testPaths,
     tier: base.tier,
     baseFiles: await supersedeBaseFiles(base, text),
+    ground: await specGround(base, text),
   });
+}
+
+/**
+ * The tree the spec is written against, read for the three path rules
+ * (ADR-0067): every tracked path at the base sha, the test files under the
+ * test paths that mention each touched path, and the routes root. A run with
+ * no base sha reads the worktree's index instead, which at birth is the same
+ * tree. A tree git cannot read turns the rules off rather than parking a run
+ * on a lint that could not look.
+ */
+async function specGround(base, text) {
+  const sha = typeof base.baseSha === 'string' && base.baseSha.length > 0 ? base.baseSha : null;
+  let files;
+  try {
+    files = await treeFiles(base.worktree, sha);
+  } catch {
+    return null;
+  }
+  const touched = [...new Set(parseTouchedBlock(text).entries.map((e) => e.path))];
+  let pins = new Map();
+  try {
+    for (const path of touched) {
+      pins.set(path, await filesMentioning(base.worktree, sha, path, base.testPaths ?? []));
+    }
+  } catch {
+    pins = null;
+  }
+  return { files, pins, routesRoot: base.routesRoot ?? null };
 }
 
 /**
@@ -1537,6 +1568,9 @@ function templateLines() {
     '   - a line "Named constants:" and under it one list item per constant, written "NAME = value". A constant is named in one place; every other mention refers to it.',
     '   - a line "Supersedes:" and under it one list item per frozen test this criterion contradicts, written "<path> — keep|supersede — <the clause that replaces it>". Write "- None" when it contradicts none.',
     '3. One fenced block, opened by ```touched-paths and closed by ```, naming every repo-relative path the work touches: one path per line, each followed by " — dev" or " — suite" for the seat that owns the file. Exactly one such block in the document, and every line names one file.',
+    '   Every path in the block exists in the repository as it stands, or the work creates it. Write a path the work creates with the marker (new) between the path and the owner: "src/new-module.mjs (new) — dev". The lint refutes a path that is neither.',
+    '   A test file that mentions a touched path by its repo-relative path is a pin on it. Name every such pin in the block, or name it in the Supersedes clause of the criterion that replaces it; the lint reports a pin the spec says nothing about.',
+    '   A route id in prose, such as /[lang=lang]/cart, names a directory under the routes root of the repository. Name only routes that exist there, or mark a route the work creates: `/[lang=lang]/cart` (new).',
     '   A story that changes a rendered surface re-renders that surface\'s existing visual baseline files, so name each of those files in the block as a dev-owned entry and they join the freeze exclusions. A baseline the block does not name is frozen: the capture reverts the write, and the change costs a verdict round-trip to reach the suite.',
     '4. An environment section naming only the environment variables the card names.',
     `The whole document runs to ${SPEC_LINE_CAP} lines at most.`,
@@ -1786,6 +1820,7 @@ async function laneBase(ctx) {
     gateNotes: gateNotes(runEvents(ctx)),
     constitution: readConstitution(worktree, config),
     testPaths: config.repo.testPaths,
+    routesRoot: config.repo.routesRoot ?? null,
     // The lane's diff policy. The spec lint judges the paths the spec plans
     // against the same tiers the candidate capture judges the diff against, so
     // a spec cannot plan a path the capture would refuse.

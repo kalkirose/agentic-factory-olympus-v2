@@ -5,7 +5,11 @@
 // git remote and the same real gate commands as the story scenario.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import {
+  DENIED_GATES,
+  FORBIDDEN_TICKET_PATH,
   PROJECT,
   TICKET_PATH,
   assertMilestones,
@@ -22,6 +26,7 @@ import {
   instanceEvents,
   originSha,
   pollFor,
+  rejectedControlFiles,
   runEvents,
   seatCalls,
   stalled,
@@ -44,6 +49,57 @@ const SCENARIO = {
     'tests/greeting.test.mjs': REGRESSION,
   },
 };
+
+test('a ticket that names forbidden ground is refused at launch, and the refusal is readable in status', async (t) => {
+  // ADR-0067. The daemon reads the ticket's touched-paths block before a slot
+  // or a workspace is spent, and refuses an entry the repair lane's diff
+  // policy denies. The reason names the entry and the rule; the instance
+  // ledger and the status page carry it; a ticket with no block still launches.
+  const fx = buildFixture({ prefix: 'olympus-e2e-refused-ticket-', scenario: SCENARIO });
+  t.after(() => cleanup(fx));
+  await startDaemon(fx);
+
+  ctl(fx, ['launch', '--project', PROJECT, '--lane', 'repair', '--ticket', FORBIDDEN_TICKET_PATH]);
+  const rejected = await pollFor(
+    'the refusal stamp',
+    () => instanceEvents(fx).find((e) => e.event === 'launch-rejected'),
+    { diagnose: () => diagnostics(fx) },
+  );
+  assert.equal(rejected.lane, 'repair');
+  assert.equal(rejected.ticket, FORBIDDEN_TICKET_PATH);
+  assert.match(rejected.requestedBy, /^console:/);
+  assert.match(
+    rejected.reason,
+    new RegExp(
+      `names ground the repair lane may not touch: \\.olympus/gates/suite\\.mjs \\(deniedPaths: ${DENIED_GATES.replaceAll('.', '\\.')}\\)\\.`,
+    ),
+  );
+  assert.ok(!rejected.reason.includes('src/greeting.mjs'), 'an admitted entry was named');
+  // Nothing was spent on it: no launch stamp, no run directory, no workspace.
+  assert.ok(!instanceEvents(fx).some((e) => e.event === 'launch'));
+  assert.deepEqual(readdirSync(join(fx.home, 'runs')), []);
+  assert.ok(!existsSync(join(fx.home, 'worktrees')) || readdirSync(join(fx.home, 'worktrees')).length === 0);
+  // The console's own feedback names the same entry and rule.
+  const reasons = rejectedControlFiles(fx).filter((f) => f.endsWith('.reason.txt'));
+  assert.equal(reasons.length, 1);
+  // The status page carries the refusal with its reason.
+  const status = ctl(fx, ['status']);
+  assertStatusRenders(assert, status);
+  assert.match(status, /REJECTED \(last 1\)/);
+  assert.match(status, /fixture repair \.olympus\/tickets\/forbidden\.md \(console:.*\) — the ticket/);
+  assert.match(status, /\.olympus\/gates\/suite\.mjs \(deniedPaths: \.olympus\/gates\)/);
+
+  // A ticket with no block launches, as it always did.
+  ctl(fx, ['launch', '--project', PROJECT, '--lane', 'repair', '--ticket', TICKET_PATH]);
+  const launched = await pollFor(
+    'the launch stamp',
+    () => instanceEvents(fx).find((e) => e.event === 'launch'),
+    { diagnose: () => diagnostics(fx) },
+  );
+  assert.equal(launched.lane, 'repair');
+  assert.equal(instanceEvents(fx).filter((e) => e.event === 'launch-rejected').length, 1);
+  await stopDaemon(fx);
+});
 
 test('the repair lane ships a ticketed fix through the assembled binaries', async (t) => {
   const fx = buildFixture({ prefix: 'olympus-e2e-repair-', scenario: SCENARIO });

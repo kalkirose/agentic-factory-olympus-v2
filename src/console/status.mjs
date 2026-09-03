@@ -231,6 +231,22 @@ export function renderStatus(paths) {
       lines.push(`  ${finding.severity} · ${finding.check} — ${finding.gist}`);
     }
   }
+  // The launches the daemon refused, newest first. A refusal writes a reason
+  // file that reaches only the console that asked, and a run that never
+  // started is in no run ledger; this is where every other reader learns that
+  // a slot was asked for and not given, and why (ADR-0067).
+  const rejected = rejectedLaunches(paths);
+  if (rejected.length > 0) {
+    lines.push('');
+    lines.push(`REJECTED (last ${rejected.length})`);
+    for (const r of rejected) {
+      const what = r.card ?? r.ticket;
+      lines.push(
+        `  #${r.seq} ${r.ts} ${r.project} ${r.lane}${what ? ` ${what}` : ''} ` +
+          `(${r.requestedBy ?? 'unknown'}) — ${r.reason}`,
+      );
+    }
+  }
   const changed = tailEvents(paths.instanceLedger, 200)
     .filter((e) => e.event === 'config-changed')
     .at(-1);
@@ -241,6 +257,21 @@ export function renderStatus(paths) {
     );
   }
   return lines.join('\n');
+}
+
+/** How many refused launches the status page carries. */
+export const REJECTED_LAUNCHES_SHOWN = 5;
+
+/**
+ * The most recent refused launches on the instance ledger, newest first, at
+ * most `REJECTED_LAUNCHES_SHOWN` of them. Read whole: a refusal can be far
+ * behind a busy ledger's tail and is still the newest one there is.
+ */
+export function rejectedLaunches(paths) {
+  return readEvents(paths.instanceLedger)
+    .filter((e) => e.event === 'launch-rejected')
+    .slice(-REJECTED_LAUNCHES_SHOWN)
+    .reverse();
 }
 
 /** Who took this run's own hold and when, or nothing when no hold is its own. */

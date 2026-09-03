@@ -424,7 +424,12 @@ export const INSTANCE_EVENTS = new Set([
   'seat-environment',
   'launch',
   // A launch the daemon refused. The console's reason file says why to
-  // whoever asked; this says it to everyone reading the instance ledger.
+  // whoever asked; this says it to everyone reading the instance ledger, and
+  // `olympusctl status` renders the last few. It carries `requestedBy` (the
+  // console actor, or `frontier` for a launch the sweep asked for), `project`,
+  // `lane`, the `card` or `ticket` named, the `runId` that would have existed
+  // where the refusal came after the name was taken, and the `reason`
+  // (ADR-0067).
   'launch-rejected',
   // A closed run reached the archive: at its close, or at the start that
   // swept it up afterwards. It carries how the directory travelled (`rename`

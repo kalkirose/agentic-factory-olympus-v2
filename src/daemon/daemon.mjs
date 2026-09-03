@@ -10,7 +10,7 @@ import {
   renameSync,
   writeFileSync,
 } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, isAbsolute } from 'node:path';
 import {
   openEscapesStore,
   openInstanceStore,
@@ -44,6 +44,7 @@ import {
 } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 import { parseProjectConfig } from '../config/project.mjs';
+import { diffPolicyViolations, laneDiffPolicy, parseTouchedBlock } from '../seats/diffpolicy.mjs';
 import { parseIntentCard } from '../lanes/card.mjs';
 import { readInheritance, closeState } from '../lanes/resume.mjs';
 import { FrontierLauncher } from '../frontier/autolaunch.mjs';
@@ -528,6 +529,9 @@ export class Daemon {
         throw new Error(`run ${runId} already has a ledger`);
       }
       if (inherit) await this.requireFrozenTree(project, entry, inherit);
+      if (lane === 'repair' && typeof payload.ticket === 'string') {
+        await this.refuseForbiddenTicket(project, entry, payload.ticket);
+      }
       const ws = await this.isolation.provision({
         runId,
         project,
@@ -596,6 +600,84 @@ export class Daemon {
     payload.card = inherit.card;
     if (inherit.storyKey !== null) payload.storyKey = inherit.storyKey;
     return inherit;
+  }
+
+  /**
+   * A repair ticket whose touched-paths block names ground the repair lane may
+   * never ship is refused here, before a slot, a workspace or a seat is spent
+   * on it (ADR-0067). The block is judged against the lane's `deniedPaths` and
+   * `forbiddenPatterns` exactly as the capture gate judges the diff; the
+   * `declaredPaths` tier does not apply, because the block is the declaration.
+   * The refusal names every offending entry and the rule it broke.
+   *
+   * A ticket with no block is accepted, as it always was: the capture gate and
+   * the review seat still read the whole ticket. A ticket the clone cannot
+   * read is accepted too — the lane parks `ticket-missing` with the path, and
+   * that park is where a wrong path is answered. A project config that does
+   * not parse is left to provisioning, which refuses the launch with the
+   * config error itself.
+   */
+  async refuseForbiddenTicket(project, entry, ticket) {
+    const text = await this.readTicketText(project, entry, ticket);
+    const block = parseTouchedBlock(text);
+    if (block.entries.length === 0) return;
+    const tier = laneDiffPolicy(await this.readLaunchConfig(project, entry), 'repair');
+    if (!tier) return;
+    const violations = diffPolicyViolations(
+      block.entries.map((e) => e.path),
+      tier,
+      () => true,
+    );
+    if (violations.length === 0) return;
+    const named = violations.map((v) =>
+      v.rule === 'denied'
+        ? `${v.path} (deniedPaths: ${v.pattern})`
+        : `${v.path} (forbiddenPatterns: ${v.pattern})`,
+    );
+    throw new Error(
+      `the ticket ${ticket} names ground the repair lane may not touch: ${named.join('; ')}. ` +
+        "Remove those entries from the ticket's touched-paths block, or take the change " +
+        'through a lane the diff policy admits it in.',
+    );
+  }
+
+  /**
+   * The ticket text, read from where the run would read it: an absolute path
+   * from the daemon home, a repo-relative one from the default branch of the
+   * clone after a fetch. Null when it cannot be read, which leaves that
+   * failure to the stage that owns it.
+   */
+  async readTicketText(project, entry, ticket) {
+    try {
+      if (isAbsolute(ticket)) return readFileSync(ticket, 'utf8');
+      return await this.isolation.withClone(project, async () => {
+        const dir = await ensureBareClone(this.paths, project, entry.repoUrl, entry.defaultBranch);
+        await fetchClone(dir);
+        return (await readBlobFromBranch(dir, entry.defaultBranch, ticket)).text;
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The project config as the default branch holds it, parsed as a launch
+   * parses it, or null when it does not parse: provisioning reads the same
+   * blob next and refuses the launch with the config error itself.
+   */
+  async readLaunchConfig(project, entry) {
+    try {
+      return await this.isolation.withClone(project, async () => {
+        const dir = await ensureBareClone(this.paths, project, entry.repoUrl, entry.defaultBranch);
+        await fetchClone(dir);
+        const { text } = await readBlobFromBranch(dir, entry.defaultBranch, entry.projectConfigPath);
+        return parseProjectConfig(text, `${entry.defaultBranch}:${entry.projectConfigPath}`, {
+          launch: true,
+        });
+      });
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -1358,6 +1440,7 @@ export class Daemon {
         lane: command.lane ?? 'story',
         ...(error.runId !== undefined && { runId: error.runId }),
         ...(command.card !== undefined && { card: command.card }),
+        ...(command.ticket !== undefined && { ticket: command.ticket }),
         reason: error.message,
       });
     } catch {

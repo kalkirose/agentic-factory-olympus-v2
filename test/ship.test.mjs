@@ -835,7 +835,7 @@ test('persistent CI reds enter the shared triage and the repair route', async (t
               summary: `broken ${layer}`,
               evidence: `red output of ${layer}`,
             })),
-            persisting: [],
+            ...(prompt.includes('Prior open findings') && { persisting: [] }),
             summary: 'triaged',
           },
         };
@@ -884,7 +884,7 @@ function ciTriageSeat(classes) {
             evidence: `red output of ${layer}`,
           })),
         ),
-        persisting: [],
+        ...(prompt.includes('Prior open findings') && { persisting: [] }),
         summary: 'triaged',
       },
     };
@@ -3003,7 +3003,7 @@ test('the verdict behind an update judges main\'s version of a test path the run
     // A red second cycle would reach triage; the seat is here so the scenario
     // renders that red instead of parking on a missing fixture behavior.
     seats: {
-      'verdict-triage': () => ({
+      'verdict-triage': ({ prompt }) => ({
         report: {
           findings: [
             {
@@ -3013,7 +3013,7 @@ test('the verdict behind an update judges main\'s version of a test path the run
               evidence: 'the fixture asserts this never runs',
             },
           ],
-          persisting: [],
+          ...(prompt.includes('Prior open findings') && { persisting: [] }),
           summary: 'one finding',
         },
       }),
@@ -3061,7 +3061,7 @@ test('a merge-born fresh pass carries the frozen suite onto main and reverts not
       },
       // The reverting shape renders a red here; the seat is what lets it
       // render instead of parking on a missing fixture behavior.
-      'verdict-triage': () => ({
+      'verdict-triage': ({ prompt }) => ({
         report: {
           findings: [
             {
@@ -3071,7 +3071,7 @@ test('a merge-born fresh pass carries the frozen suite onto main and reverts not
               evidence: 'the fixture asserts this never runs',
             },
           ],
-          persisting: [],
+          ...(prompt.includes('Prior open findings') && { persisting: [] }),
           summary: 'one finding',
         },
       }),

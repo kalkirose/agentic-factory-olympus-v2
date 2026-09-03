@@ -116,13 +116,11 @@ const COVERED = {
       evidence: 'the replay printed the same refusal',
     },
   ],
-  persisting: [],
   summary: 'one env finding',
 };
 
 const asks = (layer, reason = 'reproduce the red') => ({
   findings: [],
-  persisting: [],
   summary: 'asking first',
   probe: { layer, reason },
 });

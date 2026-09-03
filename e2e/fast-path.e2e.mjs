@@ -55,8 +55,8 @@ Supersedes:
 ## Touched paths
 
 \`\`\`touched-paths
-src/feature.mjs - dev
-tests/feature.test.mjs - suite
+src/feature.mjs (new) - dev
+tests/feature.test.mjs (new) - suite
 \`\`\`
 
 ## Environment

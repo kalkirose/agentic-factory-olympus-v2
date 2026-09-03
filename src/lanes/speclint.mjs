@@ -63,19 +63,36 @@ const SUPERSEDES_LABEL = /^\**\s*supersedes\b/i;
 const NONE = /^none\.?$/i;
 
 /**
+ * The shape of a route id in prose: a token that opens with a slash and a
+ * bracketed segment, the way a file-system router names a route whose first
+ * segment is a parameter (`/[lang=lang]/cart`). Read as a token and never as a
+ * sentence: the rule asks whether a directory of that name exists, which is a
+ * question about the tree and not about what the sentence means.
+ */
+const ROUTE_ID = /^\/\[/;
+const TOKEN_TRIM_LEAD = /^[`'"(]+/;
+const TOKEN_TRIM_TAIL = /[`'",.;:]+$/;
+const NEW_TOKEN = /^\(new\)[`'",.;:)]*$/i;
+
+/**
  * Lints a born or amended story spec against the template.
  *
  * @param {string} specText
  * @param {{card: object, cardPath: string|null, worktree: string, testPaths: string[],
- *   tier: object|null, baseFiles: string[]|null}} ctx `tier` is the lane's diff
- *   policy, or null when the project declares none; `cardPath` names the card in
- *   rule (a)'s messages; `baseFiles` is the supersede targets that exist at the
- *   spec's base sha, or null when the base sha is unknown.
+ *   tier: object|null, baseFiles: string[]|null, ground: object|null}} ctx `tier`
+ *   is the lane's diff policy, or null when the project declares none;
+ *   `cardPath` names the card in rule (a)'s messages; `baseFiles` is the
+ *   supersede targets that exist at the spec's base sha, or null when the base
+ *   sha is unknown; `ground` is the tree the spec is written against (ADR-0067):
+ *   `files`, every tracked path at the base sha; `pins`, a map from each
+ *   touched path to the test files that mention it; `routesRoot`, the directory
+ *   route ids resolve under. Each part may be null, and a null part turns its
+ *   rule off.
  * @returns {string[]} one message per defect, in rule order; empty means clean
  */
 export function lintSpec(
   specText,
-  { card, cardPath = null, worktree, testPaths = [], tier = null, baseFiles = null },
+  { card, cardPath = null, worktree, testPaths = [], tier = null, baseFiles = null, ground = null },
 ) {
   const text = typeof specText === 'string' ? specText : '';
   const lines = text.split(/\r?\n/);
@@ -186,7 +203,119 @@ export function lintSpec(
         `${SPEC_LINE_CAP}-line cap with shorter prose instead.`,
     );
   }
+
+  // (j) every touched path is in the tree, or is marked new.
+  const tree = ground?.files ? treeIndex(ground.files) : null;
+  if (tree) {
+    for (const entry of block.entries) {
+      const held = tree.has(entry.path);
+      if (!held && !entry.isNew) {
+        defects.push(
+          `the touched-paths entry ${entry.raw} names no path in the tree at the spec's base ` +
+            `sha; a path the story creates carries the marker (new) after the path, as in ` +
+            `"${entry.path} (new) — ${entry.owner ?? 'dev'}".`,
+        );
+      } else if (held && entry.isNew) {
+        defects.push(
+          `the touched-paths entry ${entry.raw} is marked (new), and the tree at the spec's ` +
+            'base sha already holds that path; drop the marker.',
+        );
+      }
+    }
+  }
+
+  // (k) every pin on a touched path is declared, or superseded.
+  //
+  // A test file that names a touched path by its repo-relative path is a pin on
+  // it: a config table, a layout assertion, a count of files. Changing the path
+  // reddens the pin, and the spec has to say what becomes of it: the block
+  // lists it, or a Supersedes clause names it. A spec that says neither
+  // reaches the gate with a red the tree could already see.
+  if (ground?.pins) {
+    const superseded = new Set(supersedes.map((s) => s.path));
+    const declares = (file) =>
+      block.entries.some((e) => file === e.path || file.startsWith(`${e.path}/`));
+    for (const entry of block.entries) {
+      for (const pin of ground.pins.get(entry.path) ?? []) {
+        if (pin === entry.path || declares(pin) || superseded.has(pin)) continue;
+        defects.push(
+          `the spec touches ${entry.path}; the test file ${pin} mentions that path, and the ` +
+            `spec neither lists ${pin} in the touched-paths block nor names it in a ` +
+            'Supersedes clause. Declare the pin, or state the supersede.',
+        );
+      }
+    }
+  }
+
+  // (l) every route id resolves under the routes root, or is marked new.
+  if (tree && typeof ground?.routesRoot === 'string' && tree.has(ground.routesRoot)) {
+    const root = ground.routesRoot.replace(/\/+$/, '');
+    const seen = new Set();
+    const tokens = text.split(/\s+/);
+    for (const [index, raw] of tokens.entries()) {
+      const token = cleanToken(raw);
+      if (!ROUTE_ID.test(token)) continue;
+      const id = token.replace(/\/+$/, '');
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const marked = NEW_TOKEN.test(tokens[index + 1] ?? '');
+      const held = tree.has(`${root}${id}`);
+      if (!held && !marked) {
+        defects.push(
+          `the spec names the route ${id}, and no such path exists under ${root} at the ` +
+            `spec's base sha; a route the story creates is written \`${id}\` (new).`,
+        );
+      } else if (held && marked) {
+        defects.push(
+          `the spec marks the route ${id} (new), and ${root}${id} already exists at the ` +
+            "spec's base sha; drop the marker.",
+        );
+      }
+    }
+  }
   return defects;
+}
+
+/**
+ * The tree as a membership test over files and the directories above them. A
+ * touched entry or a route id resolves when the tree holds it as a file or as
+ * a directory; nothing here reads what kind of path the spec meant.
+ */
+function treeIndex(files) {
+  const held = new Set();
+  for (const file of files) {
+    const path = file.replaceAll('\\', '/');
+    held.add(path);
+    let cut = path.lastIndexOf('/');
+    while (cut > 0) {
+      const dir = path.slice(0, cut);
+      if (held.has(dir)) break;
+      held.add(dir);
+      cut = path.lastIndexOf('/', cut - 1);
+    }
+  }
+  return held;
+}
+
+/**
+ * A whitespace-delimited token with the sentence's own marks taken off it:
+ * the quotes and backticks around it, the punctuation after it, and a closing
+ * parenthesis that closes nothing inside the token. A route group `(shop)`
+ * keeps its own.
+ */
+function cleanToken(raw) {
+  let out = raw.replace(TOKEN_TRIM_LEAD, '');
+  for (;;) {
+    const before = out;
+    out = out.replace(TOKEN_TRIM_TAIL, '');
+    while (out.endsWith(')')) {
+      const opens = (out.match(/\(/g) ?? []).length;
+      const closes = (out.match(/\)/g) ?? []).length;
+      if (closes <= opens) break;
+      out = out.slice(0, -1);
+    }
+    if (out === before) return out;
+  }
 }
 
 /**
