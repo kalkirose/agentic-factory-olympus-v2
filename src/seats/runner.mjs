@@ -22,11 +22,13 @@
 // seat-failure on the harness route, never a silent downgrade.
 //
 // Availability degrade: a seat whose model refuses the work (the stream says
-// the model is unavailable) retries once on the default model at the same
-// effort, and stamps `model-degraded` first. Effort never drops. The fallback
-// only ever moves a seat from the certification model to the default model,
-// which raises capability, so no floor is at risk. The default model refusing
-// too is a loud failure, not a second retry.
+// the model is unavailable) retries once on FALLBACK_MODEL (Claude Opus 5) at
+// the same effort, and stamps `model-degraded` first. Effort never drops. The
+// fallback moves a seat from the default model (Claude Fable 5.1) down to the
+// substitute, which lowers capability and holds the effort floor, so the
+// stamp is the record a reader needs to see who judged the work. A seat
+// already on the fallback model (by substitute dispatch) has nowhere to go:
+// the fallback model refusing is a loud failure, not a second retry.
 //
 // Quota memo: a run that already watched the vendor refuse a model, and holds
 // the reset instant the vendor declared, degrades at the spawn instead of
@@ -37,7 +39,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { superviseSeat } from '../engine/supervise.mjs';
 import { COMMAND_LINE_MAX, commandLineLength } from '../engine/executable.mjs';
-import { seatDef, DEFAULT_MODEL } from './seatmap.mjs';
+import { seatDef, FALLBACK_MODEL } from './seatmap.mjs';
 import { checkReportSchema, validateReport, readReport } from './contract.mjs';
 import { assembleSeatPrompt, correctivePrompt, promptFileRef } from './prompt.mjs';
 import { claudeSeatCommand } from './claude.mjs';
@@ -117,21 +119,22 @@ export async function runSeat(store, opts) {
   }
   mkdirSync(dirname(reportPath), { recursive: true });
   let degraded = false;
-  // The memo is read before the semaphore: a seat that will run on the default
-  // model must hold the default model's slot, not the refused model's.
-  const memo = model === DEFAULT_MODEL ? null : unavailableMemo(store.events(), model);
+  // The memo is read before the semaphore: a seat that will run on the
+  // fallback model must hold the fallback model's slot, not the refused
+  // model's. A seat already on the fallback model has no memo to read.
+  const memo = model === FALLBACK_MODEL ? null : unavailableMemo(store.events(), model);
   if (memo !== null) {
     store.append('model-degraded', {
       actor: ACTOR,
       seat,
       requested: model,
-      used: DEFAULT_MODEL,
+      used: FALLBACK_MODEL,
       ...(memo.reason && { reason: memo.reason }),
       attempt: 1,
       resetsAt: memo.resetsAt,
       memo: true,
     });
-    model = DEFAULT_MODEL;
+    model = FALLBACK_MODEL;
     degraded = true;
   }
   let release = semaphores ? await semaphores.acquire(model, { store, seat }) : () => {};
@@ -226,20 +229,20 @@ export async function runSeat(store, opts) {
     for (let attempt = 1; attempt <= 2; attempt++) {
       let result = await dispatchWithRetries(attempt);
       if (result.reason === 'model-unavailable') {
-        if (!degraded && model !== DEFAULT_MODEL) {
+        if (!degraded && model !== FALLBACK_MODEL) {
           store.append('model-degraded', {
             actor: ACTOR,
             seat,
             requested: model,
-            used: DEFAULT_MODEL,
+            used: FALLBACK_MODEL,
             reason: result.unavailable,
             attempt,
             ...(typeof result.resetsAt === 'number' && { resetsAt: result.resetsAt }),
           });
           // The semaphore counts seats per model; the retry belongs to the
-          // default model's cap, not the one that refused.
+          // fallback model's cap, not the one that refused.
           release();
-          model = DEFAULT_MODEL;
+          model = FALLBACK_MODEL;
           degraded = true;
           release = semaphores ? await semaphores.acquire(model, { store, seat }) : () => {};
           // A rejected model wrote no transcript to resume into.

@@ -1,6 +1,6 @@
 # ADR-0005: Seat runtime shapes
 
-Status: accepted (2026-08-10)
+Status: accepted (2026-08-10, seat models 2026-09-03)
 
 ## Decision
 
@@ -8,11 +8,16 @@ The seat runtime — seat map, file contracts, model semaphores, prompt
 assembly, and the headless runner — gets these concrete shapes:
 
 - **Seat map as code.** `src/seats/seatmap.mjs` is a closed registry: seat →
-  model, effort, web-tool allowance, Explore-subagent allowance. Default:
-  Opus 5 at xhigh, every seat. Named exceptions on Fable 5 at xhigh: verdict
-  triage, the Fury verifier, and the eval seat. Web search: spec birth and
-  the two dev seats only. Explore subagents: the two dev seats only, cap 2.
-  An unknown seat is an error, never a default. A change enters by ADR.
+  model, effort, web-tool allowance, Explore-subagent allowance. Every seat
+  runs Claude Fable 5.1 (`claude-fable-5-1`) at xhigh effort. There are no
+  named exceptions: the certification spine (verdict triage, the Fury
+  verifier, the eval seat) shares the default by decision, and the map says
+  so through `CERTIFICATION_MODEL`, which names the same id. Claude Opus 5
+  (`claude-opus-5`) is `FALLBACK_MODEL`: the substitute the runner spawns
+  when the vendor refuses the default, and never a seat's default. Web
+  search: spec birth and the two dev seats only. Explore subagents: the two
+  dev seats only, cap 2. An unknown seat is an error, never a default. A
+  change enters by ADR.
 - **File contract.** The runner names the report path in the prompt
   (`runs/<runId>/reports/<name>.json` — a run artifact, archived with the
   run). After the child exits clean, a deterministic process validates the
@@ -46,9 +51,15 @@ assembly, and the headless runner — gets these concrete shapes:
   queue depth), `semaphore-granted` at every grant under a cap (`waited`,
   and `waitSeq` pairing the wait stamp). Waiters are granted first come,
   first served. A model without a configured limit has no semaphore and no
-  stamps. A live config edit re-arms the limits and grants what a raised
-  cap allows; seats granted while a model was uncapped are not counted
-  against a cap added later.
+  stamps. The limits are keyed by exact model id, so the cap that bounds
+  the harness is the instance file's `"semaphores": { "claude-fable-5-1":
+  <n> }`; a key under `"claude-opus-5"` bounds degraded and substitute
+  seats only. When the default model's key is absent, `acquire` finds no
+  limit and returns at once: every seat on it runs in parallel, no seat
+  waits, and no `semaphore-wait` or `semaphore-granted` is stamped. A live
+  config edit re-arms the limits and grants what a raised cap allows; seats
+  granted while a model was uncapped are not counted against a cap added
+  later.
 - **Model integrity.** A substitute dispatch (outage route, chosen by the
   orchestrator) stamps `model-substituted` (new registry event) with
   `from`, `to`, and a required reason — before the spawn. The supervisor
@@ -57,11 +68,12 @@ assembly, and the headless runner — gets these concrete shapes:
   `model-mismatch` — never a silent downgrade. The claude argv builder
   never emits a fallback-model flag.
 - **Availability degrade.** A seat whose model refuses the work retries once
-  on `DEFAULT_MODEL` at the same effort, and stamps `model-degraded` (new
-  registry event: `requested`, `used`, `reason`, `attempt`, and `resetsAt`
-  when the stream named one) before the retry spawn. `seat-spawned` names
-  the model that actually ran, so no reader is misled about who judged the
-  work. Effort never drops. The default model refusing too is a
+  on `FALLBACK_MODEL` (Claude Opus 5) at the same effort, and stamps
+  `model-degraded` (new registry event: `requested`, `used`, `reason`,
+  `attempt`, and `resetsAt` when the stream named one) before the retry
+  spawn. `seat-spawned` names the model that actually ran, so no reader is
+  misled about who judged the work. Effort never drops. A seat already on
+  the fallback model has nothing below it: the fallback model refusing is a
   `seat-failure` with reason `model-unavailable`, carrying the evidence —
   never a second retry.
 - **Unavailability is read from the stream.** Two structured signals mark a
@@ -175,18 +187,39 @@ The two structured fields are the only stable signal, and they are the whole
 signal. Message text is user-facing copy and can be rewritten at any release,
 so matching on it would make a release note a harness outage.
 
+## Why every seat runs one model at xhigh
+
+The harness runs every seat on Claude Fable 5.1 at xhigh effort. The
+decision is the owner's: all agents in the harness run on Fable 5.1 at high
+effort. The effort floor of xhigh, in force since the first seat map,
+satisfies that instruction and stays; no seat sits below xhigh, and no seat
+is raised above it, so effort remains the one cost control.
+
+One model for all seats removes a split the previous map carried. Under that
+map the judging seats ran on a more capable model than the seats they
+judged, and the runner held a rule for what a judging seat becomes when its
+model is refused. With one default the rule is the same for every seat, the
+semaphore that bounds the harness is one key in the instance file, and a
+ledger reader who sees `claude-fable-5-1` on a `seat-spawned` stamp knows it
+was the configured model and not a promotion.
+
+`CERTIFICATION_MODEL` stays exported and names the same id. The three seats
+that carry it still read as the certification spine in the map; the export
+records that they share the default by decision, not because nobody picked a
+model for them.
+
 ## What the degrade costs, and what it holds
 
-The degrade moves a seat from the certification model to the default model.
-That is a capability reduction, not an upgrade: the certification model is
-the more capable of the two, which is why the seats that judge are pinned to
-it in the first place. The degrade buys availability and pays for it in
-judgment quality.
+The degrade moves a seat from Claude Fable 5.1 to Claude Opus 5. That is a
+capability reduction: the default model is the more capable of the two. The
+degrade buys availability and pays for it in judgment quality, on every seat
+alike, because every seat runs the same default.
 
 Two things it does not cost. The seat's configured effort is held, so the
-effort floor stands. And the default model is not below the tier a judging
-seat is allowed to run on, so no seat lands somewhere doctrine forbids. A
-degrade in the other direction has no code to run down.
+effort floor stands. And Claude Opus 5 is not below the tier a judging seat
+is allowed to run on, so no seat lands somewhere doctrine forbids. A seat
+that already runs on the fallback model, by substitute dispatch, has no
+model below it, and its rejection stands as the failure.
 
 This is why the stamp is load-bearing rather than decorative. A reader of the
 ledger has to be able to see that a given verdict was certified by the
@@ -253,12 +286,27 @@ Settled by measurement against the installed CLI:
 
 Still open:
 
-- Whether WebFetch runs client-side on Opus 5 (map: named item).
+- Whether WebFetch runs client-side on Claude Fable 5.1 (map: named item).
 - Explore-subagent scoping: the argv allows `Task` for dev seats; the cap
   of 2 and the read-only type hold at the prompt level until a tool-level
   deny ships with M6.
 
 ## Fallback paths
+
+If Claude Fable 5.1 is refused, the runner already has the answer: the seat
+degrades to Claude Opus 5 at the same effort, stamped `model-degraded`, and
+a run that holds the vendor's reset instant degrades later seats at the
+spawn. No config change and no restart. Trigger: a `model-degraded` stamp,
+or a `seat-failure` with reason `model-unavailable`. Reversal cost: none;
+the next seat after the reset instant runs on the default again.
+
+If the default has to move (Claude Fable 5.1 withdrawn, or the owner names
+another model), `DEFAULT_MODEL` in `src/seats/seatmap.mjs` is one line, and
+`CERTIFICATION_MODEL` follows it. `FALLBACK_MODEL` must then name a model
+that is not the new default, or the degrade has nowhere to go. The instance
+file needs its `semaphores` key renamed to the new id, or the new default
+runs uncapped. Trigger: the owner's decision. Reversal cost: one line, one
+instance-file key, and this ADR.
 
 If prompt-level subagent caps leak (a dev seat spawns more than 2 or a
 non-Explore subagent), enforce at the tool level with a deny hook in the
