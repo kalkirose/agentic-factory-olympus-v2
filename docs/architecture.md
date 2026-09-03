@@ -561,6 +561,17 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 - **Repair-lane review.** Deterministic gates in full; judgment collapses to
   one generalist review seat (the same panel on one seat, diff-scoped,
   per-lens reporting). The verifier fires only when HIGHs exist.
+- **The candidate diff a seat reads** (ADR-0066). Every full-text diff read in
+  the harness carries one explicit output cap, 256 MB, and a read past it
+  answers with the bytes that fit instead of throwing: a throw in a stage
+  handler is a liveness violation, and a lockfile change alone clears the
+  runner's one-megabyte default. The patch leaves out the paths a project lists
+  under `review.excludeFromDiff` (lockfiles and generated files by default),
+  and names each of them to the seat with its `git diff --stat` line instead.
+  A patch cut by either bound ends on a line naming the files the seat never
+  saw, and the cycle stamps `diffTruncated` on `verdict-rendered` and on every
+  finding the round raised. Name reads answer about every path, so the seats
+  the interface lens sits on and the diff policy's judgment are unchanged.
 
 ## Ship step
 

@@ -37,7 +37,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isGlobEntry, underEntry } from '../config/project.mjs';
-import { git } from '../isolation/git.mjs';
+import { MAX_DIFF_BYTES, git } from '../isolation/git.mjs';
 import { priorStatus } from './spectrum.mjs';
 
 /**
@@ -105,14 +105,6 @@ export const COMMIT_LIMIT = 200;
 
 /** How many paths a refusal detail names before it stops listing them. */
 const DETAIL_PATHS = 5;
-
-/**
- * The output cap on the two full-patch reads. A story diff is the only read
- * here that grows with the work, and the runner's default cap is a megabyte.
- * A story past this cap throws, which is the internal-error route, which is
- * the full re-verdict: the wrong answer is never one of the endings.
- */
-const MAX_DIFF_BYTES = 32 * 1024 * 1024;
 
 /**
  * The wall-clock bound on every git read this check takes.
@@ -717,6 +709,10 @@ export async function fastPathFacts(tree, { fromSha, toSha, mainSha }, { run = g
   const story = parseRawDiff(
     await run(['diff', '--raw', '--no-renames', '-z', `${baseSha}..${fromSha}`], at),
   );
+  // The two full-patch reads carry the harness's diff cap. A story diff is the
+  // only read here that grows with the work, and the runner's default cap is a
+  // megabyte. A story past the cap throws, which is the internal-error route,
+  // which is the full re-verdict: the wrong answer is never one of the endings.
   const wide = { ...at, maxBuffer: MAX_DIFF_BYTES };
   const storyDiffBefore = await run(['diff', '--no-renames', `${baseSha}..${fromSha}`], wide);
   // Two dots, and not three: the merge holds the branch, so this is the story's

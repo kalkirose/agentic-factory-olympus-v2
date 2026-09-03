@@ -3272,14 +3272,17 @@ test('a cycle runs a declared group together, and the record says which layers o
   assert.ok(overlapping(left, right), 'the grouped layers did not run together');
   // Each layer keeps its own result, and each says what it ran beside, so a
   // duration read off this ledger is never mistaken for a serial one.
+  // The set and never the sequence: these layers run together by design, so
+  // ledger order is completion order and nothing about the group fixes it.
   assert.deepEqual(
     events
       .filter((e) => e.event === 'layer-result')
-      .map((e) => [e.layer, e.status, e.concurrentWith]),
+      .map((e) => [e.layer, e.status, e.concurrentWith])
+      .sort((a, b) => a[0].localeCompare(b[0])),
     [
-      ['unit', 'green', undefined],
       ['left', 'green', ['right']],
       ['right', 'green', ['left']],
+      ['unit', 'green', undefined],
     ],
   );
   const record = readRecord(fx.paths, runId, 1);

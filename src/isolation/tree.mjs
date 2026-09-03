@@ -3,8 +3,8 @@
 // a run never depends on machine-level git config.
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { isGlobEntry, underEntry } from '../config/project.mjs';
-import { git } from './git.mjs';
+import { DEFAULT_DIFF_EXCLUSIONS, isGlobEntry, underEntry } from '../config/project.mjs';
+import { MAX_DIFF_BYTES, git, gitCapped } from './git.mjs';
 import { longPath } from './removal.mjs';
 
 const IDENTITY = [
@@ -149,22 +149,173 @@ export async function carryPaths(tree, sha, entries, { except = [] } = {}) {
  * The working tree's full divergence from HEAD as a patch, new files
  * included, truncated to `limit` characters. Evidence for suite amendment
  * rounds; the tree is disposable, so staging new files is fine.
+ *
+ * The read carries the diff cap, so a tree holding a lockfile or a build
+ * artifact answers short instead of throwing at the caller.
  */
 export async function evidenceDiff(tree, { limit = 8000 } = {}) {
   await git(['add', '-A'], { cwd: tree });
-  const out = await git(['diff', '--cached'], { cwd: tree });
-  return out.length > limit ? out.slice(0, limit) + '\n[truncated]' : out;
+  const read = await gitCapped(['diff', '--cached'], { cwd: tree });
+  return read.text.length > limit ? read.text.slice(0, limit) + '\n[truncated]' : read.text;
 }
 
-/** The committed diff between two shas as a patch, truncated to `limit`. */
-export async function diffRange(tree, from, to, { limit = 12000 } = {}) {
-  const out = await git(['diff', `${from}..${to}`], { cwd: tree });
-  return out.length > limit ? out.slice(0, limit) + '\n[truncated]' : out;
+/**
+ * The committed diff between two shas, as a review seat is given it.
+ *
+ * Three things separate this from a plain range diff, and each is a rule about
+ * what a judgment seat should be reading.
+ *
+ * The patch leaves out the paths in `exclude` — lockfiles and generated files
+ * by default (see DEFAULT_DIFF_EXCLUSIONS). Those files are named to the seat
+ * instead, one `git diff --stat` line each, so the seat knows they changed and
+ * by how much without spending its window on them. Name-status reads answer
+ * about every path and are untouched by this: what a file set is derived from
+ * stays the whole file set.
+ *
+ * The read carries the diff cap (`cap`), so a patch larger than the runner's
+ * default is a short answer rather than a throw at the caller. A throw here is
+ * a throw in a stage handler, which the engine reads as a liveness violation,
+ * which leaves a run inert over the size of a file.
+ *
+ * A patch past `cap` or past `limit` is cut and says so, naming the files whose
+ * text did not fit. The caller takes `truncated` out to the ledger, because a
+ * seat that judged part of a diff and a seat that judged all of it read the
+ * same afterwards otherwise.
+ *
+ * @returns {Promise<{text: string, truncated: boolean, excluded: string[]}>}
+ */
+export async function reviewDiff(
+  tree,
+  from,
+  to,
+  { limit = 12000, cap = MAX_DIFF_BYTES, exclude = DEFAULT_DIFF_EXCLUSIONS } = {},
+) {
+  const range = `${from}..${to}`;
+  const changed = await changedInRange(tree, from, to);
+  const entries = exclude ?? DEFAULT_DIFF_EXCLUSIONS;
+  const { pathspec, excluded } = await exclusions(tree, range, changed, entries);
+  const read = await gitCapped(['diff', range, ...pathspec], { cwd: tree, maxBuffer: cap });
+  const kept = read.text.length > limit ? read.text.slice(0, limit) : read.text;
+  const truncated = read.truncated || read.text.length > limit;
+  const parts = [kept];
+  if (truncated) parts.push(truncationLine(kept, changed, excluded));
+  if (excluded.length > 0) parts.push(await excludedStat(tree, range, excluded));
+  return { text: parts.join('\n'), truncated, excluded };
 }
 
-/** File paths changed between two shas. */
+/** How many unshown file names the truncation line prints before it stops. */
+const TRUNCATION_NAMES = 20;
+
+/**
+ * The characters one exclusion list may spend on the command line. The
+ * smallest limit the harness runs under is Windows' 32767 per command line,
+ * and the rest of the argv needs room inside it.
+ */
+const PATHSPEC_BUDGET = 24_000;
+
+/**
+ * The pathspec that keeps the excluded paths out of the patch, and the paths
+ * it keeps out. A list that is all exclusions means the whole tree minus them.
+ *
+ * Naming the concrete paths is the exact form: they are matched here, in the
+ * harness's own glob vocabulary, so a project writes one entry and every reader
+ * of it gives the same answer. A set large enough to overrun the command line
+ * would make the read throw, and a throw in a stage handler is the defect this
+ * whole function exists to close, so past the budget the entries go to git as
+ * patterns and git does the matching. The names then come back from git as
+ * well, off a `--name-only` read under the same pathspec: what the seat is told
+ * is missing is exactly what git held back, in either form.
+ */
+async function exclusions(tree, range, changed, entries) {
+  const excluded = changed.filter((file) => entries.some((entry) => underEntry(file, entry)));
+  if (excluded.length === 0) return { pathspec: [], excluded };
+  const literal = excluded.map((file) => `:(exclude,literal)${file}`);
+  if (literal.join(' ').length <= PATHSPEC_BUDGET) {
+    return { pathspec: ['--', ...literal], excluded };
+  }
+  const patterns = entries.map((entry) =>
+    isGlobEntry(entry)
+      ? `:(exclude,glob)${entry}`
+      : `:(exclude,literal)${entry.replace(/\/+$/, '')}`,
+  );
+  const pathspec = ['--', ...patterns];
+  const kept = new Set(
+    (await git(['diff', '--name-only', range, ...pathspec], { cwd: tree, maxBuffer: MAX_DIFF_BYTES }))
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0),
+  );
+  return { pathspec, excluded: changed.filter((file) => !kept.has(file)) };
+}
+
+/**
+ * The one line a cut patch ends on: where it was cut, and which files the seat
+ * therefore never saw. A file counts as shown when its own patch header is in
+ * the text that survived; the header is what a reader of the patch would look
+ * for, so this counts exactly what the seat can find.
+ */
+function truncationLine(kept, changed, excluded) {
+  const held = new Set(excluded);
+  const missing = changed.filter(
+    (file) => !held.has(file) && !kept.includes(`diff --git a/${file} `),
+  );
+  const names = missing.slice(0, TRUNCATION_NAMES).join(', ');
+  const more = missing.length > TRUNCATION_NAMES ? ', ...' : '';
+  return `[diff truncated at ${kept.length} bytes; ${missing.length} files not shown: ${names}${more}]`;
+}
+
+/**
+ * The `--stat` lines of the excluded paths alone, under the seat's heading.
+ *
+ * The paths are asked for in batches, because a list long enough to overrun
+ * the command line would throw and this runs inside a stage handler. A batch
+ * of positive pathspecs is a subset of the answer, so the batches concatenate.
+ */
+async function excludedStat(tree, range, excluded) {
+  const lines = [];
+  for (const batch of batched(excluded, PATHSPEC_BUDGET)) {
+    const out = await git(
+      ['diff', '--stat', range, '--', ...batch.map((file) => `:(literal)${file}`)],
+      { cwd: tree, maxBuffer: MAX_DIFF_BYTES },
+    );
+    // git closes a `--stat` with its own summary line; the per-file lines are
+    // the ones that name a path, and the summary would read as a file that
+    // changed.
+    for (const line of out.split('\n')) {
+      const trimmed = line.trimEnd();
+      if (trimmed.includes('|')) lines.push(trimmed);
+    }
+  }
+  return ['Changed, and not shown above (lockfiles and generated files):', ...lines].join('\n');
+}
+
+/** Splits paths into runs no wider than `budget` characters of pathspec. */
+function* batched(paths, budget) {
+  let batch = [];
+  let width = 0;
+  for (const path of paths) {
+    const cost = path.length + 12;
+    if (batch.length > 0 && width + cost > budget) {
+      yield batch;
+      batch = [];
+      width = 0;
+    }
+    batch.push(path);
+    width += cost;
+  }
+  if (batch.length > 0) yield batch;
+}
+
+/**
+ * File paths changed between two shas. The read carries the diff cap for the
+ * reason every read here does: its size follows the work, and a name list past
+ * the runner's default would throw inside the stage handler that asked for it.
+ */
 export async function changedInRange(tree, from, to) {
-  const out = await git(['diff', '--name-only', `${from}..${to}`], { cwd: tree });
+  const out = await git(['diff', '--name-only', `${from}..${to}`], {
+    cwd: tree,
+    maxBuffer: MAX_DIFF_BYTES,
+  });
   return out
     .split('\n')
     .map((line) => line.trim())
@@ -179,7 +330,10 @@ export async function changedInRange(tree, from, to) {
  * than the one a request is judged on.
  */
 export async function changedAgainstBase(tree, base) {
-  const out = await git(['diff', '--name-only', `${base}...HEAD`], { cwd: tree });
+  const out = await git(['diff', '--name-only', `${base}...HEAD`], {
+    cwd: tree,
+    maxBuffer: MAX_DIFF_BYTES,
+  });
   return out
     .split('\n')
     .map((line) => line.trim())

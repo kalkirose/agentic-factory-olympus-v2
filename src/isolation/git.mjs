@@ -3,6 +3,20 @@
 import { execFile } from 'node:child_process';
 
 /**
+ * The output cap every full-text diff read carries.
+ *
+ * A patch grows with the work, not with the repository, and the runner's
+ * default cap is one megabyte. Four packages installed into a project put a
+ * lockfile change in the candidate diff and take it past that on their own,
+ * and a read that hits the default cap throws inside the stage handler that
+ * asked for it. The engine reads a handler throw as a liveness violation, so a
+ * run whose whole spectrum came out green goes inert on the size of a file
+ * nobody reviews. The cap is stated once, here, and every full-text diff read
+ * in the harness carries this number.
+ */
+export const MAX_DIFF_BYTES = 256 * 1024 * 1024;
+
+/**
  * The argv git is actually invoked with. On Windows every invocation carries
  * long-path support of its own: a run worktree nests a run id under the daemon
  * home and a workspace path under that, which clears 260 characters on an
@@ -47,7 +61,24 @@ export function gitPlain(args, { cwd, env } = {}) {
   return run([...args], args, { cwd, env });
 }
 
-function run(argv, args, { cwd, env, maxBuffer, timeout }) {
+/**
+ * Runs one git read whose output the caller would rather have short than not
+ * at all, and answers with the bytes that fit.
+ *
+ * Node stops the stream at exactly `maxBuffer`, kills the child, and hands the
+ * bytes it kept back beside the error. A caller that states a cap has already
+ * decided what to do with a short answer, so this turns that one error into
+ * the answer plus the word for it. Every other failure rejects exactly as
+ * `git` does, so a read that could not run is still a throw.
+ * @param {string[]} args
+ * @param {{cwd?: string, maxBuffer?: number, timeout?: number}} [opts]
+ * @returns {Promise<{text: string, truncated: boolean}>}
+ */
+export function gitCapped(args, { cwd, maxBuffer = MAX_DIFF_BYTES, timeout } = {}) {
+  return run(gitArgv(args), args, { cwd, maxBuffer, timeout, capped: true });
+}
+
+function run(argv, args, { cwd, env, maxBuffer, timeout, capped = false }) {
   return new Promise((resolve, reject) => {
     // The failure names the command the caller asked for, not the invocation
     // this module built around it.
@@ -61,6 +92,12 @@ function run(argv, args, { cwd, env, maxBuffer, timeout }) {
     // reader looks for it, and after the caller's options so none can drop it.
     execFile('git', argv, { ...options, windowsHide: true }, (error, stdout, stderr) => {
       if (error) {
+        // The cap the caller stated, reached. The bytes up to it are in
+        // `stdout`, so a capped read answers short rather than throwing.
+        if (capped && error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+          resolve({ text: stdout, truncated: true });
+          return;
+        }
         // A killed call is the timeout, and it says so. git's own stderr is
         // empty for one, so without this the reader gets a signal name.
         const why = error.killed
@@ -68,7 +105,7 @@ function run(argv, args, { cwd, env, maxBuffer, timeout }) {
           : String(stderr).trim() || error.message;
         reject(new Error(`git ${args.join(' ')} failed: ${why}`));
       } else {
-        resolve(stdout);
+        resolve(capped ? { text: stdout, truncated: false } : stdout);
       }
     });
   });
