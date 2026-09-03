@@ -96,7 +96,7 @@ function seededHome(t, { withClone = false } = {}) {
   const live = openRunStore(paths, 'r-live');
   live.append('run-launched', { actor: ACTOR, project: 'alpha', lane: 'story', storyKey: 's-3' });
   live.append('stage-entered', { actor: ACTOR, stage: 'verdict' });
-  live.append('seat-spawned', { actor: 'daemon', seat: 'dev-1', model: 'model-a', effort: 'xhigh' });
+  live.append('seat-spawned', { actor: 'daemon', seat: 'dev-1', model: 'model-a', effort: 'high' });
   live.append('repair-round', { actor: ACTOR, pass: 1, round: 1, sha: 'd1', openBefore: ['F1'] });
   live.append('gate-integrity', {
     actor: ACTOR,
@@ -198,7 +198,7 @@ test('snapshot derives every section from the files alone', async (t) => {
   const liveRun = s.runs.find((r) => r.runId === 'r-live');
   assert.equal(liveRun.stage, 'verdict');
   assert.deepEqual(liveRun.stages, LANE_STAGES.story);
-  assert.deepEqual(liveRun.seats, [{ seat: 'dev-1', model: 'model-a', effort: 'xhigh' }]);
+  assert.deepEqual(liveRun.seats, [{ seat: 'dev-1', model: 'model-a', effort: 'high' }]);
   assert.deepEqual(liveRun.repair, { pass: 1, round: 1 });
   assert.equal(liveRun.lastEvent.event, 'gate-integrity');
   const parkedRun = s.runs.find((r) => r.runId === 'r-parked');
@@ -277,7 +277,7 @@ test('a seat chip carries the retry ordinal, a first spawn carries none', async 
       actor: 'daemon',
       seat,
       model: 'model-a',
-      effort: 'xhigh',
+      effort: 'high',
       attempt: 1,
       ...fields,
     });
@@ -296,7 +296,7 @@ test('a seat chip carries the retry ordinal, a first spawn carries none', async 
   assert.deepEqual(seats.find((x) => x.seat === 'dev-1'), {
     seat: 'dev-1',
     model: 'model-a',
-    effort: 'xhigh',
+    effort: 'high',
     retry: 2,
     retryMax: CRASH_RETRIES,
     resumed: true,
@@ -304,7 +304,7 @@ test('a seat chip carries the retry ordinal, a first spawn carries none', async 
   assert.deepEqual(seats.find((x) => x.seat === 'fury-1'), {
     seat: 'fury-1',
     model: 'model-a',
-    effort: 'xhigh',
+    effort: 'high',
   });
   // Both seats hold a slot on the model: the retry replaced the drop.
   assert.deepEqual(s.semaphores, [{ model: 'model-a', max: null, inFlight: 2 }]);

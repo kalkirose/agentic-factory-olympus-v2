@@ -38,6 +38,21 @@ test('validation reports labeled paths', () => {
   assert.ok(paths.includes('projects.demo.defaultBranch'));
 });
 
+// The instance file carries no semaphores entry by default: an absent key and
+// an empty object both validate, both fill to {}, and neither caps a model.
+// A project that wants a cap adds one key per model id (ADR-0005).
+test('semaphores is optional, and absent or empty it caps nothing', () => {
+  assert.deepEqual(defaultInstanceConfig().semaphores, {});
+  assert.deepEqual(validateInstanceConfig({ version: 1 }), []);
+  assert.deepEqual(validateInstanceConfig({ version: 1, semaphores: {} }), []);
+  assert.deepEqual(withDefaults({ version: 1 }).semaphores, {});
+  assert.deepEqual(withDefaults({ version: 1, semaphores: {} }).semaphores, {});
+  assert.deepEqual(
+    validateInstanceConfig({ version: 1, semaphores: { 'claude-fable-5-1': 4 } }),
+    [],
+  );
+});
+
 test('withDefaults fills project defaults without mutation', () => {
   const raw = { version: 1, projects: { demo: { repoUrl: 'https://example.invalid/demo.git' } } };
   const filled = withDefaults(raw);

@@ -21,12 +21,12 @@ const SCHEMA = {
 
 // The ids are pinned as literals on purpose: a seat map that quietly moved to
 // another model or a lower effort would still agree with its own constants.
-test('every seat runs Claude Fable 5.1 at xhigh', () => {
+test('every seat runs Claude Fable 5.1 at high', () => {
   assert.equal(DEFAULT_MODEL, 'claude-fable-5-1');
-  assert.equal(DEFAULT_EFFORT, 'xhigh');
+  assert.equal(DEFAULT_EFFORT, 'high');
   for (const [name, def] of Object.entries(SEATS)) {
     assert.equal(def.model, 'claude-fable-5-1', name);
-    assert.equal(def.effort, 'xhigh', name);
+    assert.equal(def.effort, 'high', name);
   }
 });
 
@@ -147,7 +147,7 @@ test('the claude argv names the model and blocks tools per policy, never a fallb
   const judgment = claudeSeatCommand({
     prompt: 'P',
     model: CERTIFICATION_MODEL,
-    effort: 'xhigh',
+    effort: 'high',
     def: seatDef('fury-verifier'),
   });
   assert.equal(judgment.cmd, 'claude');
@@ -168,7 +168,7 @@ test('the claude argv names the model and blocks tools per policy, never a fallb
     claudeCommand: ['npx', 'claude'],
     prompt: 'P',
     model: DEFAULT_MODEL,
-    effort: 'xhigh',
+    effort: 'high',
     def: seatDef('dev'),
     resume: 'session-1',
   });

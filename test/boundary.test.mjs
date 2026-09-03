@@ -103,7 +103,7 @@ test('denyTools ride the claude argv as disallowed tools', () => {
   const { args } = claudeSeatCommand({
     prompt: 'P',
     model: 'claude-fable-5-1',
-    effort: 'xhigh',
+    effort: 'high',
     def,
     denyTools: testEditDenyRules(['tests']),
   });

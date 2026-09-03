@@ -1,5 +1,5 @@
 // The eval review. Every five ships of any lane the daemon fires one eval
-// seat: Fable 5.1 at xhigh, instance-scoped — no worktree, no stack, seat
+// seat: Fable 5.1 at high, instance-scoped — no worktree, no stack, seat
 // events in the instance ledger. The seat reads the ledgers since the last
 // review and reports proposals only; every change lands by PR or a
 // map-level decision. Nothing self-executes: the scheduler stamps the

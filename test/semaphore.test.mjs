@@ -30,6 +30,22 @@ test('an uncapped model grants without stamps', async (t) => {
   assert.equal(readEvents(runLedgerPath(paths, 'r1')).length, 0);
 });
 
+// The daemon builds its semaphores from the instance file's key and re-arms
+// them on every live edit. A file that carries no key at all, and an edit that
+// removes the key, both leave every seat granted at once with nothing stamped.
+test('no semaphores key at all caps nothing, before and after a live edit', async (t) => {
+  const { paths, store } = setup(t);
+  const semaphores = new ModelSemaphores(undefined);
+  const seats = ['spec-birth', 'dev', 'fury-spec', 'fury-verifier', 'eval'];
+  const releases = await Promise.all(seats.map((seat) => semaphores.acquire(MODEL, { store, seat })));
+  assert.equal(releases.length, seats.length);
+  semaphores.setLimits(undefined);
+  releases.push(await semaphores.acquire(MODEL, { store, seat: 'adversary' }));
+  for (const release of releases) release();
+  assert.deepEqual(semaphores.limits, {});
+  assert.equal(readEvents(runLedgerPath(paths, 'r1')).length, 0);
+});
+
 // A cap keyed by another model's id does nothing for the default model: the
 // lookup is by exact id, and an absent key means no semaphore at all. Every
 // seat is granted at once, nothing waits, nothing is stamped.
