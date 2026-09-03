@@ -8,16 +8,16 @@ The seat runtime — seat map, file contracts, model semaphores, prompt
 assembly, and the headless runner — gets these concrete shapes:
 
 - **Seat map as code.** `src/seats/seatmap.mjs` is a closed registry: seat →
-  model, effort, web-tool allowance, Explore-subagent allowance. Every seat
-  runs Claude Fable 5.1 (`claude-fable-5-1`) at high effort. There are no
-  named exceptions: the certification spine (verdict triage, the Fury
-  verifier, the eval seat) shares the default by decision, and the map says
-  so through `CERTIFICATION_MODEL`, which names the same id. Claude Opus 5
-  (`claude-opus-5`) is `FALLBACK_MODEL`: the substitute the runner spawns
-  when the vendor refuses the default, and never a seat's default. Web
-  search: spec birth and the two dev seats only. Explore subagents: the two
-  dev seats only, cap 2. An unknown seat is an error, never a default. A
-  change enters by ADR.
+  model, effort, web-tool allowance, Explore-subagent allowance. Seats run
+  Claude Opus 5 (`claude-opus-5`) at high effort. The certification spine
+  (verdict triage, the Fury verifier, the eval seat) runs Claude Fable 5.1
+  (`claude-fable-5-1`), named through `CERTIFICATION_MODEL`. `FALLBACK_MODEL`
+  is the substitute a refused seat degrades to, and it names Claude Opus 5: a
+  certification seat whose model is refused runs on Opus 5 at the same effort,
+  and a seat already on Opus 5 has no substitute below it, so its rejection is
+  the failure. Web search: spec birth and the two dev seats only. Explore
+  subagents: the two dev seats only, cap 2. An unknown seat is an error, never
+  a default. A change enters by ADR.
 - **File contract.** The runner names the report path in the prompt
   (`runs/<runId>/reports/<name>.json` — a run artifact, archived with the
   run). After the child exits clean, a deterministic process validates the
@@ -59,8 +59,8 @@ assembly, and the headless runner — gets these concrete shapes:
   queue depth), `semaphore-granted` at every grant (`waited`, and
   `waitSeq` pairing the wait stamp). Waiters are granted first come, first
   served. The limits are keyed by exact model id, so a cap that bounds the
-  harness is `"semaphores": { "claude-fable-5-1": <n> }`; a key under
-  `"claude-opus-5"` bounds degraded and substitute seats only. A live
+  harness is `"semaphores": { "claude-opus-5": <n> }`; a key under
+  `"claude-fable-5-1"` bounds the certification spine only. A live
   config edit re-arms the limits: a removed key or a raised cap grants what
   it allows, and seats granted while a model was uncapped are not counted
   against a cap added later.
@@ -191,23 +191,27 @@ The two structured fields are the only stable signal, and they are the whole
 signal. Message text is user-facing copy and can be rewritten at any release,
 so matching on it would make a release note a harness outage.
 
-## Why every seat runs one model at high
+## Why Fable 5.1 is the certification spine, not the whole harness
 
-The harness runs every seat on Claude Fable 5.1 at high effort. The
-decision is the owner's: all agents in the harness run on Fable 5.1 at high
-effort, and high names the level itself, not a floor a higher level may
-satisfy. The floor is high: no seat sits below it, and no seat is raised
-above it, so effort remains the one cost control and it is the same level
-on every seat. A level above the one named would spend more than the
-decision authorizes on every seat of every run.
+Every seat ran Claude Fable 5.1 for part of 2026-09-03. The account's session
+limit was exhausted within hours: the harness spawns seats by the dozen per
+run, and one model carrying all of them spends the window faster than it
+refills. So the model split is back. Seats run Claude Opus 5. The three seats
+whose judgment a run's certification rests on (verdict triage, the Fury
+verifier, the eval seat) run Fable 5.1. The spine is where the more capable
+model buys the most, and it is a small enough share of the seats to sit inside
+the window.
 
-One model for all seats removes a split the previous map carried. Under that
-map the judging seats ran on a more capable model than the seats they
-judged, and the runner held a rule for what a judging seat becomes when its
-model is refused. With one default the rule is the same for every seat, a
-cap on the harness, when a project wants one, is one key in the instance
-file, and a ledger reader who sees `claude-fable-5-1` on a `seat-spawned`
-stamp knows it was the configured model and not a promotion.
+Effort is not part of that reversal. Every seat runs at high, which is the
+owner's decision: high names the level itself, not a floor a higher level may
+satisfy. No seat sits below it and no seat is raised above it, so effort
+remains the one cost control and it is the same level on every seat.
+
+`CERTIFICATION_MODEL` names the spine's model, so the three seats read as a
+decision in the map rather than three ad-hoc overrides. `FALLBACK_MODEL` names
+the same id as `DEFAULT_MODEL`, which is what makes the degrade route
+one-directional: a certification seat that is refused lands on Opus 5, and an
+Opus 5 seat that is refused has nothing below it and fails.
 
 ## Why no model is capped by default
 
@@ -223,8 +227,8 @@ the stream, the seat degrades to the fallback model at the same effort, and
 a run that holds the vendor's reset instant degrades later seats at the
 spawn (ADR-0021). A rejected request costs nothing, and the ledger records
 every degrade. Against that, the cap cost real time on every run: a
-verdict stage spawns its Fury seats together, and a cap of four on the one
-model every seat runs serialized what was designed to run in parallel. The
+verdict stage spawns its Fury seats together, and a cap of four on the model
+most of them run serialized what was designed to run in parallel. The
 owner's instruction is to run every seat at once, so the instance file
 carries no `semaphores` key and nothing waits.
 
@@ -233,23 +237,22 @@ window, not of this harness, and another project on another window may
 want the counter back. Removing it would make that a code change; keeping
 it makes it one instance-file key.
 
-`CERTIFICATION_MODEL` stays exported and names the same id. The three seats
-that carry it still read as the certification spine in the map; the export
-records that they share the default by decision, not because nobody picked a
-model for them.
+A cap, where a project sets one, is keyed by exact model id, so the harness is
+bounded under `"claude-opus-5"` and the certification spine under
+`"claude-fable-5-1"`. Neither key is set by default.
 
 ## What the degrade costs, and what it holds
 
-The degrade moves a seat from Claude Fable 5.1 to Claude Opus 5. That is a
-capability reduction: the default model is the more capable of the two. The
-degrade buys availability and pays for it in judgment quality, on every seat
-alike, because every seat runs the same default.
+The degrade moves a certification seat from Claude Fable 5.1 to Claude Opus 5.
+That is a capability reduction: Fable 5.1 is the more capable of the two, which
+is why the spine runs it. The degrade buys availability and pays for it in
+judgment quality, and it reaches only the three seats that run Fable 5.1.
 
 Two things it does not cost. The seat's configured effort is held, so the
 effort floor stands. And Claude Opus 5 is not below the tier a judging seat
 is allowed to run on, so no seat lands somewhere doctrine forbids. A seat
-that already runs on the fallback model, by substitute dispatch, has no
-model below it, and its rejection stands as the failure.
+already on Claude Opus 5 has no model below it, and its rejection stands as
+the failure.
 
 This is why the stamp is load-bearing rather than decorative. A reader of the
 ledger has to be able to see that a given verdict was certified by the
@@ -323,20 +326,27 @@ Still open:
 
 ## Fallback paths
 
-If Claude Fable 5.1 is refused, the runner already has the answer: the seat
-degrades to Claude Opus 5 at the same effort, stamped `model-degraded`, and
-a run that holds the vendor's reset instant degrades later seats at the
-spawn. No config change and no restart. Trigger: a `model-degraded` stamp,
-or a `seat-failure` with reason `model-unavailable`. Reversal cost: none;
-the next seat after the reset instant runs on the default again.
+If Claude Fable 5.1 is refused, the runner already has the answer: the
+certification seat degrades to Claude Opus 5 at the same effort, stamped
+`model-degraded`, and a run that holds the vendor's reset instant degrades
+later seats at the spawn. No config change and no restart. Trigger: a
+`model-degraded` stamp, or a `seat-failure` with reason `model-unavailable`.
+Reversal cost: none; the next seat after the reset instant runs on Fable 5.1
+again. If Claude Opus 5 is refused there is no substitute, and the seat fails
+with reason `model-unavailable` and the evidence in its ledger.
 
-If the default has to move (Claude Fable 5.1 withdrawn, or the owner names
-another model), `DEFAULT_MODEL` in `src/seats/seatmap.mjs` is one line, and
-`CERTIFICATION_MODEL` follows it. `FALLBACK_MODEL` must then name a model
-that is not the new default, or the degrade has nowhere to go. An instance
-file that caps the old id has to rename the key, or the cap it meant stops
-applying. Trigger: the owner's decision. Reversal cost: one line, this ADR,
-and one instance-file key where a cap is set.
+If the harness has to run one model on every seat again (the session limit
+proves to have another cause, or the owner names one model), point
+`CERTIFICATION_MODEL` at `DEFAULT_MODEL` in `src/seats/seatmap.mjs`, which is
+one constant. `FALLBACK_MODEL` must then name a model that is not the default,
+or the degrade has nowhere to go. Trigger: the owner's decision. Reversal cost:
+one line and this ADR.
+
+If either model has to move (one is withdrawn, or the owner names another),
+`DEFAULT_MODEL` and `CERTIFICATION_MODEL` are one line each. An instance file
+that caps the old id has to rename the key, or the cap it meant stops
+applying. Trigger: the owner's decision. Reversal cost: one line per constant,
+this ADR, and one instance-file key where a cap is set.
 
 If one seat needs a different effort, `seat()` in the map already takes an
 `effort` override, the same way it takes `web` and `explore`; the runner

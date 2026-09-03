@@ -2,17 +2,17 @@
 // event registry: a new seat or a policy change enters only by a
 // design-level decision recorded in an ADR, never ad hoc from a call site.
 //
-// Every seat runs Claude Fable 5.1 at high effort. One model, one effort, no
-// named exceptions. The certification spine (verdict triage, the Fury verifier, the
-// eval seat) is still named through CERTIFICATION_MODEL so the map states that
-// those seats share the default by decision, not by omission. FALLBACK_MODEL
-// is the substitute the runner spawns when the vendor refuses the default
-// model; it is never the default for any seat. Effort is the cost control and
-// stays constant inside a seat session; the floor is high, and no seat sits
-// below it (ADR-0005).
-export const DEFAULT_MODEL = 'claude-fable-5-1';
-export const CERTIFICATION_MODEL = DEFAULT_MODEL;
-export const FALLBACK_MODEL = 'claude-opus-5';
+// Seats run Claude Opus 5 at high effort. The certification spine (verdict
+// triage, the Fury verifier, the eval seat) runs Claude Fable 5.1, named
+// through CERTIFICATION_MODEL. FALLBACK_MODEL is the substitute a refused seat
+// degrades to, and it names Opus 5: a certification seat whose model is refused
+// runs on Opus 5 at the same effort, and a seat already on Opus 5 has no
+// substitute below it, so its rejection is the failure. Effort is the cost
+// control and stays constant inside a seat session; the floor is high, and no
+// seat sits below it (ADR-0005).
+export const DEFAULT_MODEL = 'claude-opus-5';
+export const CERTIFICATION_MODEL = 'claude-fable-5-1';
+export const FALLBACK_MODEL = DEFAULT_MODEL;
 export const DEFAULT_EFFORT = 'high';
 
 // web: web search allowed (spec birth and the two dev seats only).

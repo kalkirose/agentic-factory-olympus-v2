@@ -4,7 +4,7 @@ import { ModelSemaphores } from '../src/seats/semaphore.mjs';
 import { openRunStore } from '../src/telemetry/stores.mjs';
 import { scaffoldHome, runLedgerPath } from '../src/daemon/home.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
-import { DEFAULT_MODEL, FALLBACK_MODEL } from '../src/seats/seatmap.mjs';
+import { DEFAULT_MODEL, CERTIFICATION_MODEL } from '../src/seats/seatmap.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
 // The instance file keys its caps by model id, so the cap that bounds the
@@ -51,7 +51,7 @@ test('no semaphores key at all caps nothing, before and after a live edit', asyn
 // seat is granted at once, nothing waits, nothing is stamped.
 test('an absent key for the default model caps nothing, whatever other keys say', async (t) => {
   const { paths, store } = setup(t);
-  const semaphores = new ModelSemaphores({ [FALLBACK_MODEL]: 1, 'claude-fable-5': 1 });
+  const semaphores = new ModelSemaphores({ [CERTIFICATION_MODEL]: 1, 'claude-fable-5': 1 });
   const releases = [];
   for (const seat of ['fury-spec', 'fury-operational', 'fury-interface']) {
     let granted = false;
