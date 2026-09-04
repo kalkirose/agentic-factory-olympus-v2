@@ -19,7 +19,6 @@
 // a finding turns on what the code does under this host's credentials. The
 // lane seats never reach it — they judge a diff (ADR-0042).
 import { runReportPath } from '../daemon/home.mjs';
-import { underEntry } from '../config/project.mjs';
 import { LENS_CRITERIA, furyPanel } from './lenses.mjs';
 import { authorizedSupersedes, supersedeLines } from './supersede.mjs';
 import {
@@ -218,7 +217,7 @@ async function settleFindings(ctx, base, { cycle, collected, priorConfirmed, dif
       severity: f.severity,
       summary: f.finding,
       evidence: f.evidence,
-      ...findingPlace(f.file, allowlist),
+      ...findingPlace(f.file, allowlist, base.worktree),
       approach: isConfirmed && (result.approach ?? f.approach ?? false),
       confirmed: isConfirmed,
     };
@@ -236,7 +235,7 @@ async function settleFindings(ctx, base, { cycle, collected, priorConfirmed, dif
         severity: f.severity,
         summary: f.finding,
         evidence: f.evidence,
-        ...findingPlace(f.file, allowlist),
+        ...findingPlace(f.file, allowlist, base.worktree),
       },
       { advisory: true, diffTruncated },
     );
@@ -259,14 +258,35 @@ async function settleFindings(ctx, base, { cycle, collected, priorConfirmed, dif
  * neither field, and the metric over these reads it as a finding that is not
  * about an allowlist, which is the safe direction for a reading watched for
  * falling (ADR-0010).
+ *
+ * The path itself is prose: a seat writes what it was reading, and what it was
+ * reading is the run worktree. So it is brought to the form a path entry is
+ * written in before anything is asked of it — separators forward, the worktree
+ * prefix off, a leading `./` off — because a match against any other form
+ * silently answers no, and a silent no is exactly what this field exists to
+ * stop.
  */
-function findingPlace(file, allowlist) {
-  if (typeof file !== 'string' || file.length === 0) return {};
-  const path = file.replaceAll('\\', '/');
+function findingPlace(file, allowlist, worktree) {
+  const path = repoRelative(file, worktree);
+  if (path === null) return {};
   return {
     file: path,
-    ...(allowlist.some((entry) => underEntry(path, entry)) && { allowlist: true }),
+    ...(underAny(path, allowlist) && { allowlist: true }),
   };
+}
+
+/** A seat-written path as the repository names it, or null for no path. */
+function repoRelative(file, worktree) {
+  if (typeof file !== 'string' || file.trim().length === 0) return null;
+  let path = file.trim().replaceAll('\\', '/').replace(/\/+$/, '');
+  const root = typeof worktree === 'string' ? worktree.replaceAll('\\', '/').replace(/\/+$/, '') : '';
+  // The worktree prefix is compared case-insensitively because the hosts that
+  // hand a seat an absolute path are the ones whose file systems are.
+  if (root.length > 0 && path.toLowerCase().startsWith(root.toLowerCase() + '/')) {
+    path = path.slice(root.length + 1);
+  }
+  while (path.startsWith('./')) path = path.slice(2);
+  return path.length > 0 ? path : null;
 }
 
 function stampReviewFinding(ctx, cycle, finding, { advisory, diffTruncated = false }) {

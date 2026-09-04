@@ -98,9 +98,11 @@ export function defaultProjectConfig() {
     // the tree to the closed signature set, and `proofDebt: true` offers the
     // owner's trade at the external gate; both absent is the default, which is
     // the closed set alone and no trade (ADR-0069). `allowlistPaths` names the
-    // files that carry a cross-cutting gate's allowlist, so a spec-lens finding
-    // on one is countable afterwards; absent, that reading is a standing zero
-    // and the project is told so by its own band (ADR-0010).
+    // files that carry a cross-cutting gate's allowlist: a capture stamps the
+    // ones its candidate touched and a finding on one carries the word, which
+    // is what makes `allowlist-findings-window` countable. Absent, no capture
+    // stamps an addition, so that window holds none and the reading is not
+    // eligible — quiet rather than a standing zero (ADR-0010).
     gates: { tier1: [] },
     // one convention per line; prompt assembly consumes these
     conventions: [],
@@ -346,10 +348,13 @@ function validateGates(gates, commands, err) {
   // A FOURTH list, and a different claim again: the files that carry a
   // cross-cutting gate's allowlist. A story that extends the codebase adds a
   // line to one of them in its own diff, so nothing here blocks a write and
-  // nothing here narrows a re-run. The list exists to be counted: it is what
-  // tells the `allowlist-findings-window` metric which of a run's confirmed
-  // spec-lens findings are findings about an allowlist addition, and a project
-  // that declares none gets no reading rather than a standing zero (ADR-0010).
+  // nothing here narrows a re-run. The list exists to be counted, at two
+  // points: the candidate capture stamps the entries its diff touched, and a
+  // review finding on one carries the word. Both halves feed
+  // `allowlist-findings-window`, which asks whether the spec lens is reading
+  // the additions. A project that declares none stamps neither half, so that
+  // window holds no addition and the reading is not eligible — quiet rather
+  // than a standing zero (ADR-0010).
   if (gates.allowlistPaths !== undefined && !isStringList(gates.allowlistPaths)) {
     err('gates.allowlistPaths', 'must be an array of path entries');
   }

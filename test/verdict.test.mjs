@@ -255,6 +255,7 @@ function verdictFixture(t, opts) {
     credentials = undefined,
     proofDebt = undefined,
     transientPatterns = undefined,
+    allowlistPaths = undefined,
     laneConfig = { story: { suiteCommand: 'suite' } },
   } = opts;
   const root = tempDir();
@@ -273,6 +274,7 @@ function verdictFixture(t, opts) {
         ...(concurrencyGroups !== undefined && { concurrencyGroups }),
         ...(proofDebt !== undefined && { proofDebt }),
         ...(transientPatterns !== undefined && { transientPatterns }),
+        ...(allowlistPaths !== undefined && { allowlistPaths }),
       },
       ...(credentials && { credentials }),
       lanes: laneConfig,
@@ -4303,4 +4305,48 @@ test('the same lane with the field absent runs the strict sequence', async (t) =
   );
   const record = readRecord(fx.paths, runId, 1);
   assert.ok(record.spectrum.every((r) => r.concurrentWith === undefined));
+});
+
+// The producer half of `allowlist-findings-window`: the capture already walks
+// the changed files with the lane's config in hand, so it names the
+// cross-cutting gate allowlists the candidate touched and they ride the commit
+// stamp. Without it the ledger cannot tell a window in which no story touched
+// an allowlist from one the lens read none of (ADR-0010).
+test('the capture names the allowlist entries the candidate touched', async (t) => {
+  const seats = {
+    dev: () => ({
+      files: {
+        'src/feature.mjs': GOOD_FEATURE,
+        'config/allowlists/price-surfaces.json': '["checkout"]\n',
+        'config/notes.md': 'not an allowlist\n',
+      },
+      report: { summary: 'implemented, and one allowlist extended' },
+    }),
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, { seats, allowlistPaths: ['config/allowlists/**'] });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const commits = events.filter((e) => e.event === 'implementation-committed');
+  assert.equal(commits.length, 1);
+  assert.deepEqual(commits[0].allowlists, ['config/allowlists/price-surfaces.json']);
+});
+
+// A project that declares no allowlist path stamps no addition, so the reading
+// over it is quiet rather than a standing zero.
+test('a project with no declared allowlist stamps no addition', async (t) => {
+  const seats = {
+    dev: () => ({
+      files: { 'src/feature.mjs': GOOD_FEATURE, 'config/allowlists/price-surfaces.json': '[]\n' },
+      report: { summary: 'implemented' },
+    }),
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, { seats });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  const commits = events.filter((e) => e.event === 'implementation-committed');
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].allowlists, undefined);
 });

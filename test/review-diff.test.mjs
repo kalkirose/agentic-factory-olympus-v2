@@ -422,3 +422,53 @@ test("a cycle's diff file sits in the run directory, beside the record", () => {
     join('C:', 'olympusd-home', 'runs', 'r1', 'reviews', 'diff-c2.patch'),
   );
 });
+
+// The allowlist word is assigned at the stamp, and the path it is assigned
+// against is prose: a seat writes the path it was reading, and what it was
+// reading is the run worktree. A match against any other form answers no
+// silently, which is the one thing the field exists to stop (ADR-0010).
+test('a finding carries the file the lens named, in the form a path entry is written', async (t) => {
+  const worktree = process.cwd();
+  const report = {
+    findings: [
+      { lens: 'spec', severity: 'MED', finding: 'a', evidence: 'e', file: './allowlists/price.json' },
+      {
+        lens: 'spec',
+        severity: 'MED',
+        finding: 'b',
+        evidence: 'e',
+        file: join(worktree, 'allowlists', 'price.json'),
+      },
+      { lens: 'spec', severity: 'MED', finding: 'c', evidence: 'e', file: 'allowlists\\price.json' },
+      { lens: 'spec', severity: 'MED', finding: 'd', evidence: 'e', file: 'src/pay.mjs' },
+      { lens: 'spec', severity: 'MED', finding: 'e', evidence: 'e' },
+    ],
+    summary: 'five',
+  };
+  const { ctx, paths } = runFixture(t, report);
+
+  await generalistReview(
+    ctx,
+    { ...BASE, worktree, allowlistPaths: ['allowlists/**'] },
+    { cycle: 1, diff: excerpted(), priorConfirmed: [] },
+  );
+
+  const findings = readEvents(runLedgerPath(paths, 'r1')).filter((e) => e.event === 'finding');
+  assert.deepEqual(
+    findings.map((f) => f.file),
+    [
+      'allowlists/price.json',
+      'allowlists/price.json',
+      'allowlists/price.json',
+      'src/pay.mjs',
+      undefined,
+    ],
+  );
+  assert.deepEqual(
+    findings.map((f) => f.allowlist),
+    [true, true, true, undefined, undefined],
+  );
+  // Every review seat is asked for the field, so the ledger can hold it.
+  const brief = ctx.briefs.find((b) => b.seat === 'generalist-review').roleBlock;
+  assert.ok(brief.includes('Put the repo-relative path of the one file a finding is about'), brief);
+});

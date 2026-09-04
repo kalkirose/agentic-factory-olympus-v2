@@ -66,13 +66,51 @@ export class TripwireWatcher {
     this.readRegistry = readRegistry ?? (async () => []);
     this.readSource = readSource ?? (async () => null);
     this.registries = new Map();
+    // What was last stamped as armed, per project, serialized. It is the
+    // change detector for `tripwires-armed` and nothing else reads it.
+    this.armed = new Map();
     this.chains = new Map();
     this.stopped = false;
   }
 
   /** The launch path hands over the freshly read registry. */
   setRegistry(project, tripwires) {
-    this.registries.set(project, (tripwires ?? []).map(withTripwireDefaults));
+    const filled = (tripwires ?? []).map(withTripwireDefaults);
+    this.registries.set(project, filled);
+    this.stampArmed(project, filled);
+  }
+
+  /**
+   * What the project is armed with, on the instance ledger, whenever it
+   * differs from the set last read.
+   *
+   * A console prints readings from the same ledgers this watcher evaluates,
+   * and it has no clone to read a registry out of. Without this it would have
+   * to print the metric defaults, which is a window the project's own band
+   * does not judge. Stamped on change alone: every launch hands a registry
+   * over, and a record per launch would be a record of nothing. The change is
+   * measured against this instance's own reads, so a start stamps once per
+   * project and says what it read, which is the fact a console wants.
+   */
+  stampArmed(project, entries) {
+    const shape = entries.map((e) => ({
+      id: e.id,
+      metric: e.metric,
+      ...(e.window !== undefined && { window: e.window }),
+      breach: e.breach,
+      ...(e.params !== undefined && { params: e.params }),
+    }));
+    const serialized = JSON.stringify(shape);
+    if (this.armed.get(project) === serialized) return;
+    // Nothing to say about a project that has never been armed and still is
+    // not. A project that disarms what it had is a change, and it is stamped.
+    if (this.armed.get(project) === undefined && shape.length === 0) return;
+    this.armed.set(project, serialized);
+    try {
+      this.ledger.append('tripwires-armed', { actor: ACTOR, project, entries: shape });
+    } catch {
+      // A closed ledger at a stop. The next start reads the registry again.
+    }
   }
 
   /**

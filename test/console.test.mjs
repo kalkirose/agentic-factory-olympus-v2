@@ -534,6 +534,13 @@ test('status prints the four stop readings under each project', (t) => {
   });
   run.append('waiting-ended', { actor: 'daemon', kind: 'seat', outcome: 'elapsed', waitSeq: 5 });
   run.append('stage-entered', { actor: 'daemon', stage: 'verdict' });
+  run.append('implementation-committed', {
+    actor: 'daemon',
+    pass: 1,
+    phase: 'initial',
+    sha: 'bbbbbbb',
+    allowlists: ['apps/web/src/lib/allowlists/price-surfaces.json'],
+  });
   run.append('finding', {
     actor: 'daemon',
     cycle: 1,
@@ -550,4 +557,36 @@ test('status prints the four stop readings under each project', (t) => {
     renderStatus(paths),
     /parks 0\.5\/run · gate rounds 2 · waits 0\.5\/run \(100% green\) · allowlist findings 1/,
   );
+});
+
+test('the stop readings are measured over the window the project armed', (t) => {
+  // The band judges the project's own window, so the page prints it. A page
+  // that answered from the metric defaults would print a number nothing
+  // judges, and two numbers that disagree are worse than one (ADR-0010).
+  const { paths } = seededHome(t);
+  const quiet = openRunStore(paths, 'r2');
+  quiet.append('run-launched', { actor: 'daemon', project: 'alpha', lane: 'story', storyKey: 's2' });
+  quiet.close();
+  // The default window of ten holds both runs and the one park in them.
+  assert.match(renderStatus(paths), /parks 0\.5\/run/);
+
+  const instance = openInstanceStore(paths);
+  instance.append('tripwires-armed', {
+    actor: 'tripwire-watcher',
+    project: 'alpha',
+    entries: [
+      {
+        id: 'parks',
+        metric: 'parks-window',
+        window: 1,
+        breach: { op: '>', value: 0.5 },
+        answer: 'read the park types',
+      },
+    ],
+  });
+  instance.close();
+  // A window of one holds the newest run alone, which parked nothing.
+  assert.match(renderStatus(paths), /parks 0\/run/);
+  // A metric the project arms no entry for keeps the registry default.
+  assert.match(renderStatus(paths), /gate rounds — /);
 });

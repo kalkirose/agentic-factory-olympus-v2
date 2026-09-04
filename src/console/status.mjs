@@ -17,6 +17,7 @@ import {
   allowlistFindingsReading,
   gateRoundsReading,
   parksReading,
+  projectRuns,
   waitsReading,
 } from '../tripwires/metrics.mjs';
 
@@ -216,12 +217,13 @@ export function renderStatus(paths) {
   }
   if (runs.length === 0) lines.push('  none');
   const config = readInstanceConfig(paths);
+  const instanceEvents = readEvents(paths.instanceLedger);
   if (config) {
     const armed = armingState(paths);
     // A hold with no run under it yet is still the reason the next boundary
     // will not be crossed, so the project line carries it whether or not any
     // run is standing on one.
-    const holds = holdState(readEvents(paths.instanceLedger));
+    const holds = holdState(instanceEvents);
     lines.push('');
     lines.push('PROJECTS');
     for (const [name, project] of Object.entries(config.projects)) {
@@ -231,11 +233,13 @@ export function renderStatus(paths) {
       );
       // The four readings of what still stops a run and of what the harness
       // now answers for itself. They are on the status page rather than only
-      // behind a breach, because a band is set from readings somebody watched
-      // first, and because three of the four are the numbers a plan argued
-      // from and nobody could see without reading the ledgers by hand
-      // (ADR-0010).
-      const stops = stopReadings(paths, name);
+      // behind a breach, because a band is set from readings that were
+      // watched first, and a reading nobody can see is a reading nobody sets a
+      // band from (ADR-0010).
+      const stops = stopReadings(paths, name, {
+        instanceEvents,
+        windows: armedWindows(instanceEvents, name),
+      });
       if (stops) lines.push(`    ${stops}`);
     }
   }
@@ -243,7 +247,7 @@ export function renderStatus(paths) {
   // belongs on the status page and not only in a park that has been answered:
   // an ack outlives the run that recorded it and every restart after, and the
   // only thing that ends one is an operator reading this line (ADR-0032).
-  const acks = standingAckList(readEvents(paths.instanceLedger));
+  const acks = standingAckList(instanceEvents);
   if (acks.length > 0) {
     lines.push('');
     lines.push(`STANDING ACKS (${acks.length})`);
@@ -292,17 +296,30 @@ export function renderStatus(paths) {
  * One project's four stop readings as a line, or null when the project has no
  * run to read yet.
  *
- * The windows are the metric registry's own defaults, so the line and a band
- * set against it are measured over the same stretch. An ineligible reading
- * prints an em-dash rather than a zero: the difference between "no run parked"
- * and "no run" is the whole of what a cold window means.
+ * Every window is the project's own, read off the newest `tripwires-armed`
+ * record, so the line and the band that judges it are measured over the same
+ * stretch; a metric the project arms no entry for falls back to the registry
+ * default. An ineligible reading prints an em-dash rather than a zero: the
+ * difference between "no run parked" and "no run" is the whole of what a cold
+ * window means.
+ *
+ * The run ledgers are walked once for all four. Each reading would otherwise
+ * open every live and archived ledger of the project on its own, and a status
+ * page is something a person waits for.
  */
-function stopReadings(paths, project) {
-  const parks = parksReading(paths, project, { window: windowOf('parks-window') });
-  const rounds = gateRoundsReading(paths, project, { window: windowOf('gate-rounds-window') });
-  const waits = waitsReading(paths, project, { window: windowOf('waits-window') });
+function stopReadings(paths, project, { instanceEvents, windows }) {
+  const runs = projectRuns(paths, project);
+  const at = (metric) => windows.get(metric) ?? TRIPWIRE_METRICS[metric].defaultWindow;
+  const parks = parksReading(paths, project, {
+    window: at('parks-window'),
+    runs,
+    instanceEvents,
+  });
+  const rounds = gateRoundsReading(paths, project, { window: at('gate-rounds-window'), runs });
+  const waits = waitsReading(paths, project, { window: at('waits-window'), runs });
   const allowlist = allowlistFindingsReading(paths, project, {
-    window: windowOf('allowlist-findings-window'),
+    window: at('allowlist-findings-window'),
+    runs,
   });
   if (![parks, rounds, waits, allowlist].some((r) => r.eligible)) return null;
   const green =
@@ -315,8 +332,21 @@ function stopReadings(paths, project) {
   );
 }
 
-function windowOf(metric) {
-  return TRIPWIRE_METRICS[metric].defaultWindow;
+/**
+ * The window each metric is armed with on one project, from the newest
+ * `tripwires-armed` record. An empty map is a project the daemon has not read
+ * a registry for yet, and every reading then falls back to its default.
+ */
+function armedWindows(events, project) {
+  let newest = null;
+  for (const e of events) {
+    if (e.event === 'tripwires-armed' && e.project === project) newest = e;
+  }
+  const windows = new Map();
+  for (const entry of newest?.entries ?? []) {
+    if (typeof entry.window === 'number') windows.set(entry.metric, entry.window);
+  }
+  return windows;
 }
 
 function shown(reading) {

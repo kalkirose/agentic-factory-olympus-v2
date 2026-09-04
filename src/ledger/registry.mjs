@@ -579,6 +579,14 @@ export const INSTANCE_EVENTS = new Set([
   // against the ship that carried it. Stamped here and not in the run,
   // because the run that made the trade closed hours or days before.
   'proof-settled',
+  // The tripwire registry one project is armed with, stamped whenever the
+  // daemon reads a set that differs from the one it last read: the entry ids,
+  // their metrics, their windows and their bands. It exists so a console can
+  // say what window a reading it prints was measured over without opening the
+  // project's clone — a status page that answered from the metric defaults
+  // would print a number the project's own band does not judge. Quiet: it
+  // records a read, and nothing about it is a request (ADR-0010).
+  'tripwires-armed',
   // Instance-scoped escalations: a park that waits on the human but belongs
   // to no open run (card-invalidated from the ship-time sweep). The paired
   // `answer` clears the park and unblocks the card; runs park and answer

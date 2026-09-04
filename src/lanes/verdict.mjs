@@ -279,7 +279,7 @@ function implementationHandler(mode) {
     const baseSha = await headSha(base.worktree);
     // The capture gate holds the structural test-edit guarantee: the frozen
     // suite is restored from its sha before the tree is committed or judged.
-    const { fail, dropped } = await devSeatWithCapture(ctx, base, mode, {
+    const { fail, dropped, allowlists } = await devSeatWithCapture(ctx, base, mode, {
       seat: 'dev',
       buildRole: (brief) => (mode === 'story' ? devRole(base, brief) : fixRole(base, brief)),
       suiteSha: base.suiteSha,
@@ -296,6 +296,9 @@ function implementationHandler(mode) {
       // not the tree the seat left, and every later reader must know that
       // from the record rather than from a re-discovered red (ADR-0017).
       ...(dropped.length > 0 && { dropped }),
+      // And the cross-cutting gate allowlists it touched, which is the half of
+      // `allowlist-findings-window` the diff knows and no finding does.
+      ...(allowlists.length > 0 && { allowlists }),
     });
     return { next: 'verdict' };
   };
@@ -2225,7 +2228,7 @@ export async function freshPass(ctx, base, mode, { newPass, trigger, open, last 
 async function runDevSeat(ctx, base, mode, { seat, buildRole, pass = null, phase = null }) {
   const events = runEvents(ctx);
   const baseSha = await headSha(base.worktree);
-  const { fail, dropped } = await devSeatWithCapture(ctx, base, mode, {
+  const { fail, dropped, allowlists } = await devSeatWithCapture(ctx, base, mode, {
     seat,
     buildRole,
     suiteSha: mode === 'story' ? currentSuiteSha(events) : null,
@@ -2239,6 +2242,7 @@ async function runDevSeat(ctx, base, mode, { seat, buildRole, pass = null, phase
     baseSha,
     sha,
     ...(dropped.length > 0 && { dropped }),
+    ...(allowlists.length > 0 && { allowlists }),
   });
   return { sha };
 }
@@ -2401,6 +2405,16 @@ function ruledSuiteFiles(answer, frozen) {
  */
 async function captureDefects(ctx, base, mode, { seat, capture }) {
   const changed = await changedFiles(base.worktree);
+  // The cross-cutting gate allowlists this candidate touched. The walk is
+  // already here and the lane's config is already read, so the fact is taken
+  // where it is free. It rides `implementation-committed`, and it is what
+  // makes `allowlist-findings-window` a reading about something: without it
+  // the ledger cannot tell a window in which no story touched an allowlist
+  // from a window in which the lens read none of the ones that did (ADR-0010).
+  for (const path of changed) {
+    if (!underAny(path, base.allowlistPaths ?? [])) continue;
+    if (!capture.allowlists.includes(path)) capture.allowlists.push(path);
+  }
   // An exclusion is the seat's own file: the restore leaves it alone, so the
   // capture keeps it and the diff policy judges it like any other change.
   const exempt = mode === 'story' ? (base.frozenExclusions ?? []) : [];
@@ -2512,10 +2526,12 @@ function declaresPath(base, mode, tier) {
  * carrying the exact paths, then the `seat-failure` park. A capture that only
  * took frozen writes back proceeds, and reports what it took.
  *
- * @returns {Promise<{report?: object, fail?: object, dropped: string[]}>}
+ * @returns {Promise<{report?: object, fail?: object, dropped: string[],
+ *   allowlists: string[]}>} `allowlists` names the cross-cutting gate
+ *   allowlists the candidate touched, across the attempts of this pass.
  */
 async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
-  const capture = { dropped: [] };
+  const capture = { dropped: [], allowlists: [] };
   const outcome = await seatWithChecks(ctx, {
     seat,
     label: null,
@@ -2532,7 +2548,7 @@ async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
     buildRole,
     checks: () => captureDefects(ctx, base, mode, { seat, capture }),
   });
-  return { ...outcome, dropped: capture.dropped };
+  return { ...outcome, dropped: capture.dropped, allowlists: capture.allowlists };
 }
 
 // -- role blocks -------------------------------------------------------------

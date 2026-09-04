@@ -306,7 +306,9 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   every route id in the spec (`/[param]/...`) is a directory under
   `repo.routesRoot` or is marked `(new)`; every component the spec's
   `Components` section names resolves under `repo.componentsRoot` as
-  folder-per-component or is marked `(new)`. The last two rules run only where
+  folder-per-component or is marked `(new)`, the section itself is required,
+  and a bullet in it that is not one component name on one line is a defect
+  naming the line. The last two rules run only where
   the tree holds their root; a tree git cannot read turns the four rules
   off for that lint. A failure is a work-product defect — one corrective
   invocation, then the `seat-failure` park — and never spends a gate round.
@@ -1298,11 +1300,16 @@ asking anybody (`waits-window`, narrowable to one wait kind), and confirmed
 spec-lens findings on a cross-cutting gate allowlist across the runs holding
 the last five verdicts (`allowlist-findings-window`). The last is watched for
 falling: an allowlist addition is judged by the spec lens alone, and a window
-of additions with no finding is a lens nobody is feeding. Whether a finding
-sits on an allowlist is decided at the stamp against `gates.allowlistPaths` and
-carried on the `finding` event beside the file, never read back out of the
-seat's sentence. Their bands are a project's own, set from readings it watched
-first, so `olympusctl status` prints all four under each project (ADR-0010).
+of additions with no finding is a lens nobody is feeding. Both halves are
+stamped where the harness observes them and never inferred from prose: the
+candidate capture names the allowlist entries its diff touched on
+`implementation-committed`, and a review finding carries the file it is on and
+`allowlist: true`, both against `gates.allowlistPaths`. A window with no
+addition in it is not eligible. Their bands are a project's own, set from
+readings it watched first, so `olympusctl status` prints all four under each
+project, at the windows the project's own registry declares — the daemon stamps
+`tripwires-armed` when it reads a registry that changed, and the page reads it
+(ADR-0010).
 
 Standing quality bar (written by the runs themselves, never mined from
 outside): escaped defects per story (ceiling 0.5, rolling 10 ships),

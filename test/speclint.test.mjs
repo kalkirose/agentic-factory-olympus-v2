@@ -47,7 +47,7 @@ function spec({
   header = '# alpha-1 spec',
   sections,
   touched,
-  components = null,
+  components = ['None.'],
   environment = '## Environment\n\nNone.',
 } = {}) {
   const body =
@@ -905,15 +905,40 @@ test('(m) the (new) marker admits a component the story creates, and is refused 
   assert.match(defects[0], /marks the component PriceTag \(new\), and ui already holds it/);
 });
 
-test('(m) no section, "None", and no components root each turn the rule off', (t) => {
-  // A story that renders nothing writes the section as None; a spec written
-  // before the section existed carries none; a project that names no root, or
-  // names one its tree does not hold, gets no rule at all.
+test('(m) "None" answers the section, and no components root turns the rule off', (t) => {
+  // A story that renders nothing writes the section as None. A project that
+  // names no root, or names one its tree does not hold, gets no rule at all —
+  // and then the section is not required either.
   assert.deepEqual(lint(t, spec({ components: ['None.'] }), { ground: groundOf() }), []);
-  assert.deepEqual(lint(t, spec(), { ground: groundOf() }), []);
   const phantom = spec({ components: ['`RadioField`'] });
   assert.deepEqual(lint(t, phantom, { ground: groundOf({ componentsRoot: null }) }), []);
   assert.deepEqual(lint(t, phantom, { ground: groundOf({ componentsRoot: 'web/ui' }) }), []);
+  assert.deepEqual(lint(t, spec({ components: null }), { ground: groundOf({ componentsRoot: null }) }), []);
+});
+
+test('(m) a spec with no Components section, or an empty one, has not made the claim', (t) => {
+  // The section carries a rule and it carries "- None." for the empty case, so
+  // silence is not an answer: a rule that read an absent section as "renders
+  // nothing" would be a rule every spec could skip.
+  const absent = lint(t, spec({ components: null }), { ground: groundOf() });
+  assert.equal(absent.length, 1, absent.join(' | '));
+  assert.match(absent[0], /the spec has no Components section; the template takes one/);
+  const empty = lint(t, spec({ components: [] }), { ground: groundOf() });
+  assert.equal(empty.length, 1, empty.join(' | '));
+  assert.match(empty[0], /Components section lists nothing; write one item per design-system/);
+});
+
+test('(m) a bullet the entry shape does not fit is a defect naming the line', (t) => {
+  // The three shapes that would otherwise pass a rule that skipped what it
+  // could not parse: a path, two names on one line, and a dotted name.
+  const bad = spec({ components: ['`forms/RadioField`', '`PriceTag` `QuantityStepper`', 'ui.RadioField'] });
+  const defects = lint(t, bad, { ground: groundOf() });
+  assert.equal(defects.length, 3, defects.join(' | '));
+  assert.match(defects[0], /carries "`forms\/RadioField`" on line \d+, which is not a component entry/);
+  assert.match(defects[1], /carries "`PriceTag` `QuantityStepper`" on line \d+/);
+  assert.match(defects[2], /carries "ui\.RadioField" on line \d+/);
+  // Every message states the shape the template asks for.
+  for (const defect of defects) assert.match(defect, /one component name on one line/);
 });
 
 test('(m) the lane reads the components root from the tree at the base sha', async (t) => {
@@ -943,8 +968,9 @@ test('(m) the lane reads the components root from the tree at the base sha', asy
   assert.match(defects[0], /names RadioField, and no component of that name exists under ui/);
   writeFileSync(specPath, spec({ components: ['`PriceTag`', '`RadioField` (new)'] }));
   assert.deepEqual(await specLintDefects(base), []);
-  // A project that names no components root gets no rule (m).
-  writeFileSync(specPath, spec({ components: ['`RadioField`'] }));
+  // A project that names no components root gets no rule (m), section or no
+  // section.
+  writeFileSync(specPath, spec({ components: null }));
   assert.deepEqual(await specLintDefects({ ...base, componentsRoot: null }), []);
 });
 

@@ -230,6 +230,10 @@ src/feature.mjs (new) - dev
 tests/exports.test.mjs (new) - suite
 \`\`\`
 
+## Components
+
+- None.
+
 ## Environment
 
 None; the card names none.
@@ -260,6 +264,10 @@ Supersedes:
 src/feature.mjs - dev
 tests/exports.test.mjs - suite
 \`\`\`
+
+## Components
+
+- None.
 
 ## Environment
 

@@ -112,15 +112,18 @@ proposals get these concrete shapes:
     the wait. `params.type` narrows it to one park type, which is how a project
     watches the one stop it is repairing without losing the total. The detail
     carries the types, because the type is what is repaired, and the runs,
-    because that is where the questions and the answers are written.
+    because that is where the questions and the answers are written. Two park
+    types belong to a card rather than to a run and are stamped on the instance
+    ledger by the ship that raised them (ADR-0008, ADR-0052); they carry that
+    run id, so the reading takes them into the same window. A count that read
+    the run ledgers alone would answer zero for two types its own `params.type`
+    admits.
   - `gate-rounds-window`: the most spec-gate rounds any one story of the last N
     freezes spent, keyed on `spec-gate-round`. The worst story rather than the
     mean, for the reason `verdict-cycles` reads the worst run: the gate has no
     round cap and parks only when it stops closing findings (ADR-0020), so the
     story that kept the gate open is the reading, and four quick freezes beside
-    it do not make that one cheaper. The mean rides in the detail. A run that
-    froze twice is two readings, each counting the rounds stamped before its
-    own freeze.
+    it do not make that one cheaper. The mean rides in the detail.
   - `waits-window`: wait spans per run over the last N launched runs, keyed on
     `waiting`, with the share of those spans whose ladder ended without asking
     a person. `params.kind` narrows it to one wait kind. The value is what the
@@ -138,8 +141,11 @@ proposals get these concrete shapes:
     allowlist in its own diff; nothing mechanical judges whether the card
     covered the addition, and the spec lens reading the whole diff is what does
     (ADR-0066). So a window full of allowlist additions and empty of findings
-    is not a clean window, it is a lens nobody is feeding, and no other reading
-    here can tell those two apart.
+    is not a clean window, it is a lens nobody is feeding. It is eligible only
+    while the window holds at least one addition, and the count of them is in
+    the detail: a window in which no story touched an allowlist says nothing at
+    all about whether anybody reads them, and a floor that breached on it would
+    breach on every quiet window of every project from the day it armed.
 - **Baseline proposals.** At the 5th freeze the watcher stamps a kill-rate
   proposal (observed kills, waves, per-freeze rates, and the observed floor
   as the suggested band); at the 5th verdict a per-lens yield proposal,
@@ -148,40 +154,56 @@ proposals get these concrete shapes:
   the project registry by PR, then resolves the queue item. Stamped once per
   project and metric, checked against the instance ledger.
 
-## Where the allowlist word is assigned
+## Both halves of the allowlist reading are ledger facts
 
-Whether a finding sits on an allowlist path is decided where the finding is
-stamped, in `src/lanes/review.mjs`, against the project's
-`gates.allowlistPaths`. The `finding` event gains two fields: `file`, the one
-file the lens named, and `allowlist: true` when that file falls under one of
-those entries. The review report already carried an optional `file`; the ledger
-dropped it, so nothing downstream could count anything about where a finding
-sat. The role text now asks every review seat for it.
+The question is whether the spec lens is reading the allowlist additions, and
+answering it needs the additions as well as the findings. Both are stamped
+where the harness observes them, and neither is inferred later from prose.
 
-It is assigned at the stamp and never read back out of the seat's sentence, for
-the reason every closed vocabulary in the ledger is: a fact carried as prose
-counts as nothing when somebody comes to count it. It also keeps the metric
-readable from the ledgers alone, which is what lets the status page print it
-with no daemon and no clone behind it.
+The additions come from the candidate capture, in `src/lanes/verdict.mjs`. It
+already walks the changed files of every dev and repair pass with the lane's
+config in hand, so it names the entries of `gates.allowlistPaths` the candidate
+touched and they ride `implementation-committed` as `allowlists`.
 
-A project that arms this metric and declares no allowlist path reads zero and
-breaches its floor at once. That is the intended answer rather than a silent
-ineligibility: the config line and the band ship together, the way a cut and
-its tripwire do, and a project that armed one without the other is told so.
+The findings come from the review stamp, in `src/lanes/review.mjs`. The
+`finding` event gains `file`, the one file the lens named, and `allowlist: true`
+when that file falls under one of those entries. The review report already
+carried an optional `file` and the ledger dropped it, so nothing downstream
+could count anything about where a finding sat; the role text now asks every
+review seat for it, and the path is brought to repo-relative form before it is
+matched, because a seat writes the path it was reading and what it was reading
+is the worktree.
+
+Assigning both at the stamp is the rule every closed vocabulary in this ledger
+follows: a fact carried as prose counts as nothing when somebody comes to count
+it. It also keeps the reading answerable from the ledgers alone, which is what
+lets the status page print it with no daemon and no clone behind it.
+
+A project that declares no allowlist path stamps neither half. Its window then
+holds no addition, the reading is not eligible, and the metric is quiet — which
+is the honest answer, because nothing about that project's ledgers says whether
+its lens would read an addition if one existed.
 
 ## Why the four stop readings are on the status page
 
-`olympusctl status` prints all four under each project, with the metric
-registry's own default windows, and an em-dash where a reading is not eligible:
-the difference between "no run parked" and "no run" is the whole of what a cold
-window means.
+`olympusctl status` prints all four under each project, with an em-dash where a
+reading is not eligible: the difference between "no run parked" and "no run" is
+the whole of what a cold window means.
 
-They are printed rather than left behind a breach because three of the four are
-numbers a plan argued from after somebody read ninety-four parks off the run
-ledgers by hand. A band is set from readings that were watched first, and a
-reading nobody can see is a reading nobody sets a band from. The four
-implementations are plain functions beside their entries in the metric table,
-so the status page and the watcher read exactly the same number.
+Each window is the project's own. The daemon stamps `tripwires-armed` on the
+instance ledger whenever it reads a registry that differs from the last one,
+and the page reads the newest record per project; a metric the project arms no
+entry for falls back to the registry default. Without that record the page
+would have to print the defaults, which is a window the project's own band does
+not judge, and two numbers that disagree are worse than one number nobody has.
+
+They are printed rather than left behind a breach because a band is set from
+readings that were watched first, and a reading nobody can see is a reading
+nobody sets a band from. Three of the four — parks, gate rounds, waits — were
+first counted by hand off the run ledgers, which is the work this removes. The
+four implementations are plain functions beside their entries in the metric
+table, so the status page and the watcher read exactly the same number, and the
+page walks the run ledgers once for all four rather than once per reading.
 
 ## Why re-arm waits for the next trigger instead of re-evaluating at resolve
 
@@ -262,6 +284,12 @@ how a count stops meaning one thing, and the floor would then be met by
 findings that were about something else. Trigger: allowlist additions the
 window shows and findings the metric does not. Reversal cost: one function in
 `review.mjs`; the metric and the field are unchanged.
+
+If `tripwires-armed` proves to be noise, the status page returns to the metric
+defaults and prints the window beside each reading so nothing is implied.
+Trigger: a project whose registry changes often enough that the record is a
+material part of the instance ledger. Reversal cost: one stamp and one reader;
+the metrics never read it.
 
 If the four stop readings crowd the status page, or the four ledger walks they
 cost make the page slow on a long-lived home, they move behind a flag on

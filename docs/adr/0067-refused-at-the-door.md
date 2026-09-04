@@ -76,6 +76,13 @@ corrective birth round and never a gate round. Nothing here is a stage.
   that section and nothing else: a component name in prose is an English word,
   and no rule about the tree can say one true thing about a word.
 
+  The section is required, and the three ways of not making the claim are each
+  a defect of their own: a spec with no `Components` section, a section that
+  lists nothing and does not say `None`, and a bullet the entry shape does not
+  fit, which is reported with its line and its text. A rule that read silence
+  as "no components", or skipped the line it could not parse, would be a rule
+  any spec could pass by writing `forms/RadioField` or two names on one line.
+
 `repo.routesRoot` and `repo.componentsRoot` are project config keys, validated
 in `src/config/project.mjs` by one rule as a plain repo-relative path or
 `null`. Their defaults are `apps/storefront/src/routes` and

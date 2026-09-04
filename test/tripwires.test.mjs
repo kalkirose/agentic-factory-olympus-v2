@@ -1298,6 +1298,9 @@ test('a failing hook never fails the append', (t) => {
 // -- the two operator levers (ADR-0061, ADR-0062) ----------------------------
 
 /** A run ledger of one project holding whatever events a test needs after it. */
+/** One cross-cutting gate allowlist, as a project's config would name it. */
+const ALLOW = 'apps/web/src/lib/allowlists/price-surfaces.json';
+
 function runWith(paths, runId, project, ts, events = []) {
   writeLedger(runLedgerPath(paths, runId), [
     line(1, ts, 'run-launched', { project, lane: 'story' }),
@@ -1432,13 +1435,50 @@ test('parks-window counts the stops per run, and narrows to one type', async (t)
   runWith(paths, 'o1', 'other', '2026-09-04T00:00:00Z', [
     { event: 'park', type: 'seat-failure', question: 'theirs' },
   ]);
+  // The two park types that belong to a card are stamped on the instance
+  // ledger by the ship of the run that raised them, with that run id on them.
+  // A reading that walked the run ledgers alone would answer zero for a type
+  // its own params.type admits.
+  writeLedger(paths.instanceLedger, [
+    line(1, '2026-09-03T01:00:00Z', 'park', {
+      type: 'card-decision',
+      project: 'p',
+      runId: 'r3',
+      card: '.olympus/cards/beta-1.md',
+      question: 'a choice the story left open',
+    }),
+    line(2, '2026-09-04T01:00:00Z', 'park', {
+      type: 'card-invalidated',
+      project: 'other',
+      runId: 'o1',
+      card: '.olympus/cards/theirs.md',
+      question: 'theirs',
+    }),
+    // A card park of this project raised by a run outside the window counts
+    // for nothing: the window is the runs, and this one left it.
+    line(3, '2026-09-01T01:00:00Z', 'park', {
+      type: 'card-decision',
+      project: 'p',
+      runId: 'gone',
+      card: '.olympus/cards/old.md',
+      question: 'an older one',
+    }),
+  ]);
   const all = await evaluateMetric('parks-window', { paths, project: 'p', window: 10 });
-  assert.equal(all.value, 1);
+  assert.equal(all.value, 1.333);
   assert.equal(all.eligible, true);
   assert.equal(all.detail.runs, 3);
-  assert.equal(all.detail.parks, 3);
-  assert.deepEqual(all.detail.types, ['provisioning-gate', 'seat-failure']);
+  assert.equal(all.detail.parks, 4);
+  assert.deepEqual(all.detail.types, ['card-decision', 'provisioning-gate', 'seat-failure']);
   assert.deepEqual(all.detail.parked.sort(), ['r1', 'r3']);
+  const cards = await evaluateMetric('parks-window', {
+    paths,
+    project: 'p',
+    window: 10,
+    params: { type: 'card-decision' },
+  });
+  assert.equal(cards.detail.parks, 1);
+  assert.deepEqual(cards.detail.parked, ['r3']);
   // Narrowed to the one stop a project is repairing.
   const gates = await evaluateMetric('parks-window', {
     paths,
@@ -1448,9 +1488,10 @@ test('parks-window counts the stops per run, and narrows to one type', async (t)
   });
   assert.equal(gates.value, 0.667);
   assert.equal(gates.detail.type, 'provisioning-gate');
-  // The window is the last N runs in launch order.
+  // The window is the last N runs in launch order: the oldest run's park
+  // leaves it, and r3 keeps its two run parks and its one card park.
   const narrow = await evaluateMetric('parks-window', { paths, project: 'p', window: 2 });
-  assert.equal(narrow.value, 1);
+  assert.equal(narrow.value, 1.5);
   assert.deepEqual(narrow.detail.parked, ['r3']);
   // A project with no run is no reading; a project whose runs parked nothing
   // is a reading of zero.
@@ -1515,14 +1556,34 @@ test('waits-window counts every span and the share whose ladder ended green', as
     { event: 'waiting-ended', kind: 'substrate', outcome: 'elapsed', waitSeq: 6 },
     { event: 'park', type: 'provisioning-gate', question: 'the host' },
   ]);
-  runWith(paths, 'w3', 'p', '2026-09-03T00:00:00Z');
+  // A ladder the daemon stopped in the middle of, and an operator held at its
+  // stage. Neither settles it: the run is still in the stage the ladder
+  // belongs to, and the park after the ladder runs out is still this ladder's.
+  runWith(paths, 'w3', 'p', '2026-09-03T00:00:00Z', [
+    { event: 'waiting', kind: 'layer', reason: 'ECONNRESET', attempt: 1 },
+    { event: 'waiting-ended', kind: 'layer', outcome: 'daemon-stopped', waitSeq: 2 },
+    { event: 'stage-entered', stage: 'verdict', resumed: true },
+    { event: 'stage-held', stage: 'verdict', by: 'console:ana' },
+    { event: 'waiting', kind: 'layer', reason: 'ECONNRESET', attempt: 2 },
+    { event: 'waiting-ended', kind: 'layer', outcome: 'elapsed', waitSeq: 6 },
+    { event: 'park', type: 'provisioning-gate', question: 'the host' },
+  ]);
+  const layers = await evaluateMetric('waits-window', {
+    paths,
+    project: 'p',
+    window: 10,
+    params: { kind: 'layer' },
+  });
+  assert.equal(layers.detail.waits, 2, 'the span the stop closed was filtered out');
+  assert.equal(layers.detail.green, 0, 'a resumed entry or a hold settled the ladder green');
+  runWith(paths, 'w4', 'p', '2026-09-04T00:00:00Z');
   const all = await evaluateMetric('waits-window', { paths, project: 'p', window: 10 });
-  assert.equal(all.value, 1.667);
+  assert.equal(all.value, 1.75);
   assert.equal(all.eligible, true);
-  assert.equal(all.detail.waits, 5);
+  assert.equal(all.detail.waits, 7);
   assert.equal(all.detail.green, 2);
-  assert.equal(all.detail.greenShare, 0.4);
-  assert.deepEqual(all.detail.kinds, ['seat', 'substrate']);
+  assert.equal(all.detail.greenShare, 0.286);
+  assert.deepEqual(all.detail.kinds, ['layer', 'seat', 'substrate']);
   // Narrowed to one kind: the seat ladder held, both its spans counted.
   const seats = await evaluateMetric('waits-window', {
     paths,
@@ -1530,7 +1591,7 @@ test('waits-window counts every span and the share whose ladder ended green', as
     window: 10,
     params: { kind: 'seat' },
   });
-  assert.equal(seats.value, 0.667);
+  assert.equal(seats.value, 0.5);
   assert.equal(seats.detail.waits, 2);
   assert.equal(seats.detail.greenShare, 1);
   const cold = await evaluateMetric('waits-window', { paths, project: 'none', window: 10 });
@@ -1540,37 +1601,19 @@ test('waits-window counts every span and the share whose ladder ended green', as
 test('allowlist-findings-window counts confirmed spec findings on an allowlist', async (t) => {
   const paths = home(t);
   runWith(paths, 'a1', 'p', '2026-09-01T00:00:00Z', [
-    {
-      event: 'finding',
-      id: 'F1',
-      lens: 'spec',
-      severity: 'HIGH',
-      confirmed: true,
-      file: 'apps/web/src/lib/allowlists/price-surfaces.json',
-      allowlist: true,
-    },
+    // The addition: the capture named the allowlist entries this candidate
+    // touched. It is what makes the window a window about something.
+    { event: 'implementation-committed', pass: 1, phase: 'fresh', sha: 'a1a1a1a', allowlists: [ALLOW] },
+    { event: 'finding', id: 'F1', lens: 'spec', severity: 'HIGH', confirmed: true, file: ALLOW, allowlist: true },
     // Confirmed, spec lens, but not on an allowlist.
     { event: 'finding', id: 'F2', lens: 'spec', severity: 'HIGH', confirmed: true, file: 'src/a.ts' },
     // On an allowlist, but another lens judged it.
-    {
-      event: 'finding',
-      id: 'F3',
-      lens: 'security',
-      severity: 'HIGH',
-      confirmed: true,
-      file: 'apps/web/src/lib/allowlists/price-surfaces.json',
-      allowlist: true,
-    },
-    // On an allowlist and on the spec lens, but the verifier refuted it.
-    {
-      event: 'finding',
-      id: 'F4',
-      lens: 'spec',
-      severity: 'MED',
-      advisory: true,
-      file: 'apps/web/src/lib/allowlists/price-surfaces.json',
-      allowlist: true,
-    },
+    { event: 'finding', id: 'F3', lens: 'security', severity: 'HIGH', confirmed: true, file: ALLOW, allowlist: true },
+    // On an allowlist and on the spec lens, but the verifier refuted it: the
+    // lens read the addition and said it was covered, which is not a finding.
+    { event: 'finding', id: 'F4', lens: 'spec', severity: 'HIGH', confirmed: false, advisory: true, file: ALLOW, allowlist: true },
+    // On an allowlist and on the spec lens, but below HIGH, so never verified.
+    { event: 'finding', id: 'F5', lens: 'spec', severity: 'MED', advisory: true, file: ALLOW, allowlist: true },
     { event: 'verdict-rendered', cycle: 1 },
   ]);
   const one = await evaluateMetric('allowlist-findings-window', {
@@ -1581,16 +1624,30 @@ test('allowlist-findings-window counts confirmed spec findings on an allowlist',
   assert.equal(one.value, 1);
   assert.equal(one.eligible, true);
   assert.equal(one.detail.verdicts, 1);
-  assert.deepEqual(one.detail.files, ['apps/web/src/lib/allowlists/price-surfaces.json']);
+  assert.equal(one.detail.additions, 1);
+  assert.deepEqual(one.detail.allowlists, [ALLOW]);
   assert.deepEqual(one.detail.runs, ['a1']);
-  // A window of one verdict leaves the older run out of it.
-  runWith(paths, 'a2', 'p', '2026-09-02T00:00:00Z', [{ event: 'verdict-rendered', cycle: 1 }]);
-  const narrow = await evaluateMetric('allowlist-findings-window', {
+  // A window with additions and no confirmed lens finding is the condition the
+  // floor exists for: eligible, and reading zero.
+  runWith(paths, 'a2', 'p', '2026-09-02T00:00:00Z', [
+    { event: 'implementation-committed', pass: 1, phase: 'fresh', sha: 'a2a2a2a', allowlists: [ALLOW] },
+    { event: 'verdict-rendered', cycle: 1 },
+  ]);
+  const unread = await evaluateMetric('allowlist-findings-window', {
     paths,
     project: 'p',
     window: 1,
   });
-  assert.deepEqual([narrow.eligible, narrow.value], [true, 0]);
+  assert.deepEqual([unread.eligible, unread.value, unread.detail.additions], [true, 0, 1]);
+  // A window in which no story touched an allowlist says nothing about whether
+  // anybody reads them, so it is no reading at all.
+  runWith(paths, 'a3', 'p', '2026-09-03T00:00:00Z', [{ event: 'verdict-rendered', cycle: 1 }]);
+  const quiet = await evaluateMetric('allowlist-findings-window', {
+    paths,
+    project: 'p',
+    window: 1,
+  });
+  assert.deepEqual([quiet.eligible, quiet.detail.additions], [false, 0]);
   const cold = await evaluateMetric('allowlist-findings-window', {
     paths,
     project: 'none',
@@ -1643,6 +1700,13 @@ test('the four stop metrics validate as registry entries and each seeded breach 
   // One run that stops twice, spends six gate rounds, waits three times, and
   // renders a verdict with no allowlist finding on it.
   runWith(paths, 'b1', 'p', '2026-09-01T00:00:00Z', [
+    {
+      event: 'implementation-committed',
+      pass: 1,
+      phase: 'fresh',
+      sha: 'b1b1b1b',
+      allowlists: ['apps/web/src/lib/allowlists/price-surfaces.json'],
+    },
     ...Array.from({ length: 6 }, (_, i) => ({ event: 'spec-gate-round', round: i + 1 })),
     { event: 'freeze', killCount: 1, sha: 'b'.repeat(7) },
     { event: 'waiting', kind: 'layer', reason: 'ECONNRESET', attempt: 1 },
@@ -1727,4 +1791,49 @@ test('every narrowing vocabulary a metric names resolves to a closed set', () =>
       );
     }
   }
+});
+
+test('the registry a project is armed with is stamped when it changes, and only then', async (t) => {
+  // A console prints readings from these ledgers and has no clone to read a
+  // registry out of. Without this record it would print the metric defaults,
+  // which is a window the project's own band does not judge (ADR-0010).
+  const paths = home(t);
+  const ledger = openInstanceStore(paths);
+  t.after(() => ledger.close());
+  const watcher = new TripwireWatcher({ paths, ledger });
+  const armed = () =>
+    readEvents(paths.instanceLedger).filter((e) => e.event === 'tripwires-armed');
+  const entry = (window) => ({
+    id: 'parks',
+    metric: 'parks-window',
+    window,
+    breach: { op: '>', value: 0.5 },
+    answer: 'read the park types',
+  });
+
+  // A project that has never been armed and still is not says nothing.
+  watcher.setRegistry('p', []);
+  assert.deepEqual(armed(), []);
+
+  watcher.setRegistry('p', [entry(10)]);
+  assert.equal(armed().length, 1);
+  assert.equal(armed()[0].project, 'p');
+  assert.deepEqual(armed()[0].entries, [
+    { id: 'parks', metric: 'parks-window', window: 10, breach: { op: '>', value: 0.5 } },
+  ]);
+
+  // Every launch hands the registry over, and a record per launch would be a
+  // record of nothing.
+  watcher.setRegistry('p', [entry(10)]);
+  assert.equal(armed().length, 1);
+
+  // A window that moved is what the reader came for.
+  watcher.setRegistry('p', [entry(3)]);
+  assert.equal(armed().length, 2);
+  assert.equal(armed()[1].entries[0].window, 3);
+
+  // And disarming is a change too.
+  watcher.setRegistry('p', []);
+  assert.equal(armed().length, 3);
+  assert.deepEqual(armed()[2].entries, []);
 });

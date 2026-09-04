@@ -305,7 +305,35 @@ export function lintSpec(
   if (tree && ground?.components && typeof ground.componentsRoot === 'string') {
     const root = ground.componentsRoot.replace(/\/+$/, '');
     if (tree.has(root)) {
-      for (const entry of componentEntries(lines)) {
+      const section = componentSection(lines);
+      // An absent section is a defect, not a pass. The section carries a rule
+      // and it carries "- None." for the story that renders nothing, so a spec
+      // without one has not answered the question — and a rule that read
+      // silence as "no components" would be a rule any spec could skip.
+      if (!section.present) {
+        defects.push(
+          'the spec has no Components section; the template takes one, listing every ' +
+            'design-system component the story renders, one per line as `Name` or `Name` ' +
+            '(new), and "- None." when the story renders none.',
+        );
+      } else if (!section.none && section.entries.length === 0 && section.malformed.length === 0) {
+        defects.push(
+          "the spec's Components section lists nothing; write one item per design-system " +
+            'component the story renders, or "- None." when the story renders none.',
+        );
+      }
+      // A bullet the entry shape does not fit is a defect naming the line. It
+      // is never skipped: a phantom written `forms/RadioField`, or two names
+      // on one line, would pass a rule that only read what it could parse,
+      // which is the one thing this rule exists to stop.
+      for (const bad of section.malformed) {
+        defects.push(
+          `the spec's Components section carries "${bad.text}" on line ${bad.line}, which is ` +
+            'not a component entry; one entry is one component name on one line, written ' +
+            '`Name` or `Name` (new), and "- None." when the story renders none.',
+        );
+      }
+      for (const entry of section.entries) {
         const held = ground.components.has(entry.name);
         if (!held && !entry.isNew) {
           defects.push(
@@ -356,30 +384,44 @@ function escapeRegExp(text) {
 }
 
 /**
- * The entries of the Components section, in document order. An absent section
- * and the "None" the template takes for a story that renders none both yield
- * nothing, so rule (m) fires on what a spec claims and never on what it omits.
+ * The Components section as rule (m) reads it: whether the spec carries one at
+ * all, whether it says "None", the entries it holds, and the bullets it holds
+ * that are not entries.
  *
- * A bullet the entry shape does not fit yields nothing either, which is the
- * posture rule (l) takes with a token: the rule asks a question about the
- * tree, and a line it cannot read as a name says nothing about the tree.
+ * Every one of those four is reported on, because this section is a claim and
+ * the three ways of not making it — leaving the section out, leaving it empty,
+ * and writing a line the shape does not fit — are the three ways a spec would
+ * otherwise pass the rule by saying nothing.
+ * @returns {{present: boolean, none: boolean,
+ *   entries: {name: string, isNew: boolean}[],
+ *   malformed: {line: number, text: string}[]}}
  */
-function componentEntries(lines) {
+function componentSection(lines) {
   const entries = [];
+  const malformed = [];
+  let present = false;
+  let none = false;
   let inside = false;
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
     const heading = HEADING.exec(line);
     if (heading) {
       inside = COMPONENTS_HEADING.test(heading[1]);
+      if (inside) present = true;
       continue;
     }
     if (!inside) continue;
     const item = LIST_ITEM.exec(line);
-    if (!item || NONE.test(item[1].trim())) continue;
-    const parsed = COMPONENT_ITEM.exec(item[1].trim());
+    if (!item) continue;
+    const text = item[1].trim();
+    if (NONE.test(text)) {
+      none = true;
+      continue;
+    }
+    const parsed = COMPONENT_ITEM.exec(text);
     if (parsed) entries.push({ name: parsed[1], isNew: parsed[2] !== undefined });
+    else malformed.push({ line: index + 1, text });
   }
-  return entries;
+  return { present, none, entries, malformed };
 }
 
 /**

@@ -515,7 +515,8 @@ never carries a project's specifics.
   the lint resolves each name under `repo.componentsRoot` as
   folder-per-component. A component the tree does not hold and the spec does
   not mark is refused on the birth seat's own check, in the round that costs no
-  gate round. The spec-gate seat is told the lint settled the set; every suite
+  gate round, and so are an absent section, an empty one, and a bullet that is
+  not one component name on one line. The spec-gate seat is told the lint settled the set; every suite
   seat is told to target those components through the story's own test ids and
   no others. Four tripwire metrics join the closed set, each reading the run
   ledgers: `parks-window` (parks per run over the last ten launched runs,
@@ -525,12 +526,17 @@ never carries a project's specifics.
   asking a person, narrowable by `params.kind`) and `allowlist-findings-window`
   (confirmed spec-lens findings on a cross-cutting gate allowlist across the
   runs holding the last five verdicts, watched for falling). `olympusctl
-  status` prints all four under each project. The `finding` event gains `file`
-  and `allowlist`, both assigned at the stamp against the project's allowlist
-  paths. Two project-config keys are new: `repo.componentsRoot`, defaulted to
-  the storefront layout and turned off by `null`, and `gates.allowlistPaths`,
-  without which the fourth metric reads a standing zero and its own floor says
-  so. A tripwire's narrowing param is now validated against the vocabulary its
+  status` prints all four under each project, at the windows the project's own
+  registry declares: the daemon stamps the new instance event `tripwires-armed`
+  when it reads a registry that changed, and the page reads the newest record.
+  Two ledger facts are new and both are assigned where the harness observes
+  them: `implementation-committed` carries `allowlists`, the allowlist entries
+  the candidate capture touched, and `finding` carries `file` and `allowlist`.
+  Together they are what makes the fourth metric a reading — it is eligible
+  only while its window holds an addition. Two project-config keys are new:
+  `repo.componentsRoot`, defaulted to the storefront layout and turned off by
+  `null`, and `gates.allowlistPaths`, without which no addition is ever stamped
+  and the fourth metric stays quiet. A tripwire's narrowing param is now validated against the vocabulary its
   metric names, and a param the metric does not take is refused rather than
   ignored. ADR-0067 and ADR-0010 are rewritten around the fourth rule and the
   four metrics.
