@@ -12,6 +12,13 @@ import { standingAckList } from '../ledger/acks.mjs';
 import { holdState, projectHeld } from '../daemon/hold.mjs';
 import { openLoud } from '../telemetry/readers.mjs';
 import { escalationQueue } from '../telemetry/queue.mjs';
+import { TRIPWIRE_METRICS } from '../tripwires/registry.mjs';
+import {
+  allowlistFindingsReading,
+  gateRoundsReading,
+  parksReading,
+  waitsReading,
+} from '../tripwires/metrics.mjs';
 
 /**
  * Reads the instance config for display without scaffolding a missing file —
@@ -222,6 +229,14 @@ export function renderStatus(paths) {
         `  ${name}: ${armed.get(name) === true ? 'armed' : 'paused'}` +
           `${projectHeld(holds, name) ? ', held' : ''}, slot cap ${project.slotCap}`,
       );
+      // The four readings of what still stops a run and of what the harness
+      // now answers for itself. They are on the status page rather than only
+      // behind a breach, because a band is set from readings somebody watched
+      // first, and because three of the four are the numbers a plan argued
+      // from and nobody could see without reading the ledgers by hand
+      // (ADR-0010).
+      const stops = stopReadings(paths, name);
+      if (stops) lines.push(`    ${stops}`);
     }
   }
   // Every harness defect the factory is currently allowed to walk past. It
@@ -271,6 +286,41 @@ export function renderStatus(paths) {
     );
   }
   return lines.join('\n');
+}
+
+/**
+ * One project's four stop readings as a line, or null when the project has no
+ * run to read yet.
+ *
+ * The windows are the metric registry's own defaults, so the line and a band
+ * set against it are measured over the same stretch. An ineligible reading
+ * prints an em-dash rather than a zero: the difference between "no run parked"
+ * and "no run" is the whole of what a cold window means.
+ */
+function stopReadings(paths, project) {
+  const parks = parksReading(paths, project, { window: windowOf('parks-window') });
+  const rounds = gateRoundsReading(paths, project, { window: windowOf('gate-rounds-window') });
+  const waits = waitsReading(paths, project, { window: windowOf('waits-window') });
+  const allowlist = allowlistFindingsReading(paths, project, {
+    window: windowOf('allowlist-findings-window'),
+  });
+  if (![parks, rounds, waits, allowlist].some((r) => r.eligible)) return null;
+  const green =
+    waits.eligible && waits.detail.greenShare !== undefined
+      ? ` (${Math.round(waits.detail.greenShare * 100)}% green)`
+      : '';
+  return (
+    `parks ${shown(parks)}/run · gate rounds ${shown(rounds)} · ` +
+    `waits ${shown(waits)}/run${green} · allowlist findings ${shown(allowlist)}`
+  );
+}
+
+function windowOf(metric) {
+  return TRIPWIRE_METRICS[metric].defaultWindow;
+}
+
+function shown(reading) {
+  return reading.eligible ? reading.value : '—';
 }
 
 /** How many refused launches the status page carries. */

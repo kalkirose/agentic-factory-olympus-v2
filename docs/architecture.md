@@ -159,7 +159,12 @@ Two levels; the ownership test decides placement.
   its suite (`lanes.story.groundCommand`), whether a run's commands are
   offered a cache directory (`runCache`), the directory a route id in a
   spec resolves under (`repo.routesRoot`, default `apps/storefront/src/routes`,
-  `null` for a project whose specs name no routes), this project's own wording
+  `null` for a project whose specs name no routes), the directory a component
+  the spec names resolves under (`repo.componentsRoot`, default
+  `apps/storefront/src/lib/components`, `null` for a project whose specs name
+  no components), the files that carry a cross-cutting gate's allowlist
+  (`gates.allowlistPaths`, which is what makes a spec-lens finding on one
+  countable), this project's own wording
   for a cause outside the tree (`gates.transientPatterns`), whether the owner
   arms the deferred-proof trade (`gates.proofDebt`, off by default), and the
   hosts each declared credential's service answers on (`credentials[].hosts`,
@@ -293,16 +298,21 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   superseded file existed in the worktree or at the run's base sha — the
   candidate's own work deletes what a criterion supersedes, and that deletion
   is the supersede — a dev-owned test-path entry names one file, and
-  every test mapping is one bullet on one line with its path first. Three
+  every test mapping is one bullet on one line with its path first. Four
   rules read the tree at the base sha (ADR-0067): every touched path exists
   there or carries the marker `(new)` between the path and the owner; every
   test file under the test paths that names a touched path by its literal
   repo-relative path is a pin the block lists or a Supersedes clause names;
   every route id in the spec (`/[param]/...`) is a directory under
-  `repo.routesRoot` or is marked `(new)`. The route rule runs only where the
-  tree holds the routes root; a tree git cannot read turns the three rules
+  `repo.routesRoot` or is marked `(new)`; every component the spec's
+  `Components` section names resolves under `repo.componentsRoot` as
+  folder-per-component or is marked `(new)`. The last two rules run only where
+  the tree holds their root; a tree git cannot read turns the four rules
   off for that lint. A failure is a work-product defect — one corrective
   invocation, then the `seat-failure` park — and never spends a gate round.
+  The `Components` section is read twice more: the spec-gate seat is told the
+  lint has already settled the component set, and every suite seat is told to
+  target those components through the story's own test ids and no others.
 - **Spec gate**: one fresh-context round on the born spec (grounding
   spot-checks, scope against the card, AC encodability), evidence-cited. The
   birth seat amends; the gate re-checks amended sections only. There is no
@@ -1278,6 +1288,21 @@ over the last ten ships of the project it reads (ADR-0056). Two of them breach,
 and the answer it carries is the one config line that turns the fast path off.
 It is the whole measurement of a guarantee the owner thinned on purpose, so it
 is the one tripwire whose answer is a reversal rather than a repair.
+
+Four metrics read the stops a run raises for a person and the answers the
+harness now gives itself instead: parks per run over the last ten launched runs
+(`parks-window`, narrowable to one park type), the most spec-gate rounds any
+one story of the last five freezes spent (`gate-rounds-window`), wait spans per
+run over the last ten launched runs with the share whose ladder ended without
+asking anybody (`waits-window`, narrowable to one wait kind), and confirmed
+spec-lens findings on a cross-cutting gate allowlist across the runs holding
+the last five verdicts (`allowlist-findings-window`). The last is watched for
+falling: an allowlist addition is judged by the spec lens alone, and a window
+of additions with no finding is a lens nobody is feeding. Whether a finding
+sits on an allowlist is decided at the stamp against `gates.allowlistPaths` and
+carried on the `finding` event beside the file, never read back out of the
+seat's sentence. Their bands are a project's own, set from readings it watched
+first, so `olympusctl status` prints all four under each project (ADR-0010).
 
 Standing quality bar (written by the runs themselves, never mined from
 outside): escaped defects per story (ceiling 0.5, rolling 10 ships),

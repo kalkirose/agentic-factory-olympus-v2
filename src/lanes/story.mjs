@@ -53,6 +53,7 @@ import {
 import {
   SPEC_LINE_CAP,
   amendedSections,
+  componentIndex,
   frozenExclusions,
   lintSpec,
   supersedeTargets,
@@ -631,12 +632,16 @@ export async function specLintDefects(base) {
 }
 
 /**
- * The tree the spec is written against, read for the three path rules
+ * The tree the spec is written against, read for the four path rules
  * (ADR-0067): every tracked path at the base sha, the test files under the
- * test paths that mention each touched path, and the routes root. A run with
- * no base sha reads the worktree's index instead, which at birth is the same
- * tree. A tree git cannot read turns the rules off rather than parking a run
- * on a lint that could not look.
+ * test paths that mention each touched path, the routes root, and the
+ * component names the design-system root holds. A run with no base sha reads
+ * the worktree's index instead, which at birth is the same tree. A tree git
+ * cannot read turns the rules off rather than parking a run on a lint that
+ * could not look.
+ *
+ * The component listing is derived from the same `treeFiles` answer the first
+ * two rules stand on, so the fourth rule costs no second look at the tree.
  */
 async function specGround(base, text) {
   const sha = typeof base.baseSha === 'string' && base.baseSha.length > 0 ? base.baseSha : null;
@@ -655,7 +660,14 @@ async function specGround(base, text) {
   } catch {
     pins = null;
   }
-  return { files, pins, routesRoot: base.routesRoot ?? null };
+  const componentsRoot = base.componentsRoot ?? null;
+  return {
+    files,
+    pins,
+    routesRoot: base.routesRoot ?? null,
+    componentsRoot,
+    components: componentIndex(files, componentsRoot),
+  };
 }
 
 /**
@@ -1582,7 +1594,8 @@ function templateLines() {
     '   A test file that mentions a touched path by its repo-relative path is a pin on it. Name every such pin in the block, or name it in the Supersedes clause of the criterion that replaces it; the lint reports a pin the spec says nothing about.',
     '   A route id in prose, such as /[lang=lang]/cart, names a directory under the routes root of the repository. Name only routes that exist there, or mark a route the work creates: `/[lang=lang]/cart` (new).',
     '   A story that changes a rendered surface re-renders that surface\'s existing visual baseline files, so name each of those files in the block as a dev-owned entry and they join the freeze exclusions. A baseline the block does not name is frozen: the capture reverts the write, and the change costs a verdict round-trip to reach the suite.',
-    '4. An environment section naming only the environment variables the card names.',
+    '4. A section titled "Components", listing every design-system component the story renders, one per line as a list item: `Name`, or `Name` (new) for a component the story creates. Write "- None." when the story renders none. The lint refuses a component the design system does not hold and does not mark new, and the suite seat reads this list as the components its tests may target by test id.',
+    '5. An environment section naming only the environment variables the card names.',
     `The whole document runs to ${SPEC_LINE_CAP} lines at most.`,
     'Meet the cap by writing less prose. Never meet it by reflowing a structured list: a mapping bullet the compression wrapped across lines is a defect, and the lint reports it as one.',
     'Only a criterion whose card text opens with no id of its own takes its position as its id: AC-1, AC-2, in card order. A criterion that carries an id keeps it, whatever its position.',
@@ -1684,6 +1697,7 @@ function gateRole(base, { scope, priorFindings }) {
     '- "blocking": the spec is wrong, a clause is not assertable, or the shape it states would force a defective implementation. A blocking finding holds the spec and buys an amendment round.',
     '- "note": prose the suite can prove against running code — a count of occurrences in the tree, the size of a pattern set, a name the code carries. A note does not hold the spec. It travels to the suite seat, which proves it with a test or reports it as unprovable.',
     'Never use "note" to pass a finding you cannot defend as suite-provable. When you are unsure which one a finding is, class it "blocking". An omitted severity counts as blocking.',
+    'The spec lint has already refused a Components section that names a design-system component the tree does not hold and does not mark (new), so read that section as ground truth about the component set and judge what the spec does with it.',
     'Report "intentConflict" on every pass: {"conflict": false, "detail": ""} when the spec and the card agree.',
     'Set "conflict": true only when the spec and the card\'s intent disagree, and put the disagreement in "detail"; do not list it as a finding.',
     base.cardAuthorizedSupersede
@@ -1734,6 +1748,12 @@ function suiteReportLines(base) {
     `The suite runs with: ${base.suiteArgv.join(' ')}`,
     'In the report, list every suite file and class every expected red.',
     'The suite must be red against the current tree only because the feature is absent.',
+    // The component list, stated to every suite seat. It is the answer to the
+    // question a suite file asks when it reaches for an element: which of
+    // them does this story own? A suite that asserts on a component the spec
+    // does not name is a pin on somebody else's surface, and the story that
+    // changes that surface later pays for it.
+    "The spec's Components section names the design-system components this story renders. Target those components and no others, through the story's own test ids; never through a page-wide locator by element type or role.",
     ...groundLines(base),
     ...noteLines(base),
   ];
@@ -1860,6 +1880,7 @@ async function laneBase(ctx) {
     constitution: readConstitution(worktree, config),
     testPaths: config.repo.testPaths,
     routesRoot: config.repo.routesRoot ?? null,
+    componentsRoot: config.repo.componentsRoot ?? null,
     // The lane's diff policy. The spec lint judges the paths the spec plans
     // against the same tiers the candidate capture judges the diff against, so
     // a spec cannot plan a path the capture would refuse.

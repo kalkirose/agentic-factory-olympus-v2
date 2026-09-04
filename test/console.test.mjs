@@ -510,3 +510,44 @@ test('reconfigure queues the run, the blob and the reason, and refuses an empty 
     }
   }
 });
+
+test('status prints the four stop readings under each project', (t) => {
+  // The readings a band is set from, and three of the four are the numbers a
+  // plan argued from without anyone being able to see them (ADR-0010). An
+  // ineligible reading prints an em-dash: no run froze is not zero rounds.
+  const { paths } = seededHome(t);
+  assert.match(
+    renderStatus(paths),
+    /parks 1\/run · gate rounds — · waits 0\/run · allowlist findings —/,
+  );
+  const run = openRunStore(paths, 'r2');
+  run.append('run-launched', { actor: 'daemon', project: 'alpha', lane: 'story', storyKey: 's2' });
+  run.append('spec-gate-round', { actor: 'daemon', round: 1, verdict: 'findings' });
+  run.append('spec-gate-round', { actor: 'daemon', round: 2, verdict: 'pass' });
+  run.append('freeze', { actor: 'daemon', sha: 'aaaaaaa', killCount: 1 });
+  run.append('waiting', {
+    actor: 'daemon',
+    kind: 'seat',
+    reason: 'exit',
+    attempt: 1,
+    until: '2026-09-01T00:05:00Z',
+  });
+  run.append('waiting-ended', { actor: 'daemon', kind: 'seat', outcome: 'elapsed', waitSeq: 5 });
+  run.append('stage-entered', { actor: 'daemon', stage: 'verdict' });
+  run.append('finding', {
+    actor: 'daemon',
+    cycle: 1,
+    id: 'F1',
+    lens: 'spec',
+    severity: 'HIGH',
+    confirmed: true,
+    file: 'apps/web/src/lib/allowlists/price-surfaces.json',
+    allowlist: true,
+  });
+  run.append('verdict-rendered', { actor: 'daemon', cycle: 1 });
+  run.close();
+  assert.match(
+    renderStatus(paths),
+    /parks 0\.5\/run · gate rounds 2 · waits 0\.5\/run \(100% green\) · allowlist findings 1/,
+  );
+});

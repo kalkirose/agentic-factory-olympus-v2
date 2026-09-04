@@ -262,6 +262,13 @@ export const RUN_EVENTS = new Set([
   // brief carries an excerpt of it either way, and an excerpt is not a cut.
   // A reader weighs a finding by its evidence, and the completeness of that
   // evidence is not derivable from the finding itself (ADR-0066).
+  //
+  // `file` is the one file a review finding is about, where the lens named
+  // one, and `allowlist: true` says that file is one of the project's
+  // cross-cutting gate allowlists. The word is assigned at the stamp, against
+  // `gates.allowlistPaths`, and never read back out of the seat's sentence:
+  // an allowlist addition is judged by the spec lens alone, and a reading of
+  // whether anybody is judging them has to be countable (ADR-0010).
   'finding',
   // The cycle boundary, and what the cycle did not have to buy. `partsRun`,
   // `partsCarried` and `carryShare` are the cycle's carry (ADR-0058);

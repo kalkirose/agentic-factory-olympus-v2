@@ -45,7 +45,7 @@ read both.
 
 ### A spec is checked against the tree before a seat judges it
 
-Three rules join `lintSpec` in `src/lanes/speclint.mjs`. The lint already runs
+Four rules join `lintSpec` in `src/lanes/speclint.mjs`. The lint already runs
 as the spec-birth seat's own check and on every amendment, so a defect costs a
 corrective birth round and never a gate round. Nothing here is a stage.
 
@@ -66,20 +66,48 @@ corrective birth round and never a gate round. Nothing here is a stage.
   of the shape `/[param]/...` in the spec names a directory under
   `repo.routesRoot`. A route the work creates is written `` `/[lang=lang]/cart`
   (new)``. The rule runs only when the tree holds the routes root.
+- **Every design-system component the spec names exists, or is marked new.**
+  The template carries a `Components` section: one list item per component the
+  story renders, written `` `Name` `` or `` `Name` (new)``, and `- None.` for a
+  story that renders none. A name resolves under `repo.componentsRoot` as
+  folder-per-component — a directory of that name holding a file of the same
+  name — and a name the tree does not hold and the spec does not mark is a
+  defect, as is a marker on a component the tree already holds. The rule reads
+  that section and nothing else: a component name in prose is an English word,
+  and no rule about the tree can say one true thing about a word.
 
-`repo.routesRoot` is a project config key, validated in
-`src/config/project.mjs` as a plain repo-relative path or `null`. Its default
-is `apps/storefront/src/routes`. A project whose tree has no such directory
-gets no route rule; a project that sets `null` turns it off by name.
+`repo.routesRoot` and `repo.componentsRoot` are project config keys, validated
+in `src/config/project.mjs` by one rule as a plain repo-relative path or
+`null`. Their defaults are `apps/storefront/src/routes` and
+`apps/storefront/src/lib/components`. A project whose tree has no such
+directory gets no rule; a project that sets `null` turns it off by name.
+
+The component file's extension is one of a closed set — `svelte`, `tsx`,
+`jsx`, `vue` — so the rule belongs to the folder-per-component shape rather
+than to one framework. The shape is what carries the claim: a directory named
+for a component, holding the component's own file.
 
 The lane reads the ground once per lint, in `specGround` in
 `src/lanes/story.mjs`: every tracked path at the base sha (`treeFiles`), the
 files under the test paths that mention each touched path (`filesMentioning`,
-both in `src/isolation/tree.mjs`), and the routes root. A run with no base sha
-reads the worktree's index. A tree git cannot read turns the three rules off
-for that lint rather than parking the run on a check that could not look. The
-birth template states the marker and the two rules to the seat that writes the
-block.
+both in `src/isolation/tree.mjs`), the routes root, and the component names the
+components root holds. The component listing is derived from the same
+`treeFiles` answer, so the fourth rule costs no second look. A run with no base
+sha reads the worktree's index. A tree git cannot read turns the four rules off
+for that lint rather than parking the run on a check that could not look.
+
+The birth template states the marker and the rules to the seat that writes the
+block and the section. Two other seats read the section. The spec-gate seat is
+told that the lint has already refused a component the tree does not hold, so
+it reads the section as ground truth about the component set and judges what
+the spec does with it rather than spending a finding on the set itself. Every
+suite seat is told that the section names the components the story renders and
+that its tests target those and no others, through the story's own test ids and
+never through a page-wide locator by element type or role.
+
+The `Components` section is a part of its own for `amendedSections`, beside the
+touched-paths block and the environment section, so a re-check reads it when it
+moves and skips it when it does not.
 
 ### A ticket that names forbidden ground is refused at launch
 
@@ -123,8 +151,9 @@ corrective round, and the budget now says so.
 
 A spec spent four gate rounds on faults a script can see: a touched path the
 tree did not hold, a pin that counted files the spec would move, a route id
-that named no directory. Each round cost a seat and found the next fault. The
-three rules find all of them on the birth seat's own check, in one round.
+that named no directory, a selector on an input the design system had no
+component for. Each round cost a seat and found the next fault. The four rules
+find all of them on the birth seat's own check, in one round.
 
 A repair ticket named a path the lane forbids, and nobody said so until a
 review seat read it two hours later. The daemon already had the ticket path;
@@ -145,6 +174,13 @@ route id shape; a project whose specs name no routes sets `repo.routesRoot` to
 `null` and gets no rule. The `(new)` marker is one more thing a spec author
 writes, and the lint says exactly when it is missing.
 
+The component rule reads one section rather than the whole document, which is
+the price of a name that is also an English word. A spec that names a component
+in prose and leaves the section empty gets no rule, and that is the trade: a
+rule that read prose would refuse a spec for using the word Button. The section
+earns its place twice over anyway, because the suite seat reads it as the set
+of surfaces the story owns.
+
 ## Fallback path
 
 If the per-cycle triage schema proves wrong, `triageSchema` returns
@@ -161,10 +197,18 @@ loop through corrective rounds without converging. Reversal cost: one branch;
 If a lint rule refuses specs it should pass, the rule comes out of `lintSpec`
 and the `ground` field that feeds it stops being read. Each rule stands on its
 own part of the ground: `files` for the tree rule, `pins` for the pin rule,
-`routesRoot` for the route rule. A project can turn the route rule off today
-with `repo.routesRoot: null`. Trigger: a corrective birth round spent on a
-true statement about the tree. Reversal cost: one rule block per rule, no
-change to the template the seat is told.
+`routesRoot` for the route rule, `components` and `componentsRoot` for the
+component rule. A project can turn either of the last two off today with
+`repo.routesRoot: null` or `repo.componentsRoot: null`. Trigger: a corrective
+birth round spent on a true statement about the tree. Reversal cost: one rule
+block per rule, no change to the template the seat is told.
+
+If folder-per-component is the wrong shape for a project's design system, the
+resolution in `componentIndex` changes and nothing else does: the section, the
+template line, the config key and the two role texts are all about the name,
+not about where the file sits. Trigger: a design system that holds a component
+in one file beside its siblings rather than in a directory of its own.
+Reversal cost: one regular expression, and the extension set beside it.
 
 If the launch check refuses a ticket it should launch, `launchRun` skips
 `refuseForbiddenTicket` and the ticket reaches the repair stage as before,

@@ -508,3 +508,29 @@ never carries a project's specifics.
   is rewritten around the ledger evidence, which is one interface-lens finding
   about a single input discarding a pass with twelve other findings open;
   ADR-0003 and ADR-0040 carry the hold at the start.
+- 2026-09-04 — a spec claim about the design system is checked by a script, and
+  the stops the harness raises have a reader. Rule (m) joins the spec lint: the
+  spec template carries a `Components` section, one list item per design-system
+  component the story renders, written `` `Name` `` or `` `Name` (new)``, and
+  the lint resolves each name under `repo.componentsRoot` as
+  folder-per-component. A component the tree does not hold and the spec does
+  not mark is refused on the birth seat's own check, in the round that costs no
+  gate round. The spec-gate seat is told the lint settled the set; every suite
+  seat is told to target those components through the story's own test ids and
+  no others. Four tripwire metrics join the closed set, each reading the run
+  ledgers: `parks-window` (parks per run over the last ten launched runs,
+  narrowable by `params.type`), `gate-rounds-window` (the most spec-gate rounds
+  any one story of the last five freezes spent), `waits-window` (wait spans per
+  run over the last ten launched runs and the share whose ladder ended without
+  asking a person, narrowable by `params.kind`) and `allowlist-findings-window`
+  (confirmed spec-lens findings on a cross-cutting gate allowlist across the
+  runs holding the last five verdicts, watched for falling). `olympusctl
+  status` prints all four under each project. The `finding` event gains `file`
+  and `allowlist`, both assigned at the stamp against the project's allowlist
+  paths. Two project-config keys are new: `repo.componentsRoot`, defaulted to
+  the storefront layout and turned off by `null`, and `gates.allowlistPaths`,
+  without which the fourth metric reads a standing zero and its own floor says
+  so. A tripwire's narrowing param is now validated against the vocabulary its
+  metric names, and a param the metric does not take is refused rather than
+  ignored. ADR-0067 and ADR-0010 are rewritten around the fourth rule and the
+  four metrics.

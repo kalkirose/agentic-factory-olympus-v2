@@ -10,7 +10,9 @@ import {
   INSTANCE_EVENTS,
   ESCAPES_EVENTS,
   DEFECT_KINDS,
+  PARK_TYPES,
 } from '../ledger/registry.mjs';
+import { WAIT_KINDS } from '../lanes/waiting.mjs';
 
 const KNOWN_EVENTS = new Set([...RUN_EVENTS, ...INSTANCE_EVENTS, ...ESCAPES_EVENTS]);
 
@@ -67,9 +69,16 @@ export function defaultProjectConfig() {
     // root — plain prefixes, or glob patterns (see isGlobEntry). `routesRoot`
     // is the directory a route id in a spec resolves under (ADR-0067): a plain
     // repo-relative path, defaulted to the storefront layout, or null for a
-    // project whose specs name no routes. A root the tree does not hold turns
-    // the rule off for that project.
-    repo: { testPaths: [], uiPaths: [], routesRoot: 'apps/storefront/src/routes' },
+    // project whose specs name no routes. `componentsRoot` is the same fact
+    // for a design-system component the spec's Components section names, read
+    // as folder-per-component. A root the tree does not hold turns its rule
+    // off for that project, and so does `null`.
+    repo: {
+      testPaths: [],
+      uiPaths: [],
+      routesRoot: 'apps/storefront/src/routes',
+      componentsRoot: 'apps/storefront/src/lib/components',
+    },
     // command name → argv; the single home for every runnable command
     commands: {},
     // deterministic gate layers; `command` names a key in `commands`.
@@ -88,7 +97,10 @@ export function defaultProjectConfig() {
     // `transientPatterns` adds this project's own wording for a cause outside
     // the tree to the closed signature set, and `proofDebt: true` offers the
     // owner's trade at the external gate; both absent is the default, which is
-    // the closed set alone and no trade (ADR-0069).
+    // the closed set alone and no trade (ADR-0069). `allowlistPaths` names the
+    // files that carry a cross-cutting gate's allowlist, so a spec-lens finding
+    // on one is countable afterwards; absent, that reading is a standing zero
+    // and the project is told so by its own band (ADR-0010).
     gates: { tier1: [] },
     // one convention per line; prompt assembly consumes these
     conventions: [],
@@ -224,12 +236,20 @@ function validateRepo(repo, err) {
   }
   validateStringList(repo.testPaths, 'repo.testPaths', err);
   validateStringList(repo.uiPaths, 'repo.uiPaths', err);
-  if (repo.routesRoot !== undefined && repo.routesRoot !== null) {
-    if (typeof repo.routesRoot !== 'string' || repo.routesRoot.length === 0) {
-      err('repo.routesRoot', 'must be a non-empty repo-relative path, or null');
-    } else if (/^([A-Za-z]:)?[\\/]/.test(repo.routesRoot) || isGlobEntry(repo.routesRoot)) {
-      err('repo.routesRoot', 'must be a plain repo-relative directory path, not a glob');
-    }
+  // The two roots a spec claim about the tree resolves under. They are
+  // validated by one rule because they are one kind of value: a plain
+  // repo-relative directory the lint reads the tree under, or null to turn
+  // that lint rule off by name (ADR-0067).
+  validateTreeRoot(repo.routesRoot, 'repo.routesRoot', err);
+  validateTreeRoot(repo.componentsRoot, 'repo.componentsRoot', err);
+}
+
+function validateTreeRoot(value, path, err) {
+  if (value === undefined || value === null) return;
+  if (typeof value !== 'string' || value.length === 0) {
+    err(path, 'must be a non-empty repo-relative path, or null');
+  } else if (/^([A-Za-z]:)?[\\/]/.test(value) || isGlobEntry(value)) {
+    err(path, 'must be a plain repo-relative directory path, not a glob');
   }
 }
 
@@ -322,6 +342,16 @@ function validateGates(gates, commands, err) {
         }
       });
     }
+  }
+  // A FOURTH list, and a different claim again: the files that carry a
+  // cross-cutting gate's allowlist. A story that extends the codebase adds a
+  // line to one of them in its own diff, so nothing here blocks a write and
+  // nothing here narrows a re-run. The list exists to be counted: it is what
+  // tells the `allowlist-findings-window` metric which of a run's confirmed
+  // spec-lens findings are findings about an allowlist addition, and a project
+  // that declares none gets no reading rather than a standing zero (ADR-0010).
+  if (gates.allowlistPaths !== undefined && !isStringList(gates.allowlistPaths)) {
+    err('gates.allowlistPaths', 'must be an array of path entries');
   }
   // The owner's speed-over-residual-safety trade: with it on, a service that
   // stays down past the external wait offers `defer-proof` at its gate and a
@@ -592,6 +622,18 @@ function validateGraph(graph, err) {
   });
 }
 
+/**
+ * The closed sets a tripwire's narrowing param may name, by the name the
+ * metric registry uses for each. Nothing is redefined here: each set is the
+ * one the harness already writes those values from, and a unit test holds the
+ * table to every vocabulary the registry names.
+ */
+export const PARAM_VOCABULARIES = {
+  'defect kind': DEFECT_KINDS,
+  'park type': PARK_TYPES,
+  'wait kind': WAIT_KINDS,
+};
+
 // A cut and its tripwire land in one PR; this validation is what "no cut
 // without a tripwire" leans on. The metric set is closed — the daemon
 // implements every name it admits.
@@ -650,12 +692,29 @@ function validateTripwires(tripwires, err) {
     if (entry.params !== undefined && !isPlainObject(entry.params)) {
       err(at('params'), 'must be an object');
     }
+    // A param the metric does not take. It is refused rather than ignored:
+    // a misspelt narrowing reads as no narrowing, and the entry then measures
+    // something wider than the band was set for.
+    const takes = new Set([...(metric.requiredParams ?? []), ...(metric.optionalParams ?? [])]);
+    for (const param of Object.keys(isPlainObject(entry.params) ? entry.params : {})) {
+      if (!takes.has(param)) {
+        err(
+          at(`params.${param}`),
+          `metric ${entry.metric} takes ${takes.size > 0 ? [...takes].join(', ') : 'no params'}`,
+        );
+      }
+    }
     // A metric narrowed to a closed name is validated against that set. A
-    // reading keyed on a kind nothing carries answers zero for ever and never
+    // reading keyed on a name nothing carries answers zero for ever and never
     // breaches, which looks exactly like a metric that is fine (ADR-0068).
-    if (entry.params?.kind !== undefined && (metric.optionalParams ?? []).includes('kind')) {
-      if (!DEFECT_KINDS.has(entry.params.kind)) {
-        err(at('params.kind'), `unknown defect kind: ${entry.params.kind}`);
+    // The metric names the vocabulary its narrowing param takes; the sets
+    // themselves live where the thing they name is defined.
+    for (const [param, vocabulary] of Object.entries(metric.paramVocabulary ?? {})) {
+      const value = entry.params?.[param];
+      if (value === undefined) continue;
+      const known = PARAM_VOCABULARIES[vocabulary];
+      if (known && !known.has(value)) {
+        err(at(`params.${param}`), `unknown ${vocabulary}: ${value}`);
       }
     }
     for (const param of metric.requiredParams ?? []) {

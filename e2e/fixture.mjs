@@ -63,9 +63,15 @@ const SMOKE_HOLD_MS = 1400;
  * needs a different section can amend that one and keep the rest. */
 export const PROJECT_CONFIG = {
   version: 1,
-  // The routes root is where a route id in a spec resolves (ADR-0067); the
-  // fixture tree holds one route under it.
-  repo: { testPaths: ['tests'], uiPaths: [], routesRoot: 'routes' },
+  // The routes root is where a route id in a spec resolves, and the components
+  // root is where a component the spec's Components section names resolves
+  // (ADR-0067); the fixture tree holds one of each under them.
+  repo: {
+    testPaths: ['tests'],
+    uiPaths: [],
+    routesRoot: 'routes',
+    componentsRoot: 'components',
+  },
   commands: {
     lint: ['node', '.olympus/gates/lint.mjs'],
     suite: ['node', '.olympus/gates/suite.mjs'],
@@ -306,6 +312,9 @@ export function fixtureTree() {
     // One route under the routes root, so a spec that names a route the tree
     // holds passes the lint and one that names a phantom is refused.
     'routes/[lang=lang]/shop/+page.mjs': 'export const page = "shop";\n',
+    // One design-system component, folder-per-component, for the same pair of
+    // readings on rule (m).
+    'components/PriceTag/PriceTag.svelte': '<span>price</span>\n',
     'tests/.keep': 'The acceptance suite lives here.\n',
     'tests/base.test.mjs': BASE_TEST,
     'README.md': '# Fixture project\n',

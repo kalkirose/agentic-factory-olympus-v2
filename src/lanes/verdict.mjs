@@ -2958,6 +2958,11 @@ async function verdictBase(ctx, mode) {
       testPaths: config.repo.testPaths,
       uiPaths: config.repo.uiPaths ?? [],
       routesRoot: config.repo.routesRoot ?? null,
+      componentsRoot: config.repo.componentsRoot ?? null,
+      // The cross-cutting gate allowlists. They are read at the finding
+      // stamp, so a spec-lens finding on one is countable afterwards
+      // (ADR-0010); nothing here blocks or narrows anything.
+      allowlistPaths: config.gates?.allowlistPaths ?? [],
       // The judgment panel this run is judged by, pinned at the launch blob
       // like every other config value the lane reads (ADR-0038).
       lenses: panelLenses(config),
@@ -3018,6 +3023,7 @@ async function verdictBase(ctx, mode) {
     testPaths: config.repo.testPaths ?? [],
     uiPaths: config.repo.uiPaths ?? [],
     lenses: panelLenses(config),
+    allowlistPaths: config.gates?.allowlistPaths ?? [],
     specRef: ticketPath,
     suiteSha: null,
     resetSha: ctx.payload.baseSha,

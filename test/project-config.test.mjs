@@ -66,6 +66,42 @@ test('repo.routesRoot is a plain repo-relative path, or null to turn the route r
   }
 });
 
+test('repo.componentsRoot is a plain repo-relative path, or null to turn rule (m) off', () => {
+  assert.equal(
+    withProjectDefaults({ version: 1 }).repo.componentsRoot,
+    'apps/storefront/src/lib/components',
+  );
+  assert.equal(
+    withProjectDefaults({ version: 1, repo: { componentsRoot: 'web/ui' } }).repo.componentsRoot,
+    'web/ui',
+  );
+  assert.equal(
+    withProjectDefaults({ version: 1, repo: { componentsRoot: null } }).repo.componentsRoot,
+    null,
+  );
+  for (const componentsRoot of ['web/ui', null]) {
+    const config = valid();
+    config.repo.componentsRoot = componentsRoot;
+    assert.deepEqual(validateProjectConfig(config), []);
+  }
+  for (const componentsRoot of ['', 7, '/abs/ui', 'C:\\ui', 'apps/*/ui']) {
+    const config = valid();
+    config.repo.componentsRoot = componentsRoot;
+    assert.deepEqual(errorPaths(config), ['repo.componentsRoot'], String(componentsRoot));
+  }
+});
+
+test('gates.allowlistPaths is a list of path entries', () => {
+  const config = valid();
+  config.gates.allowlistPaths = ['apps/storefront/src/lib/allowlists/**'];
+  assert.deepEqual(validateProjectConfig(config), []);
+  for (const bad of ['one', [7], [''], {}]) {
+    const wrong = valid();
+    wrong.gates.allowlistPaths = bad;
+    assert.deepEqual(errorPaths(wrong), ['gates.allowlistPaths'], JSON.stringify(bad));
+  }
+});
+
 test('version must be 1', () => {
   assert.deepEqual(errorPaths({ ...valid(), version: 2 }), ['version']);
 });
@@ -234,6 +270,7 @@ test('defaults fill every missing section', () => {
     testPaths: [],
     uiPaths: [],
     routesRoot: 'apps/storefront/src/routes',
+    componentsRoot: 'apps/storefront/src/lib/components',
   });
   assert.deepEqual(filled.commands, {});
   assert.deepEqual(filled.gates, { tier1: [] });
