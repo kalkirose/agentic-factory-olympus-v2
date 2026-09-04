@@ -425,7 +425,9 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   annotated (ADR-0042).
 - **Flake filter.** Each red layer re-runs once, red-only, by process policy.
   A green re-run writes a flake event, never a finding. Survivors are
-  persistent reds; only these enter triage.
+  persistent reds; only these enter triage. The replaced red is stamped
+  `superseded-by-rerun` with what it printed, so a re-run never replaces an
+  attempt silently.
 - **A red from outside the tree never reaches a seat** (ADR-0069). Before
   triage is dispatched, a survivor is read against a closed signature set
   (`src/lanes/transient.mjs`): dropped and refused connections, name-lookup
@@ -440,9 +442,7 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   reaches triage with the signatures in its brief, and the triage checks refuse
   a code-defect finding whose only evidence is one of them. Everything else
   takes triage unchanged: the safe direction is the seat. CI-source verdicts
-  are outside it — a red check has its own re-run in the forge. The replaced red is stamped
-  `superseded-by-rerun` with what it printed, so a re-run never replaces an
-  attempt silently.
+  are outside it — a red check has its own re-run in the forge.
 - **A re-run asks only what failed** (ADR-0065). The re-run's scope is the
   replaced attempt's own part table: the parts that did not pass, in
   `OLYMPUS_PARTS`, and the files those parts named, in `OLYMPUS_FAILED_FILES`

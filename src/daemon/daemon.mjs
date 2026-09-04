@@ -150,6 +150,9 @@ export class Daemon {
     this.workspaceSweepMs = workspaceSweepMs;
     this.workflowWatchMs = workflowWatchMs;
     this.proofDebtMs = proofDebtMs;
+    // Whether any project this instance has launched arms the deferred-proof
+    // trade. It is a hint for the watcher and never a gate on anything.
+    this.proofDebtDeclared = false;
     this.waitSleep = waitSleep;
     this.forgeFor = forgeFor ?? ((project) => projectForge(this.config, project));
     this.notifierTransport = notifierTransport;
@@ -360,6 +363,10 @@ export class Daemon {
         paths: this.paths,
         probe: (debt) => this.probeDeferred(debt),
         settle: (debt) => this.settleProofDebt(debt),
+        // A project arms the trade in its own config, and the launch is where
+        // this daemon reads one. Until a launch says so, and with no debt
+        // open, the watcher reads no ledger at all.
+        declared: () => this.proofDebtDeclared,
         ...(this.proofDebtMs !== undefined && { intervalMs: this.proofDebtMs }),
       });
       this.evals = new EvalScheduler({
@@ -589,6 +596,7 @@ export class Daemon {
       // The launch read the config fresh from the default branch; the tripwire
       // registry the watcher evaluates is the registry that just shipped.
       this.tripwires.setRegistry(project, armedTripwires(ws.projectConfig));
+      if (ws.projectConfig.gates?.proofDebt === true) this.proofDebtDeclared = true;
       try {
         this.engine.launch({
           runId,

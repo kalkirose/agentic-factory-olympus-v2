@@ -108,7 +108,8 @@ function defaultSleep(ms) {
  *   waits, which is true of the external wait alone.
  * @returns {Promise<{outcome: string, waitSeq: number, until: string}>}
  *   `outcome` is `elapsed` for a span that ran out, `probe-green` for a poll
- *   that got its answer, and `spent` for a poll that never did.
+ *   that got its answer, and `spent` for a poll that never did. A poll that
+ *   threw closes the span `error` and the throw travels on.
  */
 export async function waitFor(
   ctx,
@@ -208,6 +209,13 @@ export async function waitFor(
         break;
       }
     }
+  } catch (error) {
+    // A poll that threw is still a span that opened. The record closes here,
+    // before the throw travels: a `waiting` with no ending is a run the next
+    // start has to repair, and the handler above is about to be stamped a
+    // violation, which is a worse record to leave half written.
+    close('error', { error: String(error?.message ?? error).slice(0, 200) });
+    throw error;
   } finally {
     leave();
   }
@@ -271,14 +279,38 @@ export function recoverOpenWaits(store, { actor = ACTOR, trigger = 'daemon-start
  * `since` is the seq the ladder starts from — the render a route acts on, the
  * answer a human gave, the cycle's own beginning. It is what keeps a ladder
  * from restarting at step one after a daemon restart, and what makes a human's
- * `retry` grant a fresh ladder rather than a fourth step.
+ * `retry` grant a fresh ladder rather than a fourth step. `match` narrows the
+ * count to one subject, which is what a per-seat ladder asks about.
  */
-export function waitAttempt(events, kind, { since = 0 } = {}) {
+export function waitAttempt(events, kind, { since = 0, match = null } = {}) {
   let taken = 0;
   for (const e of events ?? []) {
-    if (e.event === 'waiting' && e.kind === kind && e.seq > since) taken += 1;
+    if (e.event !== 'waiting' || e.kind !== kind || e.seq <= since) continue;
+    if (match && !match(e)) continue;
+    taken += 1;
   }
   return taken + 1;
+}
+
+/**
+ * Where one seat's ladder stands, read from the ledger rather than from the
+ * session that is climbing it.
+ *
+ * A restart re-dispatches a seat into a session of its own, and a ladder held
+ * in that session's memory would start again at five minutes every time the
+ * daemon came back — which is how a provider outage across a restart becomes
+ * an unbounded ladder. What resets it instead are the three events that mean
+ * this seat's problem is a new one: the stage entered fresh rather than
+ * resumed, a human's answer, and a report this seat delivered.
+ */
+export function seatLadderSince(events, seat) {
+  let since = 0;
+  for (const e of events ?? []) {
+    if (e.event === 'stage-entered' && e.resumed !== true) since = e.seq;
+    else if (e.event === 'answer') since = e.seq;
+    else if (e.event === 'seat-report' && e.seat === seat) since = e.seq;
+  }
+  return since;
 }
 
 /**

@@ -30,7 +30,7 @@ import { stagePulse, PULSE_INTERVAL_MS } from '../telemetry/heartbeat.mjs';
 import { deriveRunState } from './replay.mjs';
 import { superviseSeat } from './supervise.mjs';
 import { runSeat } from '../seats/runner.mjs';
-import { recoverOpenWaits } from '../lanes/waiting.mjs';
+import { WaitCancelled, recoverOpenWaits } from '../lanes/waiting.mjs';
 
 const ACTOR = 'daemon';
 const GIST_MAX = 120;
@@ -339,8 +339,8 @@ export class RunEngine {
    * spend something. So it stops here, and the release lets it through
    * (ADR-0040).
    */
-  holdBarrier(run) {
-    if (!this.runHeld(run) || run.closed || this.stopped) return Promise.resolve();
+  async holdBarrier(run) {
+    if (!this.runHeld(run) || run.closed || this.stopped) return;
     if (run.heldGate === null) {
       let open;
       const promise = new Promise((resolve) => {
@@ -348,7 +348,13 @@ export class RunEngine {
       });
       run.heldGate = { promise, open };
     }
-    return run.heldGate.promise;
+    await run.heldGate.promise;
+    // The gate opens on a release, and it opens on a kill and on a stop too,
+    // because nothing may hang on a run that is over. Those two are not a
+    // release: the run does not re-dispatch, and the wait ends the way every
+    // cancelled wait ends, with a throw the engine drops (ADR-0069).
+    if (run.closed) throw new WaitCancelled('killed');
+    if (this.stopped) throw new WaitCancelled('daemon-stopped');
   }
 
   /** Lets a held wait through: a release, a kill, or the instance stopping. */

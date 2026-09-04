@@ -1404,9 +1404,23 @@ test('a persistent env finding parks the provisioning gate after its operational
   const park = await waitParked(fx.paths, runId, 'provisioning-gate');
   assert.ok(park.question.includes('[env]'));
   assert.ok(park.question.includes('persist after an operational fix'));
+  // The question says what the harness already tried on its own: the three
+  // rungs of the substrate ladder, each with the instant it was taken at, so
+  // the operator reads them before deciding whether a fourth is worth
+  // anything (ADR-0069).
+  assert.ok(park.question.includes('The harness waited and re-ran these layers before asking'));
+  const attempts = park.question.split('\n').filter((line) => line.startsWith('- attempt '));
+  assert.equal(attempts.length, LAYER_LADDER.length);
+  attempts.forEach((line, i) => {
+    assert.ok(line.includes(String(i + 1)), line);
+    assert.match(line, /at \d{4}-\d{2}-\d{2}T/);
+    assert.ok(line.endsWith('elapsed'), line);
+  });
   // One automatic operational fix ran before the gate parked.
   let events = readEvents(runLedgerPath(fx.paths, runId));
   assert.equal(events.filter((e) => e.event === 'operational-fix').length, 1);
+  const waits = events.filter((e) => e.event === 'waiting' && e.kind === 'substrate');
+  assert.equal(waits.length, LAYER_LADDER.length);
   // The operator repairs the substrate, then confirms.
   rmSync(join(worktree, '..', 'env-broken'));
   fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'substrate repaired' });
@@ -2124,6 +2138,68 @@ test('a service down past the wait parks, and the ship may go without the proof'
     declaredGround([{ name: 'ext' }], new Map(), render.deferred).refusal,
     'deferred-proof',
   );
+});
+
+// A compose stub that answers about a host which goes down between one probe
+// and the next: the first readings are clean and every one after them is dead.
+// It counts the readings themselves, so a scenario states which probe meets
+// the dead host rather than racing a timer against a cycle.
+function composeFailing({ counter, dead, live, cleanFor }) {
+  return [
+    'node',
+    '-e',
+    "const fs=require('fs');" +
+      `const c=${JSON.stringify(counter)};` +
+      "if(!process.argv.includes('ps')) process.exit(0);" +
+      "let n=0; try { n = Number(fs.readFileSync(c,'utf8')) } catch {}" +
+      'n += 1; fs.writeFileSync(c, String(n));' +
+      `const port = n <= ${cleanFor} ? ${live} : ${dead};` +
+      "console.log(JSON.stringify([{Service:'app',Publishers:[{PublishedPort:port,Protocol:'tcp'}]}]));",
+    '--',
+  ];
+}
+
+test('a probe that answers no mid-ladder parks at once, before any wait', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat(() => ({ class: 'env' })),
+    ...furyClean(),
+  };
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const ext = ['node', '-e', "process.exit(require('fs').existsSync('../env-broken')?1:0)"];
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'ext', command: 'ext' },
+    ],
+    commands: { suite: SUITE_CMD, ext },
+    stack: { composeFile: 'compose.yml' },
+    // The host answers the first probe and nothing after it: the fix before
+    // the ladder is clean, and the ladder's own first question is not.
+    composeCommand: composeFailing({
+      counter: join(root, 'probe-count'),
+      cleanFor: 1,
+      dead: await deadPort(),
+      live: await livePort(t),
+    }),
+    seedExtra: async (ctx, worktree) => {
+      writeFileSync(join(worktree, '..', 'env-broken'), 'x');
+    },
+  });
+  const { runId } = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  // The ladder asked the host before it spent a minute on it, and the answer
+  // ended the ladder there: no wait, and no re-run behind it (ADR-0069).
+  assert.ok(park.question.includes('The substrate probe answered no'));
+  const events = readEvents(runLedgerPath(fx.paths, runId));
+  assert.deepEqual(
+    events.filter((e) => e.event === 'substrate-probe').map((e) => e.state),
+    ['clean', 'failed'],
+  );
+  assert.ok(!events.some((e) => e.event === 'waiting' && e.kind === 'substrate'));
+  assert.equal(events.filter((e) => e.event === 'operational-fix').length, 1);
 });
 
 test('a substrate gate the retry does not move hands the harness question over', async (t) => {

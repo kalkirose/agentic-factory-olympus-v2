@@ -7,6 +7,7 @@ import {
   CODE_SIGNATURES,
   TRANSIENT_SIGNATURES,
   credentialHostIn,
+  outsideHost,
   readTransient,
   showsCode,
   showsTransient,
@@ -58,6 +59,21 @@ test('a status with no host beside it is a number in somebody output, not a serv
   const http429 = TRANSIENT_SIGNATURES.find((s) => s.id === 'http-429');
   assert.equal(http429.test('expected 429 to equal 200'), false);
   assert.equal(http429.test('GET https://api.stripe.com/v1 429'), true);
+});
+
+test('a status from the machine the run is on is the tree, not the world', () => {
+  const http5xx = TRANSIENT_SIGNATURES.find((s) => s.id === 'http-5xx');
+  // The run own stack answers on these, and no wait repairs a tree.
+  assert.equal(http5xx.test('POST http://localhost:3000/api/orders 500'), false);
+  assert.equal(http5xx.test('GET http://127.0.0.1:9000/health 503'), false);
+  assert.equal(http5xx.test('connect to 0.0.0.0:5432 returned 502'), false);
+  assert.equal(http5xx.test('http://[::1]:3000 answered 500'), false);
+  // A container alias is dotless, and nothing outside the tree answers on one.
+  assert.equal(http5xx.test('GET http://app:3000/api 500'), false);
+  assert.equal(http5xx.test('GET https://api.sanity.io/v1/data 503'), true);
+  // The rule is the host and not the scheme: a bare name counts too.
+  assert.equal(outsideHost('api.stripe.com refused'), true);
+  assert.equal(outsideHost('localhost refused'), false);
 });
 
 test('a red whose parts all show a signature is a cause outside the tree', () => {

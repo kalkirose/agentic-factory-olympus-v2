@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { runSeat, unavailableMemo } from '../src/seats/runner.mjs';
+import { runSeat, unavailableMemo, RESET_GRACE_MS } from '../src/seats/runner.mjs';
 import { parseClaudeLine } from '../src/seats/claude.mjs';
 import { ModelSemaphores } from '../src/seats/semaphore.mjs';
 import { DEFAULT_MODEL, CERTIFICATION_MODEL, FALLBACK_MODEL } from '../src/seats/seatmap.mjs';
@@ -290,10 +290,12 @@ test('both models rejected fails loudly with the evidence, and never loops', asy
   ]);
   const events = readEvents(runLedgerPath(paths, 'r1'));
   assert.equal(events.filter((e) => e.event === 'model-degraded').length, 1);
-  assert.deepEqual(
-    events.filter((e) => e.event === 'waiting').map((e) => e.kind),
-    Array(SEAT_LADDER.length).fill('seat'),
-  );
+  const waits = events.filter((e) => e.event === 'waiting');
+  // The vendor's own instant first — stamped even where it has already passed,
+  // because the ledger has to say the window was read — then the three rungs.
+  assert.deepEqual(waits.map((e) => e.kind), Array(1 + SEAT_LADDER.length).fill('seat'));
+  assert.equal(waits[0].detail.resetsAt, RESETS_AT);
+  assert.ok(waits.slice(1).every((e) => e.detail.resetsAt === undefined));
   const failures = events.filter((e) => e.event === 'seat-failure');
   assert.equal(failures.length, 1);
   assert.equal(failures[0].reason, 'model-unavailable');
@@ -340,6 +342,9 @@ test('a rejection on the default model degrades nothing and fails once', async (
 // -- the per-run quota memo --------------------------------------------------
 
 const FUTURE_RESET = Math.floor(Date.now() / 1000) + 3600;
+// A fixed read of the clock, so a wait on a declared instant is an arithmetic
+// a test can state rather than a race with the wall.
+const NOW = Date.now();
 const PAST_RESET = Math.floor(Date.now() / 1000) - 3600;
 
 const rejectionResetting = (resetsAt) =>
@@ -824,12 +829,61 @@ test('a crash before the child named a session retries fresh', async (t) => {
   assert.ok(!('session' in spawned[1]));
 });
 
+test('a rejection with a reset instant still ahead waits once and then works', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev');
+  const slept = [];
+  const calls = [];
+  // A seat already on the fallback model: there is nothing below it, so what
+  // answers the rejection is the vendor's own window and not a degrade.
+  const result = await runSeat(store, {
+    sleep: (ms) => {
+      slept.push(ms);
+      return Promise.resolve();
+    },
+    now: () => NOW,
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: (opts) => {
+      calls.push(opts.model);
+      return calls.length === 1
+        ? claudeFixtureCommand({ reportPath, lines: rejectionResetting(FUTURE_RESET), exitCode: 1 })
+        : claudeFixtureCommand({
+            report: { verdict: 'pass' },
+            reportPath,
+            lines: [initLine(DEFAULT_MODEL)],
+          });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [DEFAULT_MODEL, DEFAULT_MODEL]);
+  // One wait, on the instant the vendor named plus a minute, and no ladder
+  // step behind it: the seat asked again and the answer had changed.
+  assert.deepEqual(slept, [FUTURE_RESET * 1000 + RESET_GRACE_MS - NOW]);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  const waits = events.filter((e) => e.event === 'waiting');
+  assert.equal(waits.length, 1);
+  assert.equal(waits[0].kind, 'seat');
+  assert.equal(waits[0].reason, 'model-unavailable');
+  assert.equal(waits[0].detail.resetsAt, FUTURE_RESET);
+  assert.equal(events.filter((e) => e.event === 'waiting-ended').at(-1).outcome, 'elapsed');
+  assert.ok(!events.some((e) => e.event === 'model-degraded'));
+  assert.ok(events.some((e) => e.event === 'seat-report'));
+});
+
 test('a fourth crash ends the session with the retry budget spent', async (t) => {
   const { paths, store } = setup(t);
   const reportPath = runReportPath(paths, 'r1', 'dev');
   let calls = 0;
+  // The spans the ladder actually asks for, recorded rather than slept.
+  const slept = [];
   const result = await runSeat(store, {
-    sleep: NO_WAIT,
+    sleep: (ms) => {
+      slept.push(ms);
+      return Promise.resolve();
+    },
     seat: 'dev',
     roleBlock: 'ROLE',
     reportPath,
@@ -855,6 +909,10 @@ test('a fourth crash ends the session with the retry budget spent', async (t) =>
     waits.map((e) => [e.kind, e.attempt]),
     SEAT_LADDER.map((_, i) => ['seat', i + 1]),
   );
+  // Five, fifteen and forty-five minutes, in that order: the wiring and not
+  // only the stamps (ADR-0069).
+  assert.deepEqual(slept, [...SEAT_LADDER]);
+  assert.deepEqual(slept, [5 * 60_000, 15 * 60_000, 45 * 60_000]);
   // Every wait names the instant it runs to, and every one of them is closed.
   for (const wait of waits) assert.match(wait.until, /^\d{4}-/);
   assert.deepEqual(

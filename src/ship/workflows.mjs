@@ -14,6 +14,7 @@
 // them are still open, are both derived from the instance ledger on every
 // poll, so a restart re-derives the same set and stamps nothing twice.
 import { settleOwnedLoud } from '../ledger/resolution.mjs';
+import { PollWatcher } from '../daemon/watch.mjs';
 
 const ACTOR = 'workflow-watcher';
 const GIST_MAX = 120;
@@ -28,7 +29,7 @@ export const WATCH_MS = 15 * 60 * 1000;
 // them beside `success` for exactly that reason.
 const GREEN = new Set(['success', 'neutral', 'skipped']);
 
-export class WorkflowWatcher {
+export class WorkflowWatcher extends PollWatcher {
   /**
    * @param {{ledger: import('../telemetry/stores.mjs').TelemetryStore,
    *   projects: () => {project: string, defaultBranch: string}[],
@@ -41,41 +42,11 @@ export class WorkflowWatcher {
    *   readWatched: the project's `watchedWorkflows`, read from its clone.
    */
   constructor({ ledger, projects, forgeFor, readWatched, intervalMs = WATCH_MS }) {
+    super({ intervalMs });
     this.ledger = ledger;
     this.projects = projects ?? (() => []);
     this.forgeFor = forgeFor ?? (() => null);
     this.readWatched = readWatched ?? (async () => []);
-    this.intervalMs = intervalMs;
-    this.timer = null;
-    this.stopped = false;
-    this.chain = Promise.resolve();
-  }
-
-  /**
-   * Arms the poll and takes the first one now. The immediate poll is what
-   * covers a restart: a red that landed while the daemon was down is read at
-   * the start rather than one period later.
-   */
-  start() {
-    this.queuePoll();
-    this.timer = setInterval(() => this.queuePoll(), this.intervalMs);
-    // An observer never holds the process open on its own.
-    this.timer.unref();
-  }
-
-  /** One poll at a time; a tick that arrives mid-poll is dropped, not queued. */
-  queuePoll() {
-    if (this.stopped) return;
-    const next = this.chain.then(() => (this.stopped ? undefined : this.poll())).catch(() => {});
-    this.chain = next;
-    return next;
-  }
-
-  async stop() {
-    this.stopped = true;
-    clearInterval(this.timer);
-    this.timer = null;
-    await this.chain;
   }
 
   async poll() {

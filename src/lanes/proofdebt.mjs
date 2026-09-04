@@ -22,6 +22,7 @@ import { readEvents } from '../ledger/ledger.mjs';
 import { openEscapesStore } from '../telemetry/stores.mjs';
 import { recordEscape } from '../telemetry/escapes.mjs';
 import { assertDefectKind } from '../ledger/registry.mjs';
+import { PollWatcher } from '../daemon/watch.mjs';
 
 const ACTOR = 'proof-debt';
 const GIST_MAX = 120;
@@ -59,7 +60,10 @@ export function openProofDebts(paths) {
         host: e.host ?? null,
         parts: e.parts ?? [],
         pr: merged?.pr ?? null,
-        mergeSha: merged?.sha ?? merged?.mergeSha ?? null,
+        // The merge commit, and the request head only where no merge named
+        // one: the ship stamps both, and the commit that carried the defect
+        // into the product is the merge.
+        mergeSha: merged?.mergeSha ?? merged?.sha ?? null,
       });
     }
   }
@@ -89,51 +93,41 @@ export function narrowEnv(entry, { partsEnv, filesEnv }) {
  * nothing and decides nothing beyond the exit code of the command the project
  * itself wrote.
  */
-export class ProofDebtWatcher {
+export class ProofDebtWatcher extends PollWatcher {
   /**
    * @param {{ledger: object, paths: object,
    *   probe: (debt: object) => Promise<boolean>,
    *   settle: (debt: object) => Promise<{ok: boolean, detail?: string}>,
-   *   intervalMs?: number}} opts
+   *   declared?: () => boolean, intervalMs?: number}} opts
    *   probe answers whether the service is back; settle runs the deferred
    *   parts against the default branch. Both are the daemon's, because both
-   *   need the project's config and a workspace.
+   *   need the project's config and a workspace. `declared` says whether any
+   *   project this instance has launched arms the trade at all.
    */
-  constructor({ ledger, paths, probe, settle, intervalMs = SETTLE_POLL_MS }) {
+  constructor({ ledger, paths, probe, settle, declared, intervalMs = SETTLE_POLL_MS }) {
+    super({ intervalMs });
     this.ledger = ledger;
     this.paths = paths;
     this.probe = probe ?? (async () => false);
     this.settle = settle ?? (async () => ({ ok: false, detail: 'no settle route' }));
-    this.intervalMs = intervalMs;
-    this.timer = null;
-    this.stopped = false;
-    this.chain = Promise.resolve();
-  }
-
-  /** Arms the poll and takes the first one now, which is what covers a restart. */
-  start() {
-    this.queuePoll();
-    this.timer = setInterval(() => this.queuePoll(), this.intervalMs);
-    this.timer.unref?.();
-  }
-
-  /** One poll at a time; a tick that arrives mid-poll is dropped, not queued. */
-  queuePoll() {
-    if (this.stopped) return;
-    const next = this.chain.then(() => (this.stopped ? undefined : this.poll())).catch(() => {});
-    this.chain = next;
-    return next;
-  }
-
-  async stop() {
-    this.stopped = true;
-    clearInterval(this.timer);
-    this.timer = null;
-    await this.chain;
+    this.declared = declared ?? (() => false);
+    // One scan at the start, because a debt recorded before a restart is a
+    // debt this instance owes. After that the scan is bought by evidence.
+    this.scanned = false;
+    this.owed = false;
   }
 
   async poll() {
-    for (const debt of openProofDebts(this.paths)) {
+    // A debt exists only where an owner armed the trade, and most instances
+    // never do. The scan reads every run ledger this home holds, live and
+    // archived, so it runs at the start and then only while something says a
+    // debt could be there: one is open, or a project has launched under the
+    // flag (ADR-0069).
+    if (this.scanned && !this.owed && !this.declared()) return;
+    this.scanned = true;
+    const debts = openProofDebts(this.paths);
+    this.owed = debts.length > 0;
+    for (const debt of debts) {
       if (this.stopped) return;
       let back = false;
       try {
@@ -151,6 +145,7 @@ export class ProofDebtWatcher {
         result = { ok: false, detail: error?.message ?? String(error) };
       }
       this.record(debt, result);
+      this.owed = openProofDebts(this.paths).length > 0;
     }
   }
 

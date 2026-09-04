@@ -190,6 +190,29 @@ ledger says what the run actually tried. It also gives the human's answer its
 proper meaning: an answer is a grant, so a `retry` buys a fresh ladder rather
 than a fourth step on a spent one.
 
+## Where the poll runs, and what an hour of it costs
+
+The poll runs inside the stage handler that is waiting, not on a watcher tick
+of the daemon's. The run is mid-cycle: it holds the spectrum results it has
+earned, the read that classified them and the narrowing its re-run will ask
+for, and none of that is in the ledger in a shape a watcher could act on. A
+watcher would have to re-derive it, or the run would have to leave the handler
+and come back through a resume — which is the mechanism a park already is.
+
+The cost is that the hour before the loud record is six sleeps of ten minutes
+plus up to six probe timeouts, so it is an hour of wall clock and a little
+more, bounded by `probes.timeoutMs` per ask. The day is the same arithmetic a
+hundred and forty-four times. Nothing else waits on the handler — the run gave
+its slot up, and the poll count is what bounds the span rather than a clock the
+harness reads.
+
+One wait per ladder, and the second attempt is the gate. A restart closes the
+open span, the stage re-enters and finds the ladder spent, and without that
+bound the run would open a fresh twenty-four hours at every restart and reach
+nobody. The loud record is read off the instance ledger for the same reason:
+the call that opened it does not survive a restart, and a second record for one
+outage is what a reader least needs.
+
 ## Why the external wait polls the credential's own probe
 
 The project already wrote a read-only command that says whether that service is
@@ -209,6 +232,22 @@ says which parts went unproven, the fast path refuses to carry that
 certification, the daemon owes the proof and runs it when it can, and a proof
 that does not hold is an escape of a named kind against the ship that carried
 it. The flag can be measured by counting that kind.
+
+## What the deferred trade costs after it is taken
+
+A deferred verdict is green, and a green verdict ships. What it does not do is
+end the run's ability to come back here: a later repair round re-runs the red
+layer, meets the same service, reads the same signature and may enter the
+ladder and the external wait again — another day, on the same service, in the
+same run. The deferral is scoped to the cycle that took it precisely so a later
+cycle judges a tree somebody changed rather than inheriting the trade; the
+price of that scoping is the second wait.
+
+Two things bound it. The gate that raised the trade offers `retry` beside it,
+and a run that keeps meeting a dead service has an owner reading a loud
+`external-outage` from the first hour of the first wait. And the trade is only
+on the table where `gates.proofDebt` is armed, which is the owner's decision to
+review when a story spends two days on one service.
 
 ## Fallback paths
 

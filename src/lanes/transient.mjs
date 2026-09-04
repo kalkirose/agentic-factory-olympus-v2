@@ -32,19 +32,41 @@ function pattern(id, source) {
 }
 
 /**
- * A pattern that has to sit on one line beside a host: an HTTP status is only
- * evidence about the world when the line says which world it came from. A
- * status printed on its own is a number in somebody's output, and a status
- * beside a URL or a hostname is a service that answered.
+ * A pattern that has to sit on one line beside a host OUTSIDE this tree: an
+ * HTTP status is only evidence about the world when the line says which world
+ * it came from, and the run's own stack is not the world. A status printed on
+ * its own is a number in somebody's output; a 500 from `localhost:3000` is the
+ * tree failing on the run's own machine, and a wait would answer neither.
  */
 function beside(id, statusSource) {
   const status = new RegExp(statusSource, 'i');
-  const host = /https?:\/\/[^\s'"]+|\b[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+\b/i;
   return {
     id,
-    test: (text) =>
-      text.split('\n').some((line) => status.test(line) && host.test(line)),
+    test: (text) => text.split('\n').some((line) => status.test(line) && outsideHost(line)),
   };
+}
+
+// The addresses of the machine the run is on. A service answering here is the
+// run's own stack, whatever it answered.
+const LOOPBACK = /^(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|\[?::1\]?)$/i;
+
+const URL_IN_LINE = /https?:\/\/[^\s'"<>]+/gi;
+const NAME_IN_LINE = /\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+\b/gi;
+
+/**
+ * Whether one line names a host that is not this machine: a dotted name, and
+ * not a loopback address. A dotless name (`localhost`, a container alias, a
+ * compose service) is refused for the same reason the loopback addresses are —
+ * nothing outside the tree answers on one.
+ */
+export function outsideHost(line) {
+  const named = [
+    ...(line.match(URL_IN_LINE) ?? []).map((url) =>
+      url.replace(/^https?:\/\//i, '').split(/[/:?#]/)[0],
+    ),
+    ...(line.match(NAME_IN_LINE) ?? []),
+  ];
+  return named.some((host) => host.includes('.') && !LOOPBACK.test(host));
 }
 
 /**

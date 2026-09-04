@@ -53,7 +53,13 @@ import { seatDef, FALLBACK_MODEL } from './seatmap.mjs';
 import { checkReportSchema, validateReport, readReport } from './contract.mjs';
 import { assembleSeatPrompt, correctivePrompt, promptFileRef } from './prompt.mjs';
 import { claudeSeatCommand } from './claude.mjs';
-import { SEAT_LADDER, ladderStep, waitFor } from '../lanes/waiting.mjs';
+import {
+  SEAT_LADDER,
+  ladderStep,
+  seatLadderSince,
+  waitAttempt,
+  waitFor,
+} from '../lanes/waiting.mjs';
 
 const ACTOR = 'daemon';
 
@@ -145,12 +151,37 @@ export async function runSeat(store, opts) {
   }
   mkdirSync(dirname(reportPath), { recursive: true });
   let degraded = false;
-  // The seat ladder's position and the one reset wait a session takes, both
-  // per seat session: a restart re-dispatches the seat fresh, and a fresh
-  // session is owed a fresh ladder.
-  let ladderWaits = 0;
-  let resetWaited = false;
   const waitCtx = { store, waits, ...(sleep && { sleep }), now };
+  // Where this seat's ladder stands, and whether the vendor's own instant has
+  // already been waited out, both read from the ledger and never from this
+  // session. A restart re-dispatches the seat into a new session, and a ladder
+  // counted in that session's memory would start again at five minutes every
+  // time the daemon came back (ADR-0069). The crash retries above stay a
+  // session budget, which is what ADR-0005 gives them.
+  const ladderFrom = () => seatLadderSince(store.events(), seat);
+  const seatWaits = () =>
+    store
+      .events()
+      .filter(
+        (e) =>
+          e.event === 'waiting' &&
+          e.kind === 'seat' &&
+          e.detail?.seat === seat &&
+          e.seq > ladderFrom(),
+      );
+  // The ladder's own rungs, and never the vendor's instant beside them: a
+  // wait on a declared reset window is the window, not a step of the ladder,
+  // so the three steps are still owed after it (ADR-0069).
+  const ladderPosition = () =>
+    waitAttempt(store.events(), 'seat', {
+      since: ladderFrom(),
+      match: (e) => e.detail?.seat === seat && typeof e.detail?.resetsAt !== 'number',
+    });
+  const resetWaited = () => seatWaits().some((e) => typeof e.detail?.resetsAt === 'number');
+  // Every reason this session collected, in order: one per dispatch that died
+  // and one per wait it bought. A seat that fails on a spent ladder says what
+  // it spent it on, rather than naming the last of eight identical endings.
+  const collected = [];
   // The memo is read before the semaphore: a seat that will run on the
   // fallback model must hold the fallback model's slot, not the refused
   // model's. A seat already on the fallback model has no memo to read.
@@ -253,7 +284,7 @@ export async function runSeat(store, opts) {
       if (typeof sessionId === 'string' && sessionId.length > 0) resume = sessionId;
     };
     const dispatchWithRetries = async (attempt) => {
-      let result = await dispatch(attempt, 0, ladderWaits);
+      let result = await dispatch(attempt, 0, ladderPosition() - 1);
       while (result.failed === true && RETRYABLE.has(result.reason) && crashRetries < CRASH_RETRIES) {
         crashRetries++;
         // A session id the dying child named is the work it had already
@@ -262,45 +293,81 @@ export async function runSeat(store, opts) {
         // crash before the transcript named a session leaves nothing to
         // resume into, and the retry keeps whatever resume was in force.
         carrySession(result);
-        result = await dispatch(attempt, crashRetries, ladderWaits);
+        result = await dispatch(attempt, crashRetries, ladderPosition() - 1);
       }
       return result;
+    };
+    // A wait holds no model slot. A ladder step is up to forty-five minutes of
+    // doing nothing, and a seat that kept its semaphore through it would stop
+    // every other run's seat on that model for the same forty-five minutes
+    // (ADR-0005). The slot is given back before the wait and taken again after
+    // it; a wait the daemon cancels throws, and the release the `finally`
+    // below calls is then the one this left behind, which does nothing.
+    const idle = async (fn) => {
+      release();
+      release = () => {};
+      await fn();
+      release = semaphores ? await semaphores.acquire(model, { store, seat }) : () => {};
     };
     // One step of the seat ladder: the wait, then one re-dispatch into the
     // session the dead child named. Null when the ladder is spent, which is
     // the only way a provider failure reaches the park.
     const seatLadderStep = async (result, attempt) => {
-      const step = ladderStep(SEAT_LADDER, ladderWaits + 1);
+      const rung = ladderPosition();
+      const step = ladderStep(SEAT_LADDER, rung);
       if (step === null) return null;
-      ladderWaits += 1;
-      await waitFor(waitCtx, {
-        kind: 'seat',
-        reason: result.reason ?? 'exit',
-        ms: step,
-        attempt: ladderWaits,
-        detail: { seat, model },
-      });
+      collected.push(`waited ${Math.round(step / 60_000)}m`);
+      await idle(() =>
+        waitFor(waitCtx, {
+          kind: 'seat',
+          reason: result.reason ?? 'exit',
+          ms: step,
+          attempt: rung,
+          detail: { seat, model },
+        }),
+      );
       carrySession(result);
-      return dispatch(attempt, 0, ladderWaits);
+      return dispatch(attempt, 0, rung);
     };
     // A model with no substitute below it, refused. The vendor's own reset
     // instant is the better wait when it named one — the run asks again a
     // minute after the window it was told about, once — and the seat ladder is
     // what a rejection with no instant on it takes.
     const unavailableStep = async (result, attempt) => {
-      if (typeof result.resetsAt === 'number' && !resetWaited) {
-        resetWaited = true;
+      if (typeof result.resetsAt === 'number' && !resetWaited()) {
+        const rung = ladderPosition();
         const ms = result.resetsAt * 1000 + RESET_GRACE_MS - now();
         if (ms > 0) {
-          await waitFor(waitCtx, {
+          await idle(() =>
+            waitFor(waitCtx, {
+              kind: 'seat',
+              reason: 'model-unavailable',
+              ms,
+              attempt: rung,
+              detail: { seat, model, resetsAt: result.resetsAt },
+            }),
+          );
+        } else {
+          // The instant is already behind us, so there is nothing to wait out.
+          // The stamp still lands, because the ledger has to say the vendor's
+          // own window was read and spent.
+          const opened = store.append('waiting', {
+            actor: ACTOR,
             kind: 'seat',
             reason: 'model-unavailable',
-            ms,
-            attempt: ladderWaits + 1,
+            until: new Date(result.resetsAt * 1000 + RESET_GRACE_MS).toISOString(),
+            attempt: rung,
             detail: { seat, model, resetsAt: result.resetsAt },
           });
+          store.append('waiting-ended', {
+            actor: ACTOR,
+            kind: 'seat',
+            outcome: 'elapsed',
+            waitSeq: opened.seq,
+            elapsed: 0,
+          });
         }
-        return dispatch(attempt, 0, ladderWaits);
+        return dispatch(attempt, 0, rung);
       }
       return seatLadderStep(result, attempt);
     };
@@ -310,6 +377,9 @@ export async function runSeat(store, opts) {
     const dispatchWithWaits = async (attempt) => {
       let result = await dispatchWithRetries(attempt);
       for (;;) {
+        if (result.failed === true || result.terminated === true) {
+          collected.push(result.reason ?? 'unknown');
+        }
         let next = null;
         if (result.failed === true && RETRYABLE.has(result.reason)) {
           next = await seatLadderStep(result, attempt);
@@ -355,13 +425,19 @@ export async function runSeat(store, opts) {
             cause: result.unavailable,
             ...(degraded && { degraded: true }),
             ...(typeof result.resetsAt === 'number' && { resetsAt: result.resetsAt }),
+            // Every ending this session met, in order, and the waits it bought
+            // between them. The last reason alone says a model was refused; the
+            // list says how long the harness went on asking (ADR-0069).
+            ...(collected.length > 0 && { reasons: [...collected] }),
             ...(result.stderrTail && { stderrTail: result.stderrTail }),
             ...(result.stdoutTail && { stdoutTail: result.stdoutTail }),
           });
-          return { ok: false, ...result, model };
+          return { ok: false, ...result, model, reasons: [...collected] };
         }
       }
-      if (result.failed || result.terminated) return { ok: false, ...result };
+      if (result.failed || result.terminated) {
+        return { ok: false, ...result, ...(collected.length > 0 && { reasons: [...collected] }) };
+      }
       const actual = result.meta?.model;
       if (typeof actual === 'string' && actual !== model) {
         store.append('seat-failure', {

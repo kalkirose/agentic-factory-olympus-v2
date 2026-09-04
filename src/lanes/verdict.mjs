@@ -66,6 +66,7 @@ import {
   standingAcksFor,
 } from '../ledger/acks.mjs';
 import { cycleRepeat, openIdentities } from '../ledger/cycles.mjs';
+import { readEvents } from '../ledger/ledger.mjs';
 import { assertDefectKind } from '../ledger/registry.mjs';
 import { openEscapesStore } from '../telemetry/stores.mjs';
 import { readEscapeSet, recordEscape } from '../telemetry/escapes.mjs';
@@ -771,7 +772,17 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
       // budget the report is the verdict whatever it asks for, and they are
       // back.
       checks: (r) =>
-        asksForProbe(r, budget) ? [] : triageChecks(r, { redLayers, priorOpen, transient }),
+        asksForProbe(r, budget)
+          ? []
+          : triageChecks(r, {
+              redLayers,
+              priorOpen,
+              transient,
+              // The project's own wording for a cause outside the tree counts
+              // here exactly as the closed set does: a finding that cites one
+              // of them and nothing else is a finding about the world.
+              patterns: base.config?.gates?.transientPatterns ?? [],
+            }),
     });
   });
   if (fail) return { fail };
@@ -871,7 +882,7 @@ function recordedTakeBacks(events) {
  * rule beside the entry that broke it, so the corrective brief says what to
  * write and not only what was refused.
  */
-function triageChecks(report, { redLayers, priorOpen, transient = null }) {
+function triageChecks(report, { redLayers, priorOpen, transient = null, patterns = [] }) {
   const defects = [];
   // The harness already read these reds as a cause outside the tree and spent
   // a ladder of re-runs against them. A code-defect finding whose evidence is
@@ -882,7 +893,7 @@ function triageChecks(report, { redLayers, priorOpen, transient = null }) {
   for (const f of transient === null ? [] : report.findings) {
     if (f.class !== 'code-defect') continue;
     const evidence = `${f.summary}\n${f.evidence}`;
-    if (!showsTransient(evidence) || showsCode(evidence)) continue;
+    if (!showsTransient(evidence, patterns) || showsCode(evidence)) continue;
     defects.push(
       `the code-defect finding "${f.summary}" cites only a signature of a cause outside the ` +
         `tree (${transient.signatures.join(', ')}); the harness re-ran these files after ` +
@@ -1039,12 +1050,30 @@ async function externalWait(ctx, base, { cycle, sha, gates, spectrum, reds, read
   const since = ladderSince(events);
   const credential = host.credential;
   const layers = read.layers.map((l) => l.layer);
-  let outage = null;
+  const attempt = waitAttempt(events, 'external', { since });
+  // One wait per ladder, and never a second day of it. A daemon restart closes
+  // the open span, re-enters the stage and finds the ladder spent, so without
+  // this the run would open a fresh twenty-four hours at every restart and
+  // reach nobody. The second attempt is the gate (ADR-0069).
+  if (attempt > EXTERNAL_ATTEMPTS) {
+    return {
+      directive: externalGate(ctx, base, {
+        host,
+        read,
+        history: externalHistory(events, since),
+      }),
+    };
+  }
+  // The loud record this service already has open, read off the instance
+  // ledger rather than held in this call: the call does not survive a restart
+  // and the record does, and a second record for one outage is the thing a
+  // reader least needs.
+  let outage = openOutage(ctx, credential.name);
   const wait = await waitFor(waitCtx(ctx), {
     kind: 'external',
     reason: `${credential.name} at ${host.host}`,
     ms: EXTERNAL_WAIT_MS,
-    attempt: waitAttempt(events, 'external', { since }),
+    attempt,
     // The one wait that gives the slot up. The run may sit here for a day, and
     // a day of a slot is what a park would have cost the project.
     freesSlot: true,
@@ -1106,9 +1135,36 @@ async function externalWait(ctx, base, { cycle, sha, gates, spectrum, reds, read
     directive: externalGate(ctx, base, {
       host,
       read,
-      history: waitHistory(runEvents(ctx), 'external', { since }),
+      history: externalHistory(runEvents(ctx), since),
     }),
   };
+}
+
+/** How many days a service is waited for before somebody is asked: one. */
+const EXTERNAL_ATTEMPTS = 1;
+
+/** The waits this run has spent on a service since the ladder began. */
+function externalHistory(events, since) {
+  return waitHistory(events, 'external', { since });
+}
+
+/**
+ * The `external-outage` this project already has open for one credential, or
+ * null. Derived from the instance ledger, so a restart finds the record the
+ * instance before it opened instead of opening a second one, and the green
+ * probe that ends any wait on that service resolves it.
+ */
+function openOutage(ctx, credential) {
+  const events = readEvents(ctx.paths.instanceLedger);
+  const resolved = new Set(events.filter((e) => e.event === 'resolved').map((e) => e.resolves));
+  const open = events.filter(
+    (e) =>
+      e.event === 'external-outage' &&
+      e.project === ctx.project &&
+      e.credential === credential &&
+      !resolved.has(e.seq),
+  );
+  return open.at(-1)?.seq ?? null;
 }
 
 /**
