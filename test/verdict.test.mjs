@@ -2066,6 +2066,26 @@ test('a service that comes back ends the external wait and re-runs its files', a
   assert.equal(events.filter((e) => e.event === 'verdict-rendered').at(-1).verdict, 'green');
 });
 
+test('the deferred-proof trade is offered only where the owner armed it', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  process.env.SVC_KEY = 'fixture';
+  t.after(() => delete process.env.SVC_KEY);
+  // The same service, down for the same day, in a project that never set
+  // `gates.proofDebt`: the gate asks for the repair and offers no trade.
+  const fx = externalFixture(t, { root, greenAt: null });
+  const { runId } = await fx.launch();
+  const park = await waitFor(
+    () =>
+      readEvents(runLedgerPath(fx.paths, runId)).find(
+        (e) => e.event === 'park' && e.detail?.external === true,
+      ) ?? null,
+    { label: 'the external gate', attempts: 1800, intervalMs: 100 },
+  );
+  assert.deepEqual(park.answers.options, ['retry', 'abandon']);
+  assert.ok(!park.question.includes('defer-proof'));
+});
+
 test('a service down past the wait parks, and the ship may go without the proof', async (t) => {
   const root = tempDir();
   t.after(() => removeDir(root));

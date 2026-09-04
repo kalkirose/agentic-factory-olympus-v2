@@ -38,6 +38,16 @@ function fakeChild(pid = 4321) {
 }
 
 function alive(pid) {
+  // Off Windows a signal of nought is the question without the answer: it
+  // succeeds while the pid exists and throws when it does not.
+  if (!ON_WINDOWS) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
   return execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH'], { encoding: 'utf8' }).includes(
     String(pid),
   );
@@ -423,6 +433,9 @@ test(
       stdio: ['ignore', 'pipe', 'pipe'],
       ...treeSpawnOptions(),
     });
+    // Whatever this test decides, nothing it started outlives it: a live child
+    // holds the runner's pipes open and the suite never ends.
+    t.after(() => terminateTree(child).catch(() => {}));
     const grandPid = Number(
       await waitFor(() => existsSync(marker) && readFileSync(marker, 'utf8'), {
         label: 'the descendant to report its pid',
