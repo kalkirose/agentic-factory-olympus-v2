@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, runLedgerPath, archivedRunLedgerPath } from '../src/daemon/home.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
-import { tempDir, removeDir, waitFor } from './helpers.mjs';
+import { tempDir, removeDir, waitFor, NO_WAIT } from './helpers.mjs';
 
 function setupHome(t) {
   const home = tempDir();
@@ -43,7 +43,7 @@ test('a daemon restart resumes an open run at its recorded stage', async (t) => 
       },
     },
   };
-  const d1 = new Daemon(home, { lanes: lanesFirst });
+  const d1 = new Daemon(home, { waitSleep: NO_WAIT, lanes: lanesFirst });
   await d1.start();
   d1.engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
   await waitFor(() => readEvents(runLedgerPath(paths, 'r1')).some((e) => e.event === 'seat-spawned'), {
@@ -65,7 +65,7 @@ test('a daemon restart resumes an open run at its recorded stage', async (t) => 
       },
     },
   };
-  const d2 = new Daemon(home, { lanes: lanesSecond });
+  const d2 = new Daemon(home, { waitSleep: NO_WAIT, lanes: lanesSecond });
   const { runsResumed } = await d2.start();
   assert.deepEqual(runsResumed, ['r1']);
   await waitFor(() => readEvents(archivedRunLedgerPath(paths, 'r1')).some((e) => e.event === 'run-closed'), {
@@ -99,7 +99,7 @@ test('a parked run stays parked across restart and resumes on a control-inbox an
       },
     },
   };
-  const d1 = new Daemon(home, { lanes });
+  const d1 = new Daemon(home, { waitSleep: NO_WAIT, lanes });
   await d1.start();
   d1.engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
   await waitFor(() => readEvents(runLedgerPath(paths, 'r1')).some((e) => e.event === 'park'), {
@@ -107,7 +107,7 @@ test('a parked run stays parked across restart and resumes on a control-inbox an
   });
   await d1.stop();
 
-  const d2 = new Daemon(home, { lanes });
+  const d2 = new Daemon(home, { waitSleep: NO_WAIT, lanes });
   const { runsResumed } = await d2.start();
   t.after(async () => {
     await d2.stop();
@@ -160,12 +160,12 @@ test('a run the engine cannot resume violates loud instead of vanishing', async 
       handlers: { hold: () => new Promise(() => {}) },
     },
   };
-  const d1 = new Daemon(home, { lanes });
+  const d1 = new Daemon(home, { waitSleep: NO_WAIT, lanes });
   await d1.start();
   d1.engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
   await d1.stop();
 
-  const d2 = new Daemon(home, { lanes: {} }); // lane no longer registered
+  const d2 = new Daemon(home, { waitSleep: NO_WAIT, lanes: {} }); // lane no longer registered
   const { runsResumed } = await d2.start();
   t.after(async () => {
     await d2.stop();

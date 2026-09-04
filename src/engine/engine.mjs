@@ -30,6 +30,7 @@ import { stagePulse, PULSE_INTERVAL_MS } from '../telemetry/heartbeat.mjs';
 import { deriveRunState } from './replay.mjs';
 import { superviseSeat } from './supervise.mjs';
 import { runSeat } from '../seats/runner.mjs';
+import { recoverOpenWaits } from '../lanes/waiting.mjs';
 
 const ACTOR = 'daemon';
 const GIST_MAX = 120;
@@ -41,12 +42,14 @@ export class RunEngine {
    *   isHeld?: (project: string) => boolean,
    *   onClosed?: (info: {runId: string, project: string, lane: string, state: string}) => void,
    *   onParked?: (info: {runId: string, project: string, lane: string, type: string}) => void,
+   *   onWaiting?: (info: {runId: string, project: string, lane: string, kind: string}) => void,
    *   semaphores?: import('../seats/semaphore.mjs').ModelSemaphores,
    *   seatDefaults?: () => object,
    *   composeCommand?: () => string[],
    *   probePolicy?: () => {credentials?: string[], secretEnv?: string[]},
    *   archiveIo?: object,
    *   heartbeatMs?: number,
+   *   waitSleep?: (ms: number) => Promise<void>,
    *   onEvent?: (project: string, line: object, ledger: string) => void}} opts
    *   seatDefaults supplies machine-scoped runSeat options (claudeCommand)
    *   read fresh per dispatch, so a live config edit applies. composeCommand
@@ -58,10 +61,14 @@ export class RunEngine {
    *   is the operator hold over a project, read at every stage chain: a held
    *   project's runs settle the stage they are in and stop at the boundary
    *   (ADR-0040). A run's own hold rides the run itself (ADR-0057).
+   *   onWaiting fires when a run enters a wait that frees its slot, so the
+   *   frontier fills the slot the external wait gave up.
    *   onEvent fires on every run-store append, project-attributed and carrying
    *   its source ledger — the event key every in-daemon observer reads.
    *   archiveIo is the archive's filesystem seam, read at every call.
    *   heartbeatMs is the stage beat's interval, the seam the tests drive it at.
+   *   waitSleep is the wait mechanism's clock, the seam a test drives a ladder
+   *   at: the ladders are measured in minutes and a suite cannot spend them.
    */
   constructor(
     paths,
@@ -71,12 +78,14 @@ export class RunEngine {
       isHeld,
       onClosed,
       onParked,
+      onWaiting,
       semaphores,
       seatDefaults,
       composeCommand,
       probePolicy,
       archiveIo,
       heartbeatMs,
+      waitSleep,
       onEvent,
     },
   ) {
@@ -86,6 +95,9 @@ export class RunEngine {
     this.isHeld = isHeld ?? (() => false);
     this.onClosed = onClosed ?? null;
     this.onParked = onParked ?? null;
+    // A wait that frees a slot frees it for the frontier the way a park does,
+    // and the frontier hears about it the same way.
+    this.onWaiting = onWaiting ?? null;
     this.semaphores = semaphores ?? null;
     this.seatDefaults = seatDefaults ?? (() => ({}));
     this.composeCommand = composeCommand ?? (() => ['docker', 'compose']);
@@ -95,6 +107,7 @@ export class RunEngine {
     this.probePolicy = probePolicy ?? (() => ({}));
     this.archiveIo = archiveIo ?? {};
     this.heartbeatMs = heartbeatMs ?? PULSE_INTERVAL_MS;
+    this.waitSleep = waitSleep ?? null;
     this.onEvent = onEvent ?? null;
     this.lanes = new Map();
     this.runs = new Map();
@@ -118,15 +131,21 @@ export class RunEngine {
   // -- slot accounting (lane-agnostic) --------------------------------------
 
   /**
-   * Active runs of a project: open and not parked. A parked run frees its slot;
-   * a held run keeps it. A hold is operational rather than scheduling, and
-   * freeing the slots it stops would invite launches that oversubscribe the
-   * project the moment somebody releases it (ADR-0040).
+   * Active runs of a project: open, not parked, and not standing in a wait
+   * that frees its slot. A parked run frees its slot; a held run keeps it. A
+   * hold is operational rather than scheduling, and freeing the slots it stops
+   * would invite launches that oversubscribe the project the moment somebody
+   * releases it (ADR-0040).
+   *
+   * A wait keeps the slot when the run is mid-stage, because the run is still
+   * holding a stage of the machine and will carry on inside it. The external
+   * wait is the one that frees it: the run may sit there for a day, and a day
+   * of a slot is what a park would have cost.
    */
   activeCount(project) {
     let count = 0;
     for (const run of this.runs.values()) {
-      if (run.project === project && !run.closed && !run.parked) count++;
+      if (run.project === project && !run.closed && !run.parked && !freeingSlot(run)) count++;
     }
     return count;
   }
@@ -186,6 +205,15 @@ export class RunEngine {
       // project hold, and a project release does not end it (ADR-0057).
       ownHold: null,
       seats: new Set(),
+      // The waits this run is standing in. A wait is a span inside a handler,
+      // so the set is the engine's only view of one: the heartbeat says what
+      // the run waits on, the slot count reads whether the wait frees a slot,
+      // and a kill or a stop ends every entry in it.
+      waits: new Set(),
+      // The promise a wait's re-dispatch is held behind while an operator hold
+      // stands, and the resolve that releases it. Null when nothing is held
+      // there (ADR-0040).
+      heldGate: null,
       lastAnswer: null,
       pulse: null,
       // The last heartbeat this run recorded, from any voice. The stage beat
@@ -274,6 +302,72 @@ export class RunEngine {
     this.openPulse(run);
   }
 
+  // -- waits ----------------------------------------------------------------
+
+  /**
+   * Puts one live wait where the engine can see it, and takes it away again.
+   * A wait is a span inside a handler: the run is still executing, so the
+   * liveness invariant is satisfied by the handler itself, and what the engine
+   * needs the entry for is the three things only it can answer — what the
+   * heartbeat says the run waits on, whether the slot is still taken, and what
+   * a kill or a stop has to end.
+   * @returns {() => void} the call that ends the registration
+   */
+  registerWait(run, entry) {
+    run.waits.add(entry);
+    if (entry.freesSlot) {
+      try {
+        this.onWaiting?.({
+          runId: run.runId,
+          project: run.project,
+          lane: run.lane,
+          kind: entry.kind,
+        });
+      } catch {
+        // The hook owns its errors; a wait never fails on it.
+      }
+    }
+    return () => {
+      run.waits.delete(entry);
+    };
+  }
+
+  /**
+   * The barrier a wait's re-dispatch stands behind while an operator hold
+   * stands. A hold stops a run from entering what comes next, and the step a
+   * wait bought is exactly that: the run has finished waiting and is about to
+   * spend something. So it stops here, and the release lets it through
+   * (ADR-0040).
+   */
+  holdBarrier(run) {
+    if (!this.runHeld(run) || run.closed || this.stopped) return Promise.resolve();
+    if (run.heldGate === null) {
+      let open;
+      const promise = new Promise((resolve) => {
+        open = resolve;
+      });
+      run.heldGate = { promise, open };
+    }
+    return run.heldGate.promise;
+  }
+
+  /** Lets a held wait through: a release, a kill, or the instance stopping. */
+  openHoldGate(run) {
+    const gate = run.heldGate;
+    run.heldGate = null;
+    gate?.open();
+  }
+
+  /**
+   * Ends every wait one run is standing in. The wait stamps its own close and
+   * throws inside the handler, which the engine drops after a kill or a stop —
+   * so nothing carries on spawning work into a shutdown.
+   */
+  endWaits(run, outcome) {
+    for (const wait of [...run.waits]) wait.cancel(outcome);
+    this.openHoldGate(run);
+  }
+
   /**
    * Enters the deferred stage of every run this release frees. A run any other
    * hold still covers stays where it is: the instance hold, a project hold and
@@ -283,6 +377,13 @@ export class RunEngine {
    */
   releaseHeldRuns() {
     const released = [];
+    // A run held in the middle of a wait is not standing at a stage boundary:
+    // it is standing at the re-dispatch the wait bought, which is the step the
+    // hold stops. Releasing it is resolving that barrier, and the handler
+    // carries on from where the hold caught it.
+    for (const run of this.runs.values()) {
+      if (run.heldGate && !run.closed && !this.runHeld(run)) this.openHoldGate(run);
+    }
     for (const run of [...this.runs.values()]) {
       if (!run.held || run.closed || this.runHeld(run)) continue;
       // The flag drops before the stage runs, so a stage that settles inside
@@ -341,12 +442,28 @@ export class RunEngine {
       // engine ignores any directive returned after stop or close.
       stopped: () => this.stopped || run.closed,
       supervise,
+      // The wait mechanism's two engine seams (`src/lanes/waiting.mjs`). A
+      // handler that waits registers the wait, so the heartbeat, the slot
+      // count and a kill all see it, and it stands behind the hold barrier
+      // before it spends anything.
+      waits: {
+        register: (entry) => this.registerWait(run, entry),
+        holdBarrier: () => this.holdBarrier(run),
+      },
+      ...(this.waitSleep && { sleep: this.waitSleep }),
       // Dispatch through the engine's supervise wrapper so the liveness
       // invariant sees the seat as an in-flight child.
       runSeat: (opts) =>
         runSeat(run.store, {
           ...this.seatDefaults(),
           semaphores: this.semaphores ?? undefined,
+          // The seat ladder waits inside the runner, so the runner gets the
+          // engine's wait seam exactly as this handler does.
+          waits: {
+            register: (entry) => this.registerWait(run, entry),
+            holdBarrier: () => this.holdBarrier(run),
+          },
+          ...(this.waitSleep && { sleep: this.waitSleep }),
           ...opts,
           supervise,
         }),
@@ -395,6 +512,24 @@ export class RunEngine {
           // only wait with nothing of the run's own left running, so it is read
           // before the seats.
           if (run.held) return { waitingOn: 'hold', detail: { next: run.deferred } };
+          // A wait held at its re-dispatch is waiting on the operator too, and
+          // it says so before it says what it had been waiting for.
+          if (run.heldGate) return { waitingOn: 'hold', detail: { after: 'wait' } };
+          // What the run is waiting for, and until when. A waiting run is
+          // alive: the wait is the harness's own answer to a provider or a
+          // host, and the beat is what says so while it runs (ADR-0069).
+          const wait = [...run.waits].at(-1);
+          if (wait) {
+            return {
+              waitingOn: wait.kind,
+              detail: {
+                until: wait.until,
+                reason: wait.reason,
+                attempt: wait.attempt,
+                ...(wait.freesSlot && { freesSlot: true }),
+              },
+            };
+          }
           const seats = [...run.seats].map((s) => s.seat).filter((s) => typeof s === 'string');
           // What the stage is waiting on, in the terms the stage has: the
           // seats in flight, or the handler itself when it runs no child.
@@ -717,6 +852,9 @@ export class RunEngine {
   killRun(runId, { actor = ACTOR } = {}) {
     const run = this.runs.get(runId);
     if (!run || run.closed) throw new Error(`no open run: ${runId}`);
+    // The waits first, and while the ledger is still open: a wait closes its
+    // own span, and a kill is one of the endings it has a word for.
+    this.endWaits(run, 'killed');
     for (const seat of run.seats) seat.terminate('run-killed');
     this.closeRun(run, 'killed', { actor });
   }
@@ -949,6 +1087,10 @@ export class RunEngine {
       // stage re-enters, because a re-entered verdict stage stamps a fresh
       // start for the layer it re-runs (ADR-0034).
       recoverOpenAttempts(run.store, { actor: ACTOR, trigger: 'daemon-start' });
+      // A wait is a span of one handler's execution, and that handler died
+      // with the instance. The span is closed here, and the stamps stay, so
+      // the ladder the run was climbing resumes where it stood (ADR-0069).
+      recoverOpenWaits(run.store, { actor: ACTOR, trigger: 'daemon-start' });
       resumed.push(runId);
       if (run.parked || run.violated) continue;
       const lane = this.lanes.get(run.lane);
@@ -980,6 +1122,7 @@ export class RunEngine {
     const draining = [];
     for (const run of this.runs.values()) {
       this.closePulse(run);
+      this.endWaits(run, 'daemon-stopped');
       for (const seat of run.seats) {
         seat.terminate('daemon-stopped');
         draining.push(seat.done);
@@ -993,6 +1136,16 @@ export class RunEngine {
 
 function gist(text) {
   return text.length > GIST_MAX ? text.slice(0, GIST_MAX - 1) + '…' : text;
+}
+
+/**
+ * Whether a run is standing in a wait that gave its slot up. Only the external
+ * wait does: the run may sit there for a day while a service is down, and a
+ * day of a slot is what a park would have cost the project (ADR-0069).
+ */
+function freeingSlot(run) {
+  for (const wait of run.waits) if (wait.freesSlot) return true;
+  return false;
 }
 
 function runDirs(dir) {

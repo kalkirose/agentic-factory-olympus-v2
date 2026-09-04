@@ -72,7 +72,7 @@
 // the process tree from outside — the command's own spawn is untouched — so
 // what asking for it changes about the command is nothing.
 import { spawn } from 'node:child_process';
-import { terminateTree } from '../engine/processes.mjs';
+import { terminateTree, treeSpawnOptions } from '../engine/processes.mjs';
 import { createWriteStream, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -305,8 +305,12 @@ export function runCommand(
     const child = spawn(spec.file, spec.args, {
       cwd,
       env: base,
-      windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // The same shape a seat takes: no window on Windows, a process group off
+      // it. A gate command is a sequence of its own and leaves descendants
+      // behind, and the timeout below ends the tree rather than the wrapper
+      // (ADR-0016).
+      ...treeSpawnOptions(),
       ...(spec.windowsVerbatimArguments && { windowsVerbatimArguments: true }),
     });
     // The measurement starts once there is a tree to measure and never before:

@@ -29,8 +29,7 @@
 // the whole answer. The probe's own output never reaches the ledger or the
 // park text, because the process holds a credential and anything it prints can
 // carry one (ADR-0027).
-import { cloneDir, fetchClone, readBranchFile } from '../isolation/clones.mjs';
-import { git } from '../isolation/git.mjs';
+import { readBranchFile } from '../isolation/clones.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
 import { DEFAULT_PROBE_TIMEOUT_MS, parseProjectConfig } from '../config/project.mjs';
 import { listRunEvents } from '../telemetry/readers.mjs';
@@ -199,6 +198,55 @@ export async function worldConfig(ctx, branch) {
   } catch {
     return null;
   }
+}
+
+/**
+ * One read-only ask of one credential's probe, with nothing stamped either
+ * way. It is what an external wait polls with (ADR-0069): a service that is
+ * down answers no every ten minutes for as long as it is down, and a stamp per
+ * poll would bury the run's own ledger in a hundred copies of one fact. The
+ * caller stamps the answer it acts on, which is the green that ends the wait.
+ *
+ * @param {object} config the project config the run judges under
+ * @param {{name: string, probe: string}} credential the declared credential
+ * @param {{cwd: string, env?: object}} opts where the probe command runs
+ * @returns {Promise<{ok: boolean, code: number|null, error?: string}>}
+ *   `code === null` is a probe that could not run or ran past its bound, which
+ *   is a defect of this machine and never a verdict about the credential — so
+ *   it answers no and the wait carries on asking.
+ */
+export async function askProbe(config, credential, { cwd, env }) {
+  const argv = config.commands?.[credential.probe];
+  if (!Array.isArray(argv) || argv.length === 0) {
+    return { ok: false, code: null, error: `no command named ${credential.probe}` };
+  }
+  // No output file, for the reason the gate's own probe keeps none: the stream
+  // can carry the credential it just asked about (ADR-0027).
+  const run = await runCommand(argv, {
+    cwd,
+    env,
+    log: false,
+    timeoutMs: config.probes?.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS,
+  });
+  return { ok: run.code === 0, code: run.code, ...(run.error && { error: run.error }) };
+}
+
+/**
+ * One credential's probe, asked by name, with the machine's stored values in
+ * front of the copy this process inherited (ADR-0064). It is what the
+ * deferred-proof watcher asks with: there is no run behind it, so there is no
+ * run environment either, and the credential store is the whole of what the
+ * command needs.
+ * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ * @param {object} config the project config the default branch holds
+ * @param {string} name the declared credential's name
+ * @param {{cwd: string}} opts where the probe command runs
+ */
+export async function askDeclaredProbe(paths, config, name, { cwd }) {
+  const credential = (config.credentials ?? []).find((entry) => entry.name === name);
+  if (!credential) return { ok: false, code: null, error: `no credential named ${name}` };
+  const fresh = readCredentials(declaredStore(paths), declaredNames(config));
+  return askProbe(config, credential, { cwd, env: fresh.values });
 }
 
 /**
@@ -381,24 +429,21 @@ async function ciSecretNames(forge) {
  * file that is not there comes back as null.
  */
 function workflowReader(ctx, branch) {
-  const clone = cloneDir(ctx.paths, ctx.project);
   const cache = new Map();
-  let fetched = false;
   return async (path) => {
     if (cache.has(path)) return cache.get(path);
-    if (!fetched) {
-      fetched = true;
-      // The launch fetched this clone moments ago; a fetch that fails here
-      // leaves the refs where the launch left them rather than failing a gate
-      // over the network.
-      await fetchClone(clone).catch(() => {});
-    }
-    let text = null;
-    try {
-      text = await git(['show', `${branch}:${path}`], { cwd: clone });
-    } catch {
-      text = null;
-    }
+    // The one reader of the default branch, with the two choices a lane makes:
+    // the clone exists already, because this run launched from it, and a fetch
+    // that fails leaves the refs where the launch left them rather than
+    // failing a gate over the network (ADR-0068). Each path is read once per
+    // gate, so the fetch it carries is one per workflow file and not one per
+    // credential surface.
+    const read = await readBranchFile(ctx.paths, ctx.project, {
+      branch,
+      path,
+      fetch: 'best-effort',
+    });
+    const text = read.error === undefined ? read.text : null;
     cache.set(path, text);
     return text;
   };

@@ -96,6 +96,14 @@ export const FIXTURE_ACCEPTANCE = `
 `;
 
 /**
+ * The wait mechanism's clock, for a fixture that drives a real run. The seat
+ * ladder is 5, 15 and 45 minutes and the layer ladder is 1, 5 and 15; a suite
+ * cannot spend either, and every wait it drives still stamps its own pair
+ * (ADR-0069). A fixture that never reaches a ladder is unaffected.
+ */
+export const NO_WAIT = () => Promise.resolve();
+
+/**
  * A spec that holds the template (ADR-0019) for a fixture card with one
  * acceptance criterion: a header, one criterion section with its mapping,
  * constants and supersedes, one touched-paths block, an environment section.

@@ -24,6 +24,7 @@ import {
   commitTree,
   projectConfigJson,
   fakeComposeRunner,
+  NO_WAIT,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -43,7 +44,7 @@ function fixture(t, { lanes, composeRunner, worktreeRoot }) {
       projects: { alpha: { repoUrl: origin, slotCap: 2 } },
     }) + '\n',
   );
-  const daemon = new Daemon(join(root, 'home'), { lanes, composeRunner });
+  const daemon = new Daemon(join(root, 'home'), { waitSleep: NO_WAIT, lanes, composeRunner });
   t.after(async () => {
     await daemon.stop();
     removeDir(root);

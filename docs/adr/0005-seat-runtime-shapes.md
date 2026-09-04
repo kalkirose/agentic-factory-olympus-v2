@@ -1,6 +1,7 @@
 # ADR-0005: Seat runtime shapes
 
-Status: accepted (2026-08-10, seat models and cap 2026-09-03, effort 2026-09-04)
+Status: accepted (2026-08-10, seat models and cap 2026-09-03, effort and the
+seat ladder 2026-09-04)
 
 ## Decision
 
@@ -35,10 +36,19 @@ assembly, and the headless runner — gets these concrete shapes:
   next spawn, and every retry spawn carries `retry` with its ordinal,
   `resumed` with the shape it took, and `session` with the id when it resumed
   — the ledger holds the full history, and no reader has to infer the shape
-  from an absent field. The allowance covers reason `exit` only: a deliberate
-  termination, a cost-ceiling breach, and a spawn refusal are never retried,
-  and an unavailable model keeps its own degrade route. A session that spends
-  the budget returns the failure and the lane parks it.
+  from an absent field. The allowance covers the two reasons a child stops
+  without a verdict, `exit` and `silence`: a deliberate termination, a
+  cost-ceiling breach, and a spawn refusal are never retried.
+- **The seat ladder.** Past those three retries the seat waits rather than
+  fails: 5, 15 and 45 minutes, one wait and one re-dispatch a step, resuming
+  the session where one was named (ADR-0069). A model the vendor refused, on a
+  seat with no substitute below it, waits until the vendor's own `resetsAt`
+  plus one minute and re-dispatches once on that model; without a reset instant
+  it takes the same ladder. Only a spent ladder fails the seat, and the
+  `seat-failure` park behind it is the park it always was. A wait stamps no
+  `seat-failure` and spends nothing, so both budgets above and the cost ledger
+  read exactly what they read before it existed; the spawn behind a step
+  carries `afterWait` with the step's ordinal.
 - **Schema subset.** Report schemas are a flat draft-07-safe subset: a
   top-level object of primitive fields, arrays of primitives, arrays of
   flat objects, or one level of flat object; `enum` on primitives; every
@@ -77,10 +87,11 @@ assembly, and the headless runner — gets these concrete shapes:
   `model-degraded` (new registry event: `requested`, `used`, `reason`,
   `attempt`, and `resetsAt` when the stream named one) before the retry
   spawn. `seat-spawned` names the model that actually ran, so no reader is
-  misled about who judged the work. Effort never drops. A seat already on
-  the fallback model has nothing below it: the fallback model refusing is a
-  `seat-failure` with reason `model-unavailable`, carrying the evidence —
-  never a second retry.
+  misled about who judged the work. Effort never drops. A seat already on the
+  fallback model has nothing below it, so it takes the seat ladder instead: the
+  vendor's reset instant where the stream named one, then 5, 15 and 45 minutes.
+  The `seat-failure` with reason `model-unavailable` is what a spent ladder
+  stamps, carrying the evidence — never a second degrade.
 - **Unavailability is read from the stream.** Two structured signals mark a
   model unavailable: a `rate_limit_event` whose `rate_limit_info.status` is
   `rejected`, and the synthetic assistant message the CLI substitutes for
@@ -156,22 +167,30 @@ prompt carries the errors, the path, and the schema, and a crash retry
 carries the prompt in force. A rejected model wrote no transcript at all, so
 the degrade re-dispatch never carries a resume.
 
-## Why a nonzero exit buys retries and the other failures do not
+## Why a nonzero exit buys retries, then waits, and the other failures do not
 
 A nonzero exit is the one failure class whose cause is usually outside the
 seat: a dropped API connection, a killed stream. The work product is absent,
 not defective, and another child on the same prompt answers it. A live run
 proved the shape twice in one story, and each time the only route was a
 human park answer that bought exactly the dispatch a machine could have
-bought. Three retries bound the spend to a known worst case; the bound is a
-constant, not config, because no project has a reason to want a different
-one.
+bought.
+
+Three retries in place bound the immediate spend to a known worst case, and the
+bound is a constant rather than config because no project has a reason to want
+a different one. What comes after them is the seat ladder, for the same reason
+the retries exist and one more: the ledger of 2026-09-04 held sixteen
+`seat-failure` parks and every one of them was answered `retry`, between one
+minute and seventy hours later. Three retries inside a second answer a dropped
+connection; they do not answer a provider that is refusing work for the next
+half hour, and that is what the ladder waits out (ADR-0069).
 
 The other classes carry their own answer already. A termination is the
 orchestrator's own decision. A cost-ceiling breach re-run would spend the
 same money again. A spawn refusal is a host defect no respawn changes. An
-unavailable model has the degrade route, which reads the vendor's reset
-window instead of re-buying the rejection.
+unavailable model takes the degrade route first, which reads the vendor's own
+window instead of re-buying the rejection, and the ladder only where the
+degrade has nowhere to go.
 
 ## Why the one-turn rule sits in the core block
 
@@ -307,7 +326,7 @@ its tests on one host and refuse to spawn on the host that matters.
 ## Why the runner refuses a bad schema instead of failing the seat
 
 A schema outside the subset is a harness defect, not a seat outcome. A
-seat-failure would route it to the seat ladder and hide the real cause;
+seat-failure would route it to the contract loop and hide the real cause;
 the throw surfaces it at the call site, before any token is spent.
 
 ## Named verification items (first live shakedown)
@@ -335,8 +354,16 @@ certification seat degrades to Claude Opus 5 at the same effort, stamped
 later seats at the spawn. No config change and no restart. Trigger: a
 `model-degraded` stamp, or a `seat-failure` with reason `model-unavailable`.
 Reversal cost: none; the next seat after the reset instant runs on Fable 5.1
-again. If Claude Opus 5 is refused there is no substitute, and the seat fails
-with reason `model-unavailable` and the evidence in its ledger.
+again. If Claude Opus 5 is refused there is no substitute, so the seat waits on
+the vendor's own instant and then on the ladder, and a spent ladder is the
+failure with the evidence in its ledger.
+
+If the seat ladder proves wrong — a provider whose outages outlast 45 minutes,
+or a run that should have reached a human sooner — the numbers are one array in
+`src/lanes/waiting.mjs` and the park behind them is unchanged. Trigger: a
+`seat-failure` park whose provider was back minutes later, or a ladder that
+spends an hour on a seat somebody wanted to abandon. Reversal cost: one array,
+ADR-0069, and this record.
 
 If the harness has to run one model on every seat again (the session limit
 proves to have another cause, or the owner names one model), point

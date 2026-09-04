@@ -85,6 +85,10 @@ export function defaultProjectConfig() {
     // attributes a path to a part (ADR-0059). `flakeRerun: "whole"` returns
     // the flake filter's re-run to a whole re-run of the layer; absent, it
     // asks only for the parts and the files that failed.
+    // `transientPatterns` adds this project's own wording for a cause outside
+    // the tree to the closed signature set, and `proofDebt: true` offers the
+    // owner's trade at the external gate; both absent is the default, which is
+    // the closed set alone and no trade (ADR-0069).
     gates: { tier1: [] },
     // one convention per line; prompt assembly consumes these
     conventions: [],
@@ -118,7 +122,8 @@ export function defaultProjectConfig() {
     // leaves every seat prompt exactly as it was
     constitutionPath: DEFAULT_CONSTITUTION_PATH,
     // external credentials the project's work needs, each with the read-only
-    // command that proves it; an empty list probes nothing
+    // command that proves it, and the hosts its service answers on; an empty
+    // list probes nothing and declares no host
     credentials: [],
     // how a credential probe is bounded
     probes: { timeoutMs: DEFAULT_PROBE_TIMEOUT_MS },
@@ -298,6 +303,32 @@ function validateGates(gates, commands, err) {
   // the other's list, and a project earns each entry of each by its own proof.
   if (gates.groundlessPaths !== undefined && !isStringList(gates.groundlessPaths)) {
     err('gates.groundlessPaths', 'must be an array of path entries');
+  }
+  // What this project's runners print when the cause of a red is outside the
+  // tree. It adds to the closed signature set and never replaces it: a
+  // runner's wording is the project's fact, and the set itself grows by
+  // decision (ADR-0069). Each entry is a regular expression, matched
+  // case-insensitively over a failed part's own output, so a pattern that will
+  // not compile is refused here rather than dropped inside a verdict cycle.
+  if (gates.transientPatterns !== undefined) {
+    if (!isStringList(gates.transientPatterns)) {
+      err('gates.transientPatterns', 'must be an array of regular expressions');
+    } else {
+      gates.transientPatterns.forEach((source, i) => {
+        try {
+          new RegExp(source, 'i');
+        } catch (error) {
+          err(`gates.transientPatterns[${i}]`, `is not a regular expression: ${error.message}`);
+        }
+      });
+    }
+  }
+  // The owner's speed-over-residual-safety trade: with it on, a service that
+  // stays down past the external wait offers `defer-proof` at its gate and a
+  // ship may go out with a proof owed. Off is the default and absent is off
+  // (ADR-0069).
+  if (gates.proofDebt !== undefined && typeof gates.proofDebt !== 'boolean') {
+    err('gates.proofDebt', 'must be a boolean');
   }
   if (gates.tier1 !== undefined && !Array.isArray(gates.tier1)) {
     err('gates.tier1', 'must be an array of layers');
@@ -803,6 +834,13 @@ function validateProbes(probes, err) {
   }
 }
 
+/**
+ * A hostname and nothing else: labels and dots, no scheme, no port, no path. A
+ * signature is matched against these by equality or by suffix, so a URL here
+ * would match nothing and read as a declaration that works.
+ */
+const HOSTNAME = /^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$/i;
+
 function validateCredentials(credentials, commands, gates, err) {
   const tier1 = isPlainObject(gates) && Array.isArray(gates.tier1) ? gates.tier1 : [];
   const layerNames = new Set(tier1.filter(isPlainObject).map((layer) => layer.name));
@@ -840,6 +878,22 @@ function validateCredentials(credentials, commands, gates, err) {
         entry.layers.forEach((layer, j) => {
           if (!layerNames.has(layer)) {
             err(at(`layers[${j}]`), `must name a gates.tier1 layer: ${layer}`);
+          }
+        });
+      }
+    }
+    // The hosts this credential's service answers on. A red that names one of
+    // them is that service being down, and the wait for it is this
+    // credential's own probe (ADR-0069). A credential that declares none gets
+    // no external wait, which is what every project had before the key
+    // existed.
+    if (entry.hosts !== undefined) {
+      if (!isStringList(entry.hosts) || entry.hosts.length === 0) {
+        err(at('hosts'), 'must be a non-empty array of hostnames');
+      } else {
+        entry.hosts.forEach((host, j) => {
+          if (!HOSTNAME.test(host)) {
+            err(at(`hosts[${j}]`), `must be a hostname, not a URL or a path: ${host}`);
           }
         });
       }

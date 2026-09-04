@@ -15,7 +15,7 @@ import {
   evalWindow,
 } from '../src/eval/review.mjs';
 import { Daemon } from '../src/daemon/daemon.mjs';
-import { tempDir, removeDir, waitFor } from './helpers.mjs';
+import { tempDir, removeDir, waitFor, NO_WAIT } from './helpers.mjs';
 
 const REPORT = {
   summary: 'window reviewed',
@@ -302,6 +302,7 @@ test('the daemon fires an owed review at start and drains the seat at stop', asy
   for (let i = 1; i <= 5; i++) shipRun(paths, `s${i}`, 'p', `2026-08-0${i}T00:00:00Z`);
   const fixture = evalFixture(() => ({ report: REPORT }));
   const daemon = new Daemon(root, {
+    waitSleep: NO_WAIT,
     evalSeatDefaults: () => ({ commandFor: fixture.commandFor }),
   });
   t.after(() => daemon.stop());
@@ -322,6 +323,7 @@ test('a repair that closes shipped notifies the scheduler', async (t) => {
   for (let i = 1; i <= 4; i++) shipRun(paths, `s${i}`, 'p', `2026-08-0${i}T00:00:00Z`);
   const fixture = evalFixture(() => ({ report: REPORT }));
   const daemon = new Daemon(root, {
+    waitSleep: NO_WAIT,
     evalSeatDefaults: () => ({ commandFor: fixture.commandFor }),
   });
   t.after(() => daemon.stop());
@@ -348,6 +350,7 @@ test('daemon stop terminates an in-flight eval seat', async (t) => {
   for (let i = 1; i <= 5; i++) shipRun(paths, `s${i}`, 'p', `2026-08-0${i}T00:00:00Z`);
   const fixture = evalFixture(() => ({ report: REPORT, sleepMs: 60000 }));
   const daemon = new Daemon(root, {
+    waitSleep: NO_WAIT,
     evalSeatDefaults: () => ({ commandFor: fixture.commandFor }),
   });
   t.after(() => daemon.stop());

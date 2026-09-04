@@ -27,6 +27,13 @@ export function deriveRunState(events) {
     // run of the project, so a project release leaves this one standing
     // (ADR-0057).
     ownHold: null,
+    // The wait the run is standing in, as the ledger left it: the kind, what
+    // it waits for, and the instant the span runs to. A `waiting` with no
+    // `waiting-ended` behind it is an open span, and the daemon start closes
+    // every one of them before anything reads this — so what a resumed run
+    // holds here is null, and what a console reading a live ledger holds is
+    // the wait the run is in right now (ADR-0069).
+    waiting: null,
     lastAnswer: null,
     closed: null,
   };
@@ -70,6 +77,19 @@ export function deriveRunState(events) {
         break;
       case 'run-hold-changed':
         state.ownHold = e.held === true ? { actor: e.actor, ts: e.ts } : null;
+        break;
+      case 'waiting':
+        state.waiting = {
+          seq: e.seq,
+          kind: e.kind,
+          reason: e.reason,
+          until: e.until ?? null,
+          attempt: e.attempt ?? null,
+          freesSlot: e.freesSlot === true,
+        };
+        break;
+      case 'waiting-ended':
+        if (state.waiting === null || state.waiting.seq === e.waitSeq) state.waiting = null;
         break;
       case 'park':
         state.parkSeq = e.seq;

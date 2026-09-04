@@ -57,15 +57,25 @@ Tier-1 spectrum, and no green verdict rests on a result the cycle did not earn.
   fix on harness-class findings alone all leave the route exactly as it was.
   The probe stamps `substrate-probe` either way. It does not run where the
   route skips the sweep: nothing local runs there, and the substrate a CI
-  finding names is not this host's.
+  finding names is not this host's. It runs before every step of the substrate
+  wait ladder as well as before the first fix (ADR-0069), for the reason it
+  runs at all: a host that will not answer its own probe will not pass its
+  layers, and a ladder that skipped the question would spend three re-runs
+  proving it.
 - **A cycle that repeats a fingerprint buys one retry, then the owner
   decides.** Every verdict cycle is fingerprinted on what settles its outcome
   and on nothing else: the implementation pass, the candidate sha, the suite
-  sha, the open findings by identity, and — where the CI checks rendered the
-  verdict — the head sha and the last conclusion of every check on it. The
+  sha, the open findings by identity, the waits the run has taken by that
+  render, and — where the CI checks rendered the verdict — the head sha and the
+  last conclusion of every check on it. The
   pass is a component because a fresh pass can rebuild a tree byte for byte
   and land on the same sha, and that run has spent a bounded resource rather
-  than looped; the second stall is the ceiling that owns it. The response ladder reads the
+  than looped; the second stall is the ceiling that owns it. The waits are a
+  component because a wait is the harness deciding that the answer may be
+  different if it asks the world again later (ADR-0069): the tree did not move
+  and the findings did not move, and that is exactly the case this rule would
+  otherwise read as a loop and park. Counting them makes a cycle after a wait a
+  new cycle by construction. The response ladder reads the
   fingerprint of the render it is about to act on before it acts. A first
   repeat stamps `cycle-retry` and carries on: it spends the same
   one-per-subject budget an automatic CI re-run spends (`RERUN_BUDGET`,

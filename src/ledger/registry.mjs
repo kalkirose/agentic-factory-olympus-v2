@@ -122,6 +122,24 @@ export const RUN_EVENTS = new Set([
   // run and when. A ledger written before this event existed folds to no
   // per-run hold, which is what those runs had (ADR-0057).
   'run-hold-changed',
+  // The run waiting on something that is not a person: a provider that killed
+  // a seat, a layer whose red came from outside the tree, a host that has not
+  // repaired itself yet, a declared service that is down. It carries the
+  // `kind` (seat, layer, substrate, external), the `reason` it waits for, the
+  // `until` the span runs to, and the `attempt` on the ladder. Every reader of
+  // a run works off this pair and its close: the liveness rule reads a waiting
+  // run as alive, the duration split takes the span out of `activeMs`, the
+  // heartbeat says what is being waited on, the cycle fingerprint counts the
+  // waits, and `olympusctl status` prints it. Quiet — waiting is the answer,
+  // not a fault — but never silent, because a run that stopped for twenty
+  // minutes with no stamp reads exactly like a run that died.
+  'waiting',
+  // The close of that span: the kind again, and the `outcome` — `elapsed` for
+  // a ladder step that ran out, `probe-green` for a service that came back,
+  // `spent` for a poll that never got its answer, `killed` or `daemon-stopped`
+  // for a wait the machine ended. Every `waiting` pairs with exactly one of
+  // these, and a span a dead instance left open is closed by the next start.
+  'waiting-ended',
   // What a stage that runs no seat says while it polls: what it waits on, the
   // poll outcomes behind the stamp, and its time in the stage. One stamp per
   // batch of poll outcomes, so a stage that settles quickly stamps none and a
@@ -223,6 +241,20 @@ export const RUN_EVENTS = new Set([
   // ledger said either had happened (ADR-0034).
   'layer-abandoned',
   'flake',
+  // A red the harness read as a condition outside the tree, before any seat
+  // was spawned: the layer, the parts that failed, the files they named, and
+  // the signatures every one of those parts showed. It is what the layer
+  // ladder is climbing for, and it is the evidence a triage brief carries when
+  // the ladder is spent — a check refuses a code-class finding whose only
+  // evidence is one of these signatures. Quiet: nothing is wrong yet, and the
+  // re-runs behind it are the test of the reading.
+  'layer-transient',
+  // A ship that went out with one proof missing: the credential whose service
+  // was down past the wait, and the files nobody could run against it. It is
+  // stamped only where the project turned `gates.proofDebt` on, which is the
+  // owner's speed-over-residual-safety trade, and the settle run behind it is
+  // what pays the debt back or records that it could not.
+  'proof-deferred',
   // One judgment, and what the seat that made it was reading.
   // `diffTruncated: true` says the read cap cut the candidate diff itself, so
   // the end of the work is in no file the seat could open and the finding
@@ -519,6 +551,19 @@ export const INSTANCE_EVENTS = new Set([
   // with, and it owns that item, so the strip clears where the green landed
   // rather than where a human got round to it (ADR-0035).
   'workflow-recovered',
+  // A declared service that has refused its own probe for an hour while a run
+  // waited on it. Loud, because nobody is being asked anything: the run waits
+  // on its own and the operator is being told, once, that a service the
+  // factory depends on is down. It names the project, the credential and the
+  // run that is waiting, and it is answered by the probe that comes back green
+  // (`resolution.mjs`).
+  'external-outage',
+  // The deferred proof, settled: the daemon ran the files a ship went out
+  // without against the default branch once the service came back. `ok` says
+  // which way it went, and a red is also an escape of kind `deferred-proof`
+  // against the ship that carried it. Stamped here and not in the run,
+  // because the run that made the trade closed hours or days before.
+  'proof-settled',
   // Instance-scoped escalations: a park that waits on the human but belongs
   // to no open run (card-invalidated from the ship-time sweep). The paired
   // `answer` clears the park and unblocks the card; runs park and answer
@@ -566,6 +611,7 @@ export const LOUD_EVENTS = new Set([
   'budget-breach',
   'archive-failed',
   'workflow-red',
+  'external-outage',
 ]);
 
 // The close-out backstop. A loud record resolves at the event that owns it
@@ -689,6 +735,12 @@ export const OBSERVED_DEFECT_KINDS = new Set([
   // (ADR-0032, ADR-0068). The escape carries the ack fingerprint, so one
   // defect reported in two sentences across two runs is one count.
   'harness',
+  // A proof a ship went out without, that did not hold when it was finally
+  // run. The trade is the owner's (`gates.proofDebt`), the settle run is what
+  // tests it, and this word is what makes the cost of the trade a number
+  // rather than an anecdote. It is recorded against the ship that carried the
+  // debt, whose merge is what put the defect in the product.
+  'deferred-proof',
 ]);
 
 // The whole vocabulary. `escape-recorded` takes any of it: a defect the harness

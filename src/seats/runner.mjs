@@ -35,6 +35,16 @@
 // buying the same rejection again (ADR-0021). The stamp is the same
 // `model-degraded`, marked `memo` — no degrade is ever silent, and the
 // evidence it stood on is named.
+//
+// The seat ladder: past the crash retries the seat waits instead of failing
+// (ADR-0069). A child that keeps dying of the provider takes 5, 15 and 45
+// minutes, one re-dispatch a step, resuming the session where one was named. A
+// model the vendor refused with a reset instant waits until that instant and
+// one minute, and re-dispatches on the same model — the degrade runs first, so
+// what waits here is a seat with no substitute below it. Only a spent ladder
+// fails the seat, and the `seat-failure` park behind it is the park it always
+// was. A wait spends nothing and stamps no `seat-failure`, so the corrective
+// and crash-retry budgets read exactly what they read before.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { superviseSeat } from '../engine/supervise.mjs';
@@ -43,6 +53,7 @@ import { seatDef, FALLBACK_MODEL } from './seatmap.mjs';
 import { checkReportSchema, validateReport, readReport } from './contract.mjs';
 import { assembleSeatPrompt, correctivePrompt, promptFileRef } from './prompt.mjs';
 import { claudeSeatCommand } from './claude.mjs';
+import { SEAT_LADDER, ladderStep, waitFor } from '../lanes/waiting.mjs';
 
 const ACTOR = 'daemon';
 
@@ -51,6 +62,13 @@ const ACTOR = 'daemon';
 // command center reads it too, to say how much of the allowance a retrying
 // seat has spent.
 export const CRASH_RETRIES = 3;
+
+/**
+ * What is added to the vendor's own reset instant before the seat asks again.
+ * The instant is the vendor's statement about when it will take work, and a
+ * request that lands on the same second is a request that races it.
+ */
+export const RESET_GRACE_MS = 60_000;
 
 /**
  * The failure reasons a fresh child may answer. Both are a child that stopped
@@ -69,6 +87,8 @@ const RETRYABLE = new Set(['exit', 'silence']);
  *   semaphores?: import('./semaphore.mjs').ModelSemaphores,
  *   cwd?: string, env?: object, secretEnv?: string[], costCeiling?: number,
  *   silenceMs?: number, claudeCommand?: string[], denyTools?: string[],
+ *   waits?: {register?: Function, holdBarrier?: Function},
+ *   sleep?: (ms: number) => Promise<void>, now?: () => number,
  *   commandFor?: (opts: object) => {cmd: string, args: string[], parseLine?: Function},
  *   supervise?: (opts: object) => Promise<object>}} opts
  *   commandFor substitutes the claude argv builder (tests, fixture seats).
@@ -92,6 +112,12 @@ export async function runSeat(store, opts) {
     silenceMs,
     claudeCommand,
     denyTools,
+    // The engine's wait seam and the clock behind it: the ladder below is the
+    // one place a seat session stops and does nothing, and the run has to be
+    // readable as waiting while it does (ADR-0069).
+    waits,
+    sleep,
+    now = Date.now,
     commandFor = claudeSeatCommand,
     supervise = (superviseOpts) => superviseSeat(store, superviseOpts).done,
   } = opts;
@@ -119,6 +145,12 @@ export async function runSeat(store, opts) {
   }
   mkdirSync(dirname(reportPath), { recursive: true });
   let degraded = false;
+  // The seat ladder's position and the one reset wait a session takes, both
+  // per seat session: a restart re-dispatches the seat fresh, and a fresh
+  // session is owed a fresh ladder.
+  let ladderWaits = 0;
+  let resetWaited = false;
+  const waitCtx = { store, waits, ...(sleep && { sleep }), now };
   // The memo is read before the semaphore: a seat that will run on the
   // fallback model must hold the fallback model's slot, not the refused
   // model's. A seat already on the fallback model has no memo to read.
@@ -144,7 +176,7 @@ export async function runSeat(store, opts) {
     // One dispatch: build the argv for the model in force and supervise the
     // child. `seat-spawned` carries the model actually spawned, so a degraded
     // retry reads as its own spawn on the model that judged the work.
-    const dispatch = (attempt, retry = 0) => {
+    const dispatch = (attempt, retry = 0, waited = 0) => {
       const build = (text) =>
         commandFor({
           claudeCommand,
@@ -202,6 +234,9 @@ export async function runSeat(store, opts) {
           }),
           ...(attempt === 2 && { corrective: true }),
           ...(degraded && { degraded: true }),
+          // The ladder step this dispatch stands on, so a spawn after a wait
+          // reads as one rather than as a retry nobody can account for.
+          ...(waited > 0 && { afterWait: waited }),
         },
       });
     };
@@ -211,8 +246,14 @@ export async function runSeat(store, opts) {
     // deliberate, `cost-ceiling` and `spawn` do not change on a second try,
     // and an unavailable model has its own route below.
     let crashRetries = 0;
+    // The session a dying child named, carried into whatever re-dispatches
+    // next: the crash retry in place, and the ladder step after a wait.
+    const carrySession = (result) => {
+      const sessionId = result.meta?.sessionId;
+      if (typeof sessionId === 'string' && sessionId.length > 0) resume = sessionId;
+    };
     const dispatchWithRetries = async (attempt) => {
-      let result = await dispatch(attempt);
+      let result = await dispatch(attempt, 0, ladderWaits);
       while (result.failed === true && RETRYABLE.has(result.reason) && crashRetries < CRASH_RETRIES) {
         crashRetries++;
         // A session id the dying child named is the work it had already
@@ -220,14 +261,70 @@ export async function runSeat(store, opts) {
         // costs the drop; a fresh child costs the whole session again. A
         // crash before the transcript named a session leaves nothing to
         // resume into, and the retry keeps whatever resume was in force.
-        const sessionId = result.meta?.sessionId;
-        if (typeof sessionId === 'string' && sessionId.length > 0) resume = sessionId;
-        result = await dispatch(attempt, crashRetries);
+        carrySession(result);
+        result = await dispatch(attempt, crashRetries, ladderWaits);
       }
       return result;
     };
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    // One step of the seat ladder: the wait, then one re-dispatch into the
+    // session the dead child named. Null when the ladder is spent, which is
+    // the only way a provider failure reaches the park.
+    const seatLadderStep = async (result, attempt) => {
+      const step = ladderStep(SEAT_LADDER, ladderWaits + 1);
+      if (step === null) return null;
+      ladderWaits += 1;
+      await waitFor(waitCtx, {
+        kind: 'seat',
+        reason: result.reason ?? 'exit',
+        ms: step,
+        attempt: ladderWaits,
+        detail: { seat, model },
+      });
+      carrySession(result);
+      return dispatch(attempt, 0, ladderWaits);
+    };
+    // A model with no substitute below it, refused. The vendor's own reset
+    // instant is the better wait when it named one — the run asks again a
+    // minute after the window it was told about, once — and the seat ladder is
+    // what a rejection with no instant on it takes.
+    const unavailableStep = async (result, attempt) => {
+      if (typeof result.resetsAt === 'number' && !resetWaited) {
+        resetWaited = true;
+        const ms = result.resetsAt * 1000 + RESET_GRACE_MS - now();
+        if (ms > 0) {
+          await waitFor(waitCtx, {
+            kind: 'seat',
+            reason: 'model-unavailable',
+            ms,
+            attempt: ladderWaits + 1,
+            detail: { seat, model, resetsAt: result.resetsAt },
+          });
+        }
+        return dispatch(attempt, 0, ladderWaits);
+      }
+      return seatLadderStep(result, attempt);
+    };
+    // One attempt of the contract loop, with every wait the provider's own
+    // failures buy. A seat that never meets one runs exactly the dispatches it
+    // ran before this existed.
+    const dispatchWithWaits = async (attempt) => {
       let result = await dispatchWithRetries(attempt);
+      for (;;) {
+        let next = null;
+        if (result.failed === true && RETRYABLE.has(result.reason)) {
+          next = await seatLadderStep(result, attempt);
+        } else if (result.reason === 'model-unavailable' && (degraded || model === FALLBACK_MODEL)) {
+          // The degrade route runs first, in the loop below. What reaches this
+          // is a seat that has nowhere left to degrade to, and the answer for
+          // it is the wait rather than the failure.
+          next = await unavailableStep(result, attempt);
+        }
+        if (next === null) return result;
+        result = next;
+      }
+    };
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      let result = await dispatchWithWaits(attempt);
       if (result.reason === 'model-unavailable') {
         if (!degraded && model !== FALLBACK_MODEL) {
           store.append('model-degraded', {
@@ -247,7 +344,7 @@ export async function runSeat(store, opts) {
           release = semaphores ? await semaphores.acquire(model, { store, seat }) : () => {};
           // A rejected model wrote no transcript to resume into.
           resume = undefined;
-          result = await dispatchWithRetries(attempt);
+          result = await dispatchWithWaits(attempt);
         }
         if (result.reason === 'model-unavailable') {
           store.append('seat-failure', {

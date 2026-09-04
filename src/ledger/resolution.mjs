@@ -145,6 +145,15 @@ export const LOUD_OWNERSHIP = {
       fields: (item) => ({ project: item.project, workflow: item.workflow }),
     },
   ],
+  // A service the factory declares a credential for, refusing its own probe
+  // for an hour. The evidence that answers it is the same probe passing, and
+  // the reader that has it is the wait itself: it polls the probe every ten
+  // minutes and pairs the resolution the moment one comes back green. A run
+  // that ends before that leaves the record open, which is the true report —
+  // the service was still down when the last reader of it stopped looking.
+  'external-outage': [
+    { name: 'outage', by: 'the green probe that ends the wait, or the human from a console' },
+  ],
   // Instance-scoped, and both are conditions rather than records: the frontier
   // re-evaluates them on every sweep and pairs the resolution when the
   // condition lifts.

@@ -24,6 +24,7 @@ import {
   commitTree,
   projectConfigJson,
   FIXTURE_ACCEPTANCE,
+  NO_WAIT,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -147,7 +148,7 @@ function fixture(t, { beta = BETA_BROKEN } = {}) {
     }),
   };
   const seats = seatFixture();
-  const daemon = new Daemon(home, { lanes });
+  const daemon = new Daemon(home, { waitSleep: NO_WAIT, lanes });
   t.after(async () => {
     await daemon.stop();
     removeDir(root);

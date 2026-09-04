@@ -20,7 +20,7 @@ import { activeMs, stageDurations } from '../src/tripwires/duration.mjs';
 import { openInstanceStore } from '../src/telemetry/stores.mjs';
 import { renderStatus } from '../src/console/status.mjs';
 import { TripwireWatcher } from '../src/tripwires/watcher.mjs';
-import { tempDir, removeDir, waitFor } from './helpers.mjs';
+import { tempDir, removeDir, waitFor, NO_WAIT } from './helpers.mjs';
 
 const MINUTE = 60000;
 
@@ -352,7 +352,7 @@ test('the console holds a project, and the daemon stops at the boundary', async 
       },
     },
   };
-  const first = new Daemon(home, { lanes });
+  const first = new Daemon(home, { waitSleep: NO_WAIT, lanes });
   await first.start();
   await command(paths, { command: 'hold', actor: 'operator', project: 'proj' }, () =>
     first.hold.isHeld('proj'),
@@ -378,7 +378,7 @@ test('the console holds a project, and the daemon stops at the boundary', async 
   assert.ok(!afterStop.some((e) => e.event === 'seat-failure'), 'a seat failed at the stop');
   assert.equal(afterStop.at(-1).event, 'stage-held');
 
-  const second = new Daemon(home, { lanes });
+  const second = new Daemon(home, { waitSleep: NO_WAIT, lanes });
   t.after(async () => {
     await second.stop();
   });
@@ -415,7 +415,7 @@ test('a hold over the instance holds every project, and the release frees them',
       },
     },
   };
-  const daemon = new Daemon(home, { lanes });
+  const daemon = new Daemon(home, { waitSleep: NO_WAIT, lanes });
   t.after(async () => {
     await daemon.stop();
   });
@@ -439,7 +439,7 @@ test('a hold over the instance holds every project, and the release frees them',
 
 test('a hold command the daemon refuses leaves a reason for the console', async (t) => {
   const { home, paths } = daemonHome(t);
-  const daemon = new Daemon(home, { lanes: {} });
+  const daemon = new Daemon(home, { waitSleep: NO_WAIT, lanes: {} });
   t.after(async () => {
     await daemon.stop();
   });
@@ -719,7 +719,7 @@ test('the console holds one run, and status says who held it and when', async (t
       },
     },
   };
-  const first = new Daemon(home, { lanes });
+  const first = new Daemon(home, { waitSleep: NO_WAIT, lanes });
   await first.start();
   await command(paths, { command: 'hold', actor: 'operator', project: 'proj' }, () =>
     first.hold.isHeld('proj'),
@@ -753,7 +753,7 @@ test('the console holds one run, and status says who held it and when', async (t
 
   // The restart the hold outlives.
   await first.stop();
-  const second = new Daemon(home, { lanes });
+  const second = new Daemon(home, { waitSleep: NO_WAIT, lanes });
   t.after(async () => {
     await second.stop();
   });
@@ -783,7 +783,7 @@ test('the daemon refuses a per-run release under a project hold', async (t) => {
       },
     },
   };
-  const daemon = new Daemon(home, { lanes });
+  const daemon = new Daemon(home, { waitSleep: NO_WAIT, lanes });
   t.after(async () => {
     await daemon.stop();
   });

@@ -25,6 +25,7 @@ import {
   fakeComposeRunner,
   FIXTURE_ACCEPTANCE,
   FIXTURE_SPEC,
+  NO_WAIT,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -384,6 +385,7 @@ function storyFixture(
     }),
   };
   const daemon = new Daemon(join(root, 'home'), {
+    waitSleep: NO_WAIT,
     lanes,
     composeRunner,
     forgeFor: forgeFor ?? (() => null),

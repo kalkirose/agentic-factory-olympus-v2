@@ -22,6 +22,7 @@ import {
   projectConfigJson,
   FIXTURE_ACCEPTANCE,
   FIXTURE_SPEC,
+  NO_WAIT,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -247,7 +248,7 @@ function fixture(t, { seats = {}, card = CARD, config = {}, originFiles = {} } =
     }),
   });
   const seatDefs = seatFixture(seats);
-  let daemon = new Daemon(home, { lanes: lanes() });
+  let daemon = new Daemon(home, { waitSleep: NO_WAIT, lanes: lanes() });
   t.after(async () => {
     await daemon.stop();
     removeDir(root);
@@ -266,7 +267,7 @@ function fixture(t, { seats = {}, card = CARD, config = {}, originFiles = {} } =
     /** Restarts the daemon on the same home — the ledger is the only state. */
     async restart() {
       await daemon.stop();
-      daemon = new Daemon(home, { lanes: lanes() });
+      daemon = new Daemon(home, { waitSleep: NO_WAIT, lanes: lanes() });
       const started = await daemon.start();
       daemon.engine.seatDefaults = () => ({ commandFor: seatDefs.commandFor });
       return started;

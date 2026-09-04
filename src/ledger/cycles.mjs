@@ -81,6 +81,10 @@ export function deterministicRed(events, sha, check) {
  * sha. Derived from the ledger alone, so a restart re-reads the same
  * fingerprint for the same render.
  *
+ * The waits are in there because a wait is the harness deciding that the
+ * inputs may change if it asks again later, which is the one thing a repeat of
+ * everything else cannot see (ADR-0069).
+ *
  * The pass is in there because a fresh pass can rebuild a tree byte for byte
  * and, committed in the same second onto the same parent, reach the same sha.
  * That run has not looped: it has spent a bounded resource the response ladder
@@ -99,6 +103,15 @@ export function cycleFingerprint(events, render) {
         `suite ${render.suiteSha ?? ''}`,
         `open ${openIdentities(events, render).join(',')}`,
         `checks ${checkState(events, render).join(',')}`,
+        // The waits the run has taken by this render. A wait is the harness
+        // answering a provider or a host on its own, and what it buys is a
+        // re-run against a world that may have changed — so a cycle after a
+        // wait judges different inputs from the cycle before it, and the
+        // fingerprint says so by construction (ADR-0069). Without this the
+        // repeat guard would park a run for judging the same tree twice while
+        // the machine was deliberately waiting for the tree's substrate to
+        // come back.
+        `waits ${waitCount(events, render)}`,
       ].join('\n'),
     )
     .digest('hex')
@@ -136,6 +149,16 @@ export function cycleRepeat(events, renders, last) {
     occurrences,
     action: budgetOpen(spent, lastAnswered(events)) ? 'retry' : 'park',
   };
+}
+
+/** The waits this run had taken by one render. */
+function waitCount(events, render) {
+  let taken = 0;
+  for (const e of events) {
+    if (e.seq > render.seq) break;
+    if (e.event === 'waiting') taken += 1;
+  }
+  return taken;
 }
 
 /**
