@@ -2,18 +2,19 @@
 // event registry: a new seat or a policy change enters only by a
 // design-level decision recorded in an ADR, never ad hoc from a call site.
 //
-// Seats run Claude Opus 5 at high effort. The certification spine (verdict
-// triage, the Fury verifier, the eval seat) runs Claude Fable 5.1, named
-// through CERTIFICATION_MODEL. FALLBACK_MODEL is the substitute a refused seat
+// Seats run Claude Opus 5 at xhigh effort. The certification spine (verdict
+// triage, the Fury verifier, the eval seat) runs Claude Fable 5.1 at high,
+// named through CERTIFICATION_MODEL and CERTIFICATION_EFFORT. FALLBACK_MODEL is the substitute a refused seat
 // degrades to, and it names Opus 5: a certification seat whose model is refused
 // runs on Opus 5 at the same effort, and a seat already on Opus 5 has no
 // substitute below it, so its rejection is the failure. Effort is the cost
-// control and stays constant inside a seat session; the floor is high, and no
-// seat sits below it (ADR-0005).
+// control and stays constant inside a seat session: xhigh on every Opus 5
+// seat, high on the three Fable 5.1 seats (ADR-0005).
 export const DEFAULT_MODEL = 'claude-opus-5';
 export const CERTIFICATION_MODEL = 'claude-fable-5-1';
 export const FALLBACK_MODEL = DEFAULT_MODEL;
-export const DEFAULT_EFFORT = 'high';
+export const DEFAULT_EFFORT = 'xhigh';
+export const CERTIFICATION_EFFORT = 'high';
 
 // web: web search allowed (spec birth and the two dev seats only).
 // explore: max read-only Explore subagents; 0 = all subagents banned.
@@ -46,12 +47,12 @@ export const SEATS = Object.freeze({
   // verdict. Which of the Fury seats a run spawns follows the project's
   // review panel: the code-shape seat sits out of the default panel and
   // returns with the lenses it carries (ADR-0038).
-  'verdict-triage': seat({ model: CERTIFICATION_MODEL }),
+  'verdict-triage': seat({ model: CERTIFICATION_MODEL, effort: CERTIFICATION_EFFORT }),
   'fury-spec': seat(),
   'fury-code-shape': seat(),
   'fury-operational': seat(),
   'fury-interface': seat(),
-  'fury-verifier': seat({ model: CERTIFICATION_MODEL }),
+  'fury-verifier': seat({ model: CERTIFICATION_MODEL, effort: CERTIFICATION_EFFORT }),
   'generalist-review': seat(),
   // ship
   'card-sweep': seat(),
@@ -63,7 +64,7 @@ export const SEATS = Object.freeze({
   // only inside the workspace it is given (ADR-0031)
   learning: seat(),
   // instance-scoped
-  eval: seat({ model: CERTIFICATION_MODEL, instanceScoped: true }),
+  eval: seat({ model: CERTIFICATION_MODEL, effort: CERTIFICATION_EFFORT, instanceScoped: true }),
 });
 
 /** Resolves a seat definition; an unknown seat is an error, never a default. */

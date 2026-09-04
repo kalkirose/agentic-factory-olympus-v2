@@ -1,6 +1,6 @@
 # ADR-0005: Seat runtime shapes
 
-Status: accepted (2026-08-10, seat models, effort, and cap 2026-09-03)
+Status: accepted (2026-08-10, seat models and cap 2026-09-03, effort 2026-09-04)
 
 ## Decision
 
@@ -9,9 +9,10 @@ assembly, and the headless runner — gets these concrete shapes:
 
 - **Seat map as code.** `src/seats/seatmap.mjs` is a closed registry: seat →
   model, effort, web-tool allowance, Explore-subagent allowance. Seats run
-  Claude Opus 5 (`claude-opus-5`) at high effort. The certification spine
+  Claude Opus 5 (`claude-opus-5`) at xhigh effort. The certification spine
   (verdict triage, the Fury verifier, the eval seat) runs Claude Fable 5.1
-  (`claude-fable-5-1`), named through `CERTIFICATION_MODEL`. `FALLBACK_MODEL`
+  (`claude-fable-5-1`) at high, named through `CERTIFICATION_MODEL` and
+  `CERTIFICATION_EFFORT`. `FALLBACK_MODEL`
   is the substitute a refused seat degrades to, and it names Claude Opus 5: a
   certification seat whose model is refused runs on Opus 5 at the same effort,
   and a seat already on Opus 5 has no substitute below it, so its rejection is
@@ -202,10 +203,12 @@ verifier, the eval seat) run Fable 5.1. The spine is where the more capable
 model buys the most, and it is a small enough share of the seats to sit inside
 the window.
 
-Effort is not part of that reversal. Every seat runs at high, which is the
-owner's decision: high names the level itself, not a floor a higher level may
-satisfy. No seat sits below it and no seat is raised above it, so effort
-remains the one cost control and it is the same level on every seat.
+Effort follows the model, by the owner's decision of 2026-09-04: every Opus 5
+seat runs at xhigh, and the three Fable 5.1 seats run at high. The day at
+high on every seat (2026-09-03) was a half revert of the July assignment, and
+this restores it whole. Each level names itself, not a floor another level may
+satisfy. A refused certification seat degrades to Opus 5 and keeps its own
+level, high, because the runner holds effort inside a session.
 
 `CERTIFICATION_MODEL` names the spine's model, so the three seats read as a
 decision in the map rather than three ad-hoc overrides. `FALLBACK_MODEL` names

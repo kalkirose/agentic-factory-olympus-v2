@@ -23,13 +23,13 @@ const SCHEMA = {
 // another model or a lower effort would still agree with its own constants.
 const CERTIFICATION_SEATS = ['verdict-triage', 'fury-verifier', 'eval'];
 
-test('seats run Claude Opus 5 at high, except the certification spine', () => {
+test('seats run Claude Opus 5 at xhigh, except the certification spine', () => {
   assert.equal(DEFAULT_MODEL, 'claude-opus-5');
-  assert.equal(DEFAULT_EFFORT, 'high');
+  assert.equal(DEFAULT_EFFORT, 'xhigh');
   for (const [name, def] of Object.entries(SEATS)) {
     const expected = CERTIFICATION_SEATS.includes(name) ? 'claude-fable-5-1' : 'claude-opus-5';
     assert.equal(def.model, expected, name);
-    assert.equal(def.effort, 'high', name);
+    assert.equal(def.effort, CERTIFICATION_SEATS.includes(name) ? 'high' : 'xhigh', name);
   }
 });
 
