@@ -1048,9 +1048,11 @@ export class RunEngine {
   // -- resume at daemon start ----------------------------------------------
 
   /**
-   * Resumes every open run from its ledger. A parked, held or violated run
-   * stays waiting on the human; every other run re-enters its recorded stage.
-   * A run the engine cannot resume (unknown lane or stage) violates loud.
+   * Resumes every open run from its ledger. A parked or violated run stays
+   * waiting on the human; a run any hold covers holds, at the boundary it was
+   * standing at or at the stage the stop caught it in; every other run
+   * re-enters its recorded stage. A run the engine cannot resume (unknown lane
+   * or stage) violates loud.
    *
    * A closed run still sitting under `runs/` is a move that was blocked at its
    * close, so the start sweeps it up. The handle that blocked it belonged to
@@ -1114,6 +1116,16 @@ export class RunEngine {
           continue;
         }
         this.openPulse(run);
+        continue;
+      }
+      // A run the stop caught inside a stage, under a hold that still stands.
+      // Re-entering the stage is the step the hold stops, exactly as it is for
+      // a run whose park was answered while held, so the run holds where it is
+      // standing and the release runs the stage. Without this the hold would
+      // govern every boundary but the one the restart crosses, and a start
+      // under a hold would spend seats and layers nobody released (ADR-0070).
+      if (this.runHeld(run)) {
+        this.holdAt(run, run.stage, { resumed: true });
         continue;
       }
       this.enterStage(run, run.stage, { resumed: true });

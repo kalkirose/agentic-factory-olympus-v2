@@ -489,3 +489,20 @@ never carries a project's specifics.
   ends as a tree now leads a process group and the kill addresses the group.
   ADR-0069 is new; ADR-0005, ADR-0016, ADR-0022 and ADR-0065 carry the ladders,
   the group and the narrowing as standing fact.
+- 2026-09-04 — a restart finishes the step it interrupted, and a finding about
+  the shape buys a repair round. A confirmed approach finding no longer
+  discards the pass: it heads the repair brief under a structural heading of
+  its own, and the round behind it that closes nothing buys the one fresh
+  pass, as it does for every other stall. `stall` loses the reason
+  `approach-finding`, and the eval role text carries the four reasons that are
+  left. The verdict stage now reads the ledger at its entry, before it runs a
+  layer: a `fresh-pass` stamp with no implementation behind it, or a dev seat
+  a stop ended — by terminating its child, or by closing the wait it was
+  standing in — is a step the next instance dispatches again, once, with the
+  open set of the render it acts on. Every other resume runs the layers as it
+  always did. And a run the daemon start finds under a hold holds at the stage
+  the stop caught it in, `resumed` on the stamp, so a start under an instance
+  hold spends no seat and no layer until the release. ADR-0070 is new; ADR-0007
+  is rewritten around the ledger evidence, which is one interface-lens finding
+  about a single input discarding a pass with twelve other findings open;
+  ADR-0003 and ADR-0040 carry the hold at the start.

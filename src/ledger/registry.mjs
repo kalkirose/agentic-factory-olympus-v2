@@ -282,6 +282,14 @@ export const RUN_EVENTS = new Set([
   // cycle the harness granted itself is a cycle somebody paid for (ADR-0022).
   'cycle-retry',
   'repair-round',
+  // The run stopped moving on its own findings, and the reason says how: a
+  // repair round that closed none of them (`no-progress`), a suite defect that
+  // survived its re-freeze (`re-freeze-no-progress`), the round cap with its
+  // granted rounds spent (`cap-exhausted`), or, in the ship lane, a merge round
+  // that failed (`merge-conflict`). It is the whole vocabulary, and what is not
+  // in it is as much of the record: a finding about the shape of the
+  // implementation is not a stall, it is a repair round with a heading
+  // (ADR-0007).
   'stall',
   'fresh-pass',
   // A frozen-surface collision the story's own card sanctioned: the test, the

@@ -1,6 +1,9 @@
 # ADR-0040: An operator hold stops the stage chain, and nothing else
 
 Status: accepted (2026-08-27)
+Superseded in part by ADR-0070: the hold governs the daemon start as well as
+the stage chain, so a run the stop caught inside a stage holds there rather
+than re-entering it.
 
 ## The condition
 
@@ -48,7 +51,9 @@ instance-ledger event, `hold-changed`, folded at every daemon start the way
 `arming-changed` is. The restart recipe is then: hold, wait for every run to
 reach a boundary or a park, stop with zero live seats, start, release. A held
 run resumes as a held run — the stage it completed is not run again, and the
-stage behind the boundary waits exactly as it did before the process died.
+stage behind the boundary waits exactly as it did before the process died. A
+run the stop caught inside a stage holds at that stage instead, and the
+release runs it (ADR-0070).
 
 **A held run keeps its slot.** A hold is operational, not scheduling. Freeing
 the slots it stops would let the frontier launch into them, and every one of

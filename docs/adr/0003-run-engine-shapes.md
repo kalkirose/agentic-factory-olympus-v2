@@ -4,6 +4,8 @@ Status: accepted (2026-08-10)
 Superseded in part by ADR-0015: the park catalog holds twelve types, and
 the close directive is reserved for the ship path, a kill, and an abandoned
 park.
+Superseded in part by ADR-0070: a run the start finds under a hold holds at
+the stage the stop caught it in, instead of re-entering that stage.
 
 ## Decision
 
