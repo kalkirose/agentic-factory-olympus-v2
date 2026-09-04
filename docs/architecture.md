@@ -160,9 +160,9 @@ Two levels; the ownership test decides placement.
 
 ## Seats
 
-- **Seat map.** Seats run Claude Opus 5 (`claude-opus-5`) at high effort. The
+- **Seat map.** Seats run Claude Opus 5 (`claude-opus-5`) at xhigh effort. The
   certification spine (verdict triage, the Fury verifier, the eval seat) runs
-  Claude Fable 5.1 (`claude-fable-5-1`). Opus 5 is also the fallback model, so
+  Claude Fable 5.1 (`claude-fable-5-1`) at high. Opus 5 is also the fallback model, so
   a refused certification seat degrades to it and a refused Opus 5 seat has no
   substitute (ADR-0005). `max_tokens` = model max; effort is the cost control.
   Effort stays constant inside a seat session.
