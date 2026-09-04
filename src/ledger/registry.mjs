@@ -144,7 +144,12 @@ export const RUN_EVENTS = new Set([
   // the exact value the service refused and a later reader can tell a dead
   // credential from a stale copy of a live one (ADR-0064). It is twelve hex
   // characters of a hash: it identifies a value, it never reveals one, and it
-  // is absent for a probe that held no value at all.
+  // is absent for a probe that held no value at all. `validUntil` rides a
+  // pass and says how long that answer stands for the value it names: the
+  // launch door caches a green probe per fingerprint, so a second launch
+  // inside the window asks the service nothing and a value that moved misses
+  // the cache by construction. `cached` names the earlier pass a gate stood
+  // on instead of spawning the probe again.
   'credential-probe',
   // The parity read of one credential at one gate: every surface the project
   // declared for it, answered together. `ok` carries the verdict and `missing`
@@ -422,6 +427,14 @@ export const INSTANCE_EVENTS = new Set([
   // own path lengths. Informational — the daemon starts on every one of them,
   // and a clean host stamps none (ADR-0030).
   'seat-environment',
+  // The credential gate at the launch door, stamped here because it runs
+  // before a run exists: the parity read of every declared surface, and the
+  // live probe of every declared value (ADR-0068). The run-scoped stamps of
+  // the same names are the mid-run guards, and they carry the same fields.
+  // The instance copy is also the probe cache: a pass carries `validUntil`,
+  // and a gate reads the newest pass of a variable and its fingerprint here.
+  'credential-surface',
+  'credential-probe',
   'launch',
   // A launch the daemon refused. The console's reason file says why to
   // whoever asked; this says it to everyone reading the instance ledger, and
@@ -574,11 +587,12 @@ export const PARK_TYPES = new Set([
   'open-decisions', // open decisions at build start
   'grounding-conflict', // spec birth
   'intent-conflict', // spec gate
-  'spec-gate-exhausted', // spec gate, counted rounds spent
-  // The gate stopped short of the cap because its blocking set did not
-  // shrink. Same options as exhaustion, different condition — and a decision
-  // park names its condition in the type, because `reason` on a park already
-  // carries the close an answered recovery park takes (ADR-0020).
+  // The one gate park. The gate runs as many rounds as it converges for and
+  // parks only when it stops closing findings: a round that closed none of
+  // the previous round's blocking set, or a round whose blocking count is not
+  // below the count two rounds back. A decision park names its condition in
+  // the type, because `reason` on a park already carries the close an
+  // answered recovery park takes (ADR-0020).
   'spec-gate-stalled',
   'unkilled-gap-survivor', // adversary survivor without a killing test
   'second-zero-kill', // second 0/N adversary round
@@ -668,6 +682,13 @@ export const OBSERVED_DEFECT_KINDS = new Set([
   // recorded, from the ship record alone, and the standing tripwire over a
   // rolling window of it is what proposes switching the flag back off.
   'fast-path-escape',
+  // A defect of the machinery that judges, met at a provisioning gate and
+  // acknowledged there. The gate offers no retry — a retry re-runs the same
+  // harness — so the run goes on under a standing acknowledgment and the
+  // defect is counted here until `olympusctl revoke` names the fix behind it
+  // (ADR-0032, ADR-0068). The escape carries the ack fingerprint, so one
+  // defect reported in two sentences across two runs is one count.
+  'harness',
 ]);
 
 // The whole vocabulary. `escape-recorded` takes any of it: a defect the harness

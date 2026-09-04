@@ -68,15 +68,7 @@ process.exit(0);
 
 function behaviour(name) {
   if (name === 'spec-birth') return specBirth();
-  if (name === 'spec-gate') {
-    return {
-      report: {
-        findings: [],
-        intentConflict: { conflict: false, detail: '' },
-        summary: 'the spec is grounded, in scope and encodable',
-      },
-    };
-  }
+  if (name === 'spec-gate') return specGate();
   if (name === 'suite') return suiteSeat();
   if (name === 'adversary') {
     return {
@@ -103,6 +95,32 @@ function behaviour(name) {
     return { report: { owed: false, records: [], reason: 'no decision-record tree in this fixture' } };
   }
   throw new Error(`no fixture behaviour for the ${name} seat`);
+}
+
+/**
+ * The gate round. A scenario that says nothing about the gate gets a clean
+ * first round, as every scenario but the gate ones does. A scenario that
+ * names `gateRounds` gets one entry per round: the blocking defects that
+ * round reports, by the words that are their identity (ADR-0020). The round
+ * is the invocation, and the report path carries it.
+ */
+function specGate() {
+  const round = Number(/spec-gate-(\d+)\.json$/.exec(reportPath)?.[1] ?? 1);
+  const defects = scenario.gateRounds ? (scenario.gateRounds[round - 1] ?? []) : [];
+  return {
+    report: {
+      findings: defects.map((finding) => ({
+        section: 'AC-1',
+        finding,
+        evidence: 'src/base.mjs',
+      })),
+      intentConflict: { conflict: false, detail: '' },
+      summary:
+        defects.length === 0
+          ? 'the spec is grounded, in scope and encodable'
+          : `${defects.length} blocking finding(s)`,
+    },
+  };
 }
 
 function specBirth() {

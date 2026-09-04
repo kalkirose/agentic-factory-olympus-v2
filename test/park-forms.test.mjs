@@ -24,7 +24,14 @@ import {
   instanceParkForms,
   runParkForms,
 } from '../src/ledger/parks.mjs';
-import { WORLD_GATES, parkDirective, withAbandonGuard, worldGate } from '../src/lanes/shared.mjs';
+import {
+  GATE_FORMS,
+  HARNESS_GATE_FORMS,
+  WORLD_GATES,
+  parkDirective,
+  withAbandonGuard,
+  worldGate,
+} from '../src/lanes/shared.mjs';
 import { tempDir, removeDir, waitFor } from './helpers.mjs';
 
 // -- the descriptor ----------------------------------------------------------
@@ -125,7 +132,7 @@ test('every park site declares the forms it accepts', () => {
     for (const site of parkSites(readFileSync(file, 'utf8'))) {
       assert.ok(
         /(^|[\s{,])(options|text):/.test(site.body) ||
-          /\.\.\.GATE_FORMS/.test(site.body) ||
+          /\.\.\.\w*GATE_FORMS/.test(site.body) ||
           /\.\.\.worldGate\(/.test(site.body),
         `the ${site.type} park in ${file} declares neither an option nor a text slot`,
       );
@@ -142,6 +149,25 @@ test('every park site declares the forms it accepts', () => {
     [...PARK_TYPES].filter((type) => !declared.has(type) && !fromRecover.has(type) && !fromSweep.has(type)),
     [],
   );
+});
+
+test('a provisioning gate over a harness defect offers the ack and no retry', () => {
+  // A retry re-runs the same harness on the same tree, so the gate that names
+  // a harness defect does not offer one: the ack leads, and the abandon every
+  // park owes closes (ADR-0068). The substrate gate keeps its retry, because
+  // there the answer is a repair somebody can actually make.
+  assert.deepEqual(runParkForms(HARNESS_GATE_FORMS), {
+    options: ['ack', 'abandon'],
+    text: 'a note on the defect and what is being done about it',
+  });
+  assert.deepEqual(runParkForms(GATE_FORMS), {
+    options: ['retry', 'abandon'],
+    text: 'a note on what you repaired',
+  });
+  // Neither form is a world gate: an ack here records a standing finding
+  // acknowledgment, which is a different instrument (ADR-0032, ADR-0062).
+  assert.equal(HARNESS_GATE_FORMS.gate, undefined);
+  assert.equal(HARNESS_GATE_FORMS.reasoned, undefined);
 });
 
 // -- the world-gate scope (ADR-0062) -----------------------------------------

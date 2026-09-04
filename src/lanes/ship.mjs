@@ -96,7 +96,7 @@ import {
 import { authorizedSupersedes, supersedeLines } from './supersede.mjs';
 import { fastPathDecision } from './fastpath.mjs';
 import { runCommand } from './exec.mjs';
-import { probeCredentials } from './probes.mjs';
+import { probeCredentials, worldConfig } from './probes.mjs';
 import { SUITE_SCHEMA } from './story.mjs';
 import {
   DEV_SCHEMA,
@@ -569,12 +569,22 @@ function shipHandler({ forgeFor, pollMs }) {
 async function openPr(ctx, base) {
   // The credential gate comes first: a CI round is the most expensive way to
   // learn that a key went stale since the launch proved it (ADR-0027).
+  //
+  // The parity half reads the declaration the default branch holds, not the
+  // blob this run pinned. The question it asks is about the CI that will run
+  // this request, and that CI reads main: a surface the world retired since
+  // the launch is not a gap, and one the world added since is one. The probe
+  // half stays on the pinned config, because a probe names a command in it
+  // (ADR-0068). A branch nothing could read falls back to the pinned set,
+  // which is where this gate stood before.
+  const world = await worldConfig(ctx, base.defaultBranch);
   const probed = await probeCredentials(ctx, base.config, {
     phase: 'ship',
     cwd: base.worktree,
     env: base.env,
     forge: base.forge,
     defaultBranch: base.defaultBranch,
+    surfaceCredentials: world ? (world.credentials ?? []) : null,
   });
   if (probed) return probed;
   const pf = await base.forge.preflight(base.defaultBranch);

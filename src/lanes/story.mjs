@@ -1,5 +1,5 @@
 // The story-lane pre-freeze chain: readiness (process) → spec birth (seat)
-// → spec gate (seat, cap 2 rounds) → suite authoring (seat) → adversary
+// → spec gate (seat, no round cap) → suite authoring (seat) → adversary
 // (one wave per round by default, each in a disposable worktree) → freeze
 // (process). The freeze record is the completion signal; the stages after
 // freeze land with their milestones and enter through
@@ -675,10 +675,7 @@ async function supersedeBaseFiles(base, text) {
   }
 }
 
-// -- spec gate (seat, 2 counted rounds, then the owner) ----------------------
-
-// Counted rounds the gate runs on its own authority. Beyond it the run parks.
-const SPEC_GATE_ROUNDS = 2;
+// -- spec gate (seat, as many rounds as it converges for) --------------------
 
 /** Findings that hold the spec. An absent severity reads as blocking. */
 function blockingFindings(findings) {
@@ -686,20 +683,73 @@ function blockingFindings(findings) {
 }
 
 /**
- * Whether a counted round closed none of the blocking findings the round
- * before it raised — the gate's progress rule, keyed on identity rather than
- * on a count (ADR-0020). A count says three against three and cannot say
- * whether they are the same three: a round that closes two and opens two is
+ * Whether a round closed none of the blocking findings the round before it
+ * raised — the gate's first progress rule, keyed on identity rather than on a
+ * count (ADR-0020). A count says three against three and cannot say whether
+ * they are the same three: a round that closes two and opens two is
  * converging on a document that is moving, and a round that reports the same
  * three again is a round nobody needed. A round stamped before the identities
- * were recorded judges nothing here, and the gate spends its cap as it always
- * did.
+ * were recorded judges nothing here.
  */
 function closedNothing(previous, last) {
   const prior = new Set(previous.blocking ?? []);
   if (prior.size === 0) return false;
   const open = new Set(last.blocking ?? []);
   return [...prior].every((identity) => open.has(identity));
+}
+
+/**
+ * Why the gate stops, or null while it is still getting closer.
+ *
+ * Two conditions, either of which parks (ADR-0020). The first is identity: a
+ * round that closed none of the previous round's blocking findings is the gate
+ * oscillating, because each amendment rewrites spec text and the next re-check
+ * reads the new text as new surface. The second is the count over two rounds:
+ * a gate that closes one finding and opens one every round passes the identity
+ * rule for ever, and the count is what says that trade is not progress. Two
+ * rounds and not one, because closing two and opening two in a single round is
+ * a document moving under a gate that is working, and the round after it says
+ * which.
+ *
+ * A cap says nothing about either. Eleven gates on the ledger reached the cap
+ * of two or its stall park, ten of them passed at rounds three to five once
+ * the owner bought the rounds, and the answer at the park was "round" fourteen
+ * times in fifteen. A budget that stops is not a budget (ADR-0021), so the
+ * gate now runs for as long as it converges.
+ */
+function gateStall(rounds) {
+  const last = rounds[rounds.length - 1];
+  const previous = rounds[rounds.length - 2];
+  const before = rounds[rounds.length - 3];
+  if (previous && closedNothing(previous, last)) {
+    return { rule: 'closed-nothing', last, against: previous };
+  }
+  if (before && last.findings >= before.findings) {
+    return { rule: 'no-fall', last, against: before };
+  }
+  return null;
+}
+
+/** The stall park's question: both counts, the rounds they came from, and why. */
+function stallQuestion(stall, base) {
+  const { last, against } = stall;
+  const opening =
+    stall.rule === 'closed-nothing'
+      ? `The spec gate is not converging. Round ${last.round} ended with ` +
+        `${last.findings} blocking findings against ${against.findings} in round ` +
+        `${against.round}, and closed none of them — every finding that round raised is ` +
+        `open again, by identity; notes: ${last.notes ?? 0}. `
+      : `The spec gate is not converging. Round ${last.round} ended with ` +
+        `${last.findings} blocking findings against ${against.findings} in round ` +
+        `${against.round}, two rounds back, so the count has not fallen across two ` +
+        `rounds; notes: ${last.notes ?? 0}. `;
+  return (
+    opening +
+    'Notes do not hold the spec; they travel to the suite seat as proof obligations. ' +
+    'The gate stops here rather than spend another round on a document ' +
+    `that is not getting closer. The spec stands at ${base.specPath}. ` +
+    'Answer "round" for one more amendment and re-check, or "abandon" to close the run.'
+  );
 }
 
 /** Every note the gate raised across its rounds, in the order it raised them. */
@@ -713,23 +763,6 @@ function gateNotes(events) {
     }
   }
   return notes;
-}
-
-// The two parks that hand the gate back to the owner. They differ in what
-// stopped the gate, never in what the owner can do about it: both offer the
-// same two options, and a `round` answered at either one buys exactly one
-// amendment plus one re-check.
-const GATE_PARKS = new Set(['spec-gate-exhausted', 'spec-gate-stalled']);
-
-/** Extra rounds the owner bought, one per gate park answered "round". */
-function grantedRounds(events) {
-  let granted = 0;
-  for (const e of events) {
-    if (e.event !== 'park' || !GATE_PARKS.has(e.type)) continue;
-    const answer = events.find((a) => a.event === 'answer' && a.parkSeq === e.seq);
-    if (answer?.option === 'round') granted++;
-  }
-  return granted;
 }
 
 /**
@@ -748,7 +781,7 @@ function gatePark(events, type, afterSeq) {
 }
 
 /**
- * The spec as a counted round judged it. Every round writes one before it
+ * The spec as a round judged it. Every round writes one before it
  * spawns its seat, so the next round derives its own scope from two documents
  * instead of trusting the amendment's account of what it changed. The copies
  * live beside the spec in the run directory and archive with the run.
@@ -757,7 +790,7 @@ function roundSpecPath(ctx, round) {
   return join(ctx.paths.runs, ctx.runId, `spec-round-${round}.md`);
 }
 
-/** The findings the last counted round reported, verbatim, notes included. */
+/** The findings the last round reported, verbatim, notes included. */
 function priorRoundFindings(events) {
   const rounds = events.filter((e) => e.event === 'spec-gate-round');
   const last = rounds[rounds.length - 1];
@@ -778,7 +811,7 @@ async function specGate(ctx) {
     const rounds = events.filter((e) => e.event === 'spec-gate-round');
     const last = rounds[rounds.length - 1];
     // An answered intent conflict directs one amendment before any re-check;
-    // the conflict never burns a counted round.
+    // the conflict never burns a round.
     const conflict = answeredPark(events, 'intent-conflict');
     if (conflict?.answer && !seatReportAfter(events, 'spec-birth', conflict.answer.seq)) {
       // The parking round stamps nothing, so its findings have no other route
@@ -803,26 +836,17 @@ async function specGate(ctx) {
       }
       continue;
     }
-    // Convergence. Every counted round past the first must close something the
-    // round before it raised, exactly as a repair round must. A round that
-    // closes nothing is the gate oscillating — each amendment rewrites spec
-    // text, and the next full re-check reads the new text as new surface — so
-    // the run hands the decision over at once and leaves the rest of the cap
-    // unspent.
-    const previous = rounds[rounds.length - 2];
-    if (previous && closedNothing(previous, last)) {
+    // Convergence, and nothing else. The gate has no round cap: a spec that is
+    // getting closer every round is a gate doing its work, and the cost of it
+    // informs through the budget record and stops nothing (ADR-0021). What
+    // stops the gate is a round that stopped closing findings, by either of
+    // the two rules, and that is one park with both counts in it.
+    const stall = gateStall(rounds);
+    if (stall) {
       const asked = gatePark(events, 'spec-gate-stalled', last.seq);
       if (!asked) {
         return parkDirective('spec-gate-stalled', {
-          question:
-            `The spec gate is not converging. Round ${last.round} ended with ` +
-            `${last.findings} blocking findings against ${previous.findings} in round ` +
-            `${previous.round}, and closed none of them — every finding that round raised is ` +
-            `open again, by identity; notes: ${last.notes ?? 0}. ` +
-            'Notes do not hold the spec; they travel to the suite seat as proof obligations. ' +
-            'The gate stops here rather than spend a counted round on a document ' +
-            `that is not getting closer. The spec stands at ${base.specPath}. ` +
-            'Answer "round" for one more amendment and re-check, or "abandon" to close the run.',
+          question: stallQuestion(stall, base),
           options: ['round'],
           refs: [base.cardPath],
         });
@@ -830,31 +854,8 @@ async function specGate(ctx) {
       // An `abandon` answer never reaches here: the guard closed the run at
       // this stage entry (ADR-0015). A granted round falls through.
     }
-    // The cap is where the human enters, not where the spec dies. An
-    // exhausted gate holds a spec that is a known list of findings away from
-    // done, so the owner buys another round or abandons it deliberately.
-    if (rounds.length >= SPEC_GATE_ROUNDS + grantedRounds(events)) {
-      const asked = gatePark(events, 'spec-gate-exhausted', last.seq);
-      if (!asked) {
-        return parkDirective('spec-gate-exhausted', {
-          // Two counts, never one total: only the blocking count holds the
-          // spec here. A merged number would read as a longer defect list
-          // than the run actually has.
-          question:
-            `The spec gate spent ${rounds.length} rounds. The last one ended with ` +
-            `blocking findings: ${last.findings}; notes: ${last.notes ?? 0}. ` +
-            'Notes do not hold the spec; they travel to the suite seat as proof obligations. ' +
-            `The spec stands at ${base.specPath}. ` +
-            'Answer "round" for one more amendment and re-check, or "abandon" to close the run.',
-          options: ['round'],
-          refs: [base.cardPath],
-        });
-      }
-      // As above: `abandon` closed the run at the guard, so a park that is
-      // answered at all was answered `round`.
-    }
-    // A counted round with findings open: the birth seat amends, then the
-    // gate re-checks the amended sections only.
+    // A round with findings open: the birth seat amends, then the gate
+    // re-checks the amended sections only.
     if (!seatReportAfter(events, 'spec-birth', last.seq)) {
       const report = readJson(lastSeatReportEvent(events, 'spec-gate').path);
       const amend = await amendSpec(ctx, base, findingsBrief(blockingFindings(report?.findings)));
@@ -865,7 +866,7 @@ async function specGate(ctx) {
     if (r.directive) return r.directive;
     // The card settled a collision this round found. The amendment runs on the
     // card's authority, exactly where an answered ruling's amendment runs, and
-    // the conflict burns no counted round either way (ADR-0044).
+    // the conflict burns no round either way (ADR-0044).
     if (r.amend) {
       const amend = await amendSpec(ctx, base, r.amend);
       if (amend.fail) return amend.fail;
@@ -922,8 +923,17 @@ async function gateRound(ctx, base, { round }) {
     if (event) return { amend: supersedeBrief(detail, event) };
     return {
       directive: parkDirective('intent-conflict', {
-        question: `${detail}\n\nThe card did not settle it: ${refusalLine(refused, claim)}`,
-        text: 'the decision the amendment must follow',
+        // The whole round, not the conflict alone. A ruling is given against
+        // the state of the spec the round found, and the findings beside the
+        // conflict are that state: an owner who reads the conflict on its own
+        // rules on half a document, and the ruling comes back into an
+        // amendment that has to carry the other half anyway. Three of the ten
+        // intent-conflict parks on the ledger were answered "no conflict
+        // exists", which is what a question asked without its context gets.
+        question:
+          `${detail}\n\nThe card did not settle it: ${refusalLine(refused, claim)}\n\n` +
+          openFindingsBlock(result.report.findings),
+        text: RULING_TEXT,
         refs: [base.cardPath],
       }),
     };
@@ -1594,12 +1604,41 @@ function amendRole(base, brief, defects = null) {
   ].join('\n');
 }
 
+// What a park asking for a ruling takes back. The answer is one statement,
+// and it may rule on more than the conflict that raised the park: every
+// finding the question lists carries an id for exactly that (ADR-0068).
+const RULING_TEXT =
+  'the decision the amendment must follow. Address any finding above by its id; ' +
+  'the amendment carries every ruling the answer gives';
+
+/**
+ * Every finding the round left open, by id, with the section it sits in, the
+ * channel it holds the spec on, and the defect it states. The ids are the
+ * round's own order: a gate finding has no identity of its own outside the
+ * round that raised it, and the question and the amendment brief that follows
+ * it read the same list.
+ */
+function openFindingsBlock(findings) {
+  const open = findings ?? [];
+  if (open.length === 0) return 'The round left no other finding open.';
+  return [
+    'Every finding this round left open:',
+    ...open.map(
+      (f, i) =>
+        `- [F${i + 1}] [${f.section}] ${f.severity === 'note' ? 'note' : 'blocking'} — ` +
+        `${f.finding} (evidence: ${f.evidence})`,
+    ),
+  ].join('\n');
+}
+
 function conflictBrief(conflict) {
   return [
     'An intent conflict was escalated and answered.',
     `Conflict: ${conflict.park.question}`,
     `Answer (${conflict.answer.actor}): ${conflict.answer.option ?? conflict.answer.answer}`,
-    'Amend the spec to honor the answer.',
+    'Amend the spec to honor the answer. The question above lists every finding that round ' +
+      'left open, by id; where the answer rules on one of them, the amendment carries that ' +
+      'ruling as well as the conflict.',
   ].join('\n');
 }
 

@@ -37,6 +37,21 @@ title: Alpha feature
 Provide f(x) that doubles x in src/feature.mjs.
 ${FIXTURE_ACCEPTANCE}`;
 
+// A card the launch door admits and readiness refuses. The door reads the
+// card and parses it (ADR-0068), so a launch naming no card or an unparsable
+// one never becomes a run at all; what still reaches readiness is a card that
+// parses and yields no criterion, and that is the readiness park these
+// scenarios walk through park, retry, re-park and abandon.
+const NO_CRITERIA_CARD = `---
+key: alpha-1
+title: Alpha feature
+---
+
+## Goal
+
+Provide f(x) that doubles x in src/feature.mjs.
+`;
+
 // The closed set of terminal routes, now two. A new entry belongs to a
 // design-level decision recorded in an ADR, never to a call site that found a
 // new way to give up. Every park of every type offers `abandon`, and that one
@@ -308,15 +323,16 @@ function chainSeats(suiteBehavior) {
 
 // -- scenarios ---------------------------------------------------------------
 
-test('a missing card parks; a retry re-runs readiness and the run goes on', async (t) => {
-  const fx = fixture(t, { seats: chainSeats(() => ({ report: {} })), card: null });
+test('a card readiness refuses parks; a retry re-runs it and the run goes on', async (t) => {
+  const fx = fixture(t, { seats: chainSeats(() => ({ report: {} })), card: NO_CRITERIA_CARD });
   const { runId, worktree } = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'stage-blocked');
-  assert.equal(park.reason, 'card-missing');
+  assert.equal(park.reason, 'card-no-criteria');
   assert.deepEqual(park.answers.options, ['retry', 'abandon']);
   assert.ok(park.question.includes(CARD_PATH));
   // The run is parked, not closed: nothing archived it.
   assert.ok(!existsSync(archivedRunLedgerPath(fx.paths, runId)));
+  // The card is repaired in the worktree, which is what a retry re-reads.
   mkdirSync(dirname(join(worktree, CARD_PATH)), { recursive: true });
   writeFileSync(join(worktree, CARD_PATH), CARD);
   fx.answer(runId, { option: 'retry' });
@@ -330,14 +346,14 @@ test('a missing card parks; a retry re-runs readiness and the run goes on', asyn
 });
 
 test('an abandoned readiness park closes failed on the original reason', async (t) => {
-  const fx = fixture(t, { seats: {}, card: null });
+  const fx = fixture(t, { seats: {}, card: NO_CRITERIA_CARD });
   const { runId } = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'stage-blocked');
   fx.answer(runId, { option: 'abandon' });
   const events = await waitClosed(fx.paths, runId);
   const closed = events.find((e) => e.event === 'run-closed');
   assert.equal(closed.state, 'failed');
-  assert.equal(closed.reason, 'card-missing');
+  assert.equal(closed.reason, 'card-no-criteria');
   assert.equal(closed.card, CARD_PATH);
   assert.equal(closed.abandoned, park.seq);
   assert.ok(!events.some((e) => e.event === 'seat-spawned'));
@@ -538,7 +554,7 @@ test('the convergence park replays across a restart, and one answer buys one rou
 });
 
 test('a park replays across a daemon restart and the answer still closes the run', async (t) => {
-  const fx = fixture(t, { seats: {}, card: null });
+  const fx = fixture(t, { seats: {}, card: NO_CRITERIA_CARD });
   const { runId } = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'stage-blocked');
   const before = readEvents(runLedgerPath(fx.paths, runId));
@@ -552,6 +568,6 @@ test('a park replays across a daemon restart and the answer still closes the run
   );
   fx.answer(runId, { option: 'abandon' });
   const closed = (await waitClosed(fx.paths, runId)).find((e) => e.event === 'run-closed');
-  assert.equal(closed.reason, 'card-missing');
+  assert.equal(closed.reason, 'card-no-criteria');
   assert.equal(closed.abandoned, park.seq);
 });

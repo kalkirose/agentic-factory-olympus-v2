@@ -11,7 +11,9 @@ import {
   readEscapeSet,
   openEscapes,
   escapesWindow,
+  kindEscapesWindow,
 } from '../src/telemetry/escapes.mjs';
+import { ESCAPE_KIND_OWNERSHIP, escapesRevokeCloses } from '../src/ledger/resolution.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { DEFECT_KINDS } from '../src/ledger/registry.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
@@ -288,4 +290,62 @@ test('escapes-window math breaches over the ceiling and stays quiet with no ship
   const empty = escapesWindow({ ships: [], escapes });
   assert.equal(empty.counted, 0);
   assert.equal(empty.breach, false);
+});
+
+test('a kind window counts the escapes of one kind over the ships of a window', () => {
+  const ships = [{ ts: '2026-01-01' }, { ts: '2026-01-02' }, { ts: '2026-01-03' }];
+  const escapes = [
+    { seq: 1, kind: 'harness', recordedTs: '2025-12-30' },
+    { seq: 2, kind: 'harness', recordedTs: '2026-01-02' },
+    { seq: 3, kind: 'fast-path-escape', recordedTs: '2026-01-02' },
+    { seq: 4, kind: null, recordedTs: '2026-01-03' },
+  ];
+  // The window is the last two ships, so the escape before the oldest of them
+  // is outside it, and only the named kind is counted.
+  const window = kindEscapesWindow({ kind: 'harness', ships, escapes, windowSize: 2 });
+  assert.deepEqual(window, { ships: 2, counted: 1, escapes: [2] });
+  // A rate is not what a kind asks for: the quality bar counts categories, and
+  // a harness escape carries a category that never enters it.
+  assert.equal(escapesWindow({ ships, escapes: [], windowSize: 2 }).rate, 0);
+});
+
+test('a revoke closes the harness defect its fingerprint was counted under', () => {
+  const escapes = [
+    {
+      seq: 1,
+      kind: 'harness',
+      fixed: false,
+      refs: { project: 'alpha', fingerprint: 'harness:aaaaaaaaaaaa' },
+    },
+    {
+      seq: 2,
+      kind: 'harness',
+      fixed: false,
+      refs: { project: 'alpha', fingerprint: 'harness:bbbbbbbbbbbb' },
+    },
+    {
+      seq: 3,
+      kind: 'harness',
+      fixed: false,
+      refs: { project: 'beta', fingerprint: 'harness:aaaaaaaaaaaa' },
+    },
+    {
+      seq: 4,
+      kind: 'harness',
+      fixed: true,
+      refs: { project: 'alpha', fingerprint: 'harness:aaaaaaaaaaaa' },
+    },
+    { seq: 5, kind: 'fast-path-escape', fixed: false, refs: { project: 'alpha' } },
+  ];
+  const closed = escapesRevokeCloses(escapes, {
+    project: 'alpha',
+    fingerprint: 'harness:aaaaaaaaaaaa',
+  });
+  // One defect, in one project, still open: a fingerprint is the identity of a
+  // defect and a revoke closes exactly the one it names (ADR-0068).
+  assert.deepEqual(closed.map((e) => e.seq), [1]);
+  // A kind the table gives no owner is nobody's to close this way.
+  assert.deepEqual(escapesRevokeCloses(escapes, { project: 'alpha', fingerprint: 'x' }), []);
+  assert.equal(ESCAPE_KIND_OWNERSHIP['fast-path-escape'], undefined);
+  assert.equal(ESCAPE_KIND_OWNERSHIP.harness.name, 'acknowledged-harness-defect');
 });

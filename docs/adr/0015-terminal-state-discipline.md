@@ -68,11 +68,12 @@ handler and opens no run at all, so it stamps nothing.
   with the reason its park recorded. A new close route fails CI until it is
   added deliberately.
 
-The decision parks keep their own affirmative options: `round` at the two
-spec-gate parks, `strengthen-again` at `second-zero-kill`,
-`accept-spec-indifferent` at `unkilled-gap-survivor`, `repair-again` and
-`fresh-pass` at `second-stall`, `retry` at a provisioning gate. The way out is
-the same `abandon` at all of them.
+The decision parks keep their own affirmative options: `round` at
+`spec-gate-stalled`, which is the one park the spec gate raises (ADR-0020),
+`strengthen-again` at `second-zero-kill`, `accept-spec-indifferent` at
+`unkilled-gap-survivor`, `repair-again` and `fresh-pass` at `second-stall`,
+`retry` at a provisioning gate over the substrate and `ack` at one over a
+harness defect (ADR-0068). The way out is the same `abandon` at all of them.
 
 ## Decision: how a closed run reaches the archive
 
@@ -224,9 +225,9 @@ answer to buy a retry or to abandon the run on purpose.
 The spec gate reached this conclusion one milestone earlier, on the same kind
 of evidence: a run closed on a list of known findings with about $21 of seat
 work in it, and the fresh birth that replaced it re-derived every one of them.
-The gate's answer was to park at the cap with `round` and `abandon` instead of
-closing, and to count the granted rounds from the answered parks in the
-ledger.
+The gate's answer was to park with `round` and `abandon` instead of closing,
+and to read whether the round it granted was spent off the answered parks in
+the ledger.
 
 That answer never depended on anything specific to the spec gate. Its
 premises are that the run holds work the condition does not invalidate, that
@@ -236,11 +237,12 @@ and a command that will not spawn. The shapes carry over one for one: the
 options are two, the grant is exactly one attempt, the count comes from the
 answered parks, and the ledger replays it.
 
-The one shape that does not carry over is the round counter. The gate spends
-rounds that can succeed, so a spent grant must not satisfy the next cap, and
-the gate keys its park on the round. A recovery park needs no key: the failure
-itself proves that the last retry was spent, and an abandoned park closes the
-run at the next stage entry, so no stale answer can survive.
+The one shape that does not carry over is the key on the round. The gate
+spends rounds that can succeed, so a bought round must be spent before the same
+condition asks again, and the gate keys its park on the round that raised it. A
+recovery park needs no key: the failure itself proves that the last retry was
+spent, and an abandoned park closes the run at the next stage entry, so no
+stale answer can survive.
 
 ## Why a blocked move is never the daemon's fault
 

@@ -5,7 +5,7 @@
 // at the freeze boundary — the pre-freeze chain has its own suite.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import {
@@ -471,7 +471,9 @@ function shipFixture(
     repair: repairShips ? repairship : repairLane({ afterVerdict: done }),
     repairship,
   };
-  const daemon = new Daemon(join(root, 'home'), { lanes });
+  // The launch door asks the same forge the ship step asks: a credential with a
+  // declared CI surface is proven before a slot is taken (ADR-0068).
+  const daemon = new Daemon(join(root, 'home'), { lanes, forgeFor: () => forge });
   const fixture = seatFixture({ ...BASE_SEATS, ...seats });
   t.after(async () => {
     await daemon.stop();
@@ -1975,13 +1977,16 @@ test('a credential that went stale in the run parks the ship gate before the PR'
     if (next === undefined) delete process.env[PROBE_VAR];
     else process.env[PROBE_VAR] = next;
   };
-  set('stale');
+  set('live');
   t.after(() => set(previous));
   const fx = shipFixture(t, {
     config: {
       commands: { probe: [process.execPath, '-e', PROBE_SCRIPT] },
       credentials: [{ name: 'payments', env: PROBE_VAR, probe: 'probe' }],
     },
+    // The door proved the value before this run existed; the service stops
+    // taking it while the run builds, which is what the ship gate is for.
+    seedExtra: async () => set('stale'),
   });
   fx.forge.state.autoChecks = () => [green()];
   const runId = await fx.launch();
@@ -1994,7 +1999,7 @@ test('a credential that went stale in the run parks the ship gate before the PR'
   assert.ok(!readFileSync(runLedgerPath(fx.paths, runId), 'utf8').includes(PROBE_LEAK));
   set('live');
   // The option form at a gate: the operator repaired the substrate and the run
-  // asks the same question again.
+  // asks the same question again. The gate reads no cache, so it asks.
   fx.daemon.engine.answer({ runId, actor: 'operator', option: 'retry' });
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
@@ -2029,8 +2034,11 @@ test('the ship gate parks on a CI surface the host surface cannot speak for', as
     files: { [workflow]: `jobs:\n  suite:\n    env:\n      K: \${{ secrets.${secret} }}\n` },
   });
   fx.forge.state.autoChecks = () => [green()];
-  fx.forge.state.ciSecrets = ['UNRELATED_KEY'];
+  // Wired when the door read it, and retired while the run built: the gap the
+  // ship gate names is the world as it stands at the ship (ADR-0068).
+  fx.forge.state.ciSecrets = ['UNRELATED_KEY', secret];
   const runId = await fx.launch();
+  fx.forge.state.ciSecrets = ['UNRELATED_KEY'];
   const park = await waitParked(fx.paths, runId, 'provisioning-gate');
   assert.match(park.question, new RegExp(`holds no secret named ${secret}`));
   assert.match(park.question, /at the ship gate/);
@@ -2038,9 +2046,9 @@ test('the ship gate parks on a CI surface the host surface cannot speak for', as
   assert.ok(!park.question.includes(workflow));
   const live = readEvents(runLedgerPath(fx.paths, runId));
   assert.ok(!live.some((e) => e.event === 'pr-opened'));
-  assert.deepEqual(live.find((e) => e.event === 'credential-surface').missing, [
-    { surface: 'ci-secret', name: secret },
-  ]);
+  const gap = live.filter((e) => e.event === 'credential-surface').at(-1);
+  assert.deepEqual(gap.missing, [{ surface: 'ci-secret', name: secret }]);
+  assert.equal(gap.source, 'default-branch');
   fx.forge.state.ciSecrets = ['UNRELATED_KEY', secret];
   fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'secret set on the repository' });
   const events = await waitClosed(fx.paths, runId);
@@ -2049,6 +2057,76 @@ test('the ship gate parks on a CI surface the host surface cannot speak for', as
     events.filter((e) => e.event === 'credential-surface').map((e) => e.ok),
     [false, true],
   );
+});
+
+
+test('the ship gate reads the surfaces main declares, not the blob the run pinned', async (t) => {
+  // The surface list is a declaration, and the question the ship gate asks is
+  // about the CI that will run this request. CI reads the default branch, so a
+  // surface the world retired after the launch is not a gap and one it added
+  // since is (ADR-0068). Before this, the run read the blob it pinned, and a
+  // deliberately retired workflow parked every ship for the life of the run.
+  const secret = 'PAY_CI_KEY';
+  const retired = '.github/workflows/retired.yml';
+  const live = '.github/workflows/live.yml';
+  const reads = (name) => `jobs:\n  suite:\n    env:\n      K: \${{ secrets.${name} }}\n`;
+  const previous = process.env[PROBE_VAR];
+  process.env[PROBE_VAR] = 'live';
+  t.after(() => {
+    if (previous === undefined) delete process.env[PROBE_VAR];
+    else process.env[PROBE_VAR] = previous;
+  });
+  const credential = (workflows) => ({
+    commands: { probe: [process.execPath, '-e', PROBE_SCRIPT] },
+    credentials: [
+      { name: 'payments', env: PROBE_VAR, probe: 'probe', ci: { secret, workflows } },
+    ],
+  });
+  // The world moves after the launch pinned its blob: the payments workflow is
+  // retired and its replacement declared, both on the default branch.
+  const moveTheWorld = [];
+  const fx = shipFixture(t, {
+    config: credential([retired]),
+    files: { [retired]: reads(secret), [live]: reads(secret) },
+    seedExtra: async () => {
+      for (const step of moveTheWorld) await step();
+    },
+  });
+  moveTheWorld.push(async () => {
+    writeFileSync(
+      join(fx.origin, CONFIG_PATH),
+      projectConfigJson({
+        repo: { testPaths: ['tests'] },
+        gates: { tier1: [{ name: 'unit', command: 'suite' }] },
+        lanes: { story: { suiteCommand: 'suite' } },
+        stack: null,
+        ...credential([live]),
+        commands: { suite: ['node', '--test', 'tests/*.test.mjs'], ...credential([live]).commands },
+      }),
+    );
+    rmSync(join(fx.origin, retired));
+    gitSync(['add', '-A'], fx.origin);
+    gitSync(['-c', 'commit.gpgsign=false', 'commit', '-m', 'config: the payments surface moves'], fx.origin);
+  });
+  fx.forge.state.autoChecks = () => [green()];
+  fx.forge.state.ciSecrets = [secret];
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // No park: the gate read the world and the world is wired.
+  assert.deepEqual(
+    events.filter((e) => e.event === 'park').map((e) => e.type),
+    [],
+  );
+  const read = events.filter((e) => e.event === 'credential-surface');
+  assert.deepEqual(
+    read.map((e) => [e.phase, e.ok, e.source]),
+    [['ship', true, 'default-branch']],
+  );
+  // The counterfactual, on the record: the run's own config still names the
+  // workflow, and the default branch no longer holds it.
+  assert.throws(() => gitSync(['show', `main:${retired}`], fx.origin));
+  assert.equal(gitSync(['show', `main:${live}`], fx.origin), reads(secret));
 });
 
 // -- request labels ----------------------------------------------------------

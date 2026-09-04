@@ -13,6 +13,7 @@ import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemo
 import { storyLane } from '../src/lanes/story.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { fingerprint } from '../src/daemon/credentials.mjs';
+import { openWorkspaceLeftovers } from '../src/telemetry/readers.mjs';
 import { OWNER_PIN_MARKER } from '../src/lanes/supersede.mjs';
 import { FORESEEN_HEADING, FORESEEN_MARKER } from '../src/lanes/card.mjs';
 import {
@@ -176,6 +177,30 @@ function amendingBirth(spec = FIXTURE_SPEC) {
         };
 }
 
+/**
+ * The seats a gate that passes needs after it: a suite that kills, and one
+ * adversary the frozen suite kills. Every scenario about a converging gate
+ * runs the whole chain, because a gate with no cap ends at the freeze.
+ */
+function shippingSeats(gate) {
+  return {
+    'spec-birth': amendingBirth(),
+    'spec-gate': gate,
+    suite: () => ({
+      files: { 'tests/feature.test.mjs': STRONG_TEST },
+      report: {
+        suiteFiles: ['tests/feature.test.mjs'],
+        reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        summary: 'authored',
+      },
+    }),
+    adversary: () => ({
+      files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
+      report: { approach: 'stub', wrongness: 'f returns 0' },
+    }),
+  };
+}
+
 /** A gate behavior that reports a blocking count per round, plus one note. */
 function gateFindings(counts) {
   return ({ label }) => {
@@ -334,18 +359,31 @@ function storyFixture(
       ...instance,
     }) + '\n',
   );
+  // A forge that answers one question: which secrets CI holds. `null` stands
+  // for a forge that would not answer at all. Both the launch door and the
+  // lane's own gate ask it, so both get the same one (ADR-0068).
+  // A list, or a function of the read: a scenario about a surface the world
+  // retired mid-run answers one thing at the door and another inside the run.
+  const forgeFor =
+    ciSecrets === null
+      ? null
+      : () => ({
+          ciSecrets: async () => (typeof ciSecrets === 'function' ? ciSecrets() : ciSecrets),
+        });
   const lanes = {
     story: storyLane({
       afterFreeze: {
         stages: ['done'],
         handlers: { done: async () => ({ close: { state: 'shipped' } }) },
       },
-      // A forge that answers one question: which secrets CI holds. `null`
-      // stands for a forge that would not answer at all.
-      forgeFor: ciSecrets === null ? null : () => ({ ciSecrets: async () => ciSecrets }),
+      forgeFor,
     }),
   };
-  const daemon = new Daemon(join(root, 'home'), { lanes, composeRunner });
+  const daemon = new Daemon(join(root, 'home'), {
+    lanes,
+    composeRunner,
+    forgeFor: forgeFor ?? (() => null),
+  });
   const fixture = seatFixture(seats);
   t.after(async () => {
     await daemon.stop();
@@ -360,6 +398,19 @@ function storyFixture(
       daemon.engine.seatDefaults = () => ({ commandFor: fixture.commandFor });
       const { runId } = await daemon.launchRun({ project: 'proj', lane: 'story', card: 'stories/alpha.md' });
       return runId;
+    },
+    /** A launch the door is expected to refuse: the daemon, started, and the throw. */
+    async refusedLaunch(payload = {}) {
+      if (!daemon.running) await daemon.start();
+      daemon.engine.seatDefaults = () => ({ commandFor: fixture.commandFor });
+      return daemon
+        .launchRun({ project: 'proj', lane: 'story', card: 'stories/alpha.md', ...payload })
+        .then(
+          (ok) => {
+            throw new Error(`the door admitted the launch: ${JSON.stringify(ok)}`);
+          },
+          (error) => error,
+        );
     },
   };
 }
@@ -596,7 +647,7 @@ test('the adversary runs one wave a round, and a survivor still hardens the suit
   assert.equal(freeze.killCount, 1);
 });
 
-test('open decisions park readiness; the spec gate caps at two rounds', async (t) => {
+test('open decisions park readiness; the spec gate stalls when a round closes nothing', async (t) => {
   const card = `---
 key: alpha-1
 title: Alpha
@@ -606,24 +657,24 @@ title: Alpha
 
 - Pick the rounding mode
 ${FIXTURE_ACCEPTANCE}`;
-  // The blocking set shrinks 2 → 1, so the gate converges and spends its cap.
-  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([2, 1]) };
+  // The same two findings both rounds, by identity: round 2 closed nothing.
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([2, 2]) };
   const fx = storyFixture(t, { seats, card });
   const runId = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'open-decisions');
   assert.ok(park.question.includes('Pick the rounding mode'));
   fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'round half up' });
-  // The cap parks for the owner; abandoning there closes the run.
-  const exhausted = await waitParked(fx.paths, runId, 'spec-gate-exhausted');
-  assert.ok(exhausted.question.includes('spent 2 rounds'));
+  // The stall parks for the owner; abandoning there closes the run.
+  const exhausted = await waitParked(fx.paths, runId, 'spec-gate-stalled');
+  assert.ok(exhausted.question.includes('2 blocking findings against 2 in round 1'));
   // The park counts the two channels apart: only the blocking count held it.
-  assert.ok(exhausted.question.includes('blocking findings: 1; notes: 1'));
+  assert.ok(exhausted.question.includes('notes: 1'));
   assert.deepEqual(exhausted.answers.options, ['round', 'abandon']);
   fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   const events = await waitClosed(fx.paths, runId);
   const closed = events.find((e) => e.event === 'run-closed');
   assert.equal(closed.state, 'failed');
-  assert.equal(closed.reason, 'spec-gate-exhausted');
+  assert.equal(closed.reason, 'spec-gate-stalled');
   // The birth seat received the resolved decision.
   const birth = fx.calls.find((c) => c.label === 'spec-birth-1');
   assert.ok(birth.prompt.includes('Decisions already made'));
@@ -668,7 +719,7 @@ ${FIXTURE_ACCEPTANCE}`;
   assert.ok(existsSync(join(fx.paths.archivedRuns, runId, 'spec-round-2.md')));
 });
 
-test('a stale credential parks readiness before the first seat spawns', async (t) => {
+test('a stale credential is refused at the door, and no workspace exists after it', async (t) => {
   const setCredential = heldCredential(t, 'stale');
   const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
   const fx = storyFixture(t, {
@@ -678,46 +729,99 @@ test('a stale credential parks readiness before the first seat spawns', async (t
       credentials: [{ name: 'payments', env: PROBE_VAR, probe: 'probe' }],
     },
   });
-  const runId = await fx.launch();
-  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
-  assert.match(park.question, /payments credential probe answered no at the launch gate/);
-  assert.ok(park.question.includes(PROBE_VAR));
-  // Nothing was spent past the gate.
+  const refused = await fx.refusedLaunch();
+  assert.match(refused.message, /payments credential probe answered no at the launch door/);
+  assert.ok(refused.message.includes(PROBE_VAR));
+  assert.equal(refused.detail.credential, 'payments');
+  assert.equal(refused.detail.fingerprint, fingerprint('stale'));
+  // Nothing was spent: no seat, no run, no workspace (ADR-0068).
   assert.equal(fx.calls.length, 0);
-  const live = runLedgerPath(fx.paths, runId);
-  const failed = readEvents(live).find((e) => e.event === 'credential-probe');
+  assert.deepEqual(readdirSync(fx.paths.runs), []);
+  assert.equal(openWorkspaceLeftovers(fx.paths).size, 0);
+  const failed = readEvents(fx.paths.instanceLedger).find((e) => e.event === 'credential-probe');
   assert.equal(failed.ok, false);
   assert.equal(failed.reason, 'refused');
   assert.equal(failed.phase, 'launch');
   assert.equal(failed.credential, 'payments');
   assert.equal(failed.variable, PROBE_VAR);
+  assert.equal(failed.validUntil, undefined);
   // The probe's own output reaches neither the ledger nor the human.
-  assert.ok(!readFileSync(live, 'utf8').includes(PROBE_LEAK));
-  assert.ok(!park.question.includes(PROBE_LEAK));
+  assert.ok(!readFileSync(fx.paths.instanceLedger, 'utf8').includes(PROBE_LEAK));
+  assert.ok(!refused.message.includes(PROBE_LEAK));
   // Nor any file. Every other command in the harness streams its output to
   // one (ADR-0043); this is the one that writes none, because nothing reads
   // its output and everything it prints can carry the credential (ADR-0027).
-  assert.deepEqual(filesHolding(join(fx.paths.runs, runId), PROBE_LEAK), []);
+  assert.deepEqual(filesHolding(fx.paths.runs, PROBE_LEAK), []);
   assert.deepEqual(filesHolding(COMMAND_LOG_ROOT, PROBE_LEAK), []);
 
+  // The owner replaces the value and launches again. The door probes the new
+  // value, admits the launch, and the pass carries the window it stands for.
   setCredential('live');
-  fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'key rotated' });
-  // The answer re-probes rather than trusting it: the pass is stamped too.
+  const { runId } = await fx.daemon.launchRun({
+    project: 'proj',
+    lane: 'story',
+    card: 'stories/alpha.md',
+  });
   const stalled = await waitParked(fx.paths, runId, 'spec-gate-stalled');
   assert.ok(stalled.question.includes('not converging'));
-  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
-  const events = await waitClosed(fx.paths, runId);
-  assert.deepEqual(
-    events.filter((e) => e.event === 'credential-probe').map((e) => [e.phase, e.ok]),
-    [
-      ['launch', false],
-      ['launch', true],
-    ],
+  const passed = readEvents(fx.paths.instanceLedger).find(
+    (e) => e.event === 'credential-probe' && e.ok === true,
   );
+  assert.equal(passed.fingerprint, fingerprint('live'));
+  assert.match(passed.validUntil, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(passed.cached, undefined);
+  // The run's own gate asked the service for itself: it is the guard for a
+  // value that moves mid-run, and it reads no cache (ADR-0068).
+  const inRun = readEvents(runLedgerPath(fx.paths, runId)).find(
+    (e) => e.event === 'credential-probe',
+  );
+  assert.equal(inRun.ok, true);
+  assert.equal(inRun.cached, undefined);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
   assert.ok(fx.calls.some((c) => c.seat === 'spec-birth'));
 });
 
-test('an absent credential variable parks without running the probe', async (t) => {
+test('a second launch inside the cache window asks the service nothing', async (t) => {
+  heldCredential(t, 'live');
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
+  const fx = storyFixture(t, {
+    seats,
+    config: {
+      commands: { probe: [process.execPath, '-e', PROBE_SCRIPT] },
+      credentials: [{ name: 'payments', env: PROBE_VAR, probe: 'probe' }],
+    },
+  });
+  const first = await fx.launch();
+  await waitParked(fx.paths, first, 'spec-gate-stalled');
+  const { runId } = await fx.daemon.launchRun({
+    project: 'proj',
+    lane: 'story',
+    card: 'stories/alpha.md',
+  });
+  await waitParked(fx.paths, runId, 'spec-gate-stalled');
+  // One live probe on this instance, and every later read of the same value
+  // stands on it and says so (ADR-0068).
+  const doors = readEvents(fx.paths.instanceLedger).filter(
+    (e) => e.event === 'credential-probe',
+  );
+  assert.equal(doors.length, 2);
+  assert.deepEqual(
+    doors.map((e) => [e.ok, e.cached === undefined]),
+    [
+      [true, true],
+      [true, false],
+    ],
+  );
+  assert.equal(doors[1].cached, doors[0].seq);
+  assert.equal(doors[1].validUntil, doors[0].validUntil);
+  for (const id of [first, runId]) {
+    fx.daemon.engine.answer({ runId: id, actor: 'operator', option: 'abandon' });
+    await waitClosed(fx.paths, id);
+  }
+});
+
+test('an absent credential variable is refused at the door without running the probe', async (t) => {
   const setCredential = heldCredential(t, undefined);
   const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
   const fx = storyFixture(t, {
@@ -727,17 +831,21 @@ test('an absent credential variable parks without running the probe', async (t) 
       credentials: [{ name: 'payments', env: PROBE_VAR, probe: 'probe' }],
     },
   });
-  const runId = await fx.launch();
-  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
-  assert.match(park.question, /is not on this host/);
-  const stamped = readEvents(runLedgerPath(fx.paths, runId)).find(
+  const refused = await fx.refusedLaunch();
+  assert.match(refused.message, /is not on this host/);
+  const stamped = readEvents(fx.paths.instanceLedger).find(
     (e) => e.event === 'credential-surface',
   );
   assert.equal(stamped.ok, false);
   assert.deepEqual(stamped.missing, [{ surface: 'host', name: PROBE_VAR }]);
   assert.equal(fx.calls.length, 0);
+  assert.deepEqual(readdirSync(fx.paths.runs), []);
   setCredential('live');
-  fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'variable set' });
+  const { runId } = await fx.daemon.launchRun({
+    project: 'proj',
+    lane: 'story',
+    card: 'stories/alpha.md',
+  });
   await waitParked(fx.paths, runId, 'spec-gate-stalled');
   fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   await waitClosed(fx.paths, runId);
@@ -779,7 +887,7 @@ test('the gate asks the value the machine stores, not the copy the daemon inheri
   await waitClosed(fx.paths, runId);
 });
 
-test('a value replaced in the store is read at the next gate and named as a rotation', async (t) => {
+test('a value replaced in the store is read at the door and named as a rotation', async (t) => {
   heldCredential(t, 'stale');
   const store = storedCredential(t, 'live');
   const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
@@ -795,37 +903,38 @@ test('a value replaced in the store is read at the next gate and named as a rota
   await waitParked(fx.paths, first, 'spec-gate-stalled');
   // The owner places a new value on this host. Nothing is restarted.
   store.set(ROTATED);
-  const { runId } = await fx.daemon.launchRun({
-    project: 'proj',
-    lane: 'story',
-    card: 'stories/alpha.md',
-  });
-  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
-  // The park says which of the two failures this is: the value moved.
-  assert.match(park.question, /The stored value changed since it last passed on \d{4}-\d{2}-\d{2}/);
-  assert.match(park.question, /check the value placed on this host/);
-  const rotated = readEvents(fx.paths.instanceLedger).find(
-    (e) => e.event === 'credential-rotated',
+  const refused = await fx.refusedLaunch();
+  // The refusal says which of the two failures this is: the value moved.
+  assert.match(
+    refused.message,
+    /The stored value changed since it last passed on \d{4}-\d{2}-\d{2}/,
   );
+  assert.match(refused.message, /check the value placed on this host/);
+  const instance = readEvents(fx.paths.instanceLedger);
+  const rotated = instance.find((e) => e.event === 'credential-rotated');
   assert.equal(rotated.name, PROBE_VAR);
   assert.equal(rotated.from, fingerprint('live'));
   assert.equal(rotated.to, fingerprint(ROTATED));
   assert.equal(rotated.source, 'store');
-  // Fingerprints, never values: neither the ledger nor the park text holds one.
+  // A value that moved misses the cache by construction: the pass on the
+  // record was recorded under the fingerprint of the value that passed, and
+  // this is a different value (ADR-0068).
+  const refusedProbe = instance.filter((e) => e.event === 'credential-probe').at(-1);
+  assert.equal(refusedProbe.ok, false);
+  assert.equal(refusedProbe.fingerprint, fingerprint(ROTATED));
+  assert.equal(refusedProbe.cached, undefined);
+  // Fingerprints, never values: neither the ledger nor the refusal holds one.
   assert.ok(!readFileSync(fx.paths.instanceLedger, 'utf8').includes(ROTATED));
-  assert.ok(!park.question.includes(ROTATED));
-  const refused = readEvents(runLedgerPath(fx.paths, runId)).find(
-    (e) => e.event === 'credential-probe',
-  );
-  assert.equal(refused.ok, false);
-  assert.equal(refused.fingerprint, fingerprint(ROTATED));
-  for (const id of [first, runId]) {
-    fx.daemon.engine.answer({ runId: id, actor: 'operator', option: 'abandon' });
-    await waitClosed(fx.paths, id);
-  }
+  assert.ok(!refused.message.includes(ROTATED));
+  fx.daemon.engine.answer({ runId: first, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, first);
 });
 
-test('a refused value that never moved names the credential, not the host', async (t) => {
+test('a value the service revokes inside the cache window is caught by the run gate', async (t) => {
+  // What the cache costs, and what pays for it. The value on this host is the
+  // one that passed an hour ago, so the door stands on that pass and admits
+  // the launch. The gate inside the run reads no cache and asks the service,
+  // which is the whole reason it stays (ADR-0068).
   heldCredential(t, 'stale');
   const store = storedCredential(t, 'live');
   const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
@@ -839,16 +948,24 @@ test('a refused value that never moved names the credential, not the host', asyn
   });
   const first = await fx.launch();
   await waitParked(fx.paths, first, 'spec-gate-stalled');
-  // The service revokes the key. The value on this host is the one that passed.
+  // The service revokes the key. The value on this host never moved.
   heldVariable(t, BREAK_VAR, '1');
   const { runId } = await fx.daemon.launchRun({
     project: 'proj',
     lane: 'story',
     card: 'stories/alpha.md',
   });
+  const doors = readEvents(fx.paths.instanceLedger).filter(
+    (e) => e.event === 'credential-probe',
+  );
+  assert.equal(doors.at(-1).cached, doors[0].seq, 'the door asked the service again');
   const park = await waitParked(fx.paths, runId, 'provisioning-gate');
-  assert.match(park.question, /The stored value is unchanged since it last passed on \d{4}-\d{2}-\d{2}/);
+  assert.match(
+    park.question,
+    /The stored value is unchanged since it last passed on \d{4}-\d{2}-\d{2}/,
+  );
   assert.match(park.question, /the credential itself needs replacing/);
+  assert.match(park.question, /The launch door proved every declared credential/);
   // A value that did not move is no rotation.
   assert.ok(!readEvents(fx.paths.instanceLedger).some((e) => e.event === 'credential-rotated'));
   for (const id of [first, runId]) {
@@ -894,7 +1011,7 @@ function parityConfig() {
   };
 }
 
-test('readiness parks on a missing CI surface and names every one at once', async (t) => {
+test('the door refuses a missing CI surface and names every one at once', async (t) => {
   // The key is on this host and works. CI holds no secret of that name, and
   // the workflow that will need it reads nothing — the two gaps that used to
   // surface only after a request was open and a round had been paid for.
@@ -906,26 +1023,28 @@ test('readiness parks on a missing CI surface and names every one at once', asyn
     files: { [WORKFLOW]: UNWIRED_WORKFLOW },
     ciSecrets: [],
   });
-  const runId = await fx.launch();
-  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
-  // One park, both surfaces: the owner wires everything in one pass.
-  assert.match(park.question, new RegExp(`holds no secret named ${CI_SECRET}`));
-  assert.match(park.question, new RegExp(`${WORKFLOW.replaceAll('.', '\\.')} does not reference`));
-  assert.match(park.question, /writes no secret on any surface/);
-  // Nothing was spent past the gate; the working host surface is not a pass.
+  const refused = await fx.refusedLaunch();
+  assert.match(refused.message, /these credential surfaces are not wired/);
+  assert.ok(refused.message.includes(`the repository holds no secret named ${CI_SECRET}`));
+  assert.ok(refused.message.includes(`${WORKFLOW} does not reference secrets.${CI_SECRET}`));
+  // Nothing was provisioned, and nothing was spent.
   assert.equal(fx.calls.length, 0);
-  const live = readEvents(runLedgerPath(fx.paths, runId));
-  const stamped = live.find((e) => e.event === 'credential-surface');
+  assert.deepEqual(readdirSync(fx.paths.runs), []);
+  const stamped = readEvents(fx.paths.instanceLedger).find(
+    (e) => e.event === 'credential-surface',
+  );
   assert.equal(stamped.ok, false);
   assert.equal(stamped.phase, 'launch');
+  // The declaration this read judged is the default branch's own (ADR-0068).
+  assert.equal(stamped.source, 'default-branch');
   assert.deepEqual(stamped.missing, [
     { surface: 'ci-secret', name: CI_SECRET },
     { surface: 'workflow', name: WORKFLOW, secret: CI_SECRET },
   ]);
   // The probe never ran: an unwired surface is answered before the round trip.
-  assert.ok(!live.some((e) => e.event === 'credential-probe'));
-  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
-  await waitClosed(fx.paths, runId);
+  assert.ok(
+    !readEvents(fx.paths.instanceLedger).some((e) => e.event === 'credential-probe'),
+  );
 });
 
 test('every declared surface wired lets readiness through to the first seat', async (t) => {
@@ -951,65 +1070,40 @@ test('every declared surface wired lets readiness through to the first seat', as
   await waitClosed(fx.paths, runId);
 });
 
-test('the owner buys one more spec-gate round, and the next cap parks again', async (t) => {
-  // 3 → 2 → 1: every round shrinks, so only the cap ever parks the run.
-  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 2, 1]) };
-  const fx = storyFixture(t, { seats });
+test('a gate that closes one finding a round runs to its pass with no park', async (t) => {
+  // 4 → 3 → 2 → 1 → 0. Every round closes one of the findings the round before
+  // it raised, and the count falls across every two rounds, so neither
+  // convergence rule fires and no cap stops it (ADR-0020). The ledger's own
+  // gates passed at rounds three to five exactly like this, after an owner
+  // bought the rounds a cap had taken away.
+  const fx = storyFixture(t, { seats: shippingSeats(gateFindings([4, 3, 2, 1])) });
   const runId = await fx.launch();
-  const first = await waitParked(fx.paths, runId, 'spec-gate-exhausted');
-  assert.ok(first.question.includes('spent 2 rounds'));
-  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'round' });
-  // The bought round runs, and the cap moves by exactly one.
-  const second = await waitParked(fx.paths, runId, 'spec-gate-exhausted', 2);
-  assert.ok(second.question.includes('spent 3 rounds'));
-  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   const events = await waitClosed(fx.paths, runId);
-  assert.equal(events.find((e) => e.event === 'run-closed').reason, 'spec-gate-exhausted');
-  const rounds = events.filter((e) => e.event === 'spec-gate-round');
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   assert.deepEqual(
-    rounds.map((e) => [e.round, e.verdict]),
+    events.filter((e) => e.event === 'spec-gate-round').map((e) => [e.round, e.verdict, e.findings]),
     [
-      [1, 'findings'],
-      [2, 'findings'],
-      [3, 'findings'],
+      [1, 'findings', 4],
+      [2, 'findings', 3],
+      [3, 'findings', 2],
+      [4, 'findings', 1],
+      [5, 'pass', 0],
     ],
   );
-  // The bought round is an amendment plus a re-check, like any other round.
-  assert.ok(fx.calls.some((c) => c.label === 'spec-birth-3'));
-  assert.ok(fx.calls.some((c) => c.label === 'spec-gate-3'));
-  // A shrinking gate never meets the convergence park.
-  assert.ok(!events.some((e) => e.event === 'park' && e.type === 'spec-gate-stalled'));
+  assert.deepEqual(events.filter((e) => e.event === 'park'), []);
+  // Every round is an amendment plus a re-check, and nobody was asked for one.
+  assert.ok(fx.calls.some((c) => c.label === 'spec-gate-5'));
+  assert.ok(fx.calls.some((c) => c.label === 'spec-birth-5'));
 });
 
 test('a shrinking blocking set runs to zero and passes the gate', async (t) => {
-  // 3 → 1 → 0. The cap parks between rounds 2 and 3, the owner buys the round,
-  // and the round it buys passes. Nothing stalls on the way.
-  const seats = {
-    'spec-birth': amendingBirth(),
-    'spec-gate': gateFindings([3, 1, 0]),
-    suite: () => ({
-      files: { 'tests/feature.test.mjs': STRONG_TEST },
-      report: {
-        suiteFiles: ['tests/feature.test.mjs'],
-        reds: [{ test: 'f doubles', class: 'feature-absence' }],
-        summary: 'authored',
-      },
-    }),
-    adversary: () => ({
-      files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
-      report: { approach: 'stub', wrongness: 'f returns 0' },
-    }),
-  };
-  const fx = storyFixture(t, { seats });
+  // 3 → 1 → 0. Nothing stalls and nothing parks on the way.
+  const fx = storyFixture(t, { seats: shippingSeats(gateFindings([3, 1, 0])) });
   const runId = await fx.launch();
-  const capped = await waitParked(fx.paths, runId, 'spec-gate-exhausted');
-  assert.ok(capped.question.includes('blocking findings: 1'));
-  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'round' });
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
-  const rounds = events.filter((e) => e.event === 'spec-gate-round');
   assert.deepEqual(
-    rounds.map((e) => [e.round, e.verdict, e.findings]),
+    events.filter((e) => e.event === 'spec-gate-round').map((e) => [e.round, e.verdict, e.findings]),
     [
       [1, 'findings', 3],
       [2, 'findings', 1],
@@ -1019,75 +1113,73 @@ test('a shrinking blocking set runs to zero and passes the gate', async (t) => {
   assert.ok(!events.some((e) => e.event === 'park' && e.type === 'spec-gate-stalled'));
 });
 
-test('a blocking set that does not shrink parks at once, cap unspent', async (t) => {
-  // 3 → 3, the same three by identity. The cap allows two counted rounds and
-  // both ran, but the park that stops the gate is the convergence one: the
-  // amendment closed nothing.
-  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
-  const fx = storyFixture(t, { seats });
-  const runId = await fx.launch();
-  const stalled = await waitParked(fx.paths, runId, 'spec-gate-stalled');
-  assert.ok(stalled.question.includes('not converging'));
-  assert.ok(stalled.question.includes('3 blocking findings against 3 in round 1'));
-  assert.ok(stalled.question.includes('closed none of them'));
-  assert.deepEqual(stalled.answers.options, ['round', 'abandon']);
-  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
-  const events = await waitClosed(fx.paths, runId);
-  const closed = events.find((e) => e.event === 'run-closed');
-  assert.equal(closed.state, 'failed');
-  assert.equal(closed.reason, 'spec-gate-stalled');
-  // The convergence park is the only one raised: the cap was never reached.
-  assert.deepEqual(
-    events.filter((e) => e.event === 'park').map((e) => e.type),
-    ['spec-gate-stalled'],
-  );
-  const rounds = events.filter((e) => e.event === 'spec-gate-round');
-  assert.equal(rounds.length, 2);
-  // The record the rule reads: the blocking set by identity, round by round.
-  assert.equal(rounds[0].blocking.length, 3);
-  assert.deepEqual(rounds[0].blocking, rounds[1].blocking);
-});
-
 test('a blocking count that holds while the identities move is converging', async (t) => {
-  // 3 → 3 again, and two of the three are different defects: the amendment
-  // closed two findings and the re-check found two more. A count cannot tell
-  // that from a round that reported the same three, and the count rule parked
-  // two runs that were converging (2026-08-21). The identity rule reads the
-  // round as progress, so the gate spends its cap and the cap is what parks.
-  const seats = {
-    'spec-birth': amendingBirth(),
-    'spec-gate': gateDefects([
-      ['ungrounded claim 1', 'ungrounded claim 2', 'ungrounded claim 3'],
-      ['ungrounded claim 1', 'unassertable threshold', 'scope beyond the card'],
-    ]),
-  };
-  const fx = storyFixture(t, { seats });
+  // 3 → 3, and two of the three are different defects: the amendment closed
+  // two findings and the re-check found two more. A count cannot tell that from
+  // a round that reported the same three, and the count rule parked two runs
+  // that were converging (2026-08-21). The identity rule reads the round as
+  // progress, and the round after it passes.
+  const fx = storyFixture(t, {
+    seats: shippingSeats(
+      gateDefects([
+        ['ungrounded claim 1', 'ungrounded claim 2', 'ungrounded claim 3'],
+        ['ungrounded claim 1', 'unassertable threshold', 'scope beyond the card'],
+        [],
+      ]),
+    ),
+  });
   const runId = await fx.launch();
-  const capped = await waitParked(fx.paths, runId, 'spec-gate-exhausted');
-  assert.ok(capped.question.includes('spent 2 rounds'));
-  assert.ok(capped.question.includes('blocking findings: 3'));
-  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   const events = await waitClosed(fx.paths, runId);
-  assert.equal(events.find((e) => e.event === 'run-closed').reason, 'spec-gate-exhausted');
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   assert.ok(!events.some((e) => e.event === 'park' && e.type === 'spec-gate-stalled'));
   const rounds = events.filter((e) => e.event === 'spec-gate-round');
   assert.deepEqual(
     rounds.map((e) => e.findings),
-    [3, 3],
+    [3, 3, 0],
   );
   // Equal counts, moved identities: one finding survived the amendment.
   assert.equal(rounds[0].blocking.filter((id) => rounds[1].blocking.includes(id)).length, 1);
 });
 
-test('a growing blocking set parks before the cap, and one bought round runs', async (t) => {
-  // 2 → 4 → 4: growth parks, the bought round runs, and the round it buys
-  // grows again, so the gate parks a second time on the same condition.
+test('a count that does not fall across two rounds parks stalled', async (t) => {
+  // Three rounds, three defects each, two of them new every time. No round
+  // closes nothing, so the identity rule never fires; the count is what says
+  // the trade of one finding for another is not progress (ADR-0020).
+  const seats = {
+    'spec-birth': amendingBirth(),
+    'spec-gate': gateDefects([
+      ['ungrounded claim 1', 'ungrounded claim 2', 'ungrounded claim 3'],
+      ['ungrounded claim 1', 'unassertable threshold', 'scope beyond the card'],
+      ['ungrounded claim 1', 'unnamed constant', 'untestable clause'],
+    ]),
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const stalled = await waitParked(fx.paths, runId, 'spec-gate-stalled');
+  assert.ok(stalled.question.includes('3 blocking findings against 3 in round 1'));
+  assert.ok(stalled.question.includes('two rounds back'));
+  assert.ok(stalled.question.includes('has not fallen across two'));
+  assert.deepEqual(stalled.answers.options, ['round', 'abandon']);
+  // Three rounds ran: the identity rule passed each of them.
+  assert.equal(
+    readEvents(runLedgerPath(fx.paths, runId)).filter((e) => e.event === 'spec-gate-round').length,
+    3,
+  );
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').reason, 'spec-gate-stalled');
+});
+
+test('a growing blocking set parks at once, and one bought round runs', async (t) => {
+  // 2 → 4 → 4: growth closes nothing, the bought round runs, and the round it
+  // buys closes nothing either, so the gate parks a second time on the same
+  // condition.
   const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([2, 4, 4]) };
   const fx = storyFixture(t, { seats });
   const runId = await fx.launch();
   const first = await waitParked(fx.paths, runId, 'spec-gate-stalled');
   assert.ok(first.question.includes('4 blocking findings against 2 in round 1'));
-  assert.ok(first.question.includes('rather than spend a counted round'));
+  assert.ok(first.question.includes('rather than spend another round'));
   fx.daemon.engine.answer({ runId, actor: 'operator', option: 'round' });
   const second = await waitParked(fx.paths, runId, 'spec-gate-stalled', 2);
   assert.ok(second.question.includes('4 blocking findings against 4 in round 2'));
@@ -2091,17 +2183,18 @@ test('the check runs again on the round that hardens the suite', async (t) => {
 // -- acknowledging a gate that judges the world (ADR-0062) -------------------
 
 test('an ack with a reason takes the run past a credential surface gate', async (t) => {
-  // The key works on this host. The CI surfaces the run pinned at launch are
-  // not wired, which is exactly the shape that goes stale: a workflow file
-  // retired after the launch reads as a gap for the life of the run, and no
-  // retry can move it.
+  // The key works on this host and every surface is wired when the door reads
+  // them. The repository's secret is retired while the run is in flight, which
+  // is exactly the shape that goes stale: the gap reads as a gap for the life
+  // of the run, and no retry can move it.
   heldCredential(t, 'live');
   const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
+  let reads = 0;
   const fx = storyFixture(t, {
     seats,
     config: parityConfig(),
-    files: { [WORKFLOW]: UNWIRED_WORKFLOW },
-    ciSecrets: [],
+    files: { [WORKFLOW]: WIRED_WORKFLOW },
+    ciSecrets: () => (reads++ === 0 ? [CI_SECRET] : []),
   });
   const runId = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'provisioning-gate');
@@ -2152,17 +2245,26 @@ test('an ack with a reason takes the run past a credential surface gate', async 
 test('the credential probe gate names the credential it is about', async (t) => {
   // A probe verdict is the project's own command speaking, so the gate can be
   // as wrong as the command is. The key carries the credential, so an ack of
-  // one probe is not an ack of another's.
-  heldCredential(t, 'stale');
+  // one probe is not an ack of another's. The gate is reached the way it is
+  // reached in life: the value passed at the door, the service refused it
+  // afterwards, and the run's own gate is what asks (ADR-0068).
+  heldCredential(t, 'live');
   const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
   const fx = storyFixture(t, {
     seats,
     config: {
-      commands: { probe: [process.execPath, '-e', PROBE_SCRIPT] },
+      commands: { probe: [process.execPath, '-e', REVOKING_PROBE_SCRIPT] },
       credentials: [{ name: 'payments', env: PROBE_VAR, probe: 'probe' }],
     },
   });
-  const runId = await fx.launch();
+  const first = await fx.launch();
+  await waitParked(fx.paths, first, 'spec-gate-stalled');
+  heldVariable(t, BREAK_VAR, '1');
+  const { runId } = await fx.daemon.launchRun({
+    project: 'proj',
+    lane: 'story',
+    card: 'stories/alpha.md',
+  });
   const park = await waitParked(fx.paths, runId, 'provisioning-gate');
   assert.equal(park.gate, 'credential-probe:payments');
   assert.deepEqual(park.answers.options, ['retry', 'ack', 'abandon']);
