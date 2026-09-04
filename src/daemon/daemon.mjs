@@ -150,8 +150,9 @@ export class Daemon {
     this.workspaceSweepMs = workspaceSweepMs;
     this.workflowWatchMs = workflowWatchMs;
     this.proofDebtMs = proofDebtMs;
-    // Whether any project this instance has launched arms the deferred-proof
-    // trade. It is a hint for the watcher and never a gate on anything.
+    // Whether anything this instance has seen arms the deferred-proof trade: a
+    // launch under the flag, or a run of any age opening a debt. It is a hint
+    // for the watcher and never a gate on anything.
     this.proofDebtDeclared = false;
     this.waitSleep = waitSleep;
     this.forgeFor = forgeFor ?? ((project) => projectForge(this.config, project));
@@ -405,6 +406,7 @@ export class Daemon {
         // the ladders through it, because a ladder is measured in minutes.
         ...(this.waitSleep && { waitSleep: this.waitSleep }),
         onEvent: (project, line, ledger) => {
+          this.noticeRunEvent(line);
           this.tripwires?.notify(project, line, ledger);
           this.notifier?.notify({ ledger, project, line });
         },
@@ -950,6 +952,19 @@ export class Daemon {
       }
     }
     return this.launchRun({ project, lane, ...payload });
+  }
+
+  /**
+   * What this daemon takes from one run-ledger append for itself.
+   *
+   * A debt is opened by a run answering `defer-proof`, and that run may be one
+   * this instance resumed rather than launched — a restart, a resume, an
+   * answer, and no launch anywhere near it. The launch is therefore not the
+   * only place the trade is declared, and a hint that only a launch could set
+   * would leave the watcher asleep over a debt it is holding (ADR-0069).
+   */
+  noticeRunEvent(line) {
+    if (line?.event === 'proof-deferred') this.proofDebtDeclared = true;
   }
 
   /**

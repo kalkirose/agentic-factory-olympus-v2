@@ -296,7 +296,7 @@ function verdictFixture(t, opts) {
     },
     repair: repairLane({ afterVerdict: done }),
   };
-  const daemon = new Daemon(join(root, 'home'), { lanes, waitSleep: NO_WAIT });
+  let daemon = new Daemon(join(root, 'home'), { lanes, waitSleep: NO_WAIT });
   const fixture = seatFixture(seats);
   t.after(async () => {
     await daemon.stop();
@@ -304,8 +304,21 @@ function verdictFixture(t, opts) {
   });
   return {
     paths,
-    daemon,
+    get daemon() {
+      return daemon;
+    },
     calls: fixture.calls,
+    /**
+     * The restart recipe on this home: a stop, and a new instance over the
+     * same ledgers. Every open run resumes from what it recorded, which is the
+     * only thing a scenario about a restart may stand on.
+     */
+    async restart() {
+      await daemon.stop();
+      daemon = new Daemon(join(root, 'home'), { lanes, waitSleep: NO_WAIT });
+      await daemon.start();
+      daemon.engine.seatDefaults = () => ({ commandFor: fixture.commandFor });
+    },
     async launch(payload = {}) {
       await daemon.start();
       daemon.engine.seatDefaults = () => ({ commandFor: fixture.commandFor });
@@ -2098,6 +2111,46 @@ test('the deferred-proof trade is offered only where the owner armed it', async 
   );
   assert.deepEqual(park.answers.options, ['retry', 'abandon']);
   assert.ok(!park.question.includes('defer-proof'));
+});
+
+test('an external wait a restart interrupts reaches the gate, not a second day', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  process.env.SVC_KEY = 'fixture';
+  t.after(() => delete process.env.SVC_KEY);
+  const fx = externalFixture(t, { root, greenAt: null, proofDebt: true });
+  const { runId } = await fx.launch();
+  // Down long enough for the instance to have said so, so the record this
+  // scenario is about exists before the restart.
+  await waitFor(
+    () => readEvents(fx.paths.instanceLedger).some((e) => e.event === 'external-outage'),
+    { label: 'the outage record', attempts: 1800, intervalMs: 100 },
+  );
+  await fx.restart();
+  const park = await waitFor(
+    () =>
+      readEvents(runLedgerPath(fx.paths, runId)).find(
+        (e) => e.event === 'park' && e.detail?.external === true,
+      ) ?? null,
+    { label: 'the external gate after the restart', attempts: 1800, intervalMs: 100 },
+  );
+  const events = readEvents(runLedgerPath(fx.paths, runId));
+  // One wait, closed by the stop, and the second attempt is the gate: a
+  // restart may not buy another day of waiting (ADR-0069).
+  const waits = events.filter((e) => e.event === 'waiting' && e.kind === 'external');
+  assert.equal(waits.length, 1);
+  assert.equal(
+    events.find((e) => e.event === 'waiting-ended' && e.kind === 'external').outcome,
+    'daemon-stopped',
+  );
+  assert.ok(park.answers.options.includes('defer-proof'));
+  assert.ok(park.question.includes('daemon-stopped'), 'the history says how the wait ended');
+  // And one record for one outage: the instance before the restart opened it,
+  // and this one read it off the ledger rather than opening a second.
+  assert.equal(
+    readEvents(fx.paths.instanceLedger).filter((e) => e.event === 'external-outage').length,
+    1,
+  );
 });
 
 test('a service down past the wait parks, and the ship may go without the proof', async (t) => {

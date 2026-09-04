@@ -200,6 +200,61 @@ function project(t, { probe }) {
   return { root, origin, paths, daemon };
 }
 
+test('a debt a resumed run opens arms the watcher, with no launch behind it', async (t) => {
+  const { paths, daemon } = project(t, { probe: PROBE_GREEN });
+  await daemon.start();
+  // Nothing has launched, so nothing has read a config that arms the trade.
+  assert.equal(daemon.proofDebts.declared(), false);
+  // A run this instance resumed answers `defer-proof`: the append travels the
+  // event key every in-daemon observer reads, and the hint is set there
+  // (ADR-0069).
+  daemon.engine.onEvent('proj', { event: 'proof-deferred', credential: 'svc' }, paths.instanceLedger);
+  assert.equal(daemon.proofDebts.declared(), true);
+  // The watcher had already scanned and found nothing at the start; with the
+  // hint set it looks again, and the debt the resumed run opened is settled.
+  const run = openRunStore(paths, 'r9');
+  t.after(() => run.close());
+  run.append('run-launched', { actor: 'daemon', project: 'proj', lane: 'story' });
+  run.append('proof-deferred', {
+    actor: 'operator',
+    cycle: 1,
+    credential: 'svc',
+    parts: [{ layer: 'ext', parts: ['api'], files: [], byPart: {} }],
+  });
+  daemon.proofDebts.settle = async () => ({ ok: true });
+  await daemon.proofDebts.poll();
+  const settled = readEvents(paths.instanceLedger).find((e) => e.event === 'proof-settled');
+  assert.equal(settled.runId, 'r9');
+  assert.equal(settled.ok, true);
+});
+
+test('an armed instance keeps looking even after it settles everything', async (t) => {
+  const { paths, instance } = debtHome(t);
+  let asked = 0;
+  const watcher = new ProofDebtWatcher({
+    ledger: instance,
+    paths,
+    probe: async () => {
+      asked += 1;
+      return true;
+    },
+    settle: async () => ({ ok: true }),
+    declared: () => true,
+  });
+  await watcher.poll();
+  assert.equal(asked, 1);
+  assert.deepEqual(openProofDebts(paths), []);
+  // Nothing is owed now, but the flag is armed, so the next debt is found.
+  await watcher.poll();
+  assert.equal(asked, 1, 'no debt, nothing to ask about');
+  const run = openRunStore(paths, 'r2');
+  t.after(() => run.close());
+  run.append('run-launched', { actor: 'daemon', project: 'proj', lane: 'story' });
+  run.append('proof-deferred', { actor: 'operator', cycle: 1, credential: 'svc', parts: [] });
+  await watcher.poll();
+  assert.equal(asked, 2, 'an armed instance reads the ledger again');
+});
+
 const DEBT = {
   project: 'proj',
   runId: 'r1',

@@ -331,6 +331,68 @@ test('a hold taken while a run waits holds the re-dispatch behind it', async (t)
   await until(() => through, { label: 'the re-dispatch after the release' });
 });
 
+test('a poll that throws closes its own span with the error on the record', async (t) => {
+  const { paths, store } = setup(t);
+  await assert.rejects(
+    () =>
+      waitFor(
+        { store, sleep: NO_WAIT },
+        {
+          kind: 'external',
+          reason: 'sanity',
+          ms: 30_000,
+          pollMs: 10_000,
+          poll: async () => {
+            throw new Error('the probe command could not run');
+          },
+        },
+      ),
+    /could not run/,
+  );
+  // The span is closed, so the next start has nothing to repair and the
+  // handler's own violation is the only record of the fault (ADR-0069).
+  const ended = events(paths).find((e) => e.event === 'waiting-ended');
+  assert.equal(ended.outcome, 'error');
+  assert.match(ended.error, /could not run/);
+  assert.equal(openWait(events(paths)), null);
+});
+
+test('a kill while a wait is held at its re-dispatch dispatches nothing', async (t) => {
+  const { paths, engine } = engineSetup(t, { isHeld: () => true });
+  let through = false;
+  engine.registerLane('story', waitingLane(
+    { sleep: NO_WAIT, wait: { kind: 'layer', reason: 'ECONNRESET', ms: 1000 } },
+    () => (through = true),
+  ));
+  engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+  await until(() => events(paths).some((e) => e.event === 'waiting-ended'), {
+    label: 'the wait to end under the hold',
+  });
+  engine.killRun('r1', { actor: 'operator' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(through, false, 'a run that is over does not re-dispatch');
+  assert.equal(
+    readEvents(archivedRunLedgerPath(paths, 'r1')).find((e) => e.event === 'run-closed').state,
+    'killed',
+  );
+});
+
+test('a stop while a wait is held at its re-dispatch dispatches nothing', async (t) => {
+  const { paths, engine } = engineSetup(t, { isHeld: () => true });
+  let through = false;
+  engine.registerLane('story', waitingLane(
+    { sleep: NO_WAIT, wait: { kind: 'layer', reason: 'ECONNRESET', ms: 1000 } },
+    () => (through = true),
+  ));
+  engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+  await until(() => events(paths).some((e) => e.event === 'waiting-ended'), {
+    label: 'the wait to end under the hold',
+  });
+  await engine.stop();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(through, false, 'a stopping instance does not re-dispatch');
+});
+
 // -- the console -------------------------------------------------------------
 
 test('status prints what a run waits on, and counts it apart from the active', async (t) => {

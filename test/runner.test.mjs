@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { runSeat, unavailableMemo, RESET_GRACE_MS } from '../src/seats/runner.mjs';
+import { runSeat, unavailableMemo, RESET_GRACE_MS, CRASH_RETRIES } from '../src/seats/runner.mjs';
 import { parseClaudeLine } from '../src/seats/claude.mjs';
 import { ModelSemaphores } from '../src/seats/semaphore.mjs';
 import { DEFAULT_MODEL, CERTIFICATION_MODEL, FALLBACK_MODEL } from '../src/seats/seatmap.mjs';
@@ -977,6 +977,122 @@ test('a seat that goes silent dies at the deadline and the session is re-dispatc
   // spawn → failure → spawn, with nothing silent between them.
   assert.ok(events.indexOf(failure) > events.indexOf(spawned[0]));
   assert.ok(events.indexOf(failure) < events.indexOf(spawned[1]));
+});
+
+test('a ladder resumed in a second session continues at the rung the ledger holds', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev');
+  // What the session before this one spent: one rung, on this seat. A restart
+  // re-dispatches the seat into a session of its own, and the ladder it climbs
+  // is the run's rather than the session's (ADR-0069).
+  const opened = store.append('waiting', {
+    actor: 'daemon',
+    kind: 'seat',
+    reason: 'exit',
+    attempt: 1,
+    detail: { seat: 'dev', model: DEFAULT_MODEL },
+  });
+  store.append('waiting-ended', {
+    actor: 'daemon',
+    kind: 'seat',
+    outcome: 'daemon-stopped',
+    waitSeq: opened.seq,
+  });
+  const slept = [];
+  let calls = 0;
+  const result = await runSeat(store, {
+    sleep: (ms) => {
+      slept.push(ms);
+      return Promise.resolve();
+    },
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: () => {
+      calls++;
+      return fixtureCommand({ reportPath, exitCode: 3 });
+    },
+  });
+  assert.equal(result.ok, false);
+  // The rungs that were left, and not the ladder from its foot.
+  assert.deepEqual(slept, SEAT_LADDER.slice(1));
+  assert.equal(calls, 1 + CRASH_RETRIES + SEAT_LADDER.slice(1).length);
+  const attempts = readEvents(runLedgerPath(paths, 'r1'))
+    .filter((e) => e.event === 'waiting' && e.kind === 'seat')
+    .map((e) => e.attempt);
+  assert.deepEqual(attempts, [1, 2, 3]);
+});
+
+test('a report this seat delivered puts its ladder back at the foot', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev');
+  const opened = store.append('waiting', {
+    actor: 'daemon',
+    kind: 'seat',
+    reason: 'exit',
+    attempt: 1,
+    detail: { seat: 'dev', model: DEFAULT_MODEL },
+  });
+  store.append('waiting-ended', { actor: 'daemon', kind: 'seat', outcome: 'elapsed', waitSeq: opened.seq });
+  // The seat then delivered: whatever it met before that is not this failure.
+  store.append('seat-report', { actor: 'dev', seat: 'dev', path: reportPath, attempt: 1 });
+  const slept = [];
+  const result = await runSeat(store, {
+    sleep: (ms) => {
+      slept.push(ms);
+      return Promise.resolve();
+    },
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: () => fixtureCommand({ reportPath, exitCode: 3 }),
+  });
+  assert.equal(result.ok, false);
+  assert.deepEqual(slept, [...SEAT_LADDER]);
+});
+
+test('a wait holds no model slot, and the dispatch behind it takes one again', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev');
+  // One slot on this model, and this seat is holding it.
+  const semaphores = new ModelSemaphores({ [DEFAULT_MODEL]: 1 });
+  const free = [];
+  let calls = 0;
+  const result = await runSeat(store, {
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    semaphores,
+    // The wait is where another run's seat must be able to get in. A slot the
+    // waiting seat kept would stop every other seat on this model for
+    // forty-five minutes (ADR-0005).
+    sleep: async () => {
+      const granted = await Promise.race([
+        semaphores.acquire(DEFAULT_MODEL, { store, seat: 'another-run' }).then((release) => {
+          release();
+          return true;
+        }),
+        new Promise((resolve) => setTimeout(() => resolve(false), 200)),
+      ]);
+      free.push(granted);
+    },
+    commandFor: () => {
+      calls++;
+      return calls <= 1 + CRASH_RETRIES
+        ? fixtureCommand({ reportPath, exitCode: 3 })
+        : fixtureCommand({ report: { verdict: 'pass' }, reportPath });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(free, [true], 'the slot was free while the seat waited');
+  // And held again at the dispatch: the seat that came back is counted.
+  const granted = readEvents(runLedgerPath(paths, 'r1')).filter(
+    (e) => e.event === 'semaphore-granted' && e.seat === 'dev',
+  );
+  assert.equal(granted.length, 2, 'one grant at the start and one after the wait');
 });
 
 test('a seat silent through its whole retry allowance ends the session', async (t) => {
