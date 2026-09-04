@@ -42,6 +42,7 @@ import {
   hasBranch,
   hasCommit,
   readBlobFromBranch,
+  readBranchFile,
 } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 import { parseProjectConfig } from '../config/project.mjs';
@@ -637,6 +638,9 @@ export class Daemon {
    * A resume takes its card from the prior run's record before this runs
    * (`resolveResume`), so an inherited freeze is judged on the card it was
    * born for and not on whatever the payload named.
+   *
+   * The read fetches first, because the card sweep pushes to the default
+   * branch and a card written minutes ago is only there afterwards.
    */
   async refuseUnreadableCard(project, entry, card) {
     if (typeof card !== 'string' || card.length === 0) {
@@ -645,7 +649,7 @@ export class Daemon {
           'intent card. Name one with --card.',
       );
     }
-    const read = await this.readCardText(project, entry, card);
+    const read = await this.readFromDefaultBranch(project, entry, card);
     if (read.error) {
       const error = new Error(
         `the intent card ${card} is not on ${entry.defaultBranch} in ${project}: ${read.error}. ` +
@@ -668,23 +672,17 @@ export class Daemon {
   }
 
   /**
-   * The intent card as the default branch holds it, fetched first: the card
-   * sweep pushes to that branch, so a card written minutes ago is only there
-   * after a fetch. `{text}` or `{error}` — this reader never decides what an
-   * unreadable card means, because a story launch and a resume owe different
-   * answers to it.
+   * One file of this project's default branch, read the way every door reader
+   * reads one: the clone lock, the clone made on first use, a fetch that must
+   * succeed, and the blob. `{text}` or `{error}`.
    */
-  async readCardText(project, entry, card) {
-    try {
-      const text = await this.isolation.withClone(project, async () => {
-        const dir = await ensureBareClone(this.paths, project, entry.repoUrl, entry.defaultBranch);
-        await fetchClone(dir);
-        return (await readBlobFromBranch(dir, entry.defaultBranch, card)).text;
-      });
-      return { text };
-    } catch (error) {
-      return { error: error.message };
-    }
+  readFromDefaultBranch(project, entry, path) {
+    return readBranchFile(this.paths, project, {
+      branch: entry.defaultBranch,
+      path,
+      repoUrl: entry.repoUrl,
+      withClone: (read) => this.isolation.withClone(project, read),
+    });
   }
 
   /**
@@ -749,7 +747,7 @@ export class Daemon {
    */
   launchForge(project) {
     try {
-      return this.forgeFor?.(project) ?? null;
+      return this.forgeFor(project) ?? null;
     } catch {
       return null;
     }
@@ -801,16 +799,15 @@ export class Daemon {
    * failure to the stage that owns it.
    */
   async readTicketText(project, entry, ticket) {
-    try {
-      if (isAbsolute(ticket)) return readFileSync(ticket, 'utf8');
-      return await this.isolation.withClone(project, async () => {
-        const dir = await ensureBareClone(this.paths, project, entry.repoUrl, entry.defaultBranch);
-        await fetchClone(dir);
-        return (await readBlobFromBranch(dir, entry.defaultBranch, ticket)).text;
-      });
-    } catch {
-      return null;
+    if (isAbsolute(ticket)) {
+      try {
+        return readFileSync(ticket, 'utf8');
+      } catch {
+        return null;
+      }
     }
+    const read = await this.readFromDefaultBranch(project, entry, ticket);
+    return read.error === undefined ? read.text : null;
   }
 
   /**
@@ -819,14 +816,11 @@ export class Daemon {
    * blob next and refuses the launch with the config error itself.
    */
   async readLaunchConfig(project, entry) {
+    const read = await this.readFromDefaultBranch(project, entry, entry.projectConfigPath);
+    if (read.error !== undefined) return null;
     try {
-      return await this.isolation.withClone(project, async () => {
-        const dir = await ensureBareClone(this.paths, project, entry.repoUrl, entry.defaultBranch);
-        await fetchClone(dir);
-        const { text } = await readBlobFromBranch(dir, entry.defaultBranch, entry.projectConfigPath);
-        return parseProjectConfig(text, `${entry.defaultBranch}:${entry.projectConfigPath}`, {
-          launch: true,
-        });
+      return parseProjectConfig(read.text, `${entry.defaultBranch}:${entry.projectConfigPath}`, {
+        launch: true,
       });
     } catch {
       return null;

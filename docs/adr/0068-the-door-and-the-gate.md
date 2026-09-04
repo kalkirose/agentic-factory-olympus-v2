@@ -39,26 +39,48 @@ would not take (ADR-0064), and nothing is left on disk.
 
 Three facts make that affordable on every launch.
 
-- **The declaration is read from the default branch.** `readLaunchConfig` reads
-  the project config as the world holds it, so a surface the world retired
-  since some earlier launch is not a gap and one the world added since is.
+- **The declaration is read from the default branch.** `readLaunchConfig`
+  reads the project config as the world holds it, so a surface the world
+  retired since some earlier launch is not a gap and one the world added since
+  is.
 - **A green probe is cached for a day, keyed on the value.** `credential-probe`
   gains `validUntil`, and a pass is stamped on the instance ledger with the
-  project, the variable and the value's fingerprint. A gate that finds a live
-  pass for the same value asks the service nothing and stamps
-  `cached: <seq>` instead. A value that moved has a different fingerprint and
-  misses the cache by construction, which is the whole rule: a credential is
-  re-probed when it changes or when its answer ages out.
-- **The probe runs in the bare clone.** There is no worktree at the door. A
-  probe is a read-only question to a service; a project whose probe command
-  needs a working tree names an absolute one.
+  project, the variable and the value's fingerprint. Those three fields on the
+  probe stamp are the cache, and `variable:fingerprint` is its key:
+  `credential-rotated` and `credential-fingerprints` say a value moved, and the
+  cache needs no telling, because a value that moved has a different
+  fingerprint and misses by construction. A door that finds a live pass for the
+  same value asks the service nothing and stamps `cached: <seq>` instead. Only
+  the door reads the cache. A gate inside a run exists to catch a value that
+  moved under it, and one standing on a day-old answer would catch nothing, so
+  those gates always ask.
+- **The probe runs in the bare clone, under a bound.** There is no worktree at
+  the door. A probe is a read-only question to a service; a project whose probe
+  command needs a working tree names an absolute one. It is killed, with the
+  tree under it, at `probes.timeoutMs` — default one minute, validated like
+  every other config key — because the door awaits it inside the control drain
+  with the frontier sweep behind it, and a probe that never returns would hold
+  a queue nobody can see waiting. A killed probe answers no exit code and
+  refuses the launch naming the bound, and nothing is cached: only an answer of
+  yes is worth standing on later.
 
 The ship stage's parity half reads `credentials[]` from the default branch too,
-through the same reader. The question it asks is about the CI that will run the
-request, and that CI reads the default branch: a surface the world retired
-since the launch pinned its blob is not a gap. The probe half stays on the
-pinned config, because a probe names a command in it. A branch nothing could
-read falls back to the pinned set, which is where the gate stood before.
+through `worldConfig` in `src/lanes/probes.mjs`. The question it asks is about
+the CI that will run the request, and that CI reads the default branch: a
+surface the world retired since the launch pinned its blob is not a gap. The
+probe half stays on the pinned config, because a probe names a command in it. A
+branch nothing could read falls back to the pinned set, which is where the gate
+stood before.
+
+`worldConfig` and `readLaunchConfig` are two callers of one reader.
+`readBranchFile` in `src/isolation/clones.mjs` is the whole walk — the clone,
+the fetch, the blob — with its three choices named: whether the clone is made
+on first use, whether the project's clone lock is taken, and whether a failed
+fetch fails the read. The daemon takes the lock and requires the fetch; a lane
+holds no lock and stands on the refs the launch left rather than failing a gate
+over the network. The repair ticket and the intent card at the door are the
+other two callers. Four copies of that walk had already drifted apart in those
+three choices, which is what one reader is for.
 
 The gates inside a run stay, and their text says what they are for: the door
 proved every declared credential before the run existed, so what a live gate
@@ -66,24 +88,39 @@ can still catch is a value that moved while the run was in flight.
 
 ### A harness-class finding is one decision per defect, with no retry
 
-The provisioning gate in `src/lanes/verdict.mjs` splits on the class of the
-findings it holds. `gateFor` routes a set with any env-class finding to the
-substrate gate, which is the gate as it was: `retry`, the ack where a finding
-may carry one (ADR-0032), and a line naming the harness findings the same
-render holds and saying the next gate asks about them. A set of harness
+The provisioning gate in `src/lanes/verdict.mjs` splits on the ack's own scope
+rule, `ACKABLE_CLASSES`, read through `isAckable`: a finding an ack may cover
+is a defect of the harness, and every other finding at that gate is a statement
+about the host.
+
+`gateFor` routes a set holding any other class to the substrate gate, which
+offers `retry` and nothing else. It offers no ack, because the split has
+already put every ackable finding on the other side of it, and it names the
+harness findings the same render holds without asking about them: an operator
+handed a list they cannot act on answers the wrong half of it. A set of harness
 findings alone routes to the harness gate, which offers no `retry` at all.
 `HARNESS_GATE_FORMS` in `src/lanes/shared.mjs` carries the order: `ack` first,
-with each finding's fingerprint beside it in the question, and the `abandon`
-every park owes.
+with each finding's fingerprint and its escape number beside it in the
+question, and the `abandon` every park owes.
 
-Before it parks, the harness gate records one escape per fingerprint on the
-escapes ledger: category `harness`, kind `harness`, `refs.fingerprint` the ack
-identity, no ticket. No repair sweep launches against a ticketless escape, and
-the quality-bar window counts categories rather than kinds, so a harness defect
-never moves the escape rate. What it does is count: `kindEscapesWindow` in
-`src/telemetry/escapes.mjs` reads escapes of one kind over a window of ships,
-and this is the number that says what the harness is costing the runs it
-judges.
+The harness question is asked when the substrate half runs out of answers as
+well as when it is empty. A substrate gate records the identities it asked
+about; a later gate whose env findings are that same set is a gate the retry
+did not move, and it hands the harness question over there, naming the env
+findings it is standing on. Without that, a host nobody repairs holds a
+harness defect unasked for the life of the run, which is the loop this split
+exists to end. When the wait ladder lands, a spent ladder is what "exhausted"
+means and this comparison goes with the rule it stands in for.
+
+Before it parks, the harness gate records one escape per fingerprint through
+`recordEscape` on the escapes ledger — the instance-scoped store the escapes
+live in, not the instance ledger: category `harness`, kind `harness`,
+`refs.fingerprint` the ack identity, no ticket. No repair sweep launches
+against a ticketless escape, and the quality-bar window counts categories
+rather than kinds, so a harness defect never moves the escape rate. What it
+does is count: `kindEscapesWindow` in `src/telemetry/escapes.mjs` reads escapes
+of one kind over a window of ships, and the `escapes-window` metric answers
+that count rather than the rate when its entry names `params.kind`.
 
 The escape stays open while the acknowledgment stands. `ESCAPE_KIND_OWNERSHIP`
 in `src/ledger/resolution.mjs` names the act that closes it: `olympusctl
@@ -190,6 +227,20 @@ project whose CI runs the request's own workflow files rather than main's —
 blob again, where `run-reconfigured` (ADR-0061) is the way past a stale
 declaration. Trigger: a surface gap the pinned blob names and main does not,
 where CI really needed the pinned one. Reversal cost: one argument.
+
+If `probes.timeoutMs` proves wrong, the key moves: a longer bound for a
+service that is honestly slow, a shorter one for a door that must never wait.
+Trigger: a probe killed at the bound that would have answered yes. Reversal
+cost: one config line, and the default in `src/config/project.mjs` if every
+project would move it.
+
+If handing the harness question over at an exhausted substrate gate proves
+wrong — an operator who wanted to keep retrying the host and now gets a
+different question — the harness half waits for an empty substrate set again,
+and a run under an unrepairable host asks its harness question at the abandon.
+Trigger: one gate where the substrate retry was about to work. Reversal cost:
+one branch in `gateFor`; the identities the substrate gate records stay,
+because the wait ladder reads the same thing.
 
 If the harness gate's missing `retry` proves too strict — a defect a restart
 really does clear — the gate offers `retry` again beside the ack, and the

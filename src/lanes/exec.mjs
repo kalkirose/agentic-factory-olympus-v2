@@ -72,6 +72,7 @@
 // the process tree from outside — the command's own spawn is untouched — so
 // what asking for it changes about the command is nothing.
 import { spawn } from 'node:child_process';
+import { terminateTree } from '../engine/processes.mjs';
 import { createWriteStream, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -270,6 +271,7 @@ export function runCommand(
     redact,
     resources = false,
     sampleIntervalMs,
+    timeoutMs = null,
   } = {},
 ) {
   if (!Array.isArray(argv) || argv.length === 0) {
@@ -464,15 +466,31 @@ export function runCommand(
         resources: measured,
       });
     };
-    child.on('error', (error) => {
+    // A command that never ends. Every caller of this function awaits it, and
+    // one of them awaits it inside the daemon's control drain, so a child that
+    // hangs holds a queue nobody can see waiting. The kill is the answer the
+    // caller gets: no exit code, and a reason that says what happened, which
+    // is the same shape a command that could not spawn produces (ADR-0068).
+    const deadline =
+      typeof timeoutMs === 'number' && timeoutMs > 0
+        ? setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            // The tree, not the child: a probe that wraps a script leaves the
+            // work in a grandchild, and killing the wrapper alone would answer
+            // the caller while the thing that hung carried on.
+            void terminateTree(child);
+            void done({ code: null, timedOut: true, error: `timed out after ${timeoutMs} ms` });
+          }, timeoutMs)
+        : null;
+    if (deadline?.unref) deadline.unref();
+    const end = (ending) => {
       if (settled) return;
       settled = true;
-      void done({ code: null, error: error.message });
-    });
-    child.on('close', (code, signal) => {
-      if (settled) return;
-      settled = true;
-      void done({ code, signal });
-    });
+      if (deadline) clearTimeout(deadline);
+      void done(ending);
+    };
+    child.on('error', (error) => end({ code: null, error: error.message }));
+    child.on('close', (code, signal) => end({ code, signal }));
   });
 }

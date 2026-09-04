@@ -12,7 +12,12 @@ import {
   openWorkspaceLeftovers,
   storyRunsByKey,
 } from '../telemetry/readers.mjs';
-import { readEscapeSet, escapesWindow, fastPathEscapesWindow } from '../telemetry/escapes.mjs';
+import {
+  readEscapeSet,
+  escapesWindow,
+  fastPathEscapesWindow,
+  kindEscapesWindow,
+} from '../telemetry/escapes.mjs';
 import { computeFrontier } from '../frontier/graph.mjs';
 import { ALL_LENSES } from '../lanes/lenses.mjs';
 
@@ -36,9 +41,21 @@ export async function evaluateMetric(metric, input) {
 }
 
 const IMPLEMENTATIONS = {
-  'escapes-window': async ({ paths, project, window }) => {
+  'escapes-window': async ({ paths, project, window, params }) => {
     const ships = listShips(paths).filter((s) => s.project === project);
     const escapes = projectEscapes(paths, project);
+    // Named a kind, the reading is a count of that kind over the window. The
+    // quality bar counts final categories and answers a rate; a kind names a
+    // defect the harness recognises in itself, and there the question is how
+    // many, never what share (ADR-0068).
+    if (typeof params?.kind === 'string') {
+      const w = kindEscapesWindow({ kind: params.kind, ships, escapes, windowSize: window });
+      return {
+        value: w.counted,
+        eligible: ships.length > 0,
+        detail: { ships: w.ships, counted: w.counted, kind: params.kind, escapes: w.escapes },
+      };
+    }
     const w = escapesWindow({ ships, escapes, windowSize: window });
     return {
       value: w.rate,
@@ -47,6 +64,9 @@ const IMPLEMENTATIONS = {
     };
   },
 
+  // The same window as `escapes-window` under a kind, kept as an entry of its
+  // own because a project config names it and a registry is a closed set: the
+  // reading is identical, and `fastPathEscapesWindow` is that call.
   'fast-path-escapes': async ({ paths, project, window }) => {
     const ships = listShips(paths).filter((s) => s.project === project);
     const escapes = projectEscapes(paths, project);

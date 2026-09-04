@@ -1819,6 +1819,76 @@ test('an ack recorded under a prose fingerprint still answers its gate', async (
   assert.equal(events.find((e) => e.event === 'finding-ack-used').acks[0].fingerprint, words);
 });
 
+test('a substrate gate the retry does not move hands the harness question over', async (t) => {
+  // The host stays broken. Under the split alone the substrate gate would park
+  // for ever and the harness defect beside it would never be asked about, so a
+  // gate that finds the same substrate findings by identity asks the harness
+  // question there, naming the env findings it stands on (ADR-0068). When the
+  // wait ladder lands, a spent ladder is what exhausted means.
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat((layer) => ({ class: layer === 'hlayer' ? 'harness' : 'env' })),
+    ...furyClean(),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'hlayer', command: 'hlayer' },
+      { name: 'elayer', command: 'elayer' },
+    ],
+    commands: {
+      suite: SUITE_CMD,
+      hlayer: decayingLayer('hcount', 8),
+      elayer: ['node', '-e', "process.exit(require('fs').existsSync('../env-broken')?1:0)"],
+    },
+    seedExtra: async (ctx, worktree) => {
+      writeFileSync(join(worktree, '..', 'env-broken'), 'x');
+    },
+  });
+  const { runId, worktree } = await fx.launch();
+  const first = await waitParked(fx.paths, runId, 'provisioning-gate');
+  assert.deepEqual(first.answers.options, ['retry', 'abandon']);
+  assert.ok(Array.isArray(first.detail.substrate) && first.detail.substrate.length === 1);
+  assert.deepEqual(readEscapeSet(fx.paths.escapesLedger), []);
+  // The operator repairs nothing and answers: the same host, the same finding.
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'retry' });
+
+  const second = await waitFor(
+    () => {
+      const parks = readEvents(runLedgerPath(fx.paths, runId)).filter(
+        (e) => e.event === 'park' && e.type === 'provisioning-gate',
+      );
+      return parks.length > 1 ? parks[1] : null;
+    },
+    { label: 'the second provisioning gate', attempts: 600, intervalMs: 100 },
+  );
+  // The retry moved nothing, so this gate asks what a retry cannot answer.
+  assert.deepEqual(second.answers.options, ['ack', 'abandon']);
+  assert.deepEqual(second.acks.map((a) => a.class), ['harness']);
+  assert.ok(second.question.includes('unchanged since the last gate'));
+  assert.ok(second.question.includes('[env]'), 'the gate did not name what it stands on');
+  assert.equal(readEscapeSet(fx.paths.escapesLedger).length, 1);
+  await answerFromConsole(fx, { command: 'answer', runId, option: 'ack' });
+
+  // With the harness defect answered, the substrate gate is the question again:
+  // an acked finding is not asked twice, whatever the host does.
+  const third = await waitFor(
+    () => {
+      const parks = readEvents(runLedgerPath(fx.paths, runId)).filter(
+        (e) => e.event === 'park' && e.type === 'provisioning-gate',
+      );
+      return parks.length > 2 ? parks[2] : null;
+    },
+    { label: 'the third provisioning gate', attempts: 600, intervalMs: 100 },
+  );
+  assert.deepEqual(third.answers.options, ['retry', 'abandon']);
+  rmSync(join(worktree, '..', 'env-broken'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'retry' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+});
+
 test('a gate holding an env finding and a harness one asks the substrate first', async (t) => {
   const seats = {
     dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
@@ -1852,7 +1922,7 @@ test('a gate holding an env finding and a harness one asks the substrate first',
   assert.ok(park.question.includes('[env]'));
   assert.ok(!park.question.includes('[harness]'));
   assert.ok(park.question.includes('1 harness finding(s)'));
-  assert.ok(park.question.includes('the gate after this one asks about them'));
+  assert.ok(park.question.includes('The gate after this one asks about them'));
   // Nothing is counted yet: the harness question has not been asked.
   assert.deepEqual(readEscapeSet(fx.paths.escapesLedger), []);
   rmSync(join(worktree, '..', 'env-broken'));

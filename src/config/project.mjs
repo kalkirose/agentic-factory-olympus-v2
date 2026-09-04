@@ -5,12 +5,24 @@
 // describes the machine → instance config.
 import { TRIPWIRE_METRICS, BREACH_OPS } from '../tripwires/registry.mjs';
 import { ALL_LENSES, DEFAULT_LENSES } from '../lanes/lenses.mjs';
-import { RUN_EVENTS, INSTANCE_EVENTS, ESCAPES_EVENTS } from '../ledger/registry.mjs';
+import {
+  RUN_EVENTS,
+  INSTANCE_EVENTS,
+  ESCAPES_EVENTS,
+  DEFECT_KINDS,
+} from '../ledger/registry.mjs';
 
 const KNOWN_EVENTS = new Set([...RUN_EVENTS, ...INSTANCE_EVENTS, ...ESCAPES_EVENTS]);
 
 export const DEFAULT_PROJECT_CONFIG_PATH = '.olympus/project.json';
 export const DEFAULT_CONSTITUTION_PATH = '.olympus/constitution.md';
+
+// How long a credential probe may run before the harness kills it and answers
+// for it. A probe is one read-only question to a service, and every one the
+// harness has seen answers in seconds; a minute is long enough for a slow
+// service on a bad day and short enough that a probe which never returns does
+// not hold the control drain or a frontier sweep behind it (ADR-0068).
+export const DEFAULT_PROBE_TIMEOUT_MS = 60_000;
 
 // A path that starts at a root, POSIX or Windows. Most path entries here are
 // repo-relative and this rejects them; the close-out block is the exception
@@ -108,6 +120,8 @@ export function defaultProjectConfig() {
     // external credentials the project's work needs, each with the read-only
     // command that proves it; an empty list probes nothing
     credentials: [],
+    // how a credential probe is bounded
+    probes: { timeoutMs: DEFAULT_PROBE_TIMEOUT_MS },
     // label rules: one label and the diff path entries that require it; an
     // empty list leaves every request unlabelled
     labels: [],
@@ -154,6 +168,7 @@ export function validateProjectConfig(config, { launch = false } = {}) {
   validateBudgets(config.budgets, err);
   validateConstitutionPath(config.constitutionPath, err);
   validateCredentials(config.credentials, config.commands, config.gates, err);
+  validateProbes(config.probes, err);
   validateLabels(config.labels, err);
   validateWatchedWorkflows(config.watchedWorkflows, err);
   validateCloseout(config.closeout, err);
@@ -604,6 +619,14 @@ function validateTripwires(tripwires, err) {
     if (entry.params !== undefined && !isPlainObject(entry.params)) {
       err(at('params'), 'must be an object');
     }
+    // A metric narrowed to a closed name is validated against that set. A
+    // reading keyed on a kind nothing carries answers zero for ever and never
+    // breaches, which looks exactly like a metric that is fine (ADR-0068).
+    if (entry.params?.kind !== undefined && (metric.optionalParams ?? []).includes('kind')) {
+      if (!DEFECT_KINDS.has(entry.params.kind)) {
+        err(at('params.kind'), `unknown defect kind: ${entry.params.kind}`);
+      }
+    }
     for (const param of metric.requiredParams ?? []) {
       const value = entry.params?.[param];
       if (typeof value !== 'string' || value.length === 0) {
@@ -760,6 +783,26 @@ function validateCloseout(closeout, err) {
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const CREDENTIAL_CI_KEYS = ['secret', 'workflows'];
 
+/**
+ * How a credential probe is bounded. One key today, and a section rather than
+ * a loose `probeTimeoutMs` because the probe is a thing with rules of its own
+ * and the next one belongs beside this one.
+ */
+function validateProbes(probes, err) {
+  if (probes === undefined) return;
+  if (!isPlainObject(probes)) {
+    err('probes', 'must be an object');
+    return;
+  }
+  for (const key of Object.keys(probes)) {
+    if (key !== 'timeoutMs') err(`probes.${key}`, 'unknown key');
+  }
+  if (probes.timeoutMs === undefined) return;
+  if (!Number.isInteger(probes.timeoutMs) || probes.timeoutMs <= 0) {
+    err('probes.timeoutMs', 'must be a positive integer of milliseconds');
+  }
+}
+
 function validateCredentials(credentials, commands, gates, err) {
   const tier1 = isPlainObject(gates) && Array.isArray(gates.tier1) ? gates.tier1 : [];
   const layerNames = new Set(tier1.filter(isPlainObject).map((layer) => layer.name));
@@ -900,6 +943,7 @@ export function withProjectDefaults(config) {
     repo: { ...base.repo, ...config.repo },
     gates: { ...base.gates, ...config.gates },
     review: { ...base.review, ...config.review },
+    probes: { ...base.probes, ...config.probes },
     stack: config.stack ?? null,
     graph: config.graph ? { phases: [{ name: 'launch' }], ...config.graph } : null,
     closeout: config.closeout ?? null,

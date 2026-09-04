@@ -61,6 +61,7 @@ import {
 import {
   ackFingerprint,
   coveringAck,
+  findingFingerprint,
   isAckable,
   standingAcksFor,
 } from '../ledger/acks.mjs';
@@ -970,7 +971,7 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
         // and reaches the human, which is where an ack comes from (ADR-0032).
         const standing = standingAcksFor(ctx.paths, ctx.project);
         const used = ops.map((f) => coveringAck(standing, f));
-        if (!used.every(Boolean)) return gateFor(ctx, ops, last);
+        if (!used.every(Boolean)) return gateFor(ctx, ops, last, { events, standing });
         ctx.store.append('finding-ack-used', {
           actor: ACTOR,
           findings: ops.map((f) => f.id),
@@ -1145,12 +1146,15 @@ const HARNESS_NOTE =
  * asks the one question the operator can answer, which is whether the run goes
  * on under a defect somebody already holds (ADR-0068).
  *
- * A render that holds both takes the env gate first. The env findings are the
- * ones a repair can still clear, and the harness question is asked when
- * nothing but harness findings is left — which is the next gate of the same
- * run, after the retry the operator bought.
+ * A render that holds both takes the substrate gate first, because the env
+ * findings are the ones a repair can still clear. The harness question is
+ * asked when nothing but harness findings is left, or when the substrate half
+ * is exhausted: a gate whose env findings are the same ones the previous
+ * substrate gate of this run named is a gate the retry did not move, and
+ * holding the harness question behind it for ever is the loop this split
+ * exists to end.
  */
-function gateFor(ctx, ops, last) {
+function gateFor(ctx, ops, last, { events, standing }) {
   // The split is the ack's own scope rule (`ACKABLE_CLASSES`), read through
   // `isAckable`: a finding an ack may cover is a defect of the harness, and
   // every other finding at this gate is a statement about the host. The two
@@ -1158,9 +1162,38 @@ function gateFor(ctx, ops, last) {
   // of it here.
   const harness = ops.filter(isAckable);
   const substrate = ops.filter((f) => !isAckable(f));
-  return substrate.length > 0
-    ? substrateGateFor(substrate, harness, last)
-    : harnessGateFor(ctx, harness, last);
+  if (substrate.length === 0) return harnessGateFor(ctx, harness, last, []);
+  // Only what the operator has not already answered. A harness finding a
+  // standing ack covers is not a question, and asking it again at every
+  // exhausted substrate gate would be the same loop in the other direction.
+  const unasked = harness.filter((f) => !coveringAck(standing, f));
+  if (unasked.length > 0 && substrateExhausted(events, substrate)) {
+    return harnessGateFor(ctx, unasked, last, substrate);
+  }
+  return substrateGateFor(substrate, harness, last);
+}
+
+/**
+ * Whether the substrate half of this gate has already been asked and answered
+ * with no effect: the env findings of this render are, by identity, the set
+ * the last substrate gate of this run named.
+ *
+ * The identity is the finding fingerprint, which is the harness's own answer
+ * to "is this the same finding" (ADR-0022) and survives the fresh ids a triage
+ * seat mints for a red it meets again.
+ *
+ * This is the placeholder for the wait ladder: once a persisting env finding
+ * waits and re-runs on its own before it asks anybody, "exhausted" is what the
+ * spent ladder says, and this comparison goes with the rule it stands in for.
+ */
+function substrateExhausted(events, substrate) {
+  const asked = [...events]
+    .reverse()
+    .find((e) => e.event === 'park' && e.type === 'provisioning-gate' && e.detail?.substrate);
+  if (!asked) return false;
+  const now = substrate.map((f) => findingFingerprint(f)).sort();
+  const before = [...asked.detail.substrate].sort();
+  return now.length === before.length && now.every((id, i) => id === before[i]);
 }
 
 /**
@@ -1182,9 +1215,14 @@ function substrateGateFor(ops, harness, last) {
       ops.map(line).join('\n') +
       (harness.length > 0
         ? `\nThis render also holds ${harness.length} harness finding(s). They are a defect of ` +
-          'the machinery and not of this host, and the gate after this one asks about them.'
+          'the machinery and not of this host. The gate after this one asks about them, and a ' +
+          'gate that finds these same substrate findings again asks about them there.'
         : ''),
     refs: [last.record],
+    // What this gate asked about, by identity. The gate after it reads this to
+    // know whether the retry moved anything, and hands the harness question
+    // over when it did not.
+    detail: { substrate: ops.map((f) => findingFingerprint(f)).sort() },
   });
 }
 
@@ -1194,7 +1232,7 @@ function substrateGateFor(ops, harness, last) {
  * is what the ack buys against: a defect the harness walks past is a cost, and
  * a cost nobody wrote down is an anecdote (ADR-0024, ADR-0068).
  */
-function harnessGateFor(ctx, ops, last) {
+function harnessGateFor(ctx, ops, last, standingOn) {
   const offered = ops.map((f) => ({
     fingerprint: ackFingerprint(f),
     class: f.class,
@@ -1210,6 +1248,11 @@ function harnessGateFor(ctx, ops, last) {
     question:
       'These harness findings persist after an operational fix:\n' +
       ops.map(line).join('\n') +
+      (standingOn.length > 0
+        ? '\nThe substrate findings under them are unchanged since the last gate, so the ' +
+          'question the retry could answer has been asked:\n' +
+          standingOn.map((f) => `- [${f.class}] ${f.summary} (evidence: ${f.evidence})`).join('\n')
+        : '') +
       `\n${HARNESS_NOTE}`,
     refs: [last.record],
     // The records this gate is asking against, and no others: an escape the

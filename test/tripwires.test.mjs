@@ -6,6 +6,7 @@ import { scaffoldHome, runLedgerPath, archivedRunLedgerPath } from '../src/daemo
 import { openInstanceStore, openEscapesStore } from '../src/telemetry/stores.mjs';
 import { openBreaches, openStreamItems } from '../src/telemetry/readers.mjs';
 import { recordEscape } from '../src/telemetry/escapes.mjs';
+import { parseProjectConfig } from '../src/config/project.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { validateProjectConfig } from '../src/config/project.mjs';
 import {
@@ -194,6 +195,83 @@ test('escapes-window counts escapes after the oldest ship of the project', async
   assert.deepEqual(result.detail, { ships: 1, counted: 5 });
   const empty = await evaluateMetric('escapes-window', { paths, project: 'r', window: 10 });
   assert.equal(empty.eligible, false);
+});
+
+test('escapes-window named a kind answers that count, not the quality-bar rate', async (t) => {
+  const paths = home(t);
+  writeLedger(runLedgerPath(paths, 's1'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-02T00:00:00Z', 'merged', { sha: 'aaa' }),
+  ]);
+  writeLedger(paths.escapesLedger, [
+    // A defect of the machinery, counted where the gate asked about it. Its
+    // category is not one the quality bar counts, so the rate never moves.
+    line(1, '2026-08-03T00:00:00Z', 'escape-recorded', {
+      category: 'harness',
+      kind: 'harness',
+      defectLine: 'the hlayer gate command reads a marker the host rotates',
+      detectionSource: 'harness-self',
+      attribution: 'harness',
+      refs: { project: 'p', fingerprint: 'harness:aaaaaaaaaaaa' },
+    }),
+    line(2, '2026-08-03T01:00:00Z', 'escape-recorded', {
+      category: 'product-escape',
+      kind: 'fast-path-escape',
+      defectLine: 'a defect the fast path carried',
+      detectionSource: 'harness-self',
+      attribution: 'alpha-1',
+      refs: { project: 'p' },
+    }),
+  ]);
+  const rate = await evaluateMetric('escapes-window', { paths, project: 'p', window: 10 });
+  assert.equal(rate.value, 0.1, 'the harness escape moved the quality-bar rate');
+  const harness = await evaluateMetric('escapes-window', {
+    paths,
+    project: 'p',
+    window: 10,
+    params: { kind: 'harness' },
+  });
+  // A count, not a share: the question about a defect the harness recognises
+  // in itself is how many there were (ADR-0068).
+  assert.equal(harness.value, 1);
+  assert.equal(harness.eligible, true);
+  assert.deepEqual(harness.detail, { ships: 1, counted: 1, kind: 'harness', escapes: [1] });
+  // The kind the fast-path entry has always counted reads the same either way.
+  const byKind = await evaluateMetric('escapes-window', {
+    paths,
+    project: 'p',
+    window: 10,
+    params: { kind: 'fast-path-escape' },
+  });
+  const byEntry = await evaluateMetric('fast-path-escapes', { paths, project: 'p', window: 10 });
+  assert.equal(byKind.value, 1);
+  assert.equal(byKind.value, byEntry.value);
+  // A registry entry may only name a kind the harness has a word for: a
+  // reading keyed on one it does not answers zero for ever and never breaches,
+  // which looks exactly like a metric that is fine.
+  const entry = (kind) => ({
+    version: 1,
+    commands: { t: ['node'] },
+    stack: null,
+    tripwires: [
+      { id: 'h', metric: 'escapes-window', window: 10, breach: { op: '>', value: 1 }, answer: 'fix it', params: { kind } },
+    ],
+  });
+  assert.throws(
+    () => parseProjectConfig(JSON.stringify(entry('no-such-kind')), 'fixture'),
+    /params.kind: unknown defect kind: no-such-kind/,
+  );
+  parseProjectConfig(JSON.stringify(entry('harness')), 'fixture');
+
+  // A kind nothing carries reads zero over a window that exists.
+  const none = await evaluateMetric('escapes-window', {
+    paths,
+    project: 'p',
+    window: 10,
+    params: { kind: 'capture-takeback' },
+  });
+  assert.equal(none.value, 0);
+  assert.equal(none.eligible, true);
 });
 
 test('a shipped repair stands in the escape windows like a story', async (t) => {

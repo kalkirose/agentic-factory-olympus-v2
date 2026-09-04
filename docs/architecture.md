@@ -755,10 +755,11 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   word for a defect of the machinery that judges, recorded as an escape by the
   provisioning gate that asks about it (ADR-0068). It carries the ack
   fingerprint and no ticket, so no repair sweep launches against it and the
-  quality-bar rate never moves; `kindEscapesWindow` counts it, and the revoke
-  that ends the acknowledgment closes it — the one escape kind whose owner is a
-  console act rather than a repair (`ESCAPE_KIND_OWNERSHIP` in
-  `src/ledger/resolution.mjs`).
+  quality-bar rate never moves; `kindEscapesWindow` counts it, and
+  `escapes-window` answers that count rather than the rate when its entry names
+  `params.kind`. The revoke that ends the acknowledgment closes it — the one
+  escape kind whose owner is a console act rather than a repair
+  (`ESCAPE_KIND_OWNERSHIP` in `src/ledger/resolution.mjs`).
 - **One red regime.** CI reds get one automatic re-run of failed jobs, then
   the same four-class triage and the same routes as in-run reds. Budgets are
   shared.
@@ -930,8 +931,11 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   repairs it, so that gate offers no retry at all: `ack` leads, with each
   finding's fingerprint beside it, and `abandon` closes. A gate holding both
   asks the substrate first and names the harness findings the next gate will
-  ask about. Before it parks, the harness gate records one escape per
-  fingerprint on the escapes ledger under the kind `harness`, with no ticket,
+  ask about; when that next gate finds the same substrate findings by identity,
+  the retry moved nothing and the harness question is asked there, with the env
+  findings it stands on named beside it. Before it parks, the harness gate
+  records one escape per fingerprint on the escapes ledger under the kind
+  `harness`, with no ticket,
   so no repair sweep launches against it and the quality-bar rate never moves;
   what the record buys is a count of what the harness is costing the runs it
   judges, open until `olympusctl revoke` names the fix. The ack records the
@@ -1110,11 +1114,20 @@ the config the default branch holds. A gap or a refusal refuses the launch
 with the gate's evidence and the fingerprint of the value a service would not
 take. A green probe is cached on the instance ledger for a day, keyed on the
 value's fingerprint, so a burst of launches asks each service once and a value
-that moved misses the cache by construction. The door has no run to hold, so
-it offers no acknowledgment and no retry: the console fixes the world and
-launches again, which costs nothing. The gates inside a run stay, they read no
-cache, and they are the guards for a value that moves while the run is in
-flight.
+that moved misses the cache by construction. Each probe is killed at
+`probes.timeoutMs` (default one minute): the door awaits it inside the control
+drain, and a probe that never returns would hold a queue nobody can see
+waiting. The door has no run to hold, so it offers no acknowledgment and no
+retry: the console fixes the world and launches again, which costs nothing. The
+gates inside a run stay, they read no cache, and they are the guards for a
+value that moves while the run is in flight.
+
+One reader does the whole walk for every read above — `readBranchFile` in
+`src/isolation/clones.mjs` — with its three choices named: whether the clone is
+made on first use, whether the project's clone lock is taken, and whether a
+failed fetch fails the read. The door takes the lock and requires the fetch; a
+lane holds no lock and stands on the refs the launch left rather than failing a
+gate over the network.
 
 Every refused launch, console or frontier, is a `launch-rejected` stamp on the
 instance ledger with the card or ticket it named, the reason, and the evidence

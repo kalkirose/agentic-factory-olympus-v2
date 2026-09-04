@@ -108,6 +108,10 @@ const REVOKING_PROBE_SCRIPT =
   `console.log('probe sent ${PROBE_LEAK}');` +
   `process.exit(process.env.${PROBE_VAR} === 'live' && !process.env.${BREAK_VAR} ? 0 : 1);`;
 
+// A probe that never answers. The bound is what ends it, and nothing else
+// would: at the door this runs inside the control drain (ADR-0068).
+const HANGING_PROBE_SCRIPT = 'setInterval(() => {}, 1 << 30);';
+
 /** Sets the fixture credential for one test and restores it afterwards. */
 function heldCredential(t, value) {
   const previous = process.env[PROBE_VAR];
@@ -780,6 +784,40 @@ test('a stale credential is refused at the door, and no workspace exists after i
   fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   await waitClosed(fx.paths, runId);
   assert.ok(fx.calls.some((c) => c.seat === 'spec-birth'));
+});
+
+test('a probe that never answers is killed at its bound and the launch is refused', async (t) => {
+  heldCredential(t, 'live');
+  const seats = { 'spec-birth': amendingBirth(), 'spec-gate': gateFindings([3, 3]) };
+  const fx = storyFixture(t, {
+    seats,
+    config: {
+      commands: { probe: [process.execPath, '-e', HANGING_PROBE_SCRIPT] },
+      credentials: [{ name: 'payments', env: PROBE_VAR, probe: 'probe' }],
+      // Short enough to be a test and long enough to be a spawn: the bound is
+      // the project's, and this project says a probe answers in a moment.
+      probes: { timeoutMs: 700 },
+    },
+  });
+  const refused = await fx.refusedLaunch();
+  assert.match(refused.message, /did not answer: it timed out after 700 ms, and was killed/);
+  assert.match(refused.message, /Repair it, then launch again/);
+  assert.equal(refused.detail.timedOut, true);
+  assert.equal(refused.detail.credential, 'payments');
+  // Nothing was provisioned, and nothing was cached: a killed probe answered
+  // nothing, and only an answer of yes is worth standing on later.
+  assert.deepEqual(readdirSync(fx.paths.runs), []);
+  const stamped = readEvents(fx.paths.instanceLedger).filter(
+    (e) => e.event === 'credential-probe',
+  );
+  assert.deepEqual(
+    stamped.map((e) => [e.ok, e.reason, e.validUntil]),
+    [[false, 'timeout', undefined]],
+  );
+  // The daemon is still answering: the drain that awaited the probe is free.
+  const second = await fx.refusedLaunch();
+  assert.match(second.message, /did not answer/);
+  assert.equal(readEvents(fx.paths.instanceLedger).filter((e) => e.event === 'credential-probe').length, 2);
 });
 
 test('a second launch inside the cache window asks the service nothing', async (t) => {

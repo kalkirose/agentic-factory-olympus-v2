@@ -29,10 +29,10 @@
 // the whole answer. The probe's own output never reaches the ledger or the
 // park text, because the process holds a credential and anything it prints can
 // carry one (ADR-0027).
-import { cloneDir, fetchClone } from '../isolation/clones.mjs';
+import { cloneDir, fetchClone, readBranchFile } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
-import { parseProjectConfig } from '../config/project.mjs';
+import { DEFAULT_PROBE_TIMEOUT_MS, parseProjectConfig } from '../config/project.mjs';
 import { listRunEvents } from '../telemetry/readers.mjs';
 import {
   declaredNames,
@@ -165,9 +165,10 @@ export function credentialRefusal(directive) {
       detail,
     };
   }
-  // The probe could not run at all — a defect of this machine. The park text
-  // is already the whole account of it, minus the options a door cannot offer.
-  return { message: park.question.split('\n')[0], detail };
+  // The probe did not answer — it could not run, or it ran past its bound and
+  // was killed. The park text is already the whole account of it, minus the
+  // options a door cannot offer.
+  return { message: `${park.question.split('\n')[0]} Repair it, then launch again.`, detail };
 }
 
 /**
@@ -183,13 +184,18 @@ export function credentialRefusal(directive) {
 export async function worldConfig(ctx, branch) {
   const path = ctx.payload?.configPath;
   if (typeof path !== 'string' || path.length === 0) return null;
-  const clone = cloneDir(ctx.paths, ctx.project);
+  // The same reader the door uses, with the two choices a lane makes
+  // differently: the clone exists already, because this run launched from it,
+  // and a fetch that fails leaves the refs where the launch left them rather
+  // than failing a gate over the network.
+  const read = await readBranchFile(ctx.paths, ctx.project, {
+    branch,
+    path,
+    fetch: 'best-effort',
+  });
+  if (read.error !== undefined) return null;
   try {
-    // The launch fetched this clone; a fetch that fails here leaves the refs
-    // where the launch left them rather than failing a gate over the network.
-    await fetchClone(clone).catch(() => {});
-    const text = await git(['show', `${branch}:${path}`], { cwd: clone });
-    return parseProjectConfig(text, `${branch}:${path}`, { launch: true });
+    return parseProjectConfig(read.text, `${branch}:${path}`, { launch: true });
   } catch {
     return null;
   }
@@ -461,20 +467,33 @@ async function probeOne(
   // output can carry the credential it just asked about. Nothing reads that
   // output, so there is nothing here for a file to make readable — only a key
   // for a file to leave lying about (ADR-0027).
-  const run = await runCommand(config.commands[probe], { cwd, env, log: false });
+  const run = await runCommand(config.commands[probe], {
+    cwd,
+    env,
+    log: false,
+    // A probe that never returns holds whatever is awaiting it, and at the
+    // door that is the control drain with the frontier sweep behind it. The
+    // bound is the project's, because the project wrote the command (ADR-0068).
+    timeoutMs: config.probes?.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS,
+  });
   if (run.code === null) {
-    // The probe could not run at all — a defect of this machine, not a verdict
-    // about the credential, so it takes the route every unrunnable command
-    // takes rather than accusing the key.
-    stamp({ ok: false, reason: 'unrunnable' });
+    // The probe did not answer: it could not run at all, or it ran past its
+    // bound and was killed. Either way this is a defect of this machine and
+    // not a verdict about the credential, so it takes the route every
+    // unrunnable command takes rather than accusing the key. Nothing is
+    // cached either way — only an answer of yes is worth standing on later.
+    const timedOut = run.timedOut === true;
+    stamp({ ok: false, reason: timedOut ? 'timeout' : 'unrunnable' });
     return commandError(
       ctx,
-      'probe-command-error',
-      `The ${name} credential probe could not run: ${run.error}\n` +
+      timedOut ? 'probe-timeout' : 'probe-command-error',
+      (timedOut
+        ? `The ${name} credential probe did not answer: it ${run.error}, and was killed.\n`
+        : `The ${name} credential probe could not run: ${run.error}\n`) +
         GUARD_NOTE +
         'Repair the environment, then answer "retry" for one more attempt, or ' +
         '"abandon" to close the run.',
-      { credential: name, error: run.error },
+      { credential: name, error: run.error, ...(timedOut && { timedOut: true }) },
     );
   }
   if (run.code !== 0) {
