@@ -234,6 +234,120 @@ test('a held run comes back held from its own ledger', async (t) => {
   await waitFor(() => ran.includes('ship'), { label: 'the deferred stage ran after the restart' });
 });
 
+test('a run the start finds held holds where it stands, and runs at the release', async (t) => {
+  // The stop caught this run inside a stage, so it recorded no boundary: what
+  // the next start finds is a run standing in the middle of the stage it must
+  // run again. A hold governs that entry as it governs every other one, or the
+  // restart is the one boundary an operator hold does not cover (ADR-0070).
+  const home = tempDir();
+  const paths = scaffoldHome(home);
+  t.after(() => removeDir(home));
+  const held = new Set();
+  const ran = [];
+  const lane = {
+    stages: ['work', 'ship'],
+    handlers: {
+      work: () => {
+        ran.push('work');
+        // The first instance never gets an answer out of this stage: it is
+        // still running when the daemon goes.
+        if (ran.length === 1) return new Promise(() => {});
+        return { next: 'ship' };
+      },
+      ship: () => {
+        ran.push('ship');
+        return { close: { state: 'shipped' } };
+      },
+    },
+  };
+  const first = new RunEngine(paths, { getSlotCap: () => 3, isHeld: (p) => held.has(p) });
+  first.registerLane('story', lane);
+  first.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+  await waitFor(() => ran.length === 1, { label: 'the stage in flight' });
+  await first.stop();
+  assert.deepEqual(names(paths), ['run-launched', 'stage-entered']);
+
+  held.add('proj');
+  const second = new RunEngine(paths, { getSlotCap: () => 3, isHeld: (p) => held.has(p) });
+  t.after(async () => {
+    await second.stop();
+  });
+  second.registerLane('story', lane);
+  assert.deepEqual(second.resumeOpenRuns(), ['r1']);
+  // Nothing ran, and the hold is on the record with the stage it stopped: the
+  // run is standing at its own stage, not at the boundary behind it.
+  assert.deepEqual(ran, ['work']);
+  const stamp = events(paths).find((e) => e.event === 'stage-held');
+  assert.equal(stamp.stage, 'work');
+  assert.equal(stamp.next, 'work');
+  assert.equal(stamp.resumed, true);
+  assert.deepEqual(names(paths), ['run-launched', 'stage-entered', 'stage-held']);
+  assert.deepEqual(second.checkLiveness(), []);
+
+  held.delete('proj');
+  assert.deepEqual(second.releaseHeldRuns(), ['r1']);
+  // The release runs the stage the hold stopped, and it enters nothing twice:
+  // the run was already standing in `work`, so the release re-executes it and
+  // stamps no second entry.
+  await waitFor(() => ran.includes('ship'), { label: 'the held stage ran at the release' });
+  assert.deepEqual(ran, ['work', 'work', 'ship']);
+  const after = events(paths);
+  assert.equal(after.filter((e) => e.event === 'stage-entered' && e.stage === 'work').length, 1);
+  assert.equal(after.filter((e) => e.event === 'stage-released').length, 1);
+});
+
+test('a run held by name holds at the stage the stop caught it in', async (t) => {
+  // The third scope answers the start the same way. A run hold lives in the
+  // run's own ledger, so the state a start folds back is the run's, and the
+  // entry it governs is the one the restart makes (ADR-0057, ADR-0070).
+  const home = tempDir();
+  const paths = scaffoldHome(home);
+  t.after(() => removeDir(home));
+  const ran = [];
+  const lane = {
+    stages: ['work', 'ship'],
+    handlers: {
+      work: () => {
+        ran.push('work');
+        if (ran.length === 1) return new Promise(() => {});
+        return { next: 'ship' };
+      },
+      ship: () => {
+        ran.push('ship');
+        return { close: { state: 'shipped' } };
+      },
+    },
+  };
+  const first = new RunEngine(paths, { getSlotCap: () => 3 });
+  first.registerLane('story', lane);
+  first.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+  await waitFor(() => ran.length === 1, { label: 'the stage in flight' });
+  assert.equal(first.setRunHold('r1', true, 'operator'), true);
+  await first.stop();
+
+  const second = new RunEngine(paths, { getSlotCap: () => 3 });
+  t.after(async () => {
+    await second.stop();
+  });
+  second.registerLane('story', lane);
+  assert.deepEqual(second.resumeOpenRuns(), ['r1']);
+  assert.deepEqual(ran, ['work']);
+  const stamp = events(paths).find((e) => e.event === 'stage-held');
+  assert.equal(stamp.stage, 'work');
+  assert.equal(stamp.resumed, true);
+  // No project hold and no instance hold stand: the run's own is the whole
+  // reason it is standing still.
+  assert.deepEqual(
+    names(paths),
+    ['run-launched', 'stage-entered', 'run-hold-changed', 'stage-held'],
+  );
+
+  assert.equal(second.setRunHold('r1', false, 'operator'), true);
+  assert.deepEqual(second.releaseHeldRuns(), ['r1']);
+  await waitFor(() => ran.includes('ship'), { label: 'the held stage ran at the release' });
+  assert.deepEqual(ran, ['work', 'work', 'ship']);
+});
+
 test('a killed hold closes the run it was holding', async (t) => {
   const { paths, engine, held } = engineFixture(t);
   held.add('proj');

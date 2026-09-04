@@ -307,6 +307,15 @@ function verdictHandler(mode, nextStage) {
   return async function verdict(ctx) {
     const base = await verdictBase(ctx, mode);
     if (base.fail) return base.fail;
+    // The entry reads the ledger before it runs a layer. A stop catches this
+    // stage inside a dev seat as easily as between two of them, and the seat
+    // is where the hours are: what the stop left is a tree with no
+    // implementation of the step that was running on it, and a loop that
+    // reads its stamps alone would answer that with a spectrum over the
+    // untouched tree. So the step the stop interrupted is dispatched again,
+    // once, before anything is judged (ADR-0070).
+    const resumed = await resumeInterrupted(ctx, base, mode);
+    if (resumed) return resumed;
     for (;;) {
       const events = runEvents(ctx);
       const renders = events.filter((e) => e.event === 'verdict-rendered');
@@ -343,6 +352,125 @@ function verdictHandler(mode, nextStage) {
       const directive = await ladder(ctx, base, mode, { events, renders, last, nextStage });
       if (directive) return directive;
     }
+  };
+}
+
+// -- what a stop left half done ----------------------------------------------
+
+/** The stamps that bound a step of the ladder. */
+const STEP_BOUNDARIES = new Set(['fresh-pass', 'repair-round', 'verdict-rendered']);
+
+/**
+ * The step of the ladder that never finished, read from the ledger alone, or
+ * null when the stage owes no step.
+ *
+ * Two shapes say a step is owed, and neither one asks how the step ended.
+ *
+ * A `fresh-pass` stamp with no `implementation-committed` behind it is a pass
+ * whose tree was reset and never implemented: the stamp is the last thing the
+ * pass wrote, and the only tree under it is the one the pass was born on.
+ *
+ * A `repair-dev` seat spawned since the last render with no
+ * `implementation-committed` behind it is a repair round that never reached
+ * its own stamp. What ended that session is not asked, because the endings do
+ * not all leave a record: a stop with the child alive stamps `seat-terminated`
+ * `daemon-stopped`, a stop while the seat stood in a wait leaves a
+ * `waiting-ended` and no termination at all, a stop while that wait stood at
+ * the hold barrier leaves a wait that reads as elapsed, and a crash leaves
+ * nothing. A rule keyed on any of those records would answer three of the four
+ * and send the fourth into a cycle over a tree nobody implemented. A round
+ * that ended in a seat-failure park is included and costs nothing: the answer
+ * to that park re-dispatches the same round the ladder would.
+ *
+ * A `dev` seat of this stage belongs to a fresh pass, which stamps before it
+ * spawns, so the first shape answers it and there is no second rule for it.
+ * `waiting` pairs between a `fresh-pass` and the dev report are stepped over:
+ * the scans read the stamps that bound a step, and a wait is none of them.
+ * @param {object[]} events the run's ledger, in order
+ */
+export function interruptedStep(events) {
+  const reversed = [...events].reverse();
+  const last = reversed.find((e) => e.event === 'verdict-rendered');
+  if (!last) return null;
+  const committedAfter = (seq) =>
+    events.some((e) => e.event === 'implementation-committed' && e.seq > seq);
+  const bound = reversed.find((e) => STEP_BOUNDARIES.has(e.event));
+  if (bound.event === 'fresh-pass' && !committedAfter(bound.seq)) {
+    return { kind: 'fresh-pass', stamp: bound };
+  }
+  const spawn = reversed.find(
+    (e) => e.event === 'seat-spawned' && e.seat === 'repair-dev' && e.seq > last.seq,
+  );
+  if (!spawn || committedAfter(spawn.seq)) return null;
+  return { kind: 'repair-round' };
+}
+
+/**
+ * Dispatches the interrupted step again, with the open set the render it acts
+ * on left. Nothing else of the ladder re-runs: the arms in front of this step
+ * stamped before the stop and their records are what the ladder reads.
+ *
+ * The tree is put back to its last commit first. A seat that died mid-edit
+ * leaves whatever it had written, the capture restores the test paths and
+ * nothing else, and `git add -A` behind the next seat would commit both halves
+ * as one implementation. The commit under the run at this point is the tree
+ * the step was dispatched over — the pass's own birth commit for a fresh pass,
+ * the render's tree for a repair round — so the reset is what makes the second
+ * dispatch the same dispatch as the first (ADR-0070). The run cache is
+ * excluded from git and survives it (ADR-0048).
+ *
+ * The `fresh-pass` stamp is already on the ledger, so the reset and the suite
+ * carry inside `freshPass` are skipped and the pass is not born a second time.
+ */
+async function resumeInterrupted(ctx, base, mode) {
+  const events = runEvents(ctx);
+  const step = interruptedStep(events);
+  if (!step) return null;
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  const last = renders[renders.length - 1];
+  const { code, suiteDefects } = openSets(events, last, mode);
+  await resetHard(base.worktree, await headSha(base.worktree));
+  if (step.kind === 'fresh-pass') {
+    const outcome = await freshPass(ctx, base, mode, {
+      newPass: step.stamp.pass,
+      trigger: step.stamp.trigger,
+      open: [...code, ...suiteDefects],
+      last,
+    });
+    return outcome.fail ?? null;
+  }
+  const pass = currentPass(events);
+  const rounds = events.filter((e) => e.event === 'repair-round' && e.pass === pass).length;
+  const outcome = await repairRound(ctx, base, mode, {
+    pass,
+    round: rounds + 1,
+    open: code,
+    record: readJson(last.record),
+  });
+  return outcome.fail ?? null;
+}
+
+/**
+ * The open findings of a render, split into the sets the ladder routes on.
+ * One derivation, because the ladder and the resume above must brief a seat
+ * with the same set: a step dispatched again over a narrower set would repair
+ * less than the step the stop interrupted.
+ */
+function openSets(events, last, mode) {
+  const index = findingIndex(events);
+  const open = last.open.map((id) => index.get(id)).filter(Boolean);
+  const suiteDefects = mode === 'story' ? open.filter((f) => f.class === 'suite-defect') : [];
+  return {
+    open,
+    suiteDefects,
+    intent: suiteDefects.filter((f) => f.depth === 'intent'),
+    ops: open.filter((f) => f.class === 'env' || f.class === 'harness'),
+    code: open.filter(
+      (f) =>
+        f.confirmed === true ||
+        f.class === 'code-defect' ||
+        (mode !== 'story' && f.class === 'suite-defect'),
+    ),
   };
 }
 
@@ -1404,17 +1532,7 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
       cycles: repeat.occurrences.map((o) => o.cycle),
     });
   }
-  const index = findingIndex(events);
-  const open = last.open.map((id) => index.get(id)).filter(Boolean);
-  const suiteDefects = mode === 'story' ? open.filter((f) => f.class === 'suite-defect') : [];
-  const intent = suiteDefects.filter((f) => f.depth === 'intent');
-  const ops = open.filter((f) => f.class === 'env' || f.class === 'harness');
-  const code = open.filter(
-    (f) =>
-      f.confirmed === true ||
-      f.class === 'code-defect' ||
-      (mode !== 'story' && f.class === 'suite-defect'),
-  );
+  const { open, suiteDefects, intent, ops, code } = openSets(events, last, mode);
   let acted = false;
 
   // Intent-level conflicts escalate; the ruling directs the amendment. A ruling
@@ -1565,24 +1683,23 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
     }
   }
 
-  // Code findings → repair rounds, progress-gated; stall or a confirmed
-  // approach-level finding takes the one fresh pass; a second stall parks.
+  // Code findings → repair rounds, progress-gated; a stall takes the one fresh
+  // pass; a second stall parks. A confirmed approach finding is a code finding
+  // like any other here: it rides the repair brief under its own heading, and
+  // the round that closes nothing is what buys the pass (ADR-0007).
   if (code.length > 0 || suiteStalled) {
     const pass = currentPass(events);
     const rounds = events.filter((e) => e.event === 'repair-round' && e.pass === pass).length;
     const grants = answerCount(events, 'second-stall', 'repair-again');
-    const approach = code.find((f) => f.approach === true);
     const noProgress = repairStalled(events, renders, last);
     const capExhausted = rounds >= REPAIR_CAP + grants;
-    if (approach || noProgress || capExhausted || suiteStalled) {
-      const reason = approach
-        ? 'approach-finding'
-        : noProgress
-          ? 'no-progress'
-          : suiteStalled
-            ? 're-freeze-no-progress'
-            : 'cap-exhausted';
-      if (reason !== 'approach-finding' && !events.some((e) => e.event === 'stall' && e.seq > last.seq)) {
+    if (noProgress || capExhausted || suiteStalled) {
+      const reason = noProgress
+        ? 'no-progress'
+        : suiteStalled
+          ? 're-freeze-no-progress'
+          : 'cap-exhausted';
+      if (!events.some((e) => e.event === 'stall' && e.seq > last.seq)) {
         ctx.store.append('stall', { actor: ACTOR, pass, reason, open: last.open.length });
       }
       const freshUsed = events.filter(
@@ -2483,13 +2600,34 @@ function fixRole(base, brief = null) {
   ].join('\n');
 }
 
+/**
+ * What a confirmed approach finding rides into the repair brief, and why it
+ * rides in front of the rest.
+ *
+ * A finding that names the shape of the work as wrong against the spec asks
+ * for more than the edit a missing guard asks for, and a brief that lists the
+ * two together says nothing about the difference. The heading states what the
+ * reviewer found; the note states how far the round may go to answer it, so
+ * the seat is not left between that finding and the line above it that says to
+ * change nothing else (ADR-0007).
+ */
+const STRUCTURAL_HEADING =
+  'Structural finding: the reviewer names the implementation shape as wrong against the spec.';
+const STRUCTURAL_NOTE =
+  'Answer it by changing the shape, not by patching around it. Everything else in this brief ' +
+  'still holds: the spec, the test files, and every finding it lists.';
+
 function repairRole(base, open, record, brief = null, recaptured = []) {
+  const structural = open.filter((f) => f.approach === true);
+  const rest = open.filter((f) => f.approach !== true);
   return [
     'Repair the candidate tree in place. Fix every open finding below; change nothing else.',
     `The spec: ${base.specRef}`,
     'Do not edit or delete test files.',
-    'Open findings:',
-    ...open.map((f) => `- ${findingLine(f)}`),
+    ...(structural.length > 0
+      ? [STRUCTURAL_HEADING, ...structural.map((f) => `- ${findingLine(f)}`), STRUCTURAL_NOTE]
+      : []),
+    ...(rest.length > 0 ? ['Open findings:', ...rest.map((f) => `- ${findingLine(f)}`)] : []),
     'Tier-1 verdict:',
     ...(record?.spectrum ?? []).map((r) => `- ${r.layer}: ${r.status}${layerNote(r)}`),
     ...gateCommandLines(base),

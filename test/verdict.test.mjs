@@ -9,7 +9,7 @@ import { createServer } from 'node:net';
 import { basename, dirname, join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
-import { postFreeze, repairLane } from '../src/lanes/verdict.mjs';
+import { interruptedStep, postFreeze, repairLane } from '../src/lanes/verdict.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
 import { Ledger, readEvents } from '../src/ledger/ledger.mjs';
 import { INSTANCE_EVENTS } from '../src/ledger/registry.mjs';
@@ -139,7 +139,7 @@ function fixtureParse(line) {
 
 // A fixture seat child: writes files (relative paths land in the seat's cwd),
 // writes the report, exits. Behaviors dispatch per seat on label and prompt.
-function seatScript({ reportPath, model, report, files = {}, removes = [], exitCode = 0 }) {
+function seatScript({ reportPath, model, report, files = {}, removes = [], exitCode = 0, hang = false }) {
   const stmts = [
     "const fs = require('fs');",
     "const path = require('path');",
@@ -154,6 +154,11 @@ function seatScript({ reportPath, model, report, files = {}, removes = [], exitC
   for (const file of removes) {
     stmts.push(`fs.rmSync(${JSON.stringify(file)}, { force: true, recursive: true });`);
   }
+  // A seat that never answers: it writes what it had got to, says nothing more,
+  // and stands there. Only a stop or a kill ends it, and the half-written tree
+  // it leaves is what a scenario about a daemon that went down inside a seat
+  // session needs.
+  if (hang) return [...stmts, 'setInterval(() => {}, 1 << 30);'].join('\n');
   if (report !== undefined) {
     stmts.push(
       `fs.mkdirSync(path.dirname(${JSON.stringify(reportPath)}), { recursive: true });`,
@@ -2573,7 +2578,11 @@ test('stall → fresh pass → second stall parks; abandon closes the run', asyn
   );
 });
 
-test('a confirmed approach-level finding takes the fresh pass without a repair round', async (t) => {
+test('a confirmed approach finding rides the repair brief, and the stall behind it buys the pass', async (t) => {
+  // The finding names the shape of the work as wrong. It is a repair round
+  // like any other finding, under a heading of its own, and only the round
+  // that closes nothing discards the pass with everything else open
+  // (ADR-0007).
   const seats = {
     dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
     ...furyClean(),
@@ -2589,32 +2598,431 @@ test('a confirmed approach-level finding takes the fresh pass without a repair r
                   evidence: 'spec section 1',
                   approach: true,
                 },
+                {
+                  lens: 'spec',
+                  severity: 'HIGH',
+                  finding: 'the criterion is unimplemented',
+                  evidence: 'src/feature.mjs:1',
+                },
               ],
-              summary: 'approach-level',
+              summary: 'approach-level, and one more beside it',
             },
           }
         : { report: { findings: [], summary: 'clean' } },
-    'fury-verifier': verifierSeat((item) => ({
-      verdict: 'confirmed',
-      approach: item.line.includes('structure'),
-    })),
+    'fury-verifier': verifierSeat((item) =>
+      item.mode === 'confirm'
+        ? { verdict: 'confirmed', approach: item.line.includes('structure') }
+        : { verdict: 'unresolved' },
+    ),
+    'repair-dev': () => ({ report: { summary: 'tried' } }),
+    'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
   };
   const fx = verdictFixture(t, { seats });
   const { runId } = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
-  assert.ok(!events.some((e) => e.event === 'repair-round'));
-  assert.ok(!events.some((e) => e.event === 'stall'));
-  const fresh = events.find((e) => e.event === 'fresh-pass');
-  assert.equal(fresh.trigger, 'approach-finding');
+
+  // The repair round first, and the fresh pass only behind a render that
+  // closed nothing.
+  const order = events
+    .filter((e) => ['repair-round', 'stall', 'fresh-pass'].includes(e.event))
+    .map((e) => e.event);
+  assert.deepEqual(order, ['repair-round', 'stall', 'fresh-pass']);
+  const stall = events.find((e) => e.event === 'stall');
+  assert.equal(stall.reason, 'no-progress');
+  assert.equal(events.find((e) => e.event === 'fresh-pass').trigger, 'no-progress');
+  assert.ok(
+    !events.some((e) => e.reason === 'approach-finding' || e.trigger === 'approach-finding'),
+    'the retired stall reason reached the ledger',
+  );
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   assert.deepEqual(
     renders.map((e) => [e.pass, e.verdict]),
     [
       [1, 'red'],
+      [1, 'red'],
       [2, 'green'],
     ],
   );
+  // The flag survives the round trip through the ledger, and the brief the
+  // repair seat read carries the heading with the structural finding under it
+  // and the rest of the open set below.
+  const finding = events.find((e) => e.event === 'finding' && e.approach === true);
+  assert.equal(finding.confirmed, true);
+  const brief = fx.calls.find((c) => c.seat === 'repair-dev').prompt;
+  const heading = brief.indexOf('Structural finding: the reviewer names the implementation shape');
+  assert.ok(heading !== -1, `the repair brief carries no structural heading:\n${brief}`);
+  assert.ok(brief.indexOf('the implementation structure contradicts the spec') > heading);
+  assert.ok(brief.indexOf('Open findings:') > heading);
+  assert.ok(brief.indexOf('the criterion is unimplemented') > brief.indexOf('Open findings:'));
+  assert.ok(brief.includes('Answer it by changing the shape, not by patching around it.'));
+  // The pass the stall discarded took both findings with it.
+  assert.deepEqual(renders[1].open.length, 2);
+  assert.deepEqual(renders[2].open, []);
+});
+
+// -- what a stop left half done (ADR-0070) -----------------------------------
+
+/** A fabricated ledger: the events in order, with the seqs a store would give. */
+function ledger(...events) {
+  return events.map((e, i) => ({ seq: i + 1, ...e }));
+}
+
+test('the interrupted step is read off the ledger, and never off how it ended', () => {
+  const render = { event: 'verdict-rendered', cycle: 1, pass: 1 };
+  // A fresh pass whose stamp is the last thing the pass wrote: the tree was
+  // reset and nothing was implemented on it.
+  assert.equal(
+    interruptedStep(ledger(render, { event: 'fresh-pass', pass: 2, trigger: 'no-progress' })).kind,
+    'fresh-pass',
+  );
+  // The same pass, implemented.
+  assert.equal(
+    interruptedStep(
+      ledger(
+        render,
+        { event: 'fresh-pass', pass: 2, trigger: 'no-progress' },
+        { event: 'implementation-committed', pass: 2, phase: 'fresh' },
+      ),
+    ),
+    null,
+  );
+  // Four endings of one repair round, and the same answer to all four, because
+  // the round is owed whatever ended it.
+  //
+  // The stop with the child alive.
+  assert.equal(
+    interruptedStep(
+      ledger(
+        render,
+        { event: 'seat-spawned', seat: 'repair-dev' },
+        { event: 'seat-terminated', seat: 'repair-dev', reason: 'daemon-stopped' },
+      ),
+    ).kind,
+    'repair-round',
+  );
+  // The stop while the seat stood in a wait: the child had already died of the
+  // provider, so nothing was terminated, and what the next start closes is the
+  // wait (ADR-0069).
+  assert.equal(
+    interruptedStep(
+      ledger(
+        render,
+        { event: 'seat-spawned', seat: 'repair-dev' },
+        { event: 'seat-failure', seat: 'repair-dev', reason: 'exit' },
+        { event: 'waiting', kind: 'seat', reason: 'exit', attempt: 1 },
+        { event: 'waiting-ended', kind: 'seat', outcome: 'daemon-stopped', waitSeq: 4 },
+      ),
+    ).kind,
+    'repair-round',
+  );
+  // The stop while that wait stood at the hold barrier, which is the restart
+  // recipe itself: the wait closed `elapsed` before the barrier, and the
+  // barrier throws without a stamp of its own.
+  assert.equal(
+    interruptedStep(
+      ledger(
+        render,
+        { event: 'seat-spawned', seat: 'repair-dev' },
+        { event: 'seat-failure', seat: 'repair-dev', reason: 'exit' },
+        { event: 'waiting', kind: 'seat', reason: 'exit', attempt: 1 },
+        { event: 'waiting-ended', kind: 'seat', outcome: 'elapsed', waitSeq: 4 },
+      ),
+    ).kind,
+    'repair-round',
+  );
+  // The crash: no ending of any kind reached the ledger.
+  assert.equal(
+    interruptedStep(ledger(render, { event: 'seat-spawned', seat: 'repair-dev' })).kind,
+    'repair-round',
+  );
+  // The round that answered: the commit behind the seat is what closes it.
+  assert.equal(
+    interruptedStep(
+      ledger(
+        render,
+        { event: 'seat-spawned', seat: 'repair-dev' },
+        { event: 'seat-report', seat: 'repair-dev' },
+        { event: 'implementation-committed', pass: 1, phase: 'repair' },
+        { event: 'repair-round', pass: 1, round: 1 },
+      ),
+    ),
+    null,
+  );
+  // A wait between a fresh pass and the dev report is stepped over: what
+  // answers the pass is the report behind the wait.
+  assert.equal(
+    interruptedStep(
+      ledger(
+        render,
+        { event: 'fresh-pass', pass: 2, trigger: 'cap-exhausted' },
+        { event: 'seat-spawned', seat: 'dev' },
+        { event: 'waiting', kind: 'seat', reason: 'exit', attempt: 1 },
+        { event: 'waiting-ended', kind: 'seat', outcome: 'elapsed', waitSeq: 4 },
+        { event: 'seat-report', seat: 'dev' },
+        { event: 'implementation-committed', pass: 2, phase: 'fresh' },
+      ),
+    ),
+    null,
+  );
+  // A judging seat is not a step of the ladder: the stop cost a triage
+  // session, and the cycle that owns it re-runs as it always did.
+  assert.equal(
+    interruptedStep(
+      ledger(
+        render,
+        { event: 'seat-spawned', seat: 'verdict-triage' },
+        { event: 'seat-terminated', seat: 'verdict-triage', reason: 'daemon-stopped' },
+      ),
+    ),
+    null,
+  );
+  // A seat of a render this one replaced is behind the newest render, and a run
+  // with no render behind it has no step of this stage to finish.
+  assert.equal(
+    interruptedStep(
+      ledger(
+        { event: 'verdict-rendered', cycle: 1, pass: 1 },
+        { event: 'seat-spawned', seat: 'repair-dev' },
+        { event: 'implementation-committed', pass: 1, phase: 'repair' },
+        { event: 'verdict-rendered', cycle: 2, pass: 1 },
+      ),
+    ),
+    null,
+  );
+  assert.equal(interruptedStep(ledger({ event: 'seat-spawned', seat: 'dev' })), null);
+});
+
+/** What one restart left, from the resumed stage entry onwards. */
+function afterResume(events) {
+  const entered = [...events]
+    .reverse()
+    .find((e) => e.event === 'stage-entered' && e.stage === 'verdict' && e.resumed === true);
+  assert.ok(entered, 'the verdict stage never re-entered');
+  return events.filter((e) => e.seq > entered.seq);
+}
+
+/** The events of one restart up to the seat it re-dispatched. */
+function untilRedispatch(events, seat) {
+  const resumed = afterResume(events);
+  const at = resumed.findIndex((e) => e.event === 'seat-spawned' && e.seat === seat);
+  assert.ok(at !== -1, `the resumed stage never re-dispatched the ${seat} seat`);
+  return resumed.slice(0, at);
+}
+
+/**
+ * A triage behavior for the two restart scenarios: the first cycle classes the
+ * red as a code defect, and a later cycle keeps it and adds a suite defect. The
+ * suite defect is what puts a `re-freeze` between the render and the step the
+ * stop interrupts, which is the shape of the incident: an arm of the ladder had
+ * already stamped a cycle trigger when the daemon went.
+ */
+function triageThenSuiteDefect({ prompt }) {
+  const reds = [...prompt.matchAll(/^- layer (\S+):$/gm)].map((m) => m[1]);
+  const prior = [...prompt.matchAll(/^- \[(F\d+)\]/gm)].map((m) => m[1]);
+  return {
+    report: {
+      findings:
+        prior.length > 0
+          ? [
+              {
+                class: 'suite-defect',
+                depth: 'test',
+                layers: reds,
+                summary: 'the suite pins a helper the spec never named',
+                evidence: 'tests/feature.test.mjs',
+              },
+            ]
+          : [
+              {
+                class: 'code-defect',
+                layers: reds,
+                summary: 'the implementation misses the criterion',
+                evidence: 'the red output of the unit layer',
+              },
+            ],
+      ...(prior.length > 0 && { persisting: prior }),
+      summary: 'triaged',
+    },
+  };
+}
+
+/**
+ * What a dead seat left in the tree, and the layer that refuses it. A seat the
+ * stop ended had written half of its work when it went; the file stands in the
+ * worktree, tracked by nothing, and the next `git add -A` would commit it as
+ * part of an implementation nobody wrote. This layer is green only on a tree
+ * the resume put back to its last commit.
+ */
+const PLANTED = 'src/half-written.txt';
+const PLANTED_GATE = [
+  'node',
+  '-e',
+  `process.exit(require('fs').existsSync(${JSON.stringify(PLANTED)}) ? 1 : 0)`,
+];
+const CLEAN_GATES = [...DEFAULT_GATES, { name: 'clean', command: 'clean' }];
+const CLEAN_COMMANDS = { ...DEFAULT_COMMANDS, clean: PLANTED_GATE };
+
+/** The re-freeze amendment: a real change under the test paths, and nothing else. */
+function refreezeSuite() {
+  return {
+    files: { 'tests/marker.txt': 'ok\n' },
+    report: {
+      suiteFiles: ['tests/feature.test.mjs', 'tests/marker.txt'],
+      reds: [],
+      summary: 're-frozen',
+    },
+  };
+}
+
+test('a stop inside a repair seat re-dispatches the seat, not the layers', async (t) => {
+  let hung = false;
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': BAD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': ({ prompt }) => ({
+      report: {
+        findings: [
+          {
+            class: 'code-defect',
+            layers: [...prompt.matchAll(/^- layer (\S+):$/gm)].map((m) => m[1]),
+            summary: 'the implementation misses the criterion',
+            evidence: 'the red output of the unit layer',
+          },
+          {
+            class: 'suite-defect',
+            depth: 'test',
+            layers: [...prompt.matchAll(/^- layer (\S+):$/gm)].map((m) => m[1]),
+            summary: 'the suite pins a helper the spec never named',
+            evidence: 'tests/feature.test.mjs',
+          },
+        ],
+        summary: 'triaged',
+      },
+    }),
+    suite: refreezeSuite,
+    ...furyClean(),
+    'repair-dev': () => {
+      if (hung) {
+        return { files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'repaired' } };
+      }
+      hung = true;
+      // Half an edit, and then nothing: what the stop leaves in the tree.
+      return { files: { [PLANTED]: 'half an edit\n' }, hang: true };
+    },
+    'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+  };
+  const fx = verdictFixture(t, { seats, gates: CLEAN_GATES, commands: CLEAN_COMMANDS });
+  const { runId } = await fx.launch();
+  await waitFor(
+    () =>
+      readEvents(runLedgerPath(fx.paths, runId)).some(
+        (e) => e.event === 'seat-spawned' && e.seat === 'repair-dev',
+      ),
+    { label: 'the repair seat', attempts: 900, intervalMs: 100 },
+  );
+  await fx.restart();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(
+    events.filter((e) => e.event === 'seat-terminated' && e.reason === 'daemon-stopped').length,
+    1,
+  );
+  // What the dead seat had written never reached a commit: the layer that
+  // refuses that file is green on every cycle it ran.
+  const clean = events.filter((e) => e.event === 'layer-result' && e.layer === 'clean');
+  assert.ok(clean.length > 0, 'the layer that refuses the planted file never ran');
+  assert.deepEqual([...new Set(clean.map((e) => e.status))], ['green']);
+  // The re-freeze arm had stamped a cycle trigger before the round started, so
+  // a resume that read the stamps alone would judge the tree the interrupted
+  // repair never touched.
+  const render = events.find((e) => e.event === 'verdict-rendered');
+  assert.ok(events.some((e) => e.event === 're-freeze' && e.seq > render.seq));
+  // The step ran again, and it stamped once: the round the stop interrupted
+  // never reached its own stamp.
+  assert.equal(
+    events.filter((e) => e.event === 'seat-spawned' && e.seat === 'repair-dev').length,
+    2,
+  );
+  assert.equal(events.filter((e) => e.event === 'repair-round').length, 1);
+  assert.deepEqual(
+    untilRedispatch(events, 'repair-dev')
+      .filter((e) => e.event === 'layer-started')
+      .map((e) => e.layer),
+    [],
+    'the resumed stage judged a tree the interrupted repair never touched',
+  );
+});
+
+test('a stop between the fresh pass and its dev report re-dispatches the seat', async (t) => {
+  let devCalls = 0;
+  const seats = {
+    // The initial pass implements badly; the pass the stop interrupts never
+    // answers; the re-dispatch behind the restart implements.
+    dev: () => {
+      devCalls += 1;
+      if (devCalls === 1) {
+        return { files: { 'src/feature.mjs': BAD_FEATURE }, report: { summary: 'implemented' } };
+      }
+      // Half an edit, and then nothing: what the stop leaves in the tree.
+      if (devCalls === 2) return { files: { [PLANTED]: 'half an edit\n' }, hang: true };
+      return { files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } };
+    },
+    'verdict-triage': triageThenSuiteDefect,
+    suite: refreezeSuite,
+    ...furyClean(),
+    'repair-dev': () => ({ report: { summary: 'tried' } }),
+    'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+  };
+  const fx = verdictFixture(t, { seats, gates: CLEAN_GATES, commands: CLEAN_COMMANDS });
+  const { runId } = await fx.launch();
+  await waitFor(
+    () => {
+      const events = readEvents(runLedgerPath(fx.paths, runId));
+      const fresh = events.find((e) => e.event === 'fresh-pass');
+      return (
+        fresh &&
+        events.some((e) => e.event === 'seat-spawned' && e.seat === 'dev' && e.seq > fresh.seq)
+      );
+    },
+    { label: 'the dev seat of the fresh pass', attempts: 1200, intervalMs: 100 },
+  );
+  await fx.restart();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The render the pass was born on had already earned a re-freeze, which is a
+  // cycle trigger: the stamps alone say run a cycle, and the tree under them is
+  // the freeze with no implementation on it.
+  // What the dead seat had written never reached a commit: the layer that
+  // refuses that file is green on every cycle it ran.
+  const clean = events.filter((e) => e.event === 'layer-result' && e.layer === 'clean');
+  assert.ok(clean.length > 0, 'the layer that refuses the planted file never ran');
+  assert.deepEqual([...new Set(clean.map((e) => e.status))], ['green']);
+  const render = events.filter((e) => e.event === 'verdict-rendered').at(-2);
+  const fresh = events.find((e) => e.event === 'fresh-pass');
+  assert.ok(events.some((e) => e.event === 're-freeze' && e.seq > render.seq && e.seq < fresh.seq));
+  // One pass, born once: the stamp on the ledger is what makes the reset and
+  // the suite carry skip, so the re-dispatch starts on the tree the pass was
+  // born on rather than on a second reset of it.
+  assert.equal(events.filter((e) => e.event === 'fresh-pass').length, 1);
+  assert.equal(
+    events.filter((e) => e.event === 'implementation-committed' && e.phase === 'fresh').length,
+    1,
+  );
+  assert.equal(
+    events.filter((e) => e.event === 'seat-spawned' && e.seat === 'dev' && e.seq > fresh.seq).length,
+    2,
+  );
+  assert.deepEqual(
+    untilRedispatch(events, 'dev')
+      .filter((e) => e.event === 'layer-started')
+      .map((e) => e.layer),
+    [],
+    'the resumed stage ran a layer over a pass with no implementation on it',
+  );
+  // And the pass that followed the restart is the pass that shipped.
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.equal(renders.at(-1).pass, 2);
+  assert.equal(renders.at(-1).verdict, 'green');
 });
 
 test('the repair cap exhausts into a stall and the fresh pass', async (t) => {

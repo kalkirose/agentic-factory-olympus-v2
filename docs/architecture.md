@@ -553,8 +553,7 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   answered; the stamp the loop leaves before its park tells them apart.
   Every bought invocation carries the failure evidence in its brief.
 - **Response ladder.** Code-defect → repair round on the candidate tree
-  (progress-gated: each round must strictly shrink the open finding set; cap
-  3). Stall or a verified approach-level finding → one fresh pass per run,
+  (progress-gated; cap 3). Stall → one fresh pass per run,
   briefed by born spec + frozen suite + stall brief, never the prior tree; a
   second stall escalates. Suite-defect → re-freeze step by the suite seat at
   a new SHA. Env/harness → operational fix by an orchestrator job; a CI
@@ -608,8 +607,25 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   occurrences because that identity normalizes numerals away and two findings
   can reach one. A guard asking whether a round closed anything reads two
   differently worded findings as two, which is why it keeps this key and not
-  the coarser one a gate keys an acknowledgment on. The shrink rule the ladder
-  entry above describes is retired with it; the cap is unchanged (ADR-0022).
+  the coarser one a gate keys an acknowledgment on. The cap is unchanged
+  (ADR-0022).
+- **A finding about the shape rides the repair brief** (ADR-0007). A confirmed
+  review finding that names the implementation structure as wrong against the
+  spec is a code finding like any other on the ladder: it heads the repair
+  brief under a structural heading of its own, with one line that says the
+  round may change the shape rather than patch around it. It discards no pass.
+  What buys the pass is the round behind it that closed nothing, which is the
+  progress rule above and no second mechanism beside it.
+- **The stage entry finishes the step that never finished** (ADR-0070). Before
+  it runs a layer, the verdict stage asks the ledger which step of the ladder
+  owes an answer: a `fresh-pass` stamp with no implementation behind it, or a
+  repair round whose seat left no commit. How that session ended is not asked.
+  A stop with the child alive, a stop inside a wait, a stop at the hold
+  barrier and a crash leave four different records or none at all, and the
+  step is owed under every one of them. It is dispatched again, once, with the
+  open set of the render it acts on, over a worktree reset to its last commit
+  so that no part of the dead session rides the next one. Every other resume
+  runs the layers as it always did.
 - **Substrate probe before the fix.** An env finding sends the route to the
   host before it spends anything: the run stack's published ports, read off
   the compose project and asked on both loopback families with a write and a
@@ -1100,10 +1116,14 @@ it did not enter, and idles there holding its slot. `release` enters the
 deferred stage of each run it frees and stamps `stage-released`. The state is an
 instance-ledger event replayed at every start, so a hold outlives the daemon
 that took it, and the restart recipe is hold → wait for boundaries and parks →
-stop with no live seat → start → release. Held time counts as waiting in every
-duration reading, and the stage beat keeps saying `waitingOn: hold` so the quiet
-reads as intentional. A pause governs entry and a hold governs progression; the
-two are independent, and both together are the full freeze (ADR-0040).
+stop with no live seat → start → release. The start is an entry the hold
+governs like any other: a run the stop caught inside a stage comes back
+standing at that stage, stamps `stage-held` with `resumed`, and runs it at the
+release, so a start under a hold spends no seat and no layer (ADR-0070). Held
+time counts as waiting in every duration reading, and the stage beat keeps
+saying `waitingOn: hold` so the quiet reads as intentional. A pause governs
+entry and a hold governs progression; the two are independent, and both
+together are the full freeze (ADR-0040).
 
 `hold --run <id>` is the third scope. It settles at the same boundary and it
 lives in that run's ledger, as the `run-hold-changed` stamp the start folds back

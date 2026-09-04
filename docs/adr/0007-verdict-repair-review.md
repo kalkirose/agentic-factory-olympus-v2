@@ -1,36 +1,20 @@
 # ADR-0007: Verdict, repair, and review shapes
 
-Status: accepted (2026-08-10)
-Superseded in part by ADR-0015: a seat-failure and a gate-command spawn
-error park the run instead of closing it.
-Superseded in part by ADR-0022: only the first cycle of an implementation
-pass runs the full spectrum; later cycles run the targeted set and carry the
-greens no red reaches.
-Superseded in part by ADR-0038: the review panel is the project's
-`review.lenses`, the default panel drops architecture and minimality, and the
-security lens rides the operational seat instead of one of its own — so the
-fan-out below is stated at a width the harness no longer runs by default.
-Superseded in part by ADR-0065: the flake filter's one re-run asks for the
-parts and the files the replaced attempt failed on, and the greens of that
-attempt ride the re-run's own record.
-Superseded in part by ADR-0022: the repair progress rule keys on finding
-identities — a round is a stall when it closes none of the findings the render
-before it left open — and not on the size of the open set, so the sections
-below that measure progress as cardinality state a rule the harness no longer
-runs.
+Status: accepted (2026-08-10, the approach finding and the repair heading
+2026-09-04)
 
 ## Decision
 
-The post-freeze chain — implementation, full-spectrum verdict, response
-ladder, judgment review — gets these concrete shapes:
+The post-freeze chain — implementation, verdict, response ladder, judgment
+review — gets these concrete shapes:
 
 - **Lane composition.** `postFreeze({afterVerdict})` builds the story-lane
   continuation: `implementation` → `verdict` → a caller-supplied ship
   continuation. `repairLane({afterVerdict})` builds the repair lane: `fix` →
   `verdict` → continuation. The two lanes share the verdict machinery; a
   mode flag selects the differences (below).
-- **Two new registry events.** `implementation-committed` (pass, phase
-  `initial` | `fresh` | `repair`, baseSha, sha) anchors every dev-seat
+- **Two registry events anchor the chain.** `implementation-committed` (pass,
+  phase `initial` | `fresh` | `repair`, baseSha, sha) anchors every dev-seat
   commit and names the diff base for the review seats.
   `verdict-rendered` (cycle, pass, sha, verdict, open finding ids, record
   path) is the cycle boundary and the resume anchor of the verdict loop.
@@ -38,19 +22,23 @@ ladder, judgment review — gets these concrete shapes:
   when no verdict exists yet or when a cycle trigger landed after the last
   one: `implementation-committed`, `re-freeze`, or `operational-fix`. The
   ladder acts only on a rendered red verdict with no pending trigger, so a
-  daemon restart re-derives its place from the ledger alone. One condition
-  outranks a trigger: a render whose open suite defects have earned no
+  daemon restart re-derives its place from the ledger alone. Two conditions
+  outrank a trigger: a render whose open suite defects have earned no
   `re-freeze` yet still owes that amendment, and the ladder re-enters to
-  deliver it before any cycle starts.
-- **Full spectrum** (ADR-0022 narrows this to the cycles that need it).
-  Every Tier-1 layer (project config `gates.tier1`) runs
-  to completion per cycle. A layer whose prerequisite failed stamps
-  `not-runnable`, attributed through the `needs` chain to the root red. The
-  flake filter re-runs each red layer once; a green re-run stamps `flake`
-  and never a finding. Layer results stamp per layer under the cycle, so a
-  restart mid-spectrum skips judged layers. A layer command that cannot
-  spawn closes the run (`gate-command-error`) — an environment defect, not
-  a verdict.
+  deliver it before any cycle starts; and a step of the ladder a stop
+  interrupted is dispatched again before anything is judged (ADR-0070).
+- **The spectrum per cycle.** Every Tier-1 layer (project config
+  `gates.tier1`) the cycle runs runs to completion; the first cycle of an
+  implementation pass runs the full set and a later cycle runs the targeted
+  set and carries the greens no red reaches (ADR-0022). A layer whose
+  prerequisite failed stamps `not-runnable`, attributed through the `needs`
+  chain to the root red. The flake filter re-runs each red layer once, asking
+  for the parts and the files the replaced attempt failed on (ADR-0065); a
+  green re-run stamps `flake` and never a finding. Layer results stamp per
+  layer under the cycle, so a restart mid-spectrum skips judged layers. A
+  layer command that cannot spawn parks the run (`command-error`, reason
+  `gate-command-error`): an environment defect is not a verdict, and it is not
+  a close either (ADR-0015).
 - **Verdict triage.** Fires only on persistent reds. The seat clusters reds
   into findings by root cause and classes each — `code-defect` |
   `suite-defect` | `env` | `harness` — with cited evidence; suite-defect
@@ -58,36 +46,47 @@ ladder, judgment review — gets these concrete shapes:
   findings are handed in with ids; the seat lists persisting ids and reports
   only new findings. Deterministic checks (every red layer covered, depths
   present, persisting ids known) take the contract-loop route: one
-  corrective invocation, then seat-failure. A green spectrum resolves triage
-  findings mechanically — their evidence is gone.
+  corrective invocation, then the `seat-failure` park. A green spectrum
+  resolves triage findings mechanically — their evidence is gone.
 - **Findings.** Every finding stamps a `finding` event with a run-scoped id
   (`F<n>`). Sub-HIGH review findings stamp `advisory` and never block or
   verify. HIGHs go to the verifier; a refuted HIGH stamps advisory, a
   confirmed HIGH blocks. The open set travels in `verdict-rendered.open`;
-  the record file (`runs/<id>/verdict-<cycle>.json`) carries the full
-  spectrum, the open and just-resolved findings, and the flake list —
-  confirmed findings only, advisory material stays in the ledger.
+  the record file (`runs/<id>/verdict-<cycle>.json`) carries the spectrum,
+  the open and just-resolved findings, and the flake list — confirmed
+  findings only, advisory material stays in the ledger.
 - **Review composition per cycle.** First cycle of an implementation pass:
-  the five-seat Fury fan-out (six lenses; architecture + minimality merged
-  on the code-shape seat with per-lens reporting; interface conditional on a
-  diff under `repo.uiPaths`), fully parallel, then the verifier on that
-  round's HIGHs. Repair cycles: the generalist review seat over the repair
-  diff plus a verifier resolution-check on prior confirmed HIGHs; new HIGHs
-  go through confirm-to-block. Cycles after only a re-freeze or an
+  the Fury fan-out over the panel the project declares (`review.lenses`),
+  fully parallel, then the verifier on that round's HIGHs. The default panel
+  is spec, operational and interface, with the security lens riding the
+  operational seat and the interface seat conditional on a diff under
+  `repo.uiPaths` (ADR-0038). Repair cycles: the generalist review seat over
+  the repair diff plus a verifier resolution-check on prior confirmed HIGHs;
+  new HIGHs go through confirm-to-block. Cycles after only a re-freeze or an
   operational fix fire no judgment seats — the tree did not change. No
   re-fan-out over a judged tree, in either lane. The repair lane uses the
   generalist seat from cycle one and never the fan-out.
 - **Response ladder.** Order per red verdict: intent conflicts park
   (`intent-conflict`); env/harness findings get one `operational-fix` stamp
-  each, and a finding that persists past its fix parks `provisioning-gate`
-  (the daemon never self-clears substrate); suite defects re-freeze;
-  code-defect and confirmed review findings take a repair round. A batch may
-  combine routes; every route re-enters through a fresh cycle.
+  each, and a finding that persists past its fix climbs the substrate ladder
+  and parks `provisioning-gate` only when the waiting is spent (ADR-0069);
+  suite defects re-freeze; code-defect and confirmed review findings take a
+  repair round. A batch may combine routes; every route re-enters through a
+  fresh cycle.
 - **Repair rounds.** The repair-dev seat fixes the candidate tree in place
-  with the verdict and open findings as brief. Progress rule: the open set
-  size must strictly shrink per round, else `stall` (`no-progress`). Cap 3
-  rounds per implementation; open findings past the cap stall
-  (`cap-exhausted`). State-based, never wall-clock.
+  with the verdict and open findings as brief. Progress rule: a round is a
+  stall (`no-progress`) when it closed none of the findings the render before
+  it left open, measured on finding identity (ADR-0022). Cap 3 rounds per
+  implementation; open findings past the cap stall (`cap-exhausted`).
+  State-based, never wall-clock.
+- **A finding about the shape rides the repair brief.** A confirmed finding
+  that names the implementation structure as wrong against the spec
+  (`approach: true`) is a code finding like any other on the ladder. It rides
+  the repair brief ahead of the rest, under the heading "structural finding:
+  the reviewer names the implementation shape as wrong against the spec" and
+  one line that says the round may change the shape rather than patch around
+  it. It buys no pass of its own; what buys a pass is the round behind it
+  that closed nothing.
 - **Re-freeze step.** Depth-`spec` and answered-intent findings amend the
   born spec (birth seat) first; the suite seat then amends the tests under
   the contract loop (changes only under the test paths), committing as
@@ -106,18 +105,17 @@ ladder, judgment review — gets these concrete shapes:
   `re-freeze` stamp records the ruling it carried (`ruling`: the park, the
   answer, the actor, the files), which is also what makes it spent — no later
   amendment carries the same answer twice. A ruling that names no frozen file
-  rides the spec amendment alone, as it always did.
-- **Fresh pass.** Triggers: any stall, or a confirmed approach-level finding
-  (`approach: true` — the finding names the implementation structure as
-  wrong against the spec; the approach flag only counts on confirmed
-  findings). One per run. The worktree hard-resets to the freeze sha, the
-  current frozen suite is carried forward, and the dev seat gets born spec +
-  frozen suite + stall brief — never the prior tree. The reset precedes the
-  `fresh-pass` stamp, so a restart between them redoes the idempotent reset.
-  Findings of the discarded pass drop from the open set at the next render.
+  rides the spec amendment alone.
+- **Fresh pass.** Trigger: a stall, of any of its reasons. One per run. The
+  worktree hard-resets to the freeze sha, the current frozen suite is carried
+  forward, and the dev seat gets born spec + frozen suite + stall brief —
+  never the prior tree. The reset precedes the `fresh-pass` stamp, so a
+  restart between them redoes the idempotent reset. Findings of the discarded
+  pass drop from the open set at the next render.
 - **Second stall.** Parks `second-stall` with options `repair-again` (one
-  granted round past the cap), `fresh-pass` (one granted extra pass), or
-  `fail`. Grants are counted from answer events; no default answers.
+  granted round past the cap) and `fresh-pass` (one granted extra pass),
+  beside the `abandon` every run park offers. Grants are counted from answer
+  events; no default answers.
 - **Gate integrity.** A harness-class triage finding also stamps
   `gate-integrity` (loud, streamed). When the finding leaves the open set,
   the daemon appends the paired `resolved` line.
@@ -128,6 +126,28 @@ ladder, judgment review — gets these concrete shapes:
 - **Parallel seats.** The engine tracks a run's in-flight seats as a set:
   the liveness invariant, kill, and stop cover every child of a parallel
   fan-out.
+
+## Why an approach finding buys a repair round and not the pass
+
+The pass is the expensive thing on this ladder. A repair round is one seat
+over a tree that already exists; a fresh pass throws that tree away and buys
+the whole implementation again, and it is the run's only one.
+
+The ledger says what the immediate discard cost. One confirmed interface-lens
+finding about a single form input discarded a pass that had twelve other
+findings open against it. Every one of those twelve was work the repair round
+would have carried, and none of them reached the tree that replaced it: the
+fresh pass began from the freeze with a stall brief, and the twelve came back
+as whatever the new implementation raised. The run bought a second
+implementation to answer a finding a repair round could have answered, and it
+spent its one pass on it, so the stall that came later had nothing left to buy.
+
+The severity of a structural finding is real, and it is answered by saying so
+in the brief rather than by discarding the work. A repair seat told that the
+shape is wrong, in a heading of its own, may rewrite the shape; it holds
+everything else the round already knows. If the round cannot answer it, the
+round closes nothing, and the progress rule takes the pass on the next render
+— one cycle later, on evidence rather than on a flag.
 
 ## Why the ladder batches routes instead of one route per cycle
 
@@ -146,33 +166,23 @@ the finding again and parks the same question again, forever. So the ladder's
 own preconditions outrank the trigger: an owed re-freeze re-enters the ladder,
 and each arm reads its own record for this render to know it has already run.
 
-## Why the progress rule compares set sizes
-
-"Strictly shrink" is measured as cardinality: fixed findings minus new
-findings must be net negative. Identity-based shrink (proper subset) would
-stall a round that fixes every prior finding while the review surfaces one
-new one — that is progress, not a stall. Size comparison keeps the rule
-mechanical and resume-derivable from two `verdict-rendered` stamps.
-
-## Why operational fixes park instead of looping
+## Why operational fixes never loop
 
 The map bounds repair rounds and fresh passes but not operational fixes. An
-env red that survives its re-run would loop the fix arm forever. One fix per
-finding, then `provisioning-gate`: substrate repair beyond a re-run is
-provisioning work, and the provisioning rule stands — report and wait, never
-self-clear.
+env red that survived its re-run would loop the fix arm forever. One fix per
+finding; past it the finding climbs the substrate ladder, which re-runs the
+layers behind the host's own probe and ends either green or spent (ADR-0069).
+A spent ladder is provisioning work, and the provisioning rule stands — report
+and wait, never self-clear.
 
 ## Fallback paths
 
-If size-based progress proves too lenient (rounds churn by trading one
-finding for another), switch to proper-subset shrink. Trigger: repeated
-3-round cap exhaustions whose open sets rotate members. Reversal cost: low —
-one comparison in the ladder.
-
-If the merged code-shape seat under-reports one of its two lenses, the
-per-lens yield tripwire (project config) restores the split seats; the seat
-map change is one registry entry. Trigger: an escapes-ledger entry in the
-merged lenses' categories inside the watch window.
+If the repair round proves unable to answer structural findings — rounds that
+close every finding but the approach one, cycle after cycle — the immediate
+fresh pass returns as a route the ladder takes when the approach finding is
+the only one left open. Trigger: three runs whose repair rounds close every
+other finding and leave the approach finding standing. Reversal cost: low —
+one condition in the code arm, and the heading stays either way.
 
 If resetting the run branch for the fresh pass proves too destructive in
 practice (evidence wanted from discarded trees), tag the old head
