@@ -25,12 +25,13 @@ export const SPEC_LINE_CAP = 400;
 export const TOUCHED_OWNERS = ['dev', 'suite'];
 
 /**
- * The two template parts that carry no criterion id. They are compared like
- * sections because a re-check that skipped them would skip the two blocks a
- * later stage acts on: the paths the capture judges, and the variables the
- * stack must hold.
+ * The three template parts that carry no criterion id. They are compared like
+ * sections because a re-check that skipped them would skip the three blocks a
+ * later stage acts on: the paths the capture judges, the components the suite
+ * may target, and the variables the stack must hold.
  */
 const TOUCHED_PATHS_SECTION = 'touched-paths';
+const COMPONENTS_SECTION = 'components';
 const ENVIRONMENT_SECTION = 'environment';
 
 /**
@@ -55,6 +56,7 @@ const PATH_TOKEN = /\/|\.[A-Za-z0-9]{1,10}$/;
 
 const HEADING = /^#{1,6}\s+(.*\S)\s*$/;
 const ENVIRONMENT_HEADING = /^environment\b/i;
+const COMPONENTS_HEADING = /^components\b/i;
 const TOUCHED_FENCE = /^```touched-paths\b/;
 const FENCE = /^```/;
 const LIST_ITEM = /^\s*[-*]\s+(.*\S)\s*$/;
@@ -75,6 +77,22 @@ const TOKEN_TRIM_TAIL = /[`'",.;:]+$/;
 const NEW_TOKEN = /^\(new\)[`'",.;:)]*$/i;
 
 /**
+ * One entry of the Components section: a backticked name, then the optional
+ * `(new)` marker. The name is read as a token and never as a sentence — the
+ * rule asks whether a component of that name is in the tree, which is a
+ * question about the tree.
+ */
+const COMPONENT_ITEM = /^`?([A-Za-z][A-Za-z0-9_-]*)`?\s*(\(new\))?\s*$/i;
+
+/**
+ * The file extensions a component's own file may carry. The shape is the
+ * rule — a directory named for the component, holding a file of the same
+ * name — and the extension set is what keeps the shape from belonging to one
+ * framework.
+ */
+const COMPONENT_EXTENSIONS = ['svelte', 'tsx', 'jsx', 'vue'];
+
+/**
  * Lints a born or amended story spec against the template.
  *
  * @param {string} specText
@@ -86,8 +104,9 @@ const NEW_TOKEN = /^\(new\)[`'",.;:)]*$/i;
  *   sha is unknown; `ground` is the tree the spec is written against (ADR-0067):
  *   `files`, every tracked path at the base sha; `pins`, a map from each
  *   touched path to the test files that mention it; `routesRoot`, the directory
- *   route ids resolve under. Each part may be null, and a null part turns its
- *   rule off.
+ *   route ids resolve under; `componentsRoot` and `components`, the directory
+ *   the design system lives in and the component names it holds there. Each
+ *   part may be null, and a null part turns its rule off.
  * @returns {string[]} one message per defect, in rule order; empty means clean
  */
 export function lintSpec(
@@ -273,7 +292,136 @@ export function lintSpec(
       }
     }
   }
+
+  // (m) every design-system component the spec names exists, or is marked new.
+  //
+  // The same question rule (l) asks about a route, asked about a component: a
+  // spec that names a component the design system does not hold writes a test
+  // plan against a selector nobody can render, and the gate rounds that find
+  // it are rounds a script could have spent for nothing. The Components
+  // section is the whole of what this reads — a component name in prose is an
+  // English word, and no rule about the tree can say one true thing about a
+  // word.
+  if (tree && ground?.components && typeof ground.componentsRoot === 'string') {
+    const root = ground.componentsRoot.replace(/\/+$/, '');
+    if (tree.has(root)) {
+      const section = componentSection(lines);
+      // An absent section is a defect, not a pass. The section carries a rule
+      // and it carries "- None." for the story that renders nothing, so a spec
+      // without one has not answered the question — and a rule that read
+      // silence as "no components" would be a rule any spec could skip.
+      if (!section.present) {
+        defects.push(
+          'the spec has no Components section; the template takes one, listing every ' +
+            'design-system component the story renders, one per line as `Name` or `Name` ' +
+            '(new), and "- None." when the story renders none.',
+        );
+      } else if (!section.none && section.entries.length === 0 && section.malformed.length === 0) {
+        defects.push(
+          "the spec's Components section lists nothing; write one item per design-system " +
+            'component the story renders, or "- None." when the story renders none.',
+        );
+      }
+      // A bullet the entry shape does not fit is a defect naming the line. It
+      // is never skipped: a phantom written `forms/RadioField`, or two names
+      // on one line, would pass a rule that only read what it could parse,
+      // which is the one thing this rule exists to stop.
+      for (const bad of section.malformed) {
+        defects.push(
+          `the spec's Components section carries "${bad.text}" on line ${bad.line}, which is ` +
+            'not a component entry; one entry is one component name on one line, written ' +
+            '`Name` or `Name` (new), and "- None." when the story renders none.',
+        );
+      }
+      for (const entry of section.entries) {
+        const held = ground.components.has(entry.name);
+        if (!held && !entry.isNew) {
+          defects.push(
+            `the spec's Components section names ${entry.name}, and no component of that name ` +
+              `exists under ${root} at the spec's base sha; a component the story creates is ` +
+              `written \`${entry.name}\` (new).`,
+          );
+        } else if (held && entry.isNew) {
+          defects.push(
+            `the spec marks the component ${entry.name} (new), and ${root} already holds it at ` +
+              "the spec's base sha; drop the marker.",
+          );
+        }
+      }
+    }
+  }
   return defects;
+}
+
+/**
+ * The component names one tree holds, read from the listing the lint already
+ * has: a directory named for the component, holding a file of the same name.
+ * A root the caller names as null, or a listing it could not read, answers
+ * null, and rule (m) does not run.
+ *
+ * The lane calls this once per lint with the tracked paths it read for rules
+ * (j) and (k), so the rule costs no second look at the tree.
+ * @param {string[]|null} files every tracked path at the spec's base sha
+ * @param {string|null} root `repo.componentsRoot`
+ * @returns {Set<string>|null}
+ */
+export function componentIndex(files, root) {
+  if (!Array.isArray(files) || typeof root !== 'string' || root.length === 0) return null;
+  const under = root.replace(/\/+$/, '');
+  const pattern = new RegExp(
+    `^${escapeRegExp(under)}/(?:.+/)?([^/]+)/\\1\\.(?:${COMPONENT_EXTENSIONS.join('|')})$`,
+  );
+  const held = new Set();
+  for (const file of files) {
+    const match = pattern.exec(file.replaceAll('\\', '/'));
+    if (match) held.add(match[1]);
+  }
+  return held;
+}
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * The Components section as rule (m) reads it: whether the spec carries one at
+ * all, whether it says "None", the entries it holds, and the bullets it holds
+ * that are not entries.
+ *
+ * Every one of those four is reported on, because this section is a claim and
+ * the three ways of not making it — leaving the section out, leaving it empty,
+ * and writing a line the shape does not fit — are the three ways a spec would
+ * otherwise pass the rule by saying nothing.
+ * @returns {{present: boolean, none: boolean,
+ *   entries: {name: string, isNew: boolean}[],
+ *   malformed: {line: number, text: string}[]}}
+ */
+function componentSection(lines) {
+  const entries = [];
+  const malformed = [];
+  let present = false;
+  let none = false;
+  let inside = false;
+  for (const [index, line] of lines.entries()) {
+    const heading = HEADING.exec(line);
+    if (heading) {
+      inside = COMPONENTS_HEADING.test(heading[1]);
+      if (inside) present = true;
+      continue;
+    }
+    if (!inside) continue;
+    const item = LIST_ITEM.exec(line);
+    if (!item) continue;
+    const text = item[1].trim();
+    if (NONE.test(text)) {
+      none = true;
+      continue;
+    }
+    const parsed = COMPONENT_ITEM.exec(text);
+    if (parsed) entries.push({ name: parsed[1], isNew: parsed[2] !== undefined });
+    else malformed.push({ line: index + 1, text });
+  }
+  return { present, none, entries, malformed };
 }
 
 /**
@@ -360,23 +508,24 @@ export function frozenExclusions(specText, testPaths = []) {
  * spec gate scopes every re-check with it, so the scope is derived from the
  * two documents rather than declared by the seat that edited one of them.
  *
- * A part is a criterion section, the touched-paths block, or the environment
- * section. A part that only one version carries counts as moved. Comparison
- * ignores blank lines and end-of-line whitespace: an amendment that reflows a
- * paragraph changed the section, one that re-indents it did not.
+ * A part is a criterion section, the touched-paths block, the components
+ * section, or the environment section. A part that only one version carries
+ * counts as moved. Comparison ignores blank lines and end-of-line whitespace:
+ * an amendment that reflows a paragraph changed the section, one that
+ * re-indents it did not.
  *
  * @param {string} priorText the spec as the previous round judged it
  * @param {string} currentText the spec as it stands
  * @param {{card: object}} ctx
  * @returns {string[]} part names, in card order, then touched-paths, then
- *   environment
+ *   components, then environment
  */
 export function amendedSections(priorText, currentText, { card }) {
   const ids = (card?.acceptance ?? []).map((c) => c.id);
   const known = new Set(ids);
   const before = specParts(priorText, known);
   const after = specParts(currentText, known);
-  const order = [...ids, TOUCHED_PATHS_SECTION, ENVIRONMENT_SECTION];
+  const order = [...ids, TOUCHED_PATHS_SECTION, COMPONENTS_SECTION, ENVIRONMENT_SECTION];
   const rank = (name) => {
     const at = order.indexOf(name);
     return at === -1 ? order.length : at;
@@ -424,6 +573,7 @@ function specParts(specText, known) {
       headings++;
       if (isCriterionId(id) && (headings > 1 || known.has(id))) current = id;
       else if (ENVIRONMENT_HEADING.test(title)) current = ENVIRONMENT_SECTION;
+      else if (COMPONENTS_HEADING.test(title)) current = COMPONENTS_SECTION;
       else current = null;
       continue;
     }

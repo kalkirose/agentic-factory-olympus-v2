@@ -204,6 +204,7 @@ async function settleFindings(ctx, base, { cycle, collected, priorConfirmed, dif
     return { confirmed, resolved };
   }
   let nextId = 1 + events.filter((e) => e.event === 'finding').length;
+  const allowlist = base.allowlistPaths ?? [];
   const confirmed = [];
   for (let i = 0; i < highs.length; i++) {
     const f = highs[i];
@@ -216,6 +217,7 @@ async function settleFindings(ctx, base, { cycle, collected, priorConfirmed, dif
       severity: f.severity,
       summary: f.finding,
       evidence: f.evidence,
+      ...findingPlace(f.file, allowlist, base.worktree),
       approach: isConfirmed && (result.approach ?? f.approach ?? false),
       confirmed: isConfirmed,
     };
@@ -233,6 +235,7 @@ async function settleFindings(ctx, base, { cycle, collected, priorConfirmed, dif
         severity: f.severity,
         summary: f.finding,
         evidence: f.evidence,
+        ...findingPlace(f.file, allowlist, base.worktree),
       },
       { advisory: true, diffTruncated },
     );
@@ -241,6 +244,49 @@ async function settleFindings(ctx, base, { cycle, collected, priorConfirmed, dif
     .filter((f) => results.get(f.id)?.verdict === 'resolved')
     .map((f) => f.id);
   return { confirmed, resolved };
+}
+
+/**
+ * Where a finding sits, as far as the ledger is concerned: the file the lens
+ * named, and whether that file is one of the project's cross-cutting gate
+ * allowlists.
+ *
+ * The allowlist word is assigned here and never read back out of the seat's
+ * sentence, for the reason every closed vocabulary in the ledger is: a fact
+ * carried as prose counts as nothing when somebody comes to count it. The
+ * lens's `file` is optional in its report; a finding that names none carries
+ * neither field, and the metric over these reads it as a finding that is not
+ * about an allowlist, which is the safe direction for a reading watched for
+ * falling (ADR-0010).
+ *
+ * The path itself is prose: a seat writes what it was reading, and what it was
+ * reading is the run worktree. So it is brought to the form a path entry is
+ * written in before anything is asked of it — separators forward, the worktree
+ * prefix off, a leading `./` off — because a match against any other form
+ * silently answers no, and a silent no is exactly what this field exists to
+ * stop.
+ */
+function findingPlace(file, allowlist, worktree) {
+  const path = repoRelative(file, worktree);
+  if (path === null) return {};
+  return {
+    file: path,
+    ...(underAny(path, allowlist) && { allowlist: true }),
+  };
+}
+
+/** A seat-written path as the repository names it, or null for no path. */
+function repoRelative(file, worktree) {
+  if (typeof file !== 'string' || file.trim().length === 0) return null;
+  let path = file.trim().replaceAll('\\', '/').replace(/\/+$/, '');
+  const root = typeof worktree === 'string' ? worktree.replaceAll('\\', '/').replace(/\/+$/, '') : '';
+  // The worktree prefix is compared case-insensitively because the hosts that
+  // hand a seat an absolute path are the ones whose file systems are.
+  if (root.length > 0 && path.toLowerCase().startsWith(root.toLowerCase() + '/')) {
+    path = path.slice(root.length + 1);
+  }
+  while (path.startsWith('./')) path = path.slice(2);
+  return path.length > 0 ? path : null;
 }
 
 function stampReviewFinding(ctx, cycle, finding, { advisory, diffTruncated = false }) {
@@ -253,6 +299,8 @@ function stampReviewFinding(ctx, cycle, finding, { advisory, diffTruncated = fal
     severity: finding.severity,
     summary: gist(finding.summary),
     evidence: gist(finding.evidence),
+    ...(finding.file && { file: finding.file }),
+    ...(finding.allowlist && { allowlist: true }),
     ...(advisory ? { advisory: true } : {}),
     ...(finding.confirmed !== undefined && { confirmed: finding.confirmed }),
     ...(finding.approach && { approach: true }),
@@ -367,6 +415,7 @@ function furyRole(lenses, base, diff, supersedes = []) {
     'Judge the diff only. Do not fix anything; do not widen into unchanged code.',
     'Severity HIGH means the finding must block the ship. Cite evidence (file and line, or spec section) for every finding.',
     'Set "approach": true only when the finding names the implementation structure as wrong against the spec.',
+    'Put the repo-relative path of the one file a finding is about in "file"; leave it out for a finding about no single file.',
     ...(lenses.includes('spec') ? supersedeDutyLines(base, supersedes) : []),
     ...diffLines(diff),
   ].join('\n');
@@ -380,6 +429,7 @@ function generalistRole(base, diff, supersedes = []) {
     'Judge the diff only. Do not fix anything; do not widen into unchanged code.',
     'Severity HIGH means the finding must block the ship. Cite evidence (file and line, or spec section) for every finding.',
     'Set "approach": true only when the finding names the implementation structure as wrong against the spec.',
+    'Put the repo-relative path of the one file a finding is about in "file"; leave it out for a finding about no single file.',
     ...(base.lenses.includes('spec') ? supersedeDutyLines(base, supersedes) : []),
     ...diffLines(diff),
   ].join('\n');

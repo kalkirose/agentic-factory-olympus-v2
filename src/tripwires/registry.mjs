@@ -22,6 +22,7 @@ export const TRIPWIRE_METRICS = {
     defaultWindow: 10,
     defaultTriggers: ['escape-recorded', 'escape-fixed', 'merged'],
     optionalParams: ['kind'],
+    paramVocabulary: { kind: 'defect kind' },
   },
   // Defects that reached the default branch through a ship which carried its
   // certification over a moved base (ADR-0056), counted over the last N
@@ -153,6 +154,68 @@ export const TRIPWIRE_METRICS = {
     unit: 'runs',
     defaultWindow: 10,
     defaultTriggers: ['run-reconfigured'],
+  },
+  // The four readings of the stops the harness raises for a person, and of
+  // the answers it now gives itself instead. Every one of them reads the run
+  // ledgers, and every one of them exists because no plan's alarm had a
+  // reader: the park counts, the gate rounds and the waits were argued from
+  // ledgers somebody went and read by hand.
+  //
+  // Parks per run over the last N launched runs. `params.type` narrows it to
+  // one park type, which is how a project watches the one stop it is
+  // repairing without losing the total. Both `park` and `answer` trigger it:
+  // an answered park is still a park that was raised, and the answer is the
+  // append that says the window has settled.
+  'parks-window': {
+    unit: 'runs',
+    defaultWindow: 10,
+    defaultTriggers: ['park', 'answer'],
+    optionalParams: ['type'],
+    paramVocabulary: { type: 'park type' },
+  },
+  // The most spec-gate rounds any one story of the last N freezes spent. The
+  // worst story rather than the mean, for the reason `verdict-cycles` reads
+  // the worst run: the gate has no round cap any more (ADR-0020), so the
+  // reading that matters is the story that kept the gate open, and four quick
+  // freezes beside it do not make that one cheaper. The mean rides in the
+  // detail for the reader who wants the window's shape.
+  'gate-rounds-window': {
+    unit: 'freezes',
+    defaultWindow: 5,
+    defaultTriggers: ['spec-gate-round'],
+  },
+  // Waits per run over the last N launched runs, with the share of those
+  // spans whose ladder ended without asking a person. `params.kind` narrows
+  // it to one wait kind. The value counts what the harness answered for
+  // itself; the share in the detail says how often that answer was right,
+  // and a share that falls is a ladder too short for the world it waits on
+  // (ADR-0069).
+  'waits-window': {
+    unit: 'runs',
+    defaultWindow: 10,
+    defaultTriggers: ['waiting'],
+    optionalParams: ['kind'],
+    paramVocabulary: { kind: 'wait kind' },
+  },
+  // Confirmed spec-lens findings on an allowlist path, across the runs
+  // holding the last N verdicts. It is the one metric here watched for
+  // FALLING: a cross-cutting gate's allowlist is a file a story extends in
+  // its own diff, and the only thing that judges whether the card covers the
+  // addition is the spec lens reading the whole diff (ADR-0066). A window of
+  // allowlist additions with no finding on any of them is not a clean
+  // window — it is a lens that is not reading them, and no other reading here
+  // can tell those two apart.
+  //
+  // Whether a finding sits on an allowlist path is decided where the finding
+  // is stamped, against the project's `gates.allowlistPaths`, and never read
+  // back out of the sentence the seat wrote. So the metric reads one field
+  // and the config line and the band ship together, as a cut and its tripwire
+  // do: a project that arms this and declares no allowlist path reads zero,
+  // breaches its floor at once, and is told so.
+  'allowlist-findings-window': {
+    unit: 'verdicts',
+    defaultWindow: 5,
+    defaultTriggers: ['verdict-rendered'],
   },
 };
 

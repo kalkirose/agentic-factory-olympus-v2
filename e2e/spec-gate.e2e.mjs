@@ -52,6 +52,10 @@ src/feature.mjs (new) — dev
 tests/feature.test.mjs (new) — suite
 \`\`\`
 
+## Components
+
+- None.
+
 ## Environment
 
 None; the card names none.

@@ -293,6 +293,18 @@ const IMPLEMENTATIONS = {
     };
   },
 
+  'parks-window': async ({ paths, project, window, params }) =>
+    parksReading(paths, project, { window, type: params?.type }),
+
+  'gate-rounds-window': async ({ paths, project, window }) =>
+    gateRoundsReading(paths, project, { window }),
+
+  'waits-window': async ({ paths, project, window, params }) =>
+    waitsReading(paths, project, { window, kind: params?.kind }),
+
+  'allowlist-findings-window': async ({ paths, project, window }) =>
+    allowlistFindingsReading(paths, project, { window }),
+
   'frontier-width': async ({ paths, project, params, readSource }) => {
     const source = await readSource(project);
     if (!source) return { value: null, eligible: false, detail: {} };
@@ -309,6 +321,241 @@ const IMPLEMENTATIONS = {
     };
   },
 };
+
+// -- the stops, and the answers the harness gives itself ----------------------
+//
+// The four readings of what still stops a run for a person, and of what the
+// harness answers for itself instead: parks, spec-gate rounds, waits, and
+// whether anybody is reading the allowlist additions that replaced a set of
+// cross-cutting story tests.
+//
+// They are plain functions beside their entries in the table above, because
+// the status page prints all four and answers from the files with no daemon
+// behind it. One reading, two callers. Each takes the runs it reads, so a
+// caller that wants all four walks the ledgers once.
+
+/**
+ * Every run of one project, in launch order, with its events. The one read
+ * the four readings below share.
+ */
+export function projectRuns(paths, project) {
+  return runsByLaunch(paths, project);
+}
+
+/**
+ * Parks per run over the last `window` launched runs of one project, and the
+ * park types behind the number.
+ *
+ * Every park is counted, answered or not: the metric is about the stops the
+ * harness raised, and a stop a person answered in a minute still cost that
+ * person the minute and the run the wait.
+ * @param {{window?: number, type?: string, runs?: object[],
+ *   instanceEvents?: object[]}} [opts] `type` narrows to one park type;
+ *   absent counts them all.
+ */
+export function parksReading(paths, project, { window = 10, type, runs, instanceEvents } = {}) {
+  const inWindow = (runs ?? projectRuns(paths, project)).slice(-window);
+  const ids = new Set(inWindow.map((r) => r.runId));
+  const wanted = (e) => e.event === 'park' && (type === undefined || e.type === type);
+  const parks = inWindow.flatMap(({ runId, events }) =>
+    events.filter(wanted).map((e) => ({ runId, type: e.type })),
+  );
+  // The two parks that belong to a card rather than to a run are stamped on
+  // the instance ledger by the ship of the run that raised them (ADR-0008,
+  // ADR-0052). They carry that run id and that project, so they belong in the
+  // same window; a reading that walked the run ledgers alone would answer zero
+  // for two park types its own `params.type` admits.
+  for (const e of instanceEvents ?? readEvents(paths.instanceLedger)) {
+    if (!wanted(e) || e.project !== project || !ids.has(e.runId)) continue;
+    parks.push({ runId: e.runId, type: e.type });
+  }
+  return {
+    value: inWindow.length > 0 ? round(parks.length / inWindow.length) : null,
+    // A window with no run in it is no reading. A window of runs that parked
+    // nothing is a reading of zero, which is the answer.
+    eligible: inWindow.length > 0,
+    detail: {
+      runs: inWindow.length,
+      parks: parks.length,
+      ...(type !== undefined && { type }),
+      // The types, because the type is what is repaired, and the runs,
+      // because that is where the questions and the answers are written.
+      types: [...new Set(parks.map((p) => p.type))].sort(),
+      parked: [...new Set(parks.map((p) => p.runId))],
+    },
+  };
+}
+
+/**
+ * The most spec-gate rounds any one story of the last `window` freezes spent.
+ *
+ * The worst story, not the mean, for the reason `verdict-cycles` reads the
+ * worst run: the gate has no round cap and parks only when it stops closing
+ * findings (ADR-0020), so the story that kept the gate open is the reading,
+ * and four quick freezes beside it do not make that one cheaper. The mean
+ * rides in the detail for the reader who wants the window's shape.
+ */
+export function gateRoundsReading(paths, project, { window = 5, runs } = {}) {
+  const freezes = [];
+  for (const { runId, lane, events } of runs ?? projectRuns(paths, project)) {
+    if (lane !== 'story') continue;
+    const rounds = events.filter((e) => e.event === 'spec-gate-round');
+    for (const freeze of events.filter((e) => e.event === 'freeze')) {
+      freezes.push({
+        runId,
+        ts: freeze.ts,
+        rounds: rounds.filter((r) => r.seq < freeze.seq).length,
+      });
+    }
+  }
+  const counted = freezes.sort(byTs).slice(-window);
+  const worst = counted.reduce((a, b) => (b.rounds > a.rounds ? b : a), { rounds: -Infinity });
+  const mean =
+    counted.length > 0 ? counted.reduce((sum, f) => sum + f.rounds, 0) / counted.length : null;
+  return {
+    value: counted.length > 0 ? worst.rounds : null,
+    eligible: counted.length > 0,
+    detail:
+      counted.length > 0
+        ? { freezes: counted.length, run: worst.runId, mean: round(mean) }
+        : { freezes: 0 },
+  };
+}
+
+/**
+ * Wait spans per run over the last `window` launched runs, and the share of
+ * those spans whose ladder ended without asking a person.
+ *
+ * The value is what the harness answered for itself. The share is whether the
+ * answer was right: a ladder that ran out and parked anyway was a wait too
+ * short for the world it was waiting on, and a share that falls says so before
+ * the park counts do (ADR-0069).
+ *
+ * Every span counts, whatever ended it. A span the daemon closed at a stop
+ * (`waiting-ended` with outcome `daemon-stopped`) is the record the next start
+ * resumes the ladder from, so it is read and never filtered: dropping it would
+ * make a provider outage across a restart look like a shorter one.
+ * @param {{window?: number, kind?: string, runs?: object[]}} [opts] `kind`
+ *   narrows to one wait kind; absent counts them all.
+ */
+export function waitsReading(paths, project, { window = 10, kind, runs } = {}) {
+  const inWindow = (runs ?? projectRuns(paths, project)).slice(-window);
+  const spans = inWindow.flatMap(({ runId, events }) =>
+    waitLadders(events).flatMap((ladder) =>
+      ladder.spans.map(() => ({ runId, kind: ladder.kind, green: ladder.green })),
+    ),
+  );
+  const counted = kind === undefined ? spans : spans.filter((s) => s.kind === kind);
+  const green = counted.filter((s) => s.green).length;
+  return {
+    value: inWindow.length > 0 ? round(counted.length / inWindow.length) : null,
+    eligible: inWindow.length > 0,
+    detail: {
+      runs: inWindow.length,
+      waits: counted.length,
+      ...(kind !== undefined && { kind }),
+      green,
+      ...(counted.length > 0 && { greenShare: round(green / counted.length) }),
+      kinds: [...new Set(counted.map((s) => s.kind))].sort(),
+      waited: [...new Set(counted.map((s) => s.runId))],
+    },
+  };
+}
+
+/**
+ * Confirmed spec-lens findings on an allowlist path, across the runs holding
+ * the last `window` verdicts.
+ *
+ * Watched for falling. A cross-cutting rule that used to be a story test is a
+ * static gate with an allowlist, and a story extends the codebase by adding a
+ * line to that allowlist in its own diff. Nothing mechanical judges whether
+ * the card covered the addition; the spec lens reading the whole diff does
+ * (ADR-0066). So a window full of allowlist additions and empty of findings is
+ * not a clean window, it is a lens nobody is feeding.
+ *
+ * Both halves of that sentence are read off the ledger. The additions are the
+ * allowlist files each candidate capture touched, carried on
+ * `implementation-committed`; the findings carry `allowlist: true`, assigned
+ * at the stamp against the project's `gates.allowlistPaths` and never inferred
+ * here from the sentence a seat wrote. A window with no addition in it is not
+ * eligible, because a window in which no story touched an allowlist says
+ * nothing at all about whether anybody reads them.
+ */
+export function allowlistFindingsReading(paths, project, { window = 5, runs } = {}) {
+  const all = runs ?? projectRuns(paths, project);
+  const { verdicts, runIds } = verdictWindow(all, window);
+  const touched = new Set();
+  let additions = 0;
+  const found = [];
+  for (const { runId, events } of all) {
+    if (!runIds.has(runId)) continue;
+    const mine = new Set();
+    for (const e of events) {
+      if (e.event === 'implementation-committed') {
+        for (const path of e.allowlists ?? []) mine.add(path);
+        continue;
+      }
+      if (e.event !== 'finding' || e.lens !== 'spec') continue;
+      if (e.confirmed !== true || e.allowlist !== true) continue;
+      found.push({ runId, id: e.id, file: e.file });
+    }
+    // Per run: the same allowlist extended by two stories is two additions,
+    // and each of them is a judgment the lens owed.
+    additions += mine.size;
+    for (const path of mine) touched.add(path);
+  }
+  return {
+    value: found.length,
+    eligible: additions > 0,
+    detail: {
+      verdicts,
+      additions,
+      findings: found.length,
+      allowlists: [...touched].sort(),
+      runs: [...new Set(found.map((f) => f.runId))],
+    },
+  };
+}
+
+/**
+ * The wait ladders of one run, in ledger order, each with its spans and
+ * whether it ended without a park.
+ *
+ * A ladder is the run of waits one condition bought: a `waiting` of the same
+ * kind carrying an attempt past the first continues the standing one, and
+ * anything else opens a new one. What settles a ladder is the first thing the
+ * run does after it: a `park` settles it red, and a new wait or a fresh stage
+ * entry settles it green. A resumed stage entry settles nothing — the daemon
+ * restarted and the run is still in the stage the ladder belongs to — and nor
+ * does a hold at that stage. A ladder the ledger simply ends on is green,
+ * because nothing was asked.
+ *
+ * The stage boundary is what keeps the attribution honest: a park two stages
+ * later is that stage's park, not this ladder's.
+ */
+function waitLadders(events) {
+  const ladders = [];
+  let standing = null;
+  const settle = (green) => {
+    if (standing) standing.green = green;
+    standing = null;
+  };
+  for (const e of events ?? []) {
+    if (e.event === 'waiting') {
+      if (!(standing && standing.kind === e.kind && (e.attempt ?? 1) > 1)) {
+        settle(true);
+        standing = { kind: e.kind, spans: [], green: true };
+        ladders.push(standing);
+      }
+      standing.spans.push(e);
+      continue;
+    }
+    if (standing === null || e.event === 'waiting-ended') continue;
+    if (e.event === 'park') settle(false);
+    else if (e.event === 'stage-entered' && e.resumed !== true) settle(true);
+  }
+  return ladders;
+}
 
 // -- baselines ----------------------------------------------------------------
 // At the 5th freeze and the 5th verdict the watcher stamps a baseline
@@ -554,25 +801,39 @@ function collectFreezes(paths, project) {
   return freezes.sort(byTs);
 }
 
-/** Confirmed findings per lens across the runs holding the last N verdicts. */
-function collectYield(paths, project, window) {
-  const runs = listRunEvents(paths, { project });
+/**
+ * The runs holding the last `window` rendered verdicts, and how many verdicts
+ * that window holds. Two readings ask this one question — the per-lens yield
+ * and the allowlist findings — and a second copy of it would be a second
+ * definition of what a verdict window is.
+ * @returns {{verdicts: number, runIds: Set<string>}}
+ */
+function verdictWindow(runs, window) {
   const verdicts = [];
   for (const { runId, events } of runs) {
-    for (const v of events.filter((e) => e.event === 'verdict-rendered')) {
-      verdicts.push({ ts: v.ts, runId });
+    for (const v of events) {
+      if (v.event === 'verdict-rendered') verdicts.push({ ts: v.ts, runId });
     }
   }
   verdicts.sort(byTs);
-  const inWindow = new Set(verdicts.slice(-window).map((v) => v.runId));
+  return {
+    verdicts: Math.min(verdicts.length, window),
+    runIds: new Set(verdicts.slice(-window).map((v) => v.runId)),
+  };
+}
+
+/** Confirmed findings per lens across the runs holding the last N verdicts. */
+function collectYield(paths, project, window) {
+  const runs = listRunEvents(paths, { project });
+  const { verdicts, runIds } = verdictWindow(runs, window);
   const byLens = Object.fromEntries(ALL_LENSES.map((lens) => [lens, 0]));
   for (const { runId, events } of runs) {
-    if (!inWindow.has(runId)) continue;
+    if (!runIds.has(runId)) continue;
     for (const f of events.filter((e) => e.event === 'finding' && e.confirmed === true)) {
       byLens[f.lens] = (byLens[f.lens] ?? 0) + 1;
     }
   }
-  return { verdicts: Math.min(verdicts.length, window), byLens };
+  return { verdicts, byLens };
 }
 
 /** Ledger order across ledgers: the stamp's own time, ascending. */

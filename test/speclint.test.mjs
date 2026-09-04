@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { parseIntentCard } from '../src/lanes/card.mjs';
 import {
   amendedSections,
+  componentIndex,
   lintSpec,
   frozenExclusions,
   SPEC_LINE_CAP,
@@ -42,7 +43,13 @@ const TIER = {
   forbiddenPatterns: ['-win32\\.'],
 };
 
-function spec({ header = '# alpha-1 spec', sections, touched, environment = '## Environment\n\nNone.' } = {}) {
+function spec({
+  header = '# alpha-1 spec',
+  sections,
+  touched,
+  components = ['None.'],
+  environment = '## Environment\n\nNone.',
+} = {}) {
   const body =
     sections ??
     [
@@ -52,7 +59,11 @@ function spec({ header = '# alpha-1 spec', sections, touched, environment = '## 
   const block =
     touched ??
     ['```touched-paths', 'src/feature.mjs — dev', 'tests/feature.test.mjs — suite', '```'].join('\n');
-  return [header, '', body, '', block, '', environment, ''].join('\n');
+  const named =
+    components === null
+      ? []
+      : ['## Components', '', ...components.map((c) => `- ${c}`), ''];
+  return [header, '', body, '', block, '', ...named, environment, ''].join('\n');
 }
 
 function section(id, mappings, { supersedes = ['None'] } = {}) {
@@ -103,8 +114,19 @@ function lint(
 }
 
 /** The tree the fixture spec is written against, as the lane hands it over. */
-function groundOf({ files = TREE_FILES, pins = new Map(), routesRoot = 'routes' } = {}) {
-  return { files, pins, routesRoot };
+function groundOf({
+  files = TREE_FILES,
+  pins = new Map(),
+  routesRoot = 'routes',
+  componentsRoot = 'ui',
+} = {}) {
+  return {
+    files,
+    pins,
+    routesRoot,
+    componentsRoot,
+    components: componentIndex(files, componentsRoot),
+  };
 }
 
 const TREE_FILES = [
@@ -114,6 +136,11 @@ const TREE_FILES = [
   'tests/layout.test.mjs',
   'routes/[lang=lang]/shop/+page.svelte',
   'routes/[lang=lang]/(account)/orders/+page.svelte',
+  // A design system read as folder-per-component, one at the root of it and
+  // one nested, so the rule is proved against both shapes.
+  'ui/PriceTag/PriceTag.svelte',
+  'ui/PriceTag/index.ts',
+  'ui/forms/QuantityStepper/QuantityStepper.svelte',
 ];
 
 // -- the clean spec ----------------------------------------------------------
@@ -844,4 +871,111 @@ test('a criterion takes its own id, or its position when it carries none', () =>
   );
   const { card: none } = parseIntentCard('---\nkey: a-1\n---\n\n## Goal\n\nDo the thing.\n');
   assert.deepEqual(none.acceptance, []);
+});
+
+// -- (m) every component the spec names exists, or is marked new -------------
+
+test('(m) the components root is read as folder-per-component', () => {
+  const held = componentIndex(TREE_FILES, 'ui');
+  assert.deepEqual([...held].sort(), ['PriceTag', 'QuantityStepper']);
+  // A file that is not its directory's namesake is not a component, and a
+  // root the caller turns off answers nothing at all.
+  assert.deepEqual([...componentIndex(['ui/PriceTag/helpers.ts'], 'ui')], []);
+  assert.equal(componentIndex(TREE_FILES, null), null);
+});
+
+test('(m) a component the design system does not hold is named', (t) => {
+  const held = spec({ components: ['`PriceTag`', '`QuantityStepper`'] });
+  assert.deepEqual(lint(t, held, { ground: groundOf() }), []);
+  const phantom = spec({ components: ['`PriceTag`', '`RadioField`'] });
+  const defects = lint(t, phantom, { ground: groundOf() });
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(
+    defects[0],
+    /the spec's Components section names RadioField, and no component of that name exists under ui at the spec's base sha; a component the story creates is written `RadioField` \(new\)\./,
+  );
+});
+
+test('(m) the (new) marker admits a component the story creates, and is refused on one that exists', (t) => {
+  const created = spec({ components: ['`RadioField` (new)'] });
+  assert.deepEqual(lint(t, created, { ground: groundOf() }), []);
+  const stale = spec({ components: ['`PriceTag` (new)'] });
+  const defects = lint(t, stale, { ground: groundOf() });
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(defects[0], /marks the component PriceTag \(new\), and ui already holds it/);
+});
+
+test('(m) "None" answers the section, and no components root turns the rule off', (t) => {
+  // A story that renders nothing writes the section as None. A project that
+  // names no root, or names one its tree does not hold, gets no rule at all —
+  // and then the section is not required either.
+  assert.deepEqual(lint(t, spec({ components: ['None.'] }), { ground: groundOf() }), []);
+  const phantom = spec({ components: ['`RadioField`'] });
+  assert.deepEqual(lint(t, phantom, { ground: groundOf({ componentsRoot: null }) }), []);
+  assert.deepEqual(lint(t, phantom, { ground: groundOf({ componentsRoot: 'web/ui' }) }), []);
+  assert.deepEqual(lint(t, spec({ components: null }), { ground: groundOf({ componentsRoot: null }) }), []);
+});
+
+test('(m) a spec with no Components section, or an empty one, has not made the claim', (t) => {
+  // The section carries a rule and it carries "- None." for the empty case, so
+  // silence is not an answer: a rule that read an absent section as "renders
+  // nothing" would be a rule every spec could skip.
+  const absent = lint(t, spec({ components: null }), { ground: groundOf() });
+  assert.equal(absent.length, 1, absent.join(' | '));
+  assert.match(absent[0], /the spec has no Components section; the template takes one/);
+  const empty = lint(t, spec({ components: [] }), { ground: groundOf() });
+  assert.equal(empty.length, 1, empty.join(' | '));
+  assert.match(empty[0], /Components section lists nothing; write one item per design-system/);
+});
+
+test('(m) a bullet the entry shape does not fit is a defect naming the line', (t) => {
+  // The three shapes that would otherwise pass a rule that skipped what it
+  // could not parse: a path, two names on one line, and a dotted name.
+  const bad = spec({ components: ['`forms/RadioField`', '`PriceTag` `QuantityStepper`', 'ui.RadioField'] });
+  const defects = lint(t, bad, { ground: groundOf() });
+  assert.equal(defects.length, 3, defects.join(' | '));
+  assert.match(defects[0], /carries "`forms\/RadioField`" on line \d+, which is not a component entry/);
+  assert.match(defects[1], /carries "`PriceTag` `QuantityStepper`" on line \d+/);
+  assert.match(defects[2], /carries "ui\.RadioField" on line \d+/);
+  // Every message states the shape the template asks for.
+  for (const defect of defects) assert.match(defect, /one component name on one line/);
+});
+
+test('(m) the lane reads the components root from the tree at the base sha', async (t) => {
+  const dir = tempDir('olympus-speclint-components-');
+  t.after(() => removeDir(dir));
+  initOriginRepo(dir, {
+    'src/feature.mjs': 'export {};\n',
+    'tests/feature.test.mjs': 'export {};\n',
+    'ui/PriceTag/PriceTag.svelte': '<span />\n',
+  });
+  const baseSha = gitSync(['rev-parse', 'HEAD'], dir).trim();
+  const specPath = join(dir, 'spec.md');
+  const base = {
+    card,
+    cardPath: CARD_PATH,
+    worktree: dir,
+    testPaths: ['tests'],
+    tier: null,
+    specPath,
+    routesRoot: null,
+    componentsRoot: 'ui',
+    baseSha,
+  };
+  writeFileSync(specPath, spec({ components: ['`PriceTag`', '`RadioField`'] }));
+  const defects = await specLintDefects(base);
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(defects[0], /names RadioField, and no component of that name exists under ui/);
+  writeFileSync(specPath, spec({ components: ['`PriceTag`', '`RadioField` (new)'] }));
+  assert.deepEqual(await specLintDefects(base), []);
+  // A project that names no components root gets no rule (m), section or no
+  // section.
+  writeFileSync(specPath, spec({ components: null }));
+  assert.deepEqual(await specLintDefects({ ...base, componentsRoot: null }), []);
+});
+
+test('the components section is an amended part of its own', () => {
+  const before = spec({ components: ['`PriceTag`'] });
+  const after = spec({ components: ['`PriceTag`', '`RadioField` (new)'] });
+  assert.deepEqual(amendedSections(before, after, { card }), ['components']);
 });
