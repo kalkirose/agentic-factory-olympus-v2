@@ -16,7 +16,7 @@ import { readEvents } from '../src/ledger/ledger.mjs';
 import { recoverOpenAttempts, unpairedAttempts } from '../src/ledger/attempts.mjs';
 import { LAYER_ABANDON_REASONS } from '../src/ledger/registry.mjs';
 import { runSpectrum } from '../src/lanes/spectrum.mjs';
-import { tempDir, removeDir, waitFor } from './helpers.mjs';
+import { tempDir, removeDir, waitFor, NO_WAIT } from './helpers.mjs';
 
 const GREEN = ['node', '-e', 'process.exit(0)'];
 const RED = ['node', '-e', 'console.log("boom"); process.exit(1)'];
@@ -297,7 +297,7 @@ test('a daemon start closes the attempt the dead instance was holding', async (t
   const lanes = {
     story: { stages: ['verdict'], handlers: { verdict: () => new Promise(() => {}) } },
   };
-  const daemon = new Daemon(home, { lanes });
+  const daemon = new Daemon(home, { waitSleep: NO_WAIT, lanes });
   const { runsResumed } = await daemon.start();
   assert.deepEqual(runsResumed, ['r1']);
   await waitFor(
@@ -323,7 +323,7 @@ test('the orphan sweep closes an attempt in a ledger the engine does not hold', 
   const paths = scaffoldHome(home);
   writeFileSync(paths.instanceConfig, JSON.stringify({ version: 1, projects: {} }, null, 2));
   t.after(() => removeDir(home));
-  const daemon = new Daemon(home, { lanes: {} });
+  const daemon = new Daemon(home, { waitSleep: NO_WAIT, lanes: {} });
   await daemon.start();
   writeLedger(paths, 'orphan', RESUMABLE);
   daemon.recoverAttemptsOf('orphan');

@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  seatSpawnOptions,
+  treeSpawnOptions,
   terminateTree,
   sweepPathHolders,
   pathHolders,
@@ -38,6 +38,16 @@ function fakeChild(pid = 4321) {
 }
 
 function alive(pid) {
+  // Off Windows a signal of nought is the question without the answer: it
+  // succeeds while the pid exists and throws when it does not.
+  if (!ON_WINDOWS) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
   return execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH'], { encoding: 'utf8' }).includes(
     String(pid),
   );
@@ -110,23 +120,57 @@ function endOfString(text, start) {
 
 // -- the spawn branch ---------------------------------------------------------
 
-test('off Windows a seat spawns with exactly the options it had before', () => {
+test('off Windows a child leads a process group of its own', () => {
+  // POSIX `detached` is `setsid`: a session and a process group, which is what
+  // makes the tree addressable by one signal. It is not the console-less shape
+  // Windows means by the same word.
   for (const platform of ['linux', 'darwin', 'freebsd']) {
-    assert.deepEqual(seatSpawnOptions({ platform }), {});
+    assert.deepEqual(treeSpawnOptions({ platform }), { detached: true });
   }
 });
 
 test('on Windows a seat spawns onto a console with no window', () => {
   // CREATE_NO_WINDOW. One shape for every seat: the shim under `cmd.exe` and
   // the directly spawned tool are given the same console treatment.
-  assert.deepEqual(seatSpawnOptions({ platform: 'win32' }), { windowsHide: true });
+  assert.deepEqual(treeSpawnOptions({ platform: 'win32' }), { windowsHide: true });
 });
 
-test('no seat is ever detached from a console', () => {
+test('no seat is ever detached from a console on Windows', () => {
   // DETACHED_PROCESS leaves the seat with no console, and each console
-  // descendant of a console-less process opens a visible one of its own.
-  for (const platform of ['win32', 'linux', 'darwin']) {
-    assert.equal('detached' in seatSpawnOptions({ platform }), false);
+  // descendant of a console-less process opens a visible one of its own. The
+  // rule is the Windows branch's, and it is the whole reason that branch
+  // hides a window instead of detaching.
+  assert.equal('detached' in treeSpawnOptions({ platform: 'win32' }), false);
+});
+
+test('off Windows a deliberate kill addresses the group, not the handle', async () => {
+  const killed = [];
+  const child = fakeChild(4321);
+  await terminateTree(child, {
+    platform: 'linux',
+    kill: (pid, signal) => killed.push([pid, signal]),
+  });
+  assert.deepEqual(killed, [[-4321, 'SIGTERM']]);
+  // The group took it; the handle is not killed twice.
+  assert.equal(child.killed, 0);
+});
+
+test('a group that is already gone falls back to the handle', async () => {
+  const child = fakeChild(4321);
+  await terminateTree(child, {
+    platform: 'linux',
+    kill: () => {
+      throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
+    },
+  });
+  assert.equal(child.killed, 1);
+});
+
+test('a child with no pid is killed by its handle on every platform', async () => {
+  for (const platform of ['linux', 'win32']) {
+    const child = fakeChild(null);
+    await terminateTree(child, { platform, kill: () => {}, run: recorder() });
+    assert.equal(child.killed, 1);
   }
 });
 
@@ -152,13 +196,15 @@ test('nothing the harness starts can put a window on screen', () => {
       const daemonShape = /\.\.\.daemonSpawnOptions\(/.test(site.args);
       const hidden =
         /windowsHide:\s*true/.test(site.args) ||
-        /\.\.\.seatSpawnOptions\(/.test(site.args) ||
+        /\.\.\.treeSpawnOptions\(/.test(site.args) ||
         daemonShape;
       if (!hidden) offenders.push(`${where} does not hide its window`);
-      // Detaching is the daemon's shape and nothing else's. A site that spells
-      // it out for itself is a seat or a command escaping the rule.
+      // Spelling `detached` out at a site is the daemon's shape and nothing
+      // else's: every other child takes the platform decision from
+      // `treeSpawnOptions`, where the Windows branch never detaches and the
+      // POSIX branch means a process group by it.
       if (/\bdetached\b/.test(site.args) && !daemonShape) {
-        offenders.push(`${where} detaches from its console`);
+        offenders.push(`${where} names detached for itself`);
       }
     }
   }
@@ -364,6 +410,44 @@ test('a record names a handful of holders, not every one of a hundred', async ()
   assert.equal(swept.count, 25);
 });
 
+// -- the real host -----------------------------------------------------------
+
+test(
+  'off Windows a deliberate kill reaches a descendant the handle does not name',
+  { skip: ON_WINDOWS ? 'runs off Windows only' : false },
+  async (t) => {
+    const dir = tempDir();
+    t.after(() => removeDir(dir));
+    // The shape every gate command has: a tool that spawns work of its own, so
+    // the thing that matters is a grandchild of the process the handle names.
+    const marker = join(dir, 'grandchild.pid');
+    writeFileSync(
+      join(dir, 'tool.mjs'),
+      `import { spawn } from 'node:child_process';
+       import { writeFileSync } from 'node:fs';
+       const grand = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1<<30)']);
+       writeFileSync(${JSON.stringify(marker)}, String(grand.pid));
+       setInterval(() => {}, 1 << 30);`,
+    );
+    const child = spawn(process.execPath, [join(dir, 'tool.mjs')], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...treeSpawnOptions(),
+    });
+    // Whatever this test decides, nothing it started outlives it: a live child
+    // holds the runner's pipes open and the suite never ends.
+    t.after(() => terminateTree(child).catch(() => {}));
+    const grandPid = Number(
+      await waitFor(() => existsSync(marker) && readFileSync(marker, 'utf8'), {
+        label: 'the descendant to report its pid',
+      }),
+    );
+    assert.ok(alive(grandPid), 'the descendant should be running before the kill');
+    await terminateTree(child);
+    await waitFor(() => !alive(grandPid), { label: 'the descendant to die with the child' });
+    assert.equal(alive(grandPid), false);
+  },
+);
+
 // -- the real host (Windows only) --------------------------------------------
 
 test(
@@ -388,7 +472,7 @@ test(
     const child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${join(dir, 'tool.cmd')}"`], {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsVerbatimArguments: true,
-      ...seatSpawnOptions(),
+      ...treeSpawnOptions(),
     });
     const grandPid = Number(
       await waitFor(() => existsSync(marker) && readFileSync(marker, 'utf8'), {
@@ -441,7 +525,7 @@ test(
       const child = spawn(spec.file, spec.args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         ...(spec.windowsVerbatimArguments && { windowsVerbatimArguments: true }),
-        ...seatSpawnOptions(),
+        ...treeSpawnOptions(),
       });
       child.stdout.on('data', (chunk) => (out += chunk));
       child.stderr.on('data', (chunk) => (out += chunk));

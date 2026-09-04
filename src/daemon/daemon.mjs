@@ -56,6 +56,11 @@ import { readGraphSource } from '../frontier/source.mjs';
 import { TripwireWatcher } from '../tripwires/watcher.mjs';
 import { armedTripwires } from '../tripwires/registry.mjs';
 import { WorkflowWatcher } from '../ship/workflows.mjs';
+import { ProofDebtWatcher, narrowEnv } from '../lanes/proofdebt.mjs';
+import { askDeclaredProbe } from '../lanes/probes.mjs';
+import { runCommand } from '../lanes/exec.mjs';
+import { PARTS_ENV, FAILED_FILES_ENV } from '../lanes/parts.mjs';
+import { runEnv } from '../lanes/shared.mjs';
 import { projectForge } from '../lanes/assemble.mjs';
 import { EvalScheduler } from '../eval/review.mjs';
 import { Notifier } from './notifier.mjs';
@@ -105,7 +110,8 @@ export class Daemon {
    * @param {string} home
    * @param {{handleSignals?: boolean, lanes?: Record<string, object>,
    *   composeRunner?: Function, evalSeatDefaults?: () => object,
-   *   workspaceSweepMs?: number, workflowWatchMs?: number,
+   *   workspaceSweepMs?: number, workflowWatchMs?: number, proofDebtMs?: number,
+   *   waitSleep?: (ms: number) => Promise<void>,
    *   forgeFor?: (project: string) => object,
    *   notifierTransport?: {fetchImpl?: Function, spawnImpl?: Function}}} opts
    *   lanes: lane name → {stages, handlers}, registered on the run engine at
@@ -115,6 +121,8 @@ export class Daemon {
    *   substitutes the eval seat's dispatch defaults (tests only);
    *   workspaceSweepMs shortens the orphan-sweep period (tests only);
    *   workflowWatchMs shortens the watched-workflow poll (tests only);
+   *   proofDebtMs shortens the deferred-proof poll (tests only);
+   *   waitSleep substitutes the wait mechanism's clock (tests only);
    *   forgeFor substitutes the forge the workflow watcher reads through
    *   (tests only); notifierTransport substitutes the push transport
    *   (tests only).
@@ -128,6 +136,8 @@ export class Daemon {
       evalSeatDefaults,
       workspaceSweepMs = WORKSPACE_SWEEP_MS,
       workflowWatchMs,
+      proofDebtMs,
+      waitSleep,
       forgeFor,
       notifierTransport,
     } = {},
@@ -139,6 +149,12 @@ export class Daemon {
     this.evalSeatDefaults = evalSeatDefaults;
     this.workspaceSweepMs = workspaceSweepMs;
     this.workflowWatchMs = workflowWatchMs;
+    this.proofDebtMs = proofDebtMs;
+    // Whether anything this instance has seen arms the deferred-proof trade: a
+    // launch under the flag, or a run of any age opening a debt. It is a hint
+    // for the watcher and never a gate on anything.
+    this.proofDebtDeclared = false;
+    this.waitSleep = waitSleep;
     this.forgeFor = forgeFor ?? ((project) => projectForge(this.config, project));
     this.notifierTransport = notifierTransport;
     this.running = false;
@@ -152,6 +168,7 @@ export class Daemon {
     this.hold = null;
     this.tripwires = null;
     this.workflows = null;
+    this.proofDebts = null;
     this.evals = null;
     this.notifier = null;
     this.pendingTeardowns = new Set();
@@ -339,6 +356,20 @@ export class Daemon {
         readWatched: (project) => this.readWatchedWorkflows(project),
         ...(this.workflowWatchMs !== undefined && { intervalMs: this.workflowWatchMs }),
       });
+      // The proofs a ship went out without, where an owner took that trade.
+      // The watcher asks the service and settles the debt; it holds no run and
+      // it is not there for a project that never defers one (ADR-0069).
+      this.proofDebts = new ProofDebtWatcher({
+        ledger: this.ledger,
+        paths: this.paths,
+        probe: (debt) => this.probeDeferred(debt),
+        settle: (debt) => this.settleProofDebt(debt),
+        // A project arms the trade in its own config, and the launch is where
+        // this daemon reads one. Until a launch says so, and with no debt
+        // open, the watcher reads no ledger at all.
+        declared: () => this.proofDebtDeclared,
+        ...(this.proofDebtMs !== undefined && { intervalMs: this.proofDebtMs }),
+      });
       this.evals = new EvalScheduler({
         paths: this.paths,
         ledger: this.ledger,
@@ -358,6 +389,9 @@ export class Daemon {
           if (info.state === 'shipped') this.evals.notify();
         },
         onParked: (info) => this.frontier.queueSweep(info.project),
+        // An external wait gives its slot up the way a park does, so the
+        // frontier fills it the same way (ADR-0069).
+        onWaiting: (info) => this.frontier.queueSweep(info.project),
         semaphores: this.semaphores,
         seatDefaults: () => this.seatDefaults(),
         composeCommand: () => this.config.composeCommand,
@@ -368,7 +402,11 @@ export class Daemon {
           credentials: this.config.probeCredentials ?? [],
           secretEnv: this.config.secretEnv ?? [],
         }),
+        // The wait mechanism's clock. Absent is the real one; a test drives
+        // the ladders through it, because a ladder is measured in minutes.
+        ...(this.waitSleep && { waitSleep: this.waitSleep }),
         onEvent: (project, line, ledger) => {
+          this.noticeRunEvent(line);
           this.tripwires?.notify(project, line, ledger);
           this.notifier?.notify({ ledger, project, line });
         },
@@ -400,6 +438,7 @@ export class Daemon {
       this.watchControl();
       this.armWorkspaceSweep();
       this.workflows.start();
+      this.proofDebts.start();
       if (this.handleSignals) this.installSignalHandlers();
       this.running = true;
       this.frontier.queueSweepAll();
@@ -559,6 +598,7 @@ export class Daemon {
       // The launch read the config fresh from the default branch; the tripwire
       // registry the watcher evaluates is the registry that just shipped.
       this.tripwires.setRegistry(project, armedTripwires(ws.projectConfig));
+      if (ws.projectConfig.gates?.proofDebt === true) this.proofDebtDeclared = true;
       try {
         this.engine.launch({
           runId,
@@ -900,25 +940,107 @@ export class Daemon {
       payload.card = card;
       const entry = this.config.projects[project];
       if (entry && lane === 'story') {
-        try {
-          payload.storyKey = await this.isolation.withClone(project, async () => {
-            const dir = await ensureBareClone(
-              this.paths,
-              project,
-              entry.repoUrl,
-              entry.defaultBranch,
-            );
-            const { text } = await readBlobFromBranch(dir, entry.defaultBranch, card);
-            return parseIntentCard(text).card.key ?? undefined;
-          });
-          if (payload.storyKey === undefined) delete payload.storyKey;
-        } catch {
-          delete payload.storyKey;
-          // no key: the run still launches; it just matches no card history
-        }
+        // The one reader of the default branch, with the door's own three
+        // choices: the clone made on first use, the project's clone lock
+        // taken, and a fetch that must succeed (ADR-0068). The card the door
+        // is about to refuse the launch over is the same read.
+        const read = await this.readFromDefaultBranch(project, entry, card);
+        payload.storyKey =
+          read.error === undefined ? (parseIntentCard(read.text).card.key ?? undefined) : undefined;
+        // No key: the run still launches; it just matches no card history.
+        if (payload.storyKey === undefined) delete payload.storyKey;
       }
     }
     return this.launchRun({ project, lane, ...payload });
+  }
+
+  /**
+   * What this daemon takes from one run-ledger append for itself.
+   *
+   * A debt is opened by a run answering `defer-proof`, and that run may be one
+   * this instance resumed rather than launched — a restart, a resume, an
+   * answer, and no launch anywhere near it. The launch is therefore not the
+   * only place the trade is declared, and a hint that only a launch could set
+   * would leave the watcher asleep over a debt it is holding (ADR-0069).
+   */
+  noticeRunEvent(line) {
+    if (line?.event === 'proof-deferred') this.proofDebtDeclared = true;
+  }
+
+  /**
+   * Whether the service one deferred proof waits on is back. It is the
+   * project's own probe command, run in the bare clone as the launch door runs
+   * it: a probe is a read-only question to a service, and there is no
+   * workspace at this point (ADR-0069).
+   */
+  async probeDeferred(debt) {
+    const entry = this.config.projects[debt.project];
+    if (!entry) return false;
+    const config = await this.readLaunchConfig(debt.project, entry);
+    if (!config) return false;
+    const answer = await askDeclaredProbe(this.paths, config, debt.credential, {
+      cwd: cloneDir(this.paths, debt.project),
+    });
+    return answer.ok === true;
+  }
+
+  /**
+   * Runs one deferred proof against the default branch, in a workspace of its
+   * own. The workspace is provisioned and released like a run's, and it is
+   * held off the orphan sweep while it stands, because a directory whose run
+   * has not reached the engine is not an orphan.
+   *
+   * The layers are the default branch's own, not the ones the run judged: the
+   * question is whether main holds the defect, and main's config is what says
+   * how to ask.
+   */
+  async settleProofDebt(debt) {
+    const entry = this.config.projects[debt.project];
+    if (!entry) return { ok: false, detail: `unknown project ${debt.project}` };
+    const settleId = `proof-${debt.runId}-${debt.seq}`;
+    this.provisioning.add(settleId);
+    try {
+      const ws = await this.isolation.provision({
+        runId: settleId,
+        project: debt.project,
+        repoUrl: entry.repoUrl,
+        defaultBranch: entry.defaultBranch,
+        configPath: entry.projectConfigPath,
+      });
+      const config = ws.projectConfig;
+      const env = runEnv(
+        { runId: settleId, paths: this.paths, payload: { worktree: ws.worktree } },
+        config,
+      );
+      for (const part of debt.parts) {
+        const layer = (config.gates?.tier1 ?? []).find((l) => l.name === part.layer);
+        const argv = layer ? config.commands?.[layer.command] : null;
+        if (!Array.isArray(argv) || argv.length === 0) {
+          // The default branch no longer runs that layer. Nothing here can
+          // prove or disprove the defect, and a settle that cannot ask is not
+          // a red: the debt closes with the reason on the record.
+          return { ok: false, detail: `the default branch runs no layer ${part.layer}` };
+        }
+        const run = await runCommand(argv, {
+          cwd: ws.worktree,
+          env: {
+            ...env,
+            ...narrowEnv(part, { partsEnv: PARTS_ENV, filesEnv: FAILED_FILES_ENV }),
+          },
+          log: false,
+        });
+        if (run.code !== 0) {
+          return {
+            ok: false,
+            detail: `${part.layer} exited ${run.code ?? 'without an answer'}`,
+          };
+        }
+      }
+      return { ok: true };
+    } finally {
+      this.provisioning.delete(settleId);
+      await this.isolation.release(settleId, { project: debt.project }).catch(() => {});
+    }
   }
 
   /**
@@ -1731,6 +1853,7 @@ export class Daemon {
       if (this.frontier) await this.frontier.drain();
       if (this.tripwires) await this.tripwires.stop();
       if (this.workflows) await this.workflows.stop();
+      if (this.proofDebts) await this.proofDebts.stop();
       if (this.evals) await this.evals.stop();
       // Last of the observers: a push in flight may still owe a failure stamp,
       // and the ledger closes right after this.

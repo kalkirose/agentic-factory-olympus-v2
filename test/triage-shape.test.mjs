@@ -164,6 +164,161 @@ test('a later-cycle report naming an unknown id gets the open ids in its defect 
   );
 });
 
+test('a code finding whose only evidence is a signature is refused with the rule', async (t) => {
+  const { ctx } = fixture(t);
+  // The harness already read this red as a cause outside the tree and spent a
+  // ladder of re-runs against it (ADR-0069). A code-defect finding that cites
+  // nothing but the signature sends a repair seat to rewrite working code.
+  ctx.store.append('layer-transient', {
+    actor: 'daemon',
+    cycle: 1,
+    layer: 'acceptance',
+    parts: ['api'],
+    files: ['tests/api.test.mjs'],
+    signatures: ['ECONNRESET'],
+  });
+  ctx.runSeat = seatQueue(ctx, [
+    {
+      findings: [
+        {
+          class: 'code-defect',
+          layers: ['acceptance'],
+          summary: 'the client drops the connection',
+          evidence: 'Error: read ECONNRESET',
+        },
+      ],
+      summary: 'wrong',
+    },
+    {
+      findings: [
+        {
+          class: 'env',
+          layers: ['acceptance'],
+          summary: 'the host drops the connection',
+          evidence: 'Error: read ECONNRESET',
+        },
+      ],
+      summary: 'right',
+    },
+  ]);
+  const outcome = await triageStep(ctx, base(), { cycle: 1, reds: REDS, priorOpen: [] });
+  assert.equal(outcome.fail, undefined);
+  assert.equal(ctx.runSeat.calls.length, 2, 'one corrective round');
+  assert.match(
+    ctx.runSeat.calls[1].roleBlock,
+    /cites only a signature of a cause outside the tree \(ECONNRESET\); the harness re-ran these files after 1, 5 and 15 minutes/,
+  );
+  // The brief said so before the seat wrote anything, too.
+  assert.match(ctx.runSeat.calls[0].roleBlock, /acceptance: ECONNRESET in api/);
+  assert.equal(outcome.open[0].class, 'env');
+});
+
+test('a code finding whose only evidence is a project pattern is refused too', async (t) => {
+  const { ctx } = fixture(t);
+  // The project's own wording for a cause outside the tree counts exactly as
+  // the closed set does (ADR-0069).
+  ctx.store.append('layer-transient', {
+    actor: 'daemon',
+    cycle: 1,
+    layer: 'acceptance',
+    parts: ['api'],
+    files: ['tests/api.test.mjs'],
+    signatures: ['project:sandbox is warming up'],
+  });
+  ctx.runSeat = seatQueue(ctx, [
+    {
+      findings: [
+        {
+          class: 'code-defect',
+          layers: ['acceptance'],
+          summary: 'the client starts too early',
+          evidence: 'sandbox is warming up, please retry',
+        },
+      ],
+      summary: 'wrong',
+    },
+    {
+      findings: [
+        {
+          class: 'env',
+          layers: ['acceptance'],
+          summary: 'the sandbox is not up',
+          evidence: 'sandbox is warming up, please retry',
+        },
+      ],
+      summary: 'right',
+    },
+  ]);
+  const withPattern = base();
+  withPattern.config.gates.transientPatterns = ['sandbox is warming up'];
+  const outcome = await triageStep(ctx, withPattern, { cycle: 1, reds: REDS, priorOpen: [] });
+  assert.equal(outcome.fail, undefined);
+  assert.equal(ctx.runSeat.calls.length, 2, 'one corrective round');
+  assert.match(
+    ctx.runSeat.calls[1].roleBlock,
+    /cites only a signature of a cause outside the tree \(project:sandbox is warming up\)/,
+  );
+  assert.equal(outcome.open[0].class, 'env');
+});
+
+test('a project that declares no pattern reads the same finding as the tree', async (t) => {
+  const { ctx } = fixture(t);
+  ctx.store.append('layer-transient', {
+    actor: 'daemon',
+    cycle: 1,
+    layer: 'acceptance',
+    parts: ['api'],
+    files: ['tests/api.test.mjs'],
+    signatures: ['ECONNRESET'],
+  });
+  ctx.runSeat = seatQueue(ctx, [
+    {
+      findings: [
+        {
+          class: 'code-defect',
+          layers: ['acceptance'],
+          summary: 'the client starts too early',
+          evidence: 'sandbox is warming up, please retry',
+        },
+      ],
+      summary: 'one',
+    },
+  ]);
+  const outcome = await triageStep(ctx, base(), { cycle: 1, reds: REDS, priorOpen: [] });
+  assert.equal(outcome.fail, undefined);
+  assert.equal(ctx.runSeat.calls.length, 1, 'no corrective round');
+  assert.equal(outcome.open[0].class, 'code-defect');
+});
+
+test('an assertion beside the signature leaves a code finding standing', async (t) => {
+  const { ctx } = fixture(t);
+  ctx.store.append('layer-transient', {
+    actor: 'daemon',
+    cycle: 1,
+    layer: 'acceptance',
+    parts: ['api'],
+    files: ['tests/api.test.mjs'],
+    signatures: ['ECONNRESET'],
+  });
+  ctx.runSeat = seatQueue(ctx, [
+    {
+      findings: [
+        {
+          class: 'code-defect',
+          layers: ['acceptance'],
+          summary: 'the client retries wrongly',
+          evidence: 'ECONNRESET, and AssertionError: expected 2 to equal 4',
+        },
+      ],
+      summary: 'one',
+    },
+  ]);
+  const outcome = await triageStep(ctx, base(), { cycle: 1, reds: REDS, priorOpen: [] });
+  assert.equal(outcome.fail, undefined);
+  assert.equal(ctx.runSeat.calls.length, 1, 'no corrective round');
+  assert.equal(outcome.open[0].class, 'code-defect');
+});
+
 test('a finding on a green layer and a suite-defect without depth are refused with their rules', async (t) => {
   const { ctx } = fixture(t);
   ctx.runSeat = seatQueue(ctx, [

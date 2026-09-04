@@ -686,6 +686,7 @@ test('every refusal the module can return is in the closed set', () => {
   // Every route above named one of them, and the internal-error route is the
   // lane's own; nothing else may reach a stamp.
   assert.deepEqual([...FAST_PATH_REFUSALS].sort(), [
+    'deferred-proof',
     'diff-changed',
     'ground-intersects',
     'internal-error',

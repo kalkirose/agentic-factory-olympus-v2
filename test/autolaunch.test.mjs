@@ -18,6 +18,7 @@ import {
   initOriginRepo,
   projectConfigJson,
   fakeComposeRunner,
+  NO_WAIT,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -75,6 +76,7 @@ function fixture(t, { cards, phases, slotCap = 1, behavior = {}, lanes } = {}) {
     JSON.stringify({ version: 1, projects: { alpha: { repoUrl: origin, slotCap } } }) + '\n',
   );
   const daemon = new Daemon(join(root, 'home'), {
+    waitSleep: NO_WAIT,
     lanes: lanes ?? { story: stubStoryLane(behavior, launched) },
     composeRunner: fakeComposeRunner(),
   });
@@ -226,6 +228,7 @@ test('arming survives a daemon restart', async (t) => {
   await daemon.stop();
   const launched = [];
   const daemon2 = new Daemon(join(root, 'home'), {
+    waitSleep: NO_WAIT,
     lanes: { story: stubStoryLane({}, launched) },
     composeRunner: fakeComposeRunner(),
   });

@@ -43,6 +43,7 @@ import {
   tempDir,
   removeDir,
   waitFor,
+  NO_WAIT,
   gitSync,
   initOriginRepo,
   commitTree,
@@ -473,7 +474,7 @@ function shipFixture(
   };
   // The launch door asks the same forge the ship step asks: a credential with a
   // declared CI surface is proven before a slot is taken (ADR-0068).
-  const daemon = new Daemon(join(root, 'home'), { lanes, forgeFor: () => forge });
+  const daemon = new Daemon(join(root, 'home'), { lanes, forgeFor: () => forge, waitSleep: NO_WAIT });
   const fixture = seatFixture({ ...BASE_SEATS, ...seats });
   t.after(async () => {
     await daemon.stop();

@@ -19,6 +19,13 @@
 //    A seat is usually `cmd.exe` running a shim (ADR-0013), so the tool itself
 //    is a grandchild and survives the kill along with everything it spawned.
 //    A deliberate termination therefore kills the tree, not the handle.
+//    Off Windows the same hole is there for the same reason — a signal to one
+//    pid reaches one process — and the answer POSIX already has is the process
+//    group: a child spawned `detached` leads a group of its own, and a signal
+//    to the negative pid reaches every descendant in it. So the harness spawns
+//    its children into groups off Windows and ends the group, and `detached`
+//    there is a process group and not the console-less shape Windows means by
+//    the same word.
 // 3. A seat that exits on its own leaves no signal behind for its own
 //    descendants. Survivors keep a handle or a working directory inside the
 //    run worktree, and Windows refuses to delete a directory anything is
@@ -79,29 +86,60 @@ const CWD_READER_SOURCE = [
 const HOLDER_LINE = /^(\d+)\|([a-z,]+)\|(.+)$/;
 
 /**
- * Spawn options for a seat child, on top of what the caller sets. One shape for
- * every seat: a shim under `cmd.exe` and a directly spawned tool take the same.
+ * Spawn options for a child the harness ends as a tree: a seat, and every
+ * command a gate layer or a probe runs. One shape for all of them, because
+ * every one of them can leave descendants behind and the harness ends them the
+ * same way.
  * @param {{platform?: string}} [opts]
- * @returns {object} empty off Windows
+ * @returns {object}
  */
-export function seatSpawnOptions({ platform = process.platform } = {}) {
-  if (platform !== 'win32') return {};
+export function treeSpawnOptions({ platform = process.platform } = {}) {
+  if (platform !== 'win32') {
+    // A process group of its own, so `terminateTree` can address the whole
+    // tree with one signal. It is not unref'd, so the daemon still waits on
+    // the child exactly as before, and nothing about the console changes:
+    // POSIX `detached` is `setsid`, which is a session and a group, and the
+    // visible-console failure the Windows branch avoids is a Windows fact.
+    return { detached: true };
+  }
   // CREATE_NO_WINDOW. The seat gets a console of its own with no window on it,
   // the descendants inherit that console instead of opening a visible one, and
   // a console control event stays inside it. The child is not detached and not
-  // unref'd: the daemon still waits on it exactly as before.
+  // unref'd: the daemon still waits on it exactly as before. DETACHED_PROCESS
+  // is what `detached` means here, and it is the one thing this branch exists
+  // to avoid.
   return { windowsHide: true };
 }
 
 /**
- * Ends a seat the daemon decided to end, and everything it spawned.
+ * Ends a child the daemon decided to end, and everything it spawned.
  * @param {import('node:child_process').ChildProcess} child
- * @param {{platform?: string, run?: Function}} [opts] injection points for tests
+ * @param {{platform?: string, run?: Function, kill?: Function}} [opts]
+ *   injection points for tests
  * @returns {Promise<void>}
  */
-export async function terminateTree(child, { platform = process.platform, run = execAsync } = {}) {
-  if (platform !== 'win32' || !child.pid) {
+export async function terminateTree(
+  child,
+  {
+    platform = process.platform,
+    run = execAsync,
+    kill = (pid, signal) => process.kill(pid, signal),
+  } = {},
+) {
+  if (!child.pid) {
     child.kill();
+    return;
+  }
+  if (platform !== 'win32') {
+    // The child leads a process group of its own (`treeSpawnOptions`), so its
+    // pid is the group id and the negative pid addresses every descendant. A
+    // group that has already gone, or a child somebody spawned without the
+    // group, throws — and the direct kill is what that child was owed anyway.
+    try {
+      kill(-child.pid, 'SIGTERM');
+    } catch {
+      child.kill();
+    }
     return;
   }
   // /T takes the descendants with it; /F is required because a console

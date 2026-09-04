@@ -129,7 +129,8 @@ export function renderStatus(paths) {
   const loud = openLoud(paths);
   const queue = escalationQueue(paths);
   const runs = openRuns(paths);
-  const active = runs.filter((r) => !r.parked && !r.held && !r.violated).length;
+  const waiting = runs.filter((r) => r.waiting).length;
+  const active = runs.filter((r) => !r.parked && !r.held && !r.violated && !r.waiting).length;
   const parked = runs.filter((r) => r.parked).length;
   // Held runs are counted apart from active ones because they are the two
   // different answers to "is the factory working": a held run holds its slot
@@ -137,9 +138,13 @@ export function renderStatus(paths) {
   // hold stands is reading the wrong number (ADR-0040).
   const held = runs.filter((r) => r.held).length;
   const lines = [];
+  // Waiting runs are counted apart from active ones for the reason held runs
+  // are: a run sitting out a provider outage is not the factory working, and a
+  // header that read it as active would report a busy factory that is idle
+  // (ADR-0069).
   lines.push(
     `daemon ${running ? `running (pid ${lock.pid})` : 'stopped'}` +
-      ` · runs ${active} active / ${parked} parked / ${held} held` +
+      ` · runs ${active} active / ${parked} parked / ${held} held / ${waiting} waiting` +
       ` · loud ${loud.length} · queue ${queue.length}`,
   );
   const credentials = credentialStoreState(paths);
@@ -192,6 +197,15 @@ export function renderStatus(paths) {
       `  ${run.runId} ${run.lane} @ ${run.stage} · ${spend}${carry}` +
         `${flags.length > 0 ? ` [${flags.join(', ')}]` : ''}`,
     );
+    // What the run is waiting for and until when, on its own line under the
+    // run. It is the whole of what an operator can do about a wait — read it,
+    // and decide whether to let it run out or kill the run (ADR-0069).
+    if (run.waiting) {
+      lines.push(
+        `    waiting: ${run.waiting.kind} ${run.waiting.reason} until ${run.waiting.until}` +
+          `${run.waiting.attempt ? ` (attempt ${run.waiting.attempt})` : ''}`,
+      );
+    }
   }
   if (runs.length === 0) lines.push('  none');
   const config = readInstanceConfig(paths);

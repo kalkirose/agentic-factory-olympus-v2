@@ -106,7 +106,7 @@ test('the vocabulary says which record carries each kind, and the two sets are d
   );
   assert.deepEqual(
     [...OBSERVED_DEFECT_KINDS].sort(),
-    ['capture-takeback', 'fast-path-escape', 'harness', 'layer-log-truncated'],
+    ['capture-takeback', 'deferred-proof', 'fast-path-escape', 'harness', 'layer-log-truncated'],
   );
   for (const kind of GATE_INTEGRITY_KINDS) assert.ok(!OBSERVED_DEFECT_KINDS.has(kind));
   assert.deepEqual(

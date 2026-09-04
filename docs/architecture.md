@@ -38,6 +38,12 @@ Around the daemon:
   completed run, never an elapsed. A red opens one loud item per red run; the
   next green records the recovery that answers it, and the red names the jobs
   of the run that were not green. It holds no run (ADR-0035).
+- **Deferred-proof watcher** — an in-daemon poll of the proofs a ship went out
+  without, where an owner armed that trade (`gates.proofDebt`). It asks the
+  credential's own probe; when the service is back it runs exactly the deferred
+  parts against the default branch in a workspace of its own and stamps
+  `proof-settled`, with a `deferred-proof` escape against the ship when the
+  proof does not hold. It holds no run (ADR-0069).
 - **Eval seat** — an instance-scoped judgment seat fired every five ships of
   any lane. The window is every ship merged after the newest ship the last
   review named; the ship list carries each run's lane and, for a repair, the
@@ -112,8 +118,9 @@ event registry is closed; a new type enters only by a design-level decision.
 
 A run's length derives from its own ledger in two numbers, and the close-out
 record stamps both: wall, from the launch stamp to the close, and active, the
-same stretch minus every span the run spent parked on a human or inert under
-an unresolved liveness violation. Overlapping spans count once, a span still
+same stretch minus every span the run spent parked on a human, inert under an
+unresolved liveness violation, held at a boundary, or waiting on a provider,
+a host or a service (ADR-0069). Overlapping spans count once, a span still
 open at the end runs to it, and nothing is held between calls, so a restart
 and an archive re-derive the same pair. Every duration read that keys on run
 length — the command-center ship stat and its target, the eval seat's window
@@ -150,9 +157,13 @@ Two levels; the ownership test decides placement.
   states no suite of it reads (`gates.groundlessPaths`), what a flake re-run
   asks for (`gates.flakeRerun`), the project's own declared-ground check for
   its suite (`lanes.story.groundCommand`), whether a run's commands are
-  offered a cache directory (`runCache`), and the directory a route id in a
+  offered a cache directory (`runCache`), the directory a route id in a
   spec resolves under (`repo.routesRoot`, default `apps/storefront/src/routes`,
-  `null` for a project whose specs name no routes).
+  `null` for a project whose specs name no routes), this project's own wording
+  for a cause outside the tree (`gates.transientPatterns`), whether the owner
+  arms the deferred-proof trade (`gates.proofDebt`, off by default), and the
+  hosts each declared credential's service answers on (`credentials[].hosts`,
+  without which that credential earns no external wait).
   The daemon reads it from `main` in its bare clone at each run launch, so
   config changes ship through the same PR path as the code they describe. A run
   holds the blob it launched with until an operator repins it on the record
@@ -169,9 +180,13 @@ Two levels; the ownership test decides placement.
 - **File contracts.** No structured-output tool anywhere. The seat writes its
   JSON report to the named ledger path; a deterministic process validates it
   (flat, draft-07-safe schemas). One corrective re-prompt, then seat-failure.
-  A child that dies on a nonzero exit buys up to 3 re-dispatches per seat
-  session before that failure stands, resuming the session it named as it
-  died (ADR-0005); nothing else is retried.
+  A child that dies on a nonzero exit or on the silence deadline buys up to 3
+  re-dispatches per seat session, resuming the session it named as it died
+  (ADR-0005); nothing else is retried. Past those three the seat waits rather
+  than fails — 5, 15 and 45 minutes, one re-dispatch a step — and a model the
+  vendor refused, with no substitute below it, waits until the vendor's own
+  reset instant and asks again. Only a spent ladder reaches the `seat-failure`
+  park (ADR-0069).
 - **Prompts.** Two blocks: a shared core (role line, ledger discipline, file
   contract, scope discipline, narration cadence, one-turn execution, concise
   reports) plus a per-seat role block with judgment criteria only. No
@@ -413,6 +428,21 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   persistent reds; only these enter triage. The replaced red is stamped
   `superseded-by-rerun` with what it printed, so a re-run never replaces an
   attempt silently.
+- **A red from outside the tree never reaches a seat** (ADR-0069). Before
+  triage is dispatched, a survivor is read against a closed signature set
+  (`src/lanes/transient.mjs`): dropped and refused connections, name-lookup
+  failures, an HTTP 429 or 5xx beside a host, rate-limit wording, an image pull
+  failure, a store refusing connections at startup, the runner CLI's own retry
+  exhaustion, plus whatever the project adds in `gates.transientPatterns`. The
+  read qualifies only where every red layer named its failed parts, every red
+  part named its failed files, every one of them shows a signature, and nothing
+  shows an assertion failure or a compile error. A red that qualifies stamps
+  `layer-transient` and climbs the layer ladder — 1, 5 and 15 minutes, a
+  narrowed re-run at every step — with no finding minted. A red that survives
+  reaches triage with the signatures in its brief, and the triage checks refuse
+  a code-defect finding whose only evidence is one of them. Everything else
+  takes triage unchanged: the safe direction is the seat. CI-source verdicts
+  are outside it — a red check has its own re-run in the forge.
 - **A re-run asks only what failed** (ADR-0065). The re-run's scope is the
   replaced attempt's own part table: the parts that did not pass, in
   `OLYMPUS_PARTS`, and the files those parts named, in `OLYMPUS_FAILED_FILES`
@@ -586,6 +616,25 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   read inside one bounded deadline. A failed probe parks the provisioning gate
   on its own evidence and no layer re-runs; a clean probe stamps the fix and
   the cycle runs as it always did (ADR-0022).
+- **An env finding waits before it asks** (ADR-0069). The operational fix keeps
+  its immediate re-run; a finding that survives it climbs the same 1, 5 and 15
+  minute ladder under the kind `substrate`, narrowing its re-run to the layers
+  the finding names and asking the substrate probe before every step. A finding
+  that survives the ladder parks the provisioning gate with the three attempts
+  and their times in the question, and the harness half of that gate is asked
+  when the env findings have survived both the ladder and one answered
+  substrate gate.
+- **A service that is down is waited for, not asked about** (ADR-0069). A
+  transient red that survives the layer ladder and names a host of a declared
+  credential (`credentials[].hosts`) enters an `external` wait: the run frees
+  its slot, the credential's own probe is asked every ten minutes for up to a
+  day, and nothing is stamped for an answer of no. At one hour the instance
+  ledger carries a loud `external-outage`. A green probe ends the wait, takes a
+  slot again and re-runs the red parts narrowed to their files; a day of no
+  parks the provisioning gate with the history. That park offers `defer-proof`
+  where `gates.proofDebt` is on: the parts ride the verdict as `deferred`, the
+  ship proceeds, the fast path refuses to carry that certification, and the
+  daemon settles the debt when the service comes back.
 - **Fury round.** The project's panel (`review.lenses`) over the seats that
   carry its lenses. The default panel is spec, operational, security and
   interface on three seats: security rides the operational seat, interface
@@ -887,8 +936,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   executed, never one that carried a green or could not run: the batch is
   decided whole before any of it is dispatched.
 - **Slots.** The slot cap is an instance-config value per project, counting
-  active runs of any lane. Parked runs free their slot. Scale-down to width 1
-  is a number, never idle machinery.
+  active runs of any lane. Parked runs free their slot, and so does a run in an
+  external wait, which may sit there for a day (ADR-0069); a run waiting on a
+  provider or a host mid-stage keeps its slot, because it will carry on inside
+  the stage it holds. Scale-down to width 1 is a number, never idle machinery.
 - **Merges.** Branch protection requires branches current with main. On a
   competing merge the daemon merges main into the open branch (never
   force-push); full CI re-runs; auto-merge stays armed. A textual conflict
@@ -907,6 +958,8 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   spec-gate non-convergence; unkilled-gap survivor; second 0/3 adversary
   round; second stall; card invalidated at ship-time sweep; card decision at
   ship-time sweep; provisioning gate.
+- A park is the last resort, not the first: a stop whose answer is a clock the
+  harness can read is a wait instead, and only a spent wait asks (ADR-0069).
 - Park = stamped escalation record (question, context refs, answer forms) + a
   queued-stream event. The answer is a state change from any console session;
   the daemon validates, stamps who and when, resumes at the parked state.
@@ -1017,8 +1070,10 @@ Four layers, no timeouts:
 
 1. Child supervision: exit events; seat-failure path.
 2. The liveness invariant: every open run holds an in-flight child, a parked
-   escalation, an operator hold, or a transition in progress. A violation is a
-   harness-class red, loud.
+   escalation, an operator hold, or a transition in progress. A wait is a span
+   inside a handler, so a waiting run holds the last of those, and its
+   heartbeat says which kind of wait and until when (ADR-0069). A violation is
+   a harness-class red, loud.
 3. Progress telemetry compared against duration history. A seat stamps its own
    progress. Every stage beats besides: a polling handler stamps one heartbeat
    per batch of poll outcomes with the evidence of its wait, and the engine

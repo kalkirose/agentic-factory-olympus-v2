@@ -19,10 +19,13 @@ import { writeControlCommand } from '../src/daemon/control.mjs';
 import { openLoud } from '../src/telemetry/readers.mjs';
 import { OWNER_PIN_MARKER } from '../src/lanes/supersede.mjs';
 import { PARTS_ENV } from '../src/lanes/parts.mjs';
+import { LAYER_LADDER } from '../src/lanes/waiting.mjs';
+import { declaredGround } from '../src/lanes/fastpath.mjs';
 import {
   tempDir,
   removeDir,
   waitFor,
+  NO_WAIT,
   initOriginRepo,
   projectConfigJson,
   FIXTURE_ACCEPTANCE,
@@ -244,6 +247,9 @@ function verdictFixture(t, opts) {
     partTargeting = undefined,
     flakeRerun = undefined,
     concurrencyGroups = undefined,
+    credentials = undefined,
+    proofDebt = undefined,
+    transientPatterns = undefined,
     laneConfig = { story: { suiteCommand: 'suite' } },
   } = opts;
   const root = tempDir();
@@ -260,7 +266,10 @@ function verdictFixture(t, opts) {
         ...(partTargeting !== undefined && { partTargeting }),
         ...(flakeRerun !== undefined && { flakeRerun }),
         ...(concurrencyGroups !== undefined && { concurrencyGroups }),
+        ...(proofDebt !== undefined && { proofDebt }),
+        ...(transientPatterns !== undefined && { transientPatterns }),
       },
+      ...(credentials && { credentials }),
       lanes: laneConfig,
       stack,
       ...(review && { review }),
@@ -287,7 +296,7 @@ function verdictFixture(t, opts) {
     },
     repair: repairLane({ afterVerdict: done }),
   };
-  const daemon = new Daemon(join(root, 'home'), { lanes });
+  let daemon = new Daemon(join(root, 'home'), { lanes, waitSleep: NO_WAIT });
   const fixture = seatFixture(seats);
   t.after(async () => {
     await daemon.stop();
@@ -295,8 +304,21 @@ function verdictFixture(t, opts) {
   });
   return {
     paths,
-    daemon,
+    get daemon() {
+      return daemon;
+    },
     calls: fixture.calls,
+    /**
+     * The restart recipe on this home: a stop, and a new instance over the
+     * same ledgers. Every open run resumes from what it recorded, which is the
+     * only thing a scenario about a restart may stand on.
+     */
+    async restart() {
+      await daemon.stop();
+      daemon = new Daemon(join(root, 'home'), { lanes, waitSleep: NO_WAIT });
+      await daemon.start();
+      daemon.engine.seatDefaults = () => ({ commandFor: fixture.commandFor });
+    },
     async launch(payload = {}) {
       await daemon.start();
       daemon.engine.seatDefaults = () => ({ commandFor: fixture.commandFor });
@@ -1395,9 +1417,23 @@ test('a persistent env finding parks the provisioning gate after its operational
   const park = await waitParked(fx.paths, runId, 'provisioning-gate');
   assert.ok(park.question.includes('[env]'));
   assert.ok(park.question.includes('persist after an operational fix'));
+  // The question says what the harness already tried on its own: the three
+  // rungs of the substrate ladder, each with the instant it was taken at, so
+  // the operator reads them before deciding whether a fourth is worth
+  // anything (ADR-0069).
+  assert.ok(park.question.includes('The harness waited and re-ran these layers before asking'));
+  const attempts = park.question.split('\n').filter((line) => line.startsWith('- attempt '));
+  assert.equal(attempts.length, LAYER_LADDER.length);
+  attempts.forEach((line, i) => {
+    assert.ok(line.includes(String(i + 1)), line);
+    assert.match(line, /at \d{4}-\d{2}-\d{2}T/);
+    assert.ok(line.endsWith('elapsed'), line);
+  });
   // One automatic operational fix ran before the gate parked.
   let events = readEvents(runLedgerPath(fx.paths, runId));
   assert.equal(events.filter((e) => e.event === 'operational-fix').length, 1);
+  const waits = events.filter((e) => e.event === 'waiting' && e.kind === 'substrate');
+  assert.equal(waits.length, LAYER_LADDER.length);
   // The operator repairs the substrate, then confirms.
   rmSync(join(worktree, '..', 'env-broken'));
   fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'substrate repaired' });
@@ -1817,6 +1853,406 @@ test('an ack recorded under a prose fingerprint still answers its gate', async (
   // The fingerprint it was recorded under is the one the record names, which
   // is the one a revoke will have to name.
   assert.equal(events.find((e) => e.event === 'finding-ack-used').acks[0].fingerprint, words);
+});
+
+// -- the wait routes in front of triage (ADR-0069) ----------------------------
+
+/** Waits for a run to close, which is where its ledger moves to the archive. */
+async function closed(fx, runId) {
+  await waitFor(
+    () =>
+      readEvents(archivedRunLedgerPath(fx.paths, runId)).some((e) => e.event === 'run-closed'),
+    { label: 'the run to close', attempts: 1800, intervalMs: 100 },
+  );
+}
+
+// A layer that runs in one part and says so: it names the part, the files that
+// failed inside it, and — while the world is against it — a dropped connection
+// to a host the project declares a credential for. It counts its own attempts,
+// so a scenario states which attempt the world comes back on rather than
+// racing a timer against a clone.
+function flakyLayer(counter, greenAt) {
+  return [
+    'node',
+    '-e',
+    "const fs=require('fs');" +
+      `const c=${JSON.stringify(counter)};` +
+      "let n=0; try { n = Number(fs.readFileSync(c,'utf8')) } catch {}" +
+      'n += 1; fs.writeFileSync(c, String(n));' +
+      "console.log('::olympus part api');" +
+      `if (n >= ${greenAt}) { console.log('::olympus part-ok api'); process.exit(0); }` +
+      "console.log('Error: read ECONNRESET api.example.test:443');" +
+      "console.log('::olympus part-failed api');" +
+      "console.log('::olympus part-failed-files api tests/feature.test.mjs');" +
+      'process.exit(1);',
+  ];
+}
+
+test('a red from outside the tree climbs the layer ladder and reaches no seat', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat(() => ({ class: 'code-defect' })),
+    ...furyClean(),
+  };
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  // Red on the run and on the flake filter's re-run, green on the ladder's
+  // first step: one wait, one narrowed re-run, no seat.
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'ext', command: 'ext' },
+    ],
+    commands: { suite: SUITE_CMD, ext: flakyLayer(join(root, 'ext-count'), 3) },
+  });
+  const { runId } = await fx.launch();
+  await closed(fx, runId);
+  const events = readEvents(archivedRunLedgerPath(fx.paths, runId));
+  const transient = events.find((e) => e.event === 'layer-transient');
+  assert.equal(transient.layer, 'ext');
+  assert.deepEqual(transient.parts, ['api']);
+  assert.deepEqual(transient.files, ['tests/feature.test.mjs']);
+  assert.deepEqual(transient.signatures, ['ECONNRESET']);
+  // One step of the ladder, and the re-run behind it asked for the files the
+  // part named.
+  const waits = events.filter((e) => e.event === 'waiting' && e.kind === 'layer');
+  assert.equal(waits.length, 1);
+  assert.equal(waits[0].attempt, 1);
+  assert.equal(
+    events.find((e) => e.event === 'waiting-ended' && e.kind === 'layer').outcome,
+    'elapsed',
+  );
+  const narrowed = events.filter(
+    (e) => e.event === 'layer-result' && e.layer === 'ext' && e.narrowedTo,
+  );
+  assert.ok(narrowed.some((e) => e.narrowedTo.files > 0), 'a re-run asked for the failed files');
+  // No seat judged it: the whole point is that a dropped connection never
+  // reaches a triage seat, let alone a repair one.
+  assert.ok(!events.some((e) => e.event === 'seat-spawned' && e.seat === 'verdict-triage'));
+  assert.ok(!events.some((e) => e.event === 'finding'));
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').at(-1).verdict, 'green');
+});
+
+test('an assertion beside the signature takes the seat, not the ladder', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat(() => ({ class: 'env' })),
+    ...furyClean(),
+  };
+  const mixed = [
+    'node',
+    '-e',
+    "console.log('::olympus part api');" +
+      "console.log('read ECONNRESET api.example.test');" +
+      "console.log('AssertionError: expected 4 to equal 5');" +
+      "console.log('::olympus part-failed api');" +
+      "console.log('::olympus part-failed-files api tests/feature.test.mjs');" +
+      'process.exit(1);',
+  ];
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'ext', command: 'ext' },
+    ],
+    commands: { suite: SUITE_CMD, ext: mixed },
+  });
+  const { runId } = await fx.launch();
+  await waitParked(fx.paths, runId, 'provisioning-gate');
+  const events = readEvents(runLedgerPath(fx.paths, runId));
+  assert.ok(!events.some((e) => e.event === 'layer-transient'), 'a mix is not transient');
+  assert.ok(!events.some((e) => e.event === 'waiting' && e.kind === 'layer'));
+  assert.ok(events.some((e) => e.event === 'seat-spawned' && e.seat === 'verdict-triage'));
+});
+
+test('an env finding that goes green on the substrate ladder asks nobody', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat(() => ({ class: 'env' })),
+    ...furyClean(),
+  };
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  // Nothing in this output is in the closed signature set, so the layer ladder
+  // does not recognise it and triage classes it env. The substrate ladder is
+  // what waits then, and the host comes back on its second step.
+  const counter = join(root, 'env-count');
+  const envLayer = [
+    'node',
+    '-e',
+    "const fs=require('fs');" +
+      `const c=${JSON.stringify(counter)};` +
+      "let n=0; try { n = Number(fs.readFileSync(c,'utf8')) } catch {}" +
+      'n += 1; fs.writeFileSync(c, String(n));' +
+      "console.log('::olympus part api');" +
+      'if (n >= 5) { console.log(\'::olympus part-ok api\'); process.exit(0); }' +
+      "console.log('the sandbox is not answering');" +
+      "console.log('::olympus part-failed api');" +
+      "console.log('::olympus part-failed-files api tests/feature.test.mjs');" +
+      'process.exit(1);',
+  ];
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'ext', command: 'ext' },
+    ],
+    commands: { suite: SUITE_CMD, ext: envLayer },
+  });
+  const { runId } = await fx.launch();
+  await closed(fx, runId);
+  const events = readEvents(archivedRunLedgerPath(fx.paths, runId));
+  const waits = events.filter((e) => e.event === 'waiting' && e.kind === 'substrate');
+  assert.ok(waits.length >= 1, 'the substrate ladder waited before it asked');
+  assert.ok(!events.some((e) => e.event === 'park' && e.type === 'provisioning-gate'));
+  const fix = events.filter((e) => e.event === 'operational-fix').at(-1);
+  assert.equal(fix.source, 'wait');
+  const narrowed = events.filter(
+    (e) => e.event === 'layer-result' && e.layer === 'ext' && e.narrowedTo,
+  );
+  assert.ok(narrowed.some((e) => e.narrowedTo.files > 0));
+});
+
+// A probe of a declared service: it answers no while the service is down, and
+// it is what the external wait asks. It counts its own answers, so a scenario
+// states the poll the service comes back on.
+function serviceProbe(counter, down, greenAt) {
+  return [
+    'node',
+    '-e',
+    "const fs=require('fs');" +
+      `const c=${JSON.stringify(counter)}; const d=${JSON.stringify(down)};` +
+      "let n=0; try { n = Number(fs.readFileSync(c,'utf8')) } catch {}" +
+      'n += 1; fs.writeFileSync(c, String(n));' +
+      (greenAt === null ? '' : `if (n >= ${greenAt}) { try { fs.rmSync(d) } catch {} }`) +
+      'process.exit(fs.existsSync(d) ? 1 : 0);',
+  ];
+}
+
+function externalFixture(t, { root, greenAt, proofDebt }) {
+  const down = join(root, 'service-down');
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat(() => ({ class: 'code-defect' })),
+    ...furyClean(),
+  };
+  return verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'ext', command: 'ext' },
+    ],
+    commands: {
+      suite: SUITE_CMD,
+      // Red until the service is up: the layer reads the same marker the probe
+      // does, so the re-run behind a green probe is a green layer.
+      ext: [
+        'node',
+        '-e',
+        "const fs=require('fs');" +
+          `const d=${JSON.stringify(down)};` +
+          "console.log('::olympus part api');" +
+          "if (!fs.existsSync(d)) { console.log('::olympus part-ok api'); process.exit(0); }" +
+          "console.log('Error: read ECONNRESET api.example.test:443');" +
+          "console.log('::olympus part-failed api');" +
+          "console.log('::olympus part-failed-files api tests/feature.test.mjs');" +
+          'process.exit(1);',
+      ],
+      svcprobe: serviceProbe(join(root, 'probe-count'), down, greenAt),
+    },
+    credentials: [{ name: 'svc', env: 'SVC_KEY', probe: 'svcprobe', hosts: ['api.example.test'] }],
+    ...(proofDebt !== undefined && { proofDebt }),
+    // The service goes down after the launch door proved it and before the
+    // first layer runs, which is the shape this route is for: a run that
+    // launched on a live service and met a dead one.
+    seedExtra: async () => writeFileSync(down, 'x'),
+  });
+}
+
+test('a service that comes back ends the external wait and re-runs its files', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  process.env.SVC_KEY = 'fixture';
+  t.after(() => delete process.env.SVC_KEY);
+  // The door's own probe is poll 1; the wait's second poll finds it back.
+  const fx = externalFixture(t, { root, greenAt: 3 });
+  const { runId } = await fx.launch();
+  await closed(fx, runId);
+  const events = readEvents(archivedRunLedgerPath(fx.paths, runId));
+  const wait = events.find((e) => e.event === 'waiting' && e.kind === 'external');
+  assert.equal(wait.freesSlot, true);
+  assert.equal(wait.detail.credential, 'svc');
+  assert.equal(wait.detail.host, 'api.example.test');
+  const ended = events.find((e) => e.event === 'waiting-ended' && e.kind === 'external');
+  assert.equal(ended.outcome, 'probe-green');
+  // The layer ladder ran first and was spent; the external wait is what
+  // followed it.
+  assert.equal(events.filter((e) => e.event === 'waiting' && e.kind === 'layer').length, 3);
+  assert.ok(!events.some((e) => e.event === 'park'));
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').at(-1).verdict, 'green');
+});
+
+test('the deferred-proof trade is offered only where the owner armed it', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  process.env.SVC_KEY = 'fixture';
+  t.after(() => delete process.env.SVC_KEY);
+  // The same service, down for the same day, in a project that never set
+  // `gates.proofDebt`: the gate asks for the repair and offers no trade.
+  const fx = externalFixture(t, { root, greenAt: null });
+  const { runId } = await fx.launch();
+  const park = await waitFor(
+    () =>
+      readEvents(runLedgerPath(fx.paths, runId)).find(
+        (e) => e.event === 'park' && e.detail?.external === true,
+      ) ?? null,
+    { label: 'the external gate', attempts: 1800, intervalMs: 100 },
+  );
+  assert.deepEqual(park.answers.options, ['retry', 'abandon']);
+  assert.ok(!park.question.includes('defer-proof'));
+});
+
+test('an external wait a restart interrupts reaches the gate, not a second day', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  process.env.SVC_KEY = 'fixture';
+  t.after(() => delete process.env.SVC_KEY);
+  const fx = externalFixture(t, { root, greenAt: null, proofDebt: true });
+  const { runId } = await fx.launch();
+  // Down long enough for the instance to have said so, so the record this
+  // scenario is about exists before the restart.
+  await waitFor(
+    () => readEvents(fx.paths.instanceLedger).some((e) => e.event === 'external-outage'),
+    { label: 'the outage record', attempts: 1800, intervalMs: 100 },
+  );
+  await fx.restart();
+  const park = await waitFor(
+    () =>
+      readEvents(runLedgerPath(fx.paths, runId)).find(
+        (e) => e.event === 'park' && e.detail?.external === true,
+      ) ?? null,
+    { label: 'the external gate after the restart', attempts: 1800, intervalMs: 100 },
+  );
+  const events = readEvents(runLedgerPath(fx.paths, runId));
+  // One wait, closed by the stop, and the second attempt is the gate: a
+  // restart may not buy another day of waiting (ADR-0069).
+  const waits = events.filter((e) => e.event === 'waiting' && e.kind === 'external');
+  assert.equal(waits.length, 1);
+  assert.equal(
+    events.find((e) => e.event === 'waiting-ended' && e.kind === 'external').outcome,
+    'daemon-stopped',
+  );
+  assert.ok(park.answers.options.includes('defer-proof'));
+  assert.ok(park.question.includes('daemon-stopped'), 'the history says how the wait ended');
+  // And one record for one outage: the instance before the restart opened it,
+  // and this one read it off the ledger rather than opening a second.
+  assert.equal(
+    readEvents(fx.paths.instanceLedger).filter((e) => e.event === 'external-outage').length,
+    1,
+  );
+});
+
+test('a service down past the wait parks, and the ship may go without the proof', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  process.env.SVC_KEY = 'fixture';
+  t.after(() => delete process.env.SVC_KEY);
+  const fx = externalFixture(t, { root, greenAt: null, proofDebt: true });
+  const { runId } = await fx.launch();
+  const park = await waitFor(
+    () =>
+      readEvents(runLedgerPath(fx.paths, runId)).find(
+        (e) => e.event === 'park' && e.detail?.external === true,
+      ) ?? null,
+    { label: 'the external gate', attempts: 1800, intervalMs: 100 },
+  );
+  assert.deepEqual(park.answers.options, ['retry', 'defer-proof', 'abandon']);
+  assert.equal(park.detail.credential, 'svc');
+  assert.ok(park.question.includes('refused its own probe for a day'));
+  assert.ok(park.question.includes('attempt 1'), 'the question shows what the harness tried');
+  const outage = readEvents(fx.paths.instanceLedger).find((e) => e.event === 'external-outage');
+  assert.equal(outage.credential, 'svc');
+  assert.equal(outage.runId, runId);
+  // The trade, taken: the parts ride the verdict as deferred and the ship goes
+  // on. Nothing here re-runs them — the daemon settles the debt later.
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'defer-proof' });
+  await closed(fx, runId);
+  const shipped = readEvents(archivedRunLedgerPath(fx.paths, runId));
+  const debt = shipped.find((e) => e.event === 'proof-deferred');
+  assert.equal(debt.credential, 'svc');
+  assert.deepEqual(debt.parts[0].parts, ['api']);
+  const render = shipped.filter((e) => e.event === 'verdict-rendered').at(-1);
+  assert.equal(render.verdict, 'green');
+  assert.equal(render.deferred[0].layer, 'ext');
+  assert.deepEqual(render.deferred[0].parts, ['api']);
+  // The fast path will not carry a certification that defers a proof.
+  assert.equal(
+    declaredGround([{ name: 'ext' }], new Map(), render.deferred).refusal,
+    'deferred-proof',
+  );
+});
+
+// A compose stub that answers about a host which goes down between one probe
+// and the next: the first readings are clean and every one after them is dead.
+// It counts the readings themselves, so a scenario states which probe meets
+// the dead host rather than racing a timer against a cycle.
+function composeFailing({ counter, dead, live, cleanFor }) {
+  return [
+    'node',
+    '-e',
+    "const fs=require('fs');" +
+      `const c=${JSON.stringify(counter)};` +
+      "if(!process.argv.includes('ps')) process.exit(0);" +
+      "let n=0; try { n = Number(fs.readFileSync(c,'utf8')) } catch {}" +
+      'n += 1; fs.writeFileSync(c, String(n));' +
+      `const port = n <= ${cleanFor} ? ${live} : ${dead};` +
+      "console.log(JSON.stringify([{Service:'app',Publishers:[{PublishedPort:port,Protocol:'tcp'}]}]));",
+    '--',
+  ];
+}
+
+test('a probe that answers no mid-ladder parks at once, before any wait', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat(() => ({ class: 'env' })),
+    ...furyClean(),
+  };
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const ext = ['node', '-e', "process.exit(require('fs').existsSync('../env-broken')?1:0)"];
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [
+      { name: 'unit', command: 'suite' },
+      { name: 'ext', command: 'ext' },
+    ],
+    commands: { suite: SUITE_CMD, ext },
+    stack: { composeFile: 'compose.yml' },
+    // The host answers the first probe and nothing after it: the fix before
+    // the ladder is clean, and the ladder's own first question is not.
+    composeCommand: composeFailing({
+      counter: join(root, 'probe-count'),
+      cleanFor: 1,
+      dead: await deadPort(),
+      live: await livePort(t),
+    }),
+    seedExtra: async (ctx, worktree) => {
+      writeFileSync(join(worktree, '..', 'env-broken'), 'x');
+    },
+  });
+  const { runId } = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'provisioning-gate');
+  // The ladder asked the host before it spent a minute on it, and the answer
+  // ended the ladder there: no wait, and no re-run behind it (ADR-0069).
+  assert.ok(park.question.includes('The substrate probe answered no'));
+  const events = readEvents(runLedgerPath(fx.paths, runId));
+  assert.deepEqual(
+    events.filter((e) => e.event === 'substrate-probe').map((e) => e.state),
+    ['clean', 'failed'],
+  );
+  assert.ok(!events.some((e) => e.event === 'waiting' && e.kind === 'substrate'));
+  assert.equal(events.filter((e) => e.event === 'operational-fix').length, 1);
 });
 
 test('a substrate gate the retry does not move hands the harness question over', async (t) => {

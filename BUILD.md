@@ -469,3 +469,23 @@ never carries a project's specifics.
   the daemon refuses stamps `launch-rejected` with the reason and the run id it
   would have had, so a refusal is no longer a reason file and nothing else.
   ADR-0016 records the measurements and their limits. 319 tests green.
+- 2026-09-04 — the harness waits for the world instead of asking about it. One
+  wait mechanism (`waiting` / `waiting-ended`, kinds `seat`, `layer`,
+  `substrate`, `external`) behind four entry points, with two ladders named
+  once: seats wait 5, 15 and 45 minutes past their crash retries, and a layer
+  waits 1, 5 and 15. A red whose failed parts all show a signature from a
+  closed set and no assertion or compile error is read as a cause outside the
+  tree, stamps `layer-transient` and climbs the layer ladder with a narrowed
+  re-run at every step, so no seat is spawned for a dropped connection; an env
+  finding that survives its operational fix climbs the same ladder with the
+  substrate probe in front of every step. A transient red that names a host of
+  a declared credential frees its slot and waits on that credential's own
+  probe for a day, loudly after an hour, and parks with the history at the end.
+  Three project-config keys are new: `credentials[].hosts`, without which a
+  credential earns no external wait; `gates.transientPatterns`, which adds a
+  project's own runner wording to the closed set; and `gates.proofDebt`, off by
+  default, which is what offers `defer-proof` at that park and puts the
+  deferred-proof watcher behind the ship. Off Windows every child the harness
+  ends as a tree now leads a process group and the kill addresses the group.
+  ADR-0069 is new; ADR-0005, ADR-0016, ADR-0022 and ADR-0065 carry the ladders,
+  the group and the narrowing as standing fact.

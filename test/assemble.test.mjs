@@ -10,7 +10,7 @@ import { LANE_STAGES } from '../src/center/snapshot.mjs';
 import { withDefaults } from '../src/config/instance.mjs';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome } from '../src/daemon/home.mjs';
-import { tempDir, removeDir } from './helpers.mjs';
+import { tempDir, removeDir, NO_WAIT } from './helpers.mjs';
 
 const STORY_STAGES = [
   ...PRE_FREEZE_STAGES,
@@ -133,7 +133,7 @@ test('a started daemon holds both assembled lanes', async (t) => {
     }) + '\n',
   );
   const lanes = assembleLanes({ instanceConfig: () => daemon.config });
-  const daemon = new Daemon(home, { lanes });
+  const daemon = new Daemon(home, { waitSleep: NO_WAIT, lanes });
   t.after(async () => {
     await daemon.stop();
     removeDir(home);

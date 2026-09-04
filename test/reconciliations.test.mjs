@@ -22,6 +22,7 @@ import {
   initOriginRepo,
   projectConfigJson,
   fakeComposeRunner,
+  NO_WAIT,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -133,6 +134,7 @@ test('the sweep launches repairs, then reconciliations, then the story frontier'
     },
   });
   const daemon = new Daemon(join(root, 'home'), {
+    waitSleep: NO_WAIT,
     lanes: { story: stub('story'), repair: stub('repair') },
     composeRunner: fakeComposeRunner(),
   });

@@ -31,7 +31,7 @@
 // caller can reach that path.
 import { spawn } from 'node:child_process';
 import { resolveArgv } from './executable.mjs';
-import { seatSpawnOptions, terminateTree } from './processes.mjs';
+import { treeSpawnOptions, terminateTree } from './processes.mjs';
 import { seatExecutesSuite } from '../seats/seatmap.mjs';
 
 // Bounds for the failure evidence. A ledger records what a reader needs to
@@ -118,8 +118,9 @@ export function superviseSeat(
     stdio: ['ignore', 'pipe', 'pipe'],
     // A seat runs on a console of its own that has no window, so nothing it
     // starts can put one on the operator's screen and nothing aimed at a seat
-    // reaches the daemon through it (ADR-0016).
-    ...seatSpawnOptions(),
+    // reaches the daemon through it; off Windows it leads a process group, so
+    // the kill reaches the tree it spawned (ADR-0016).
+    ...treeSpawnOptions(),
     ...(spec.windowsVerbatimArguments && { windowsVerbatimArguments: true }),
   });
   let cost = 0;

@@ -58,6 +58,11 @@ export const FAST_PATH_REFUSALS = new Set([
   'no-suite-ground',
   // A suite of the certified verdict said nothing about what it depends on.
   'undeclared-suite',
+  // The certification carries a proof nobody could run: a service was down
+  // past the external wait and an operator let the ship go without it
+  // (ADR-0069). A carry stands on a certification that proved the tree, and
+  // this one states in writing that part of the tree is unproven.
+  'deferred-proof',
   // The declarations that decide this skip come off the run's own tree, and the
   // run's own tree moved the ground they are produced from.
   'self-declared-ground',
@@ -216,14 +221,23 @@ export function groundEntry(entry) {
  * shape (ADR-0046).
  *
  * A layer without a standing green, a layer that reported no parts, a part that
- * declared no inputs, and a part whose every input names ground no path can
- * match each refuse. The default is always safety: a suite that says nothing
+ * declared no inputs, a part whose every input names ground no path can match,
+ * and a certification carrying a deferred proof each refuse. The default is always safety: a suite that says nothing
  * about its ground is a suite the module must assume depends on everything, and
  * a fast path over that assumption is no proof at all.
  * @param {Array<{name: string}>} layers the project's Tier-1 layers
  * @param {Map<string, object>} prior each layer's standing `layer-result`
  */
-export function declaredGround(layers, prior) {
+export function declaredGround(layers, prior, deferred = []) {
+  // A deferred part is a proof the ship went out without. Whatever the
+  // declarations say about the ground it rests on, the certification does not
+  // hold for it, so there is nothing here to carry over a moved base.
+  if (deferred.length > 0) {
+    const named = deferred
+      .map((entry) => `${entry.layer}/${(entry.parts ?? []).join(', ')}`)
+      .join('; ');
+    return refusal('deferred-proof', `the certification defers a proof: ${named}`);
+  }
   const suites = [];
   const entries = new Set();
   for (const layer of layers) {
@@ -641,7 +655,7 @@ export function fastPathVerdict({
       `the certification carries review-lens findings whose ground nothing declares: ${list(lensFindings)}`,
     );
   }
-  const declared = declaredGround(layers, prior);
+  const declared = declaredGround(layers, prior, deferredOf(certification.record));
   if (declared.ok !== true) return declared;
   const sources = declarationSources(layers, commands, readSource, isLinkPath);
   if (sources.ok !== true) return sources;
@@ -738,6 +752,21 @@ export async function fastPathFacts(tree, { fromSha, toSha, mainSha }, { run = g
     // the record stopped writing down.
     ...(revs.length > COMMIT_LIMIT && { truncated: true, commitLimit: COMMIT_LIMIT }),
   };
+}
+
+/**
+ * The proofs a certification records as deferred, or an empty list. A record
+ * this cannot read answers with none, and the read that follows it — the lens
+ * findings — throws on the same file, which is the internal-error route and
+ * the full re-verdict (ADR-0069).
+ */
+function deferredOf(recordPath) {
+  try {
+    const record = JSON.parse(readFileSync(recordPath, 'utf8'));
+    return Array.isArray(record.deferred) ? record.deferred : [];
+  } catch {
+    return [];
+  }
 }
 
 /**

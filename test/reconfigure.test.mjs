@@ -20,6 +20,7 @@ import {
   commitTree,
   projectConfigJson,
   gitSync,
+  NO_WAIT,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -69,7 +70,7 @@ function engineFixture(t, { lanes }) {
     paths.instanceConfig,
     JSON.stringify({ version: 1, projects: { proj: { repoUrl: origin, slotCap: 2 } } }) + '\n',
   );
-  const daemon = new Daemon(join(root, 'home'), { lanes });
+  const daemon = new Daemon(join(root, 'home'), { waitSleep: NO_WAIT, lanes });
   t.after(async () => {
     await daemon.stop();
     removeDir(root);
@@ -214,7 +215,7 @@ test('a named blob pins that config, and a restart resumes on the pin the ledger
   await fx.daemon.stop();
 
   // The restart derives the pin from the ledger, not from the launch.
-  const second = new Daemon(join(fx.root, 'home'), { lanes: { solo: parkingLane(seen) } });
+  const second = new Daemon(join(fx.root, 'home'), { waitSleep: NO_WAIT, lanes: { solo: parkingLane(seen) } });
   t.after(async () => second.stop());
   await second.start();
   assert.equal(second.engine.runs.get(runId).payload.configBlob, blob);

@@ -1,23 +1,34 @@
 # ADR-0016: Windows process lifecycle
 
-Status: accepted (2026-08-14)
+Status: accepted (2026-08-14, the POSIX group 2026-09-04)
 
 ## Decision
 
 Windows has no process groups a signal can address and no kill that reaches a
 descendant. The corrections below follow from that, and the platform branch for
 all of them lives in one module (`src/engine/processes.mjs`), the way
-`resolveArgv` owns the executable branch (ADR-0013). Off Windows every path
-below is byte for byte what shipped before.
+`resolveArgv` owns the executable branch (ADR-0013).
 
-- **A seat spawns onto a console that has no window.** Every seat takes
-  `windowsHide`, which on Windows is `CREATE_NO_WINDOW`: the seat is handed a
-  console of its own with no window on it, and its whole descendant tree
-  inherits that console instead of opening one. One shape covers both seats,
-  the tool that spawns directly and the shim that runs under `cmd.exe`.
-  `detached` is not taken: there it is `DETACHED_PROCESS`, which leaves the seat
-  with no console at all, and a console program that has none opens a visible
-  one. The child is not unref'd, so the daemon still waits on it as before.
+Off Windows one hole is the same hole for the same reason — a signal to one pid
+reaches one process — and POSIX already has the answer Windows lacks. So the
+harness spawns the children it ends as trees into process groups there and ends
+the group. `detached` means opposite things on the two platforms, and this
+module is where that is stated once: on Windows it is `DETACHED_PROCESS` and it
+is never taken, and off Windows it is `setsid`, which is a session and a group
+and nothing about a console.
+
+- **A child the harness ends as a tree spawns onto a console that has no
+  window, or into a process group.** `treeSpawnOptions` is that one decision,
+  and every such child takes it: a seat, and every command a gate layer or a
+  probe runs. On Windows it is `windowsHide`, which is `CREATE_NO_WINDOW`: the
+  child is handed a console of its own with no window on it, and its whole
+  descendant tree inherits that console instead of opening one. One shape
+  covers both seat shapes, the tool that spawns directly and the shim that runs
+  under `cmd.exe`. `detached` is not taken there: it is `DETACHED_PROCESS`,
+  which leaves the child with no console at all, and a console program that has
+  none opens a visible one. Off Windows it is `detached`, which makes the child
+  a process-group leader whose group the kill can address. The child is not
+  unref'd on either platform, so the daemon still waits on it as before.
 - **Nothing the harness starts shows a window.** The seat spawn, the
   project-config command runner, git, compose and the notifier command each
   carry `windowsHide` at the call itself, after the caller's own options so
@@ -28,9 +39,11 @@ below is byte for byte what shipped before.
   carries no indication of which member it was meant for, and the daemon has a
   stop path of its own. `SIGINT`, `SIGTERM` and `SIGHUP` still stop it.
 - **A deliberate termination kills the tree.** Every place the daemon ends a
-  seat on purpose — the run kill, the cost ceiling, a stop — runs
-  `taskkill /PID <pid> /T /F` on Windows. A failed or unavailable `taskkill`
-  falls back to the direct kill, so the child never outlives the call.
+  child on purpose — the run kill, the cost ceiling, a stop, a command that ran
+  past its bound — runs `taskkill /PID <pid> /T /F` on Windows and signals the
+  negative pid off it, which is the child's own process group. A failed or
+  unavailable `taskkill`, and a group that has already gone, both fall back to
+  the direct kill, so the child never outlives the call.
 - **A release sweeps before it removes.** Workspace release enumerates the
   processes standing inside the run's workspace, ends each one, and only then
   removes the worktrees. Standing inside it is three separate things: a command
@@ -133,10 +146,21 @@ console, so the interpreter has one to pass on and its child has usable standard
 handles. A seat's stdout is where its cost, its session id and its refusal to do
 the work arrive, so nothing that costs it is taken.
 
-Termination is untouched by any of this. A deliberate end is
+Termination is untouched by any of this on Windows. A deliberate end there is
 `taskkill /PID <pid> /T /F`, which walks the parent-child tree the kernel
 records; it never read a process group, so a seat that is not detached is ended
 exactly as before, descendants included.
+
+Off Windows the group is the mechanism, because there is no `taskkill` and
+`child.kill()` reaches one pid. A seat is `cmd.exe` running a shim on Windows
+and a shell running a tool elsewhere, and a gate command is a sequence of its
+own on every platform: in both shapes the work is a grandchild, and killing the
+handle alone answers the caller while the thing that hung carries on. The group
+is what a signal can address, `detached` is what puts the child in one of its
+own, and the negative pid is what reaches every member. The console reasoning
+above does not apply: a POSIX `setsid` child has no console to lose and opens
+no window, which is why the same word is safe on one platform and refused on
+the other.
 
 Dropping `SIGBREAK` stays. It is the same guarantee reached from the other end,
 it costs nothing, and it covers whatever reaches the daemon's own console. The
@@ -229,6 +253,15 @@ What did explain them: git refusing a removal the operating system performs.
 The answer is not a git setting at all — the release deletes the tree itself
 when git will not, and every delete the harness performs goes in the
 extended-length path form (ADR-0004).
+
+If the POSIX process group proves wrong — a child that must stay in the
+daemon's group, or a host where `setsid` costs something the harness needs —
+`treeSpawnOptions` returns an empty object off Windows again and
+`terminateTree` falls back to the direct kill it always had, which is the
+behaviour that shipped before this. Trigger: a child whose group kill reached
+something it should not have, or a signal path that stopped working. Reversal
+cost: two branches in `src/engine/processes.mjs`, one structural test, and this
+record.
 
 ## Fallback paths
 

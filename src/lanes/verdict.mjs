@@ -66,6 +66,7 @@ import {
   standingAcksFor,
 } from '../ledger/acks.mjs';
 import { cycleRepeat, openIdentities } from '../ledger/cycles.mjs';
+import { readEvents } from '../ledger/ledger.mjs';
 import { assertDefectKind } from '../ledger/registry.mjs';
 import { openEscapesStore } from '../telemetry/stores.mjs';
 import { readEscapeSet, recordEscape } from '../telemetry/escapes.mjs';
@@ -76,7 +77,25 @@ import {
   probeOfferLines,
   withReplayRounds,
 } from './replay.mjs';
-import { runSpectrum, persistentReds, cyclePlan } from './spectrum.mjs';
+import { runSpectrum, rerunLayers, persistentReds, cyclePlan } from './spectrum.mjs';
+import {
+  credentialHostIn,
+  readTransient,
+  showsCode,
+  showsTransient,
+} from './transient.mjs';
+import {
+  EXTERNAL_OUTAGE_MS,
+  EXTERNAL_POLL_MS,
+  EXTERNAL_WAIT_MS,
+  LAYER_LADDER,
+  ladderStep,
+  waitAttempt,
+  waitFor,
+  waitHistory,
+  waitLine,
+} from './waiting.mjs';
+import { askProbe } from './probes.mjs';
 import { configuredGroups } from './schedule.mjs';
 import { PARTS_ENV, partPlan, carryTally, confirmationTally } from './parts.mjs';
 import { substrateGate } from './substrate.mjs';
@@ -371,6 +390,27 @@ async function runCycle(ctx, base, mode, { cycle }) {
   let spectrum = await runSpectrum(ctx, { ...gates, run: plan.run, prior: plan.prior, parts });
   if (spectrum.error) return { directive: gateCommandError(ctx, spectrum.error) };
   let reds = persistentReds(spectrum.results);
+  // The parts a ship went out without, where an operator took that trade. They
+  // are red and they do not block: the record carries them and the daemon
+  // settles the debt when the service comes back (ADR-0069).
+  let deferred = [];
+  // A red whose cause is outside the tree never reaches a seat. The ladder,
+  // the external wait and the deferred trade all live here, in front of
+  // triage, because no repair fixes a dropped connection and a fresh pass
+  // discards a sound implementation over one. A CI-source verdict never
+  // reaches this function at all: the ship lane renders those, and a red
+  // GitHub check has its own re-run in the forge.
+  const outside = async () => {
+    if (reds.length === 0) return null;
+    const read = await outsideTheTree(ctx, base, { cycle, sha, gates, spectrum, reds });
+    if (read.directive) return read.directive;
+    if (read.spectrum) spectrum = read.spectrum;
+    if (read.reds) reds = read.reds;
+    if (read.deferred?.length > 0) deferred = [...deferred, ...read.deferred];
+    return null;
+  };
+  const outsideDirective = await outside();
+  if (outsideDirective) return { directive: outsideDirective };
 
   const events = runEvents(ctx);
   const renders = events.filter((e) => e.event === 'verdict-rendered');
@@ -468,8 +508,17 @@ async function runCycle(ctx, base, mode, { cycle }) {
     if (confirmed.error) return { directive: gateCommandError(ctx, confirmed.error) };
     spectrum = confirmed;
     reds = persistentReds(confirmed.results);
+    // A sweep red is a red like any other, and a dropped connection is no more
+    // the tree's fault at the confirmation than it was at the cycle.
+    const sweptDirective = await outside();
+    if (sweptDirective) return { directive: sweptDirective };
     if (reds.length > 0) {
-      const triaged = await triageStep(ctx, base, { cycle, reds, priorOpen: triagePrior, dropped });
+      const triaged = await triageStep(ctx, base, {
+        cycle,
+        reds,
+        priorOpen: triagePrior,
+        dropped,
+      });
       if (triaged.fail) return { directive: triaged.fail };
       open = [...triaged.open, ...reviewOpen];
     }
@@ -535,6 +584,12 @@ async function runCycle(ctx, base, mode, { cycle }) {
     // side; nobody has to reconstruct which frozen test was amended and why
     // (ADR-0044).
     ...(supersedes.length > 0 && { supersedes }),
+    // The proofs this verdict is going out without, beside the parts it
+    // carried. A carry is a green earned at another sha; this is a red nobody
+    // could turn green because the service it needs is down, and an operator
+    // said the ship may go without it. The fast path refuses to carry a
+    // certification that holds one (ADR-0069).
+    ...(deferred.length > 0 && { deferred }),
     verdict,
   };
   const recordPath = join(ctx.paths.runs, ctx.runId, `verdict-${cycle}.json`);
@@ -554,6 +609,7 @@ async function runCycle(ctx, base, mode, { cycle }) {
     ...(swept && { confirmationParts: swept }),
     ...(dropped.length > 0 && { dropped }),
     ...(diffTruncated && { diffTruncated: true }),
+    ...(deferred.length > 0 && { deferred }),
     verdict,
     open: openIds,
     record: recordPath,
@@ -680,6 +736,11 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
   }
   const redLayers = reds.map((r) => r.layer);
   const takeBacks = recordedTakeBacks(events);
+  // What the harness already read as a cause outside the tree, and the ladder
+  // it already climbed against it. The seat is told, and the checks below
+  // refuse a code-class finding whose only evidence is one of these
+  // signatures (ADR-0069).
+  const transient = transientRead(events, cycle);
   const tier1 = (base.config?.gates?.tier1 ?? []).map((layer) => layer.name);
   const { report, fail } = await withReplayRounds(ctx, spec, ({ label, replays, budget }) => {
     // Resume by report, per round: a round whose seat already answered is
@@ -696,16 +757,32 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
       env: base.env,
       constitution: base.constitution,
       buildRole: (brief) =>
-        triageRole(base, reds, priorOpen, brief, dropped, takeBacks.recaptured, {
-          replays,
-          budget,
-          layers: tier1,
-        }),
+        triageRole(
+          base,
+          reds,
+          priorOpen,
+          brief,
+          dropped,
+          takeBacks.recaptured,
+          { replays, budget, layers: tier1 },
+          transient,
+        ),
       // A report that asks for a probe it can still have is a request and not
       // a verdict, so the coverage rules do not judge it. Past the round
       // budget the report is the verdict whatever it asks for, and they are
       // back.
-      checks: (r) => (asksForProbe(r, budget) ? [] : triageChecks(r, { redLayers, priorOpen })),
+      checks: (r) =>
+        asksForProbe(r, budget)
+          ? []
+          : triageChecks(r, {
+              redLayers,
+              priorOpen,
+              transient,
+              // The project's own wording for a cause outside the tree counts
+              // here exactly as the closed set does: a finding that cites one
+              // of them and nothing else is a finding about the world.
+              patterns: base.config?.gates?.transientPatterns ?? [],
+            }),
     });
   });
   if (fail) return { fail };
@@ -805,8 +882,25 @@ function recordedTakeBacks(events) {
  * rule beside the entry that broke it, so the corrective brief says what to
  * write and not only what was refused.
  */
-function triageChecks(report, { redLayers, priorOpen }) {
+function triageChecks(report, { redLayers, priorOpen, transient = null, patterns = [] }) {
   const defects = [];
+  // The harness already read these reds as a cause outside the tree and spent
+  // a ladder of re-runs against them. A code-defect finding whose evidence is
+  // one of those signatures and nothing else sends a repair seat to rewrite
+  // working code, which is the failure this whole route exists to end
+  // (ADR-0069). An assertion or a compile error beside the signature is the
+  // tree's own answer and the finding stands.
+  for (const f of transient === null ? [] : report.findings) {
+    if (f.class !== 'code-defect') continue;
+    const evidence = `${f.summary}\n${f.evidence}`;
+    if (!showsTransient(evidence, patterns) || showsCode(evidence)) continue;
+    defects.push(
+      `the code-defect finding "${f.summary}" cites only a signature of a cause outside the ` +
+        `tree (${transient.signatures.join(', ')}); the harness re-ran these files after ` +
+        '1, 5 and 15 minutes and they failed the same way. Class it env, or cite an ' +
+        'assertion failure or a compile error from the tree itself.',
+    );
+  }
   const priorIds = new Set(priorOpen.map((f) => f.id));
   const persisting = report.persisting ?? [];
   if (priorOpen.length === 0 && report.persisting !== undefined) {
@@ -852,6 +946,445 @@ function triageChecks(report, { redLayers, priorOpen }) {
     }
   }
   return defects;
+}
+
+// -- a red from outside the tree ---------------------------------------------
+
+/** What an operator answers at the external gate to let the ship go on. */
+export const DEFER_PROOF = 'defer-proof';
+
+/**
+ * The wait routes in front of triage (ADR-0069).
+ *
+ * Three things happen here and they are one decision: a red is read against
+ * the closed signature set, a red the read recognises climbs the layer ladder,
+ * and a red that survives the ladder while naming a declared service waits for
+ * that service instead of asking anybody. Every one of them is in front of the
+ * seat because no repair fixes a cause outside the tree, and a fresh pass
+ * discards a sound implementation over one.
+ *
+ * A red the read does not recognise is returned untouched: it takes triage
+ * exactly as it did before, which is the safe direction.
+ *
+ * @returns {Promise<{spectrum?: object, reds?: Array<object>,
+ *   deferred?: Array<object>, directive?: object}>}
+ */
+async function outsideTheTree(ctx, base, { cycle, sha, gates, spectrum, reds }) {
+  const events = runEvents(ctx);
+  // The trade an operator already took at the external gate. It is read first,
+  // because those parts are red and are not the tree's to answer any more.
+  const debt = deferredProof(ctx, events, { cycle, reds });
+  if (debt) return { reds: debt.reds, deferred: debt.deferred };
+  const patterns = base.config?.gates?.transientPatterns ?? [];
+  let read = readTransient(reds, { patterns });
+  if (!read.ok) return {};
+  const since = ladderSince(events);
+  // One reading per layer per ladder. A run that comes back here on an
+  // answered retry reads the red again and climbs a fresh ladder, and a second
+  // copy of the same stamp would say the harness had recognised it twice.
+  const already = new Set(
+    events
+      .filter((e) => e.event === 'layer-transient' && e.cycle === cycle && e.seq > since)
+      .map((e) => e.layer),
+  );
+  for (const layer of read.layers) {
+    if (already.has(layer.layer)) continue;
+    ctx.store.append('layer-transient', {
+      actor: ACTOR,
+      cycle,
+      layer: layer.layer,
+      parts: layer.parts,
+      files: layer.files,
+      signatures: layer.signatures,
+    });
+  }
+  let current = spectrum;
+  let open = reds;
+  for (;;) {
+    const attempt = waitAttempt(runEvents(ctx), 'layer', { since });
+    const step = ladderStep(LAYER_LADDER, attempt);
+    if (step === null) break;
+    await waitFor(waitCtx(ctx), {
+      kind: 'layer',
+      reason: read.signatures.join(', '),
+      ms: step,
+      attempt,
+      detail: { layers: read.layers.map((l) => l.layer), files: read.files.length },
+    });
+    const again = await rerunLayers(ctx, {
+      ...gates,
+      layers: layerDefs(base, read.layers.map((l) => l.layer)),
+      trigger: 'layer-ladder',
+    });
+    if (again.error) return { directive: gateCommandError(ctx, again.error) };
+    current = mergeResults(current, again.results);
+    open = persistentReds(current.results);
+    if (open.length === 0) return { spectrum: current, reds: [] };
+    read = readTransient(open, { patterns });
+    // A red that came back showing the tree's own signature is the tree's, and
+    // the ladder stops the moment it says so.
+    if (!read.ok) return { spectrum: current, reds: open };
+  }
+  // The ladder is spent. A red that names a service the project declared a
+  // credential for is that service being down, and the wait for it is longer
+  // than any ladder (ADR-0069).
+  const host = declaredHost(base, open, read);
+  if (!host) return { spectrum: current, reds: open };
+  return externalWait(ctx, base, { cycle, sha, gates, spectrum: current, reds: open, read, host });
+}
+
+/**
+ * The external wait: the run frees its slot, the service's own probe is asked
+ * every ten minutes for a day, and nothing is stamped for an answer of no —
+ * a service that is down says no a hundred and forty-four times, and a stamp
+ * per poll would bury the run's own ledger.
+ *
+ * At an hour the instance says so, loudly and once: nobody is being asked
+ * anything, and a human who wants to know a service is down should not have to
+ * read a run ledger to find out. A green ends the wait, re-acquires the slot
+ * and re-runs the red parts narrowed to their files. A day of no ends it at
+ * the gate, with the whole history in the question.
+ */
+async function externalWait(ctx, base, { cycle, sha, gates, spectrum, reds, read, host }) {
+  const events = runEvents(ctx);
+  const since = ladderSince(events);
+  const credential = host.credential;
+  const layers = read.layers.map((l) => l.layer);
+  const attempt = waitAttempt(events, 'external', { since });
+  // One wait per ladder, and never a second day of it. A daemon restart closes
+  // the open span, re-enters the stage and finds the ladder spent, so without
+  // this the run would open a fresh twenty-four hours at every restart and
+  // reach nobody. The second attempt is the gate (ADR-0069).
+  if (attempt > EXTERNAL_ATTEMPTS) {
+    return {
+      directive: externalGate(ctx, base, {
+        host,
+        read,
+        history: externalHistory(events, since),
+      }),
+    };
+  }
+  // The loud record this service already has open, read off the instance
+  // ledger rather than held in this call: the call does not survive a restart
+  // and the record does, and a second record for one outage is the thing a
+  // reader least needs.
+  let outage = openOutage(ctx, credential.name);
+  const wait = await waitFor(waitCtx(ctx), {
+    kind: 'external',
+    reason: `${credential.name} at ${host.host}`,
+    ms: EXTERNAL_WAIT_MS,
+    attempt,
+    // The one wait that gives the slot up. The run may sit here for a day, and
+    // a day of a slot is what a park would have cost the project.
+    freesSlot: true,
+    pollMs: EXTERNAL_POLL_MS,
+    detail: { credential: credential.name, host: host.host, layers },
+    poll: async ({ spent }) => {
+      const answer = await askProbe(base.config, credential, {
+        cwd: base.worktree,
+        env: base.env,
+      });
+      if (answer.ok) {
+        // The green is stamped, because it is the answer the run acts on.
+        ctx.store.append('credential-probe', {
+          actor: ACTOR,
+          phase: 'external-wait',
+          project: ctx.project,
+          credential: credential.name,
+          variable: credential.env,
+          ok: true,
+        });
+        if (outage !== null) {
+          // The record the outage opened is answered by the service coming
+          // back, and this is the reader that has that evidence.
+          try {
+            ctx.instanceStore?.resolve({ actor: ACTOR, resolves: outage, note: 'probe green' });
+          } catch {
+            // A resolution nobody can pair is not worth failing a wait for.
+          }
+          outage = null;
+        }
+        return true;
+      }
+      if (outage === null && spent >= EXTERNAL_OUTAGE_MS) {
+        outage =
+          ctx.instanceStore?.append('external-outage', {
+            actor: ACTOR,
+            project: ctx.project,
+            runId: ctx.runId,
+            credential: credential.name,
+            host: host.host,
+            waited: spent,
+            gist: `${credential.name} (${host.host}) has refused its probe for an hour`,
+          })?.seq ?? null;
+      }
+      return false;
+    },
+  });
+  if (wait.outcome === 'probe-green') {
+    const again = await rerunLayers(ctx, {
+      ...gates,
+      layers: layerDefs(base, layers),
+      trigger: 'external-wait',
+    });
+    if (again.error) return { directive: gateCommandError(ctx, again.error) };
+    const merged = mergeResults(spectrum, again.results);
+    return { spectrum: merged, reds: persistentReds(merged.results) };
+  }
+  return {
+    directive: externalGate(ctx, base, {
+      host,
+      read,
+      history: externalHistory(runEvents(ctx), since),
+    }),
+  };
+}
+
+/** How many days a service is waited for before somebody is asked: one. */
+const EXTERNAL_ATTEMPTS = 1;
+
+/** The waits this run has spent on a service since the ladder began. */
+function externalHistory(events, since) {
+  return waitHistory(events, 'external', { since });
+}
+
+/**
+ * The `external-outage` this project already has open for one credential, or
+ * null. Derived from the instance ledger, so a restart finds the record the
+ * instance before it opened instead of opening a second one, and the green
+ * probe that ends any wait on that service resolves it.
+ */
+function openOutage(ctx, credential) {
+  const events = readEvents(ctx.paths.instanceLedger);
+  const resolved = new Set(events.filter((e) => e.event === 'resolved').map((e) => e.resolves));
+  const open = events.filter(
+    (e) =>
+      e.event === 'external-outage' &&
+      e.project === ctx.project &&
+      e.credential === credential &&
+      !resolved.has(e.seq),
+  );
+  return open.at(-1)?.seq ?? null;
+}
+
+/**
+ * The gate a service that stayed down past the day raises. It offers the
+ * repair every provisioning gate offers, and — only where the project turned
+ * `gates.proofDebt` on — the owner's speed-over-residual-safety trade: the
+ * ship goes out and the proof is owed.
+ */
+function externalGate(ctx, base, { host, read, history }) {
+  const debt = base.config?.gates?.proofDebt === true;
+  const deferred = read.layers.map((l) => ({
+    layer: l.layer,
+    parts: l.parts,
+    files: l.files,
+    // The mapping the settle run needs: it asks the default branch for these
+    // parts and these files, and a path filter belongs to the part that named
+    // it (ADR-0065).
+    byPart: l.byPart,
+  }));
+  const lines = read.layers.map(
+    (l) => `- ${l.layer}: ${l.parts.join(', ')} (${l.files.length} file(s)) — ${l.signatures.join(', ')}`,
+  );
+  return parkDirective('provisioning-gate', {
+    options: debt ? [...GATE_FORMS.options, DEFER_PROOF] : [...GATE_FORMS.options],
+    text: GATE_FORMS.text,
+    question:
+      `The ${host.credential.name} service at ${host.host} has refused its own probe for a ` +
+      'day, and these layers cannot be proven without it:\n' +
+      lines.join('\n') +
+      '\nThe harness waited for it and asked nobody:\n' +
+      history.map((entry) => waitLine(entry)).join('\n') +
+      '\nRepair the service or its credential, then answer "retry" to run these files ' +
+      'again.' +
+      (debt
+        ? `\nAnswer "${DEFER_PROOF}" to ship without this proof: the parts above are recorded ` +
+          'as deferred on the verdict, the fast path refuses to carry the certification, and ' +
+          'the daemon runs the files against the default branch as soon as the service comes ' +
+          'back. A red there is an escape against this ship.'
+        : ''),
+    detail: {
+      external: true,
+      credential: host.credential.name,
+      host: host.host,
+      layers: read.layers.map((l) => l.layer),
+      files: read.files,
+      deferred,
+    },
+  });
+}
+
+/**
+ * The trade an operator took at the external gate, applied. The stamp is
+ * written once, from the park's own record and the answer alone, so a restart
+ * reads the same debt and never writes a second one.
+ * @returns {{reds: Array<object>, deferred: Array<object>}|null}
+ */
+function deferredProof(ctx, events, { cycle, reds }) {
+  const asked = answeredPark(events, 'provisioning-gate');
+  if (!asked?.answer || asked.park.detail?.external !== true) return null;
+  if (asked.answer.option !== DEFER_PROOF) return null;
+  const detail = asked.park.detail;
+  const deferred = detail.deferred ?? [];
+  const stamped = events.find((e) => e.event === 'proof-deferred' && e.seq > asked.answer.seq);
+  // The trade is this cycle's. A later cycle judges a tree somebody changed,
+  // and a red there is that tree's answer rather than the service's — so the
+  // deferral does not travel, and the debt is recorded once.
+  if (stamped && stamped.cycle !== cycle) return null;
+  if (!stamped) {
+    ctx.store.append('proof-deferred', {
+      actor: asked.answer.actor,
+      cycle,
+      credential: detail.credential,
+      host: detail.host,
+      parts: deferred,
+      files: detail.files ?? [],
+      parkSeq: asked.park.seq,
+    });
+  }
+  const names = new Set(detail.layers ?? []);
+  return { reds: reds.filter((r) => !names.has(r.layer)), deferred };
+}
+
+/**
+ * The substrate ladder (ADR-0069): an env finding that survived its
+ * operational fix waits and re-runs before anybody is asked. Nine of the
+ * fourteen env-class provisioning parks on the ledger were host conditions
+ * that were green on a retry hours later, and every one of them cost a human
+ * the same word.
+ *
+ * The probe runs before every step, because a host that refuses its own probe
+ * will not pass its layers and the ladder would spend an hour proving it
+ * (ADR-0022).
+ *
+ * @returns {Promise<{green?: boolean, directive?: object}>} `green` says the
+ *   re-run turned the layers green and the fix is stamped; a directive is the
+ *   probe's own park, or a command that could not run.
+ */
+async function substrateLadder(ctx, base, { ops, last, events, skip, skipStamp }) {
+  // A CI-source render runs no local layer, so there is nothing here to re-run
+  // and the gate is the whole route (ADR-0022).
+  if (skip) return { green: false };
+  const env = ops.filter((f) => f.class === 'env');
+  if (env.length === 0) return { green: false };
+  const names = [...new Set(env.flatMap((f) => f.layers ?? []))];
+  const layers = layerDefs(base, names);
+  if (layers.length === 0) return { green: false };
+  const since = Math.max(last.seq, lastAnswerSeq(events));
+  for (;;) {
+    const attempt = waitAttempt(runEvents(ctx), 'substrate', { since });
+    const step = ladderStep(LAYER_LADDER, attempt);
+    if (step === null) return { green: false };
+    const gate = await substrateProbeGate(ctx, base, { ops: env, skip: false });
+    if (gate) return { directive: gate };
+    await waitFor(waitCtx(ctx), {
+      kind: 'substrate',
+      reason: 'an env finding survived its fix',
+      ms: step,
+      attempt,
+      detail: { findings: env.map((f) => f.id), layers: names },
+    });
+    const again = await rerunLayers(ctx, {
+      layers,
+      commands: base.commands,
+      cwd: base.worktree,
+      env: base.env,
+      cycle: last.cycle,
+      sha: last.sha,
+      credentials: base.config.credentials ?? [],
+      trigger: 'substrate-ladder',
+    });
+    if (again.error) return { directive: gateCommandError(ctx, again.error) };
+    if (persistentReds(again.results).length === 0) {
+      ctx.store.append('operational-fix', {
+        actor: ACTOR,
+        findings: env.map((f) => f.id),
+        layers: names,
+        source: 'wait',
+        attempts: attempt,
+        ...skipStamp,
+      });
+      return { green: true };
+    }
+  }
+}
+
+/** The wait mechanism's context: the run's ledger and the engine's seams. */
+function waitCtx(ctx) {
+  return {
+    store: ctx.store,
+    waits: ctx.waits,
+    ...(ctx.sleep && { sleep: ctx.sleep }),
+    ...(ctx.now && { now: ctx.now }),
+  };
+}
+
+/**
+ * Where a ladder inside a cycle starts counting: the render this cycle
+ * follows, or the answer a human gave after it. An answer is a grant — it is
+ * the operator saying the world changed — so it buys a fresh ladder rather
+ * than a fourth step.
+ */
+function ladderSince(events) {
+  return Math.max(lastRenderSeq(events), lastAnswerSeq(events));
+}
+
+/** The seq of the newest answer in a ledger, or 0. */
+function lastAnswerSeq(events) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].event === 'answer') return events[i].seq;
+  }
+  return 0;
+}
+
+/** The Tier-1 layer definitions behind a set of layer names, in config order. */
+function layerDefs(base, names) {
+  const wanted = new Set(names);
+  return base.layers.filter((layer) => wanted.has(layer.name));
+}
+
+/** A spectrum result set with the re-run's answers in place of the old ones. */
+function mergeResults(spectrum, results) {
+  const replaced = new Map((results ?? []).map((r) => [r.layer, r]));
+  return {
+    ...spectrum,
+    results: spectrum.results.map((r) => replaced.get(r.layer) ?? r),
+  };
+}
+
+/**
+ * The declared service a transient red names, or null. A signature host
+ * resolves to the credential whose declared host it equals or ends with, and a
+ * project that declares no host for a credential gets no external wait — which
+ * is the answer every project had before this existed.
+ */
+function declaredHost(base, reds, read) {
+  const credentials = (base.config?.credentials ?? []).filter((c) => (c.hosts ?? []).length > 0);
+  if (credentials.length === 0) return null;
+  const evidence = reds
+    .flatMap((r) => [r.output ?? '', ...(r.parts ?? []).map((part) => part.output ?? '')])
+    .join('\n');
+  return credentialHostIn(evidence, credentials) ?? credentialHostIn(read.files.join('\n'), credentials);
+}
+
+/**
+ * What this cycle already read as a cause outside the tree: the layers, the
+ * files and the signatures the `layer-transient` stamps carry. Null for a
+ * cycle that read none.
+ */
+function transientRead(events, cycle) {
+  const layers = events.filter((e) => e.event === 'layer-transient' && e.cycle === cycle);
+  if (layers.length === 0) return null;
+  return {
+    layers: layers.map((e) => ({
+      layer: e.layer,
+      parts: e.parts ?? [],
+      files: e.files ?? [],
+      signatures: e.signatures ?? [],
+    })),
+    signatures: [...new Set(layers.flatMap((e) => e.signatures ?? []))].sort(),
+  };
 }
 
 // -- the response ladder -----------------------------------------------------
@@ -963,7 +1496,19 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
       acted = true;
     } else {
       const park = answeredPark(events, 'provisioning-gate');
-      if (!park?.answer || park.answer.seq < last.seq) {
+      const asked = Boolean(park?.answer) && park.answer.seq >= last.seq;
+      // Before anybody is asked: the substrate ladder. An env finding that
+      // survived its fix waits and re-runs on its own, and only a spent ladder
+      // reaches the gate (ADR-0069). A gate the operator has already answered
+      // is past that question.
+      const climbed = asked
+        ? { green: false }
+        : await substrateLadder(ctx, base, { ops, last, events, skip, skipStamp });
+      if (climbed.directive) return climbed.directive;
+      if (climbed.green) {
+        if (skip) return { next: nextStage };
+        acted = true;
+      } else if (!asked) {
         // The gate the operator already answered. Every finding it would ask
         // about is a harness defect somebody recorded as known, so the lane
         // answers on that authority and stamps twice: the ack it used, and the
@@ -1167,33 +1712,40 @@ function gateFor(ctx, ops, last, { events, standing }) {
   // standing ack covers is not a question, and asking it again at every
   // exhausted substrate gate would be the same loop in the other direction.
   const unasked = harness.filter((f) => !coveringAck(standing, f));
-  if (unasked.length > 0 && substrateExhausted(events, substrate)) {
+  // The ledger as it stands now, not as the ladder found it: the waits this
+  // route just spent are what says the substrate half has nothing left to try.
+  const now = runEvents(ctx);
+  if (unasked.length > 0 && substrateExhausted(now, substrate, last)) {
     return harnessGateFor(ctx, unasked, last, substrate);
   }
-  return substrateGateFor(substrate, harness, last);
+  return substrateGateFor(substrate, harness, last, waitHistory(now, 'substrate', {
+    since: last.seq,
+  }));
 }
 
 /**
- * Whether the substrate half of this gate has already been asked and answered
- * with no effect: the env findings of this render are, by identity, the set
- * the last substrate gate of this run named.
+ * Whether the substrate half of this gate has nothing left to try: the env
+ * findings of this render are, by identity, the set the last substrate gate of
+ * this run named, AND the wait ladder of this render is spent.
  *
- * The identity is the finding fingerprint, which is the harness's own answer
- * to "is this the same finding" (ADR-0022) and survives the fresh ids a triage
- * seat mints for a red it meets again.
- *
- * This is the placeholder for the wait ladder: once a persisting env finding
- * waits and re-runs on its own before it asks anybody, "exhausted" is what the
- * spent ladder says, and this comparison goes with the rule it stands in for.
+ * Both halves are needed and they answer different questions. The identity
+ * says the human's retry moved nothing — it is the finding fingerprint, the
+ * harness's own answer to whether two findings are one (ADR-0022), and it
+ * survives the fresh ids a triage seat mints for a red it meets again. The
+ * ladder says the machine's own three re-runs moved nothing either
+ * (ADR-0069). Only when neither moved anything is the harness question worth
+ * asking ahead of the substrate one, and holding it behind a substrate gate
+ * for ever is the loop this split exists to end.
  */
-function substrateExhausted(events, substrate) {
+function substrateExhausted(events, substrate, last) {
   const asked = [...events]
     .reverse()
     .find((e) => e.event === 'park' && e.type === 'provisioning-gate' && e.detail?.substrate);
   if (!asked) return false;
   const now = substrate.map((f) => findingFingerprint(f)).sort();
   const before = [...asked.detail.substrate].sort();
-  return now.length === before.length && now.every((id, i) => id === before[i]);
+  if (now.length !== before.length || !now.every((id, i) => id === before[i])) return false;
+  return ladderStep(LAYER_LADDER, waitAttempt(events, 'substrate', { since: last.seq })) === null;
 }
 
 /**
@@ -1206,13 +1758,20 @@ function substrateExhausted(events, substrate) {
  * gate after this one asks them, and an operator handed a list they cannot act
  * on answers the wrong half of it.
  */
-function substrateGateFor(ops, harness, last) {
+function substrateGateFor(ops, harness, last, history = []) {
   const line = (f) => `- [${f.class}] ${f.summary} (evidence: ${f.evidence})`;
   return parkDirective('provisioning-gate', {
     ...GATE_FORMS,
     question:
       'These findings persist after an operational fix; confirm the substrate is repaired:\n' +
       ops.map(line).join('\n') +
+      // What the harness already tried on its own, and when. An operator asked
+      // to look at a host reads the three attempts before they decide whether
+      // a fourth is worth anything (ADR-0069).
+      (history.length > 0
+        ? '\nThe harness waited and re-ran these layers before asking:\n' +
+          history.map((entry) => waitLine(entry)).join('\n')
+        : '') +
       (harness.length > 0
         ? `\nThis render also holds ${harness.length} harness finding(s). They are a defect of ` +
           'the machinery and not of this host. The gate after this one asks about them, and a ' +
@@ -1974,7 +2533,16 @@ function takenBackLines(dropped, recaptured = []) {
   ];
 }
 
-function triageRole(base, reds, priorOpen, brief, dropped = [], recaptured = [], probe = null) {
+function triageRole(
+  base,
+  reds,
+  priorOpen,
+  brief,
+  dropped = [],
+  recaptured = [],
+  probe = null,
+  transient = null,
+) {
   const lines = [
     'Classify the persistent red Tier-1 layers below into findings. Cluster reds that share one root cause into one finding.',
     'Class each finding — code-defect | suite-defect | env | harness — and cite evidence for every class.',
@@ -2002,6 +2570,18 @@ function triageRole(base, reds, priorOpen, brief, dropped = [], recaptured = [],
     );
   }
   lines.push(...takenBackLines(dropped, recaptured));
+  if (transient) {
+    lines.push(
+      'The harness read these reds as a cause outside the tree before you were spawned, and',
+      're-ran the failing files after 1, 5 and 15 minutes; they failed the same way each time.',
+      'The signatures it matched:',
+      ...transient.layers.map(
+        (l) => `- ${l.layer}: ${l.signatures.join(', ')} in ${l.parts.join(', ')}`,
+      ),
+      'A code-defect finding whose only evidence is one of those signatures is refused: class',
+      'it env, or cite an assertion failure or a compile error from the tree itself.',
+    );
+  }
   lines.push('Persistent reds:');
   for (const r of reds) {
     lines.push(

@@ -17,7 +17,12 @@ red the layer's answer. That re-run asks for the failure and for nothing else.
   <path>[,<path>…]`, printed from the framework's own summary rather than
   guessed at. The harness passes those files back in `OLYMPUS_FAILED_FILES`,
   as `<part>=<path>,<path>;<part>=…`, and the command runs that part through
-  its own path filter. A part that named no file runs whole.
+  its own path filter. A part that named no file runs whole. A red part carries
+  those files on its own `layer-result` record as well as into the re-run's
+  environment, because two later readers need them: the transient read, which
+  asks whether every file that failed shows a cause outside the tree, and the
+  wait ladders behind it, which narrow their own re-runs to exactly those
+  files (ADR-0069). A green part carries none — it named no failure.
 - **The record is one complete part table at one sha.** The greens of the
   replaced attempt ride the re-run's `layer-result`, each carrying the
   `attempt` that earned it, beside the parts the re-run itself ran. Nothing in
@@ -97,6 +102,18 @@ So the record holds one table, and every line of it names the attempt behind
 it. The alternative, leaving the second attempt's table partial, would make
 the layer's own record incomplete at the sha it judged, which is the property
 every later cycle's carry is derived from.
+
+## The same narrowing, asked again after a wait
+
+The flake filter's re-run is not the only narrowed re-run in the harness. The
+layer ladder and the substrate ladder each take one at every step, and the
+external wait takes one when the service comes back (ADR-0069). They derive it
+from the layer's standing `layer-result` of that cycle rather than from a
+replaced attempt, and they build it with this rule and no other: the parts that
+did not pass, the files those parts named, and the greens carried into the new
+record so the result stays one complete part table at one sha. Every doubt buys
+the whole layer there too. The attempt number keeps climbing, so the ledger
+reads as one layer asked several times rather than as a filter that ran twice.
 
 ## Fallback paths
 

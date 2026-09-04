@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { runSeat, unavailableMemo } from '../src/seats/runner.mjs';
+import { runSeat, unavailableMemo, RESET_GRACE_MS, CRASH_RETRIES } from '../src/seats/runner.mjs';
 import { parseClaudeLine } from '../src/seats/claude.mjs';
 import { ModelSemaphores } from '../src/seats/semaphore.mjs';
 import { DEFAULT_MODEL, CERTIFICATION_MODEL, FALLBACK_MODEL } from '../src/seats/seatmap.mjs';
@@ -17,7 +17,8 @@ import {
   archivedRunLedgerPath,
 } from '../src/daemon/home.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
-import { tempDir, removeDir, waitFor } from './helpers.mjs';
+import { tempDir, removeDir, waitFor, NO_WAIT } from './helpers.mjs';
+import { SEAT_LADDER } from '../src/lanes/waiting.mjs';
 
 const SCHEMA = {
   type: 'object',
@@ -150,6 +151,7 @@ test('a rejected model degrades to the fallback model at the same effort', async
   const reportPath = runReportPath(paths, 'r1', 'verdict-triage');
   const calls = [];
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'verdict-triage',
     roleBlock: 'ROLE',
     reportPath,
@@ -204,6 +206,7 @@ test('a rejection is read from the stream, not the exit code', async (t) => {
   const reportPath = runReportPath(paths, 'r1', 'eval');
   const calls = [];
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'eval',
     roleBlock: 'ROLE',
     reportPath,
@@ -236,6 +239,7 @@ test('a healthy seat never degrades', async (t) => {
   const reportPath = runReportPath(paths, 'r1', 'verdict-triage');
   let calls = 0;
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'verdict-triage',
     roleBlock: 'ROLE',
     reportPath,
@@ -263,6 +267,7 @@ test('both models rejected fails loudly with the evidence, and never loops', asy
   const reportPath = runReportPath(paths, 'r1', 'fury-verifier');
   const calls = [];
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'fury-verifier',
     roleBlock: 'ROLE',
     reportPath,
@@ -274,10 +279,23 @@ test('both models rejected fails loudly with the evidence, and never loops', asy
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'model-unavailable');
-  // Exactly one degrade attempt: the configured model, then the fallback.
-  assert.deepEqual(calls, [CERTIFICATION_MODEL, FALLBACK_MODEL]);
+  // Exactly one degrade attempt: the configured model, then the fallback. The
+  // fallback has nothing below it, so what follows is the seat ladder — the
+  // vendor's own reset instant first (already past in this fixture, so the
+  // re-dispatch is immediate), then 5, 15 and 45 minutes (ADR-0069).
+  assert.deepEqual(calls, [
+    CERTIFICATION_MODEL,
+    // the degrade, the re-dispatch on the vendor's instant, then the ladder
+    ...Array(2 + SEAT_LADDER.length).fill(FALLBACK_MODEL),
+  ]);
   const events = readEvents(runLedgerPath(paths, 'r1'));
   assert.equal(events.filter((e) => e.event === 'model-degraded').length, 1);
+  const waits = events.filter((e) => e.event === 'waiting');
+  // The vendor's own instant first — stamped even where it has already passed,
+  // because the ledger has to say the window was read — then the three rungs.
+  assert.deepEqual(waits.map((e) => e.kind), Array(1 + SEAT_LADDER.length).fill('seat'));
+  assert.equal(waits[0].detail.resetsAt, RESETS_AT);
+  assert.ok(waits.slice(1).every((e) => e.detail.resetsAt === undefined));
   const failures = events.filter((e) => e.event === 'seat-failure');
   assert.equal(failures.length, 1);
   assert.equal(failures[0].reason, 'model-unavailable');
@@ -298,6 +316,7 @@ test('a rejection on the default model degrades nothing and fails once', async (
   const reportPath = runReportPath(paths, 'r1', 'dev');
   let calls = 0;
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'dev',
     roleBlock: 'ROLE',
     reportPath,
@@ -309,7 +328,10 @@ test('a rejection on the default model degrades nothing and fails once', async (
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'model-unavailable');
-  assert.equal(calls, 1);
+  // No degrade — and the ladder instead of the park: a refused seat with no
+  // substitute waits on the vendor's own instant and then on the ladder, and
+  // only a spent ladder is the failure (ADR-0069).
+  assert.equal(calls, 1 + 1 + SEAT_LADDER.length);
   const events = readEvents(runLedgerPath(paths, 'r1'));
   assert.ok(!events.some((e) => e.event === 'model-degraded'));
   const failure = events.find((e) => e.event === 'seat-failure');
@@ -320,6 +342,9 @@ test('a rejection on the default model degrades nothing and fails once', async (
 // -- the per-run quota memo --------------------------------------------------
 
 const FUTURE_RESET = Math.floor(Date.now() / 1000) + 3600;
+// A fixed read of the clock, so a wait on a declared instant is an arithmetic
+// a test can state rather than a race with the wall.
+const NOW = Date.now();
 const PAST_RESET = Math.floor(Date.now() / 1000) - 3600;
 
 const rejectionResetting = (resetsAt) =>
@@ -344,6 +369,7 @@ test('a run degrades the second seat on its memo, without re-buying the rejectio
   };
   const first = runReportPath(paths, 'r1', 'verdict-triage');
   const one = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'verdict-triage',
     roleBlock: 'ROLE',
     reportPath: first,
@@ -353,6 +379,7 @@ test('a run degrades the second seat on its memo, without re-buying the rejectio
   assert.equal(one.ok, true);
   const second = runReportPath(paths, 'r1', 'fury-verifier');
   const two = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'fury-verifier',
     roleBlock: 'ROLE',
     reportPath: second,
@@ -398,6 +425,7 @@ test('a memo whose reset instant has passed sends the seat at its own model', as
   });
   const calls = [];
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'verdict-triage',
     roleBlock: 'ROLE',
     reportPath,
@@ -451,6 +479,7 @@ test('a degrade moves the seat onto the fallback model semaphore', async (t) => 
   const reportPath = runReportPath(paths, 'r1', 'verdict-triage');
   const semaphores = new ModelSemaphores({ [CERTIFICATION_MODEL]: 1, [FALLBACK_MODEL]: 1 });
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'verdict-triage',
     roleBlock: 'ROLE',
     reportPath,
@@ -483,6 +512,7 @@ test('a fixture seat completes the contract loop end to end', async (t) => {
   const reportPath = runReportPath(paths, 'r1', 'dev');
   const calls = [];
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'dev',
     roleBlock: 'ROLE',
     reportPath,
@@ -527,6 +557,7 @@ test('a seat session spawns a child without the secrets the seat may not hold', 
   const reportPath = runReportPath(paths, 'r1', 'spec-gate');
   const dump = runReportPath(paths, 'r1', 'env-dump');
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'spec-gate',
     roleBlock: 'ROLE',
     reportPath,
@@ -548,6 +579,7 @@ test('a broken report triggers exactly one corrective re-prompt, then success', 
   const reportPath = runReportPath(paths, 'r1', 'dev');
   const calls = [];
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'dev',
     roleBlock: 'ROLE',
     reportPath,
@@ -580,6 +612,7 @@ test('a second broken report is a seat-failure, never a retry loop', async (t) =
   const reportPath = runReportPath(paths, 'r1', 'dev');
   let calls = 0;
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'dev',
     roleBlock: 'ROLE',
     reportPath,
@@ -604,6 +637,7 @@ test('a missing report file takes the same corrective route', async (t) => {
   const reportPath = runReportPath(paths, 'r1', 'suite');
   const calls = [];
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'suite',
     roleBlock: 'ROLE',
     reportPath,
@@ -628,6 +662,7 @@ test('a transcript model that differs from the request is a seat-failure', async
   const reportPath = runReportPath(paths, 'r1', 'fury-verifier');
   let calls = 0;
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'fury-verifier',
     roleBlock: 'ROLE',
     reportPath,
@@ -655,6 +690,7 @@ test('a substitute dispatch stamps model-substituted with the substitute named',
   const reportPath = runReportPath(paths, 'r1', 'verdict-triage');
   const calls = [];
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'verdict-triage',
     roleBlock: 'ROLE',
     reportPath,
@@ -696,6 +732,7 @@ test('a child crash buys a fresh dispatch, and the report lands on the retry', a
   const reportPath = runReportPath(paths, 'r1', 'dev');
   let calls = 0;
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'dev',
     roleBlock: 'ROLE',
     reportPath,
@@ -735,6 +772,7 @@ test('a crash retry resumes the session the dying child named', async (t) => {
   const reportPath = runReportPath(paths, 'r1', 'dev');
   const calls = [];
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'dev',
     roleBlock: 'ROLE',
     reportPath,
@@ -768,6 +806,7 @@ test('a crash before the child named a session retries fresh', async (t) => {
   const reportPath = runReportPath(paths, 'r1', 'dev');
   const calls = [];
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'dev',
     roleBlock: 'ROLE',
     reportPath,
@@ -790,11 +829,61 @@ test('a crash before the child named a session retries fresh', async (t) => {
   assert.ok(!('session' in spawned[1]));
 });
 
+test('a rejection with a reset instant still ahead waits once and then works', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev');
+  const slept = [];
+  const calls = [];
+  // A seat already on the fallback model: there is nothing below it, so what
+  // answers the rejection is the vendor's own window and not a degrade.
+  const result = await runSeat(store, {
+    sleep: (ms) => {
+      slept.push(ms);
+      return Promise.resolve();
+    },
+    now: () => NOW,
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: (opts) => {
+      calls.push(opts.model);
+      return calls.length === 1
+        ? claudeFixtureCommand({ reportPath, lines: rejectionResetting(FUTURE_RESET), exitCode: 1 })
+        : claudeFixtureCommand({
+            report: { verdict: 'pass' },
+            reportPath,
+            lines: [initLine(DEFAULT_MODEL)],
+          });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [DEFAULT_MODEL, DEFAULT_MODEL]);
+  // One wait, on the instant the vendor named plus a minute, and no ladder
+  // step behind it: the seat asked again and the answer had changed.
+  assert.deepEqual(slept, [FUTURE_RESET * 1000 + RESET_GRACE_MS - NOW]);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  const waits = events.filter((e) => e.event === 'waiting');
+  assert.equal(waits.length, 1);
+  assert.equal(waits[0].kind, 'seat');
+  assert.equal(waits[0].reason, 'model-unavailable');
+  assert.equal(waits[0].detail.resetsAt, FUTURE_RESET);
+  assert.equal(events.filter((e) => e.event === 'waiting-ended').at(-1).outcome, 'elapsed');
+  assert.ok(!events.some((e) => e.event === 'model-degraded'));
+  assert.ok(events.some((e) => e.event === 'seat-report'));
+});
+
 test('a fourth crash ends the session with the retry budget spent', async (t) => {
   const { paths, store } = setup(t);
   const reportPath = runReportPath(paths, 'r1', 'dev');
   let calls = 0;
+  // The spans the ladder actually asks for, recorded rather than slept.
+  const slept = [];
   const result = await runSeat(store, {
+    sleep: (ms) => {
+      slept.push(ms);
+      return Promise.resolve();
+    },
     seat: 'dev',
     roleBlock: 'ROLE',
     reportPath,
@@ -806,14 +895,39 @@ test('a fourth crash ends the session with the retry budget spent', async (t) =>
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'exit');
-  // One dispatch and three retries, then the failure stands.
-  assert.equal(calls, 4);
+  // One dispatch and three retries in place, then the ladder: one wait and one
+  // re-dispatch a step, at 5, 15 and 45 minutes (ADR-0069).
+  assert.equal(calls, 4 + SEAT_LADDER.length);
   const events = readEvents(runLedgerPath(paths, 'r1'));
-  assert.equal(events.filter((e) => e.event === 'seat-failure').length, 4);
+  // A wait stamps no failure of its own, so the failures are the dispatches.
+  assert.equal(
+    events.filter((e) => e.event === 'seat-failure').length,
+    4 + SEAT_LADDER.length,
+  );
+  const waits = events.filter((e) => e.event === 'waiting');
+  assert.deepEqual(
+    waits.map((e) => [e.kind, e.attempt]),
+    SEAT_LADDER.map((_, i) => ['seat', i + 1]),
+  );
+  // Five, fifteen and forty-five minutes, in that order: the wiring and not
+  // only the stamps (ADR-0069).
+  assert.deepEqual(slept, [...SEAT_LADDER]);
+  assert.deepEqual(slept, [5 * 60_000, 15 * 60_000, 45 * 60_000]);
+  // Every wait names the instant it runs to, and every one of them is closed.
+  for (const wait of waits) assert.match(wait.until, /^\d{4}-/);
+  assert.deepEqual(
+    events.filter((e) => e.event === 'waiting-ended').map((e) => e.outcome),
+    Array(SEAT_LADDER.length).fill('elapsed'),
+  );
   const spawned = events.filter((e) => e.event === 'seat-spawned');
   assert.deepEqual(
     spawned.map((e) => e.retry),
-    [undefined, 1, 2, 3],
+    [undefined, 1, 2, 3, undefined, undefined, undefined],
+  );
+  // The dispatches behind a wait say which ladder step bought them.
+  assert.deepEqual(
+    spawned.map((e) => e.afterWait),
+    [undefined, undefined, undefined, undefined, 1, 2, 3],
   );
   assert.ok(!events.some((e) => e.event === 'seat-report'));
 });
@@ -834,6 +948,7 @@ test('a seat that goes silent dies at the deadline and the session is re-dispatc
   const reportPath = runReportPath(paths, 'r1', 'dev');
   const calls = [];
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'dev',
     roleBlock: 'ROLE',
     reportPath,
@@ -864,11 +979,128 @@ test('a seat that goes silent dies at the deadline and the session is re-dispatc
   assert.ok(events.indexOf(failure) < events.indexOf(spawned[1]));
 });
 
+test('a ladder resumed in a second session continues at the rung the ledger holds', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev');
+  // What the session before this one spent: one rung, on this seat. A restart
+  // re-dispatches the seat into a session of its own, and the ladder it climbs
+  // is the run's rather than the session's (ADR-0069).
+  const opened = store.append('waiting', {
+    actor: 'daemon',
+    kind: 'seat',
+    reason: 'exit',
+    attempt: 1,
+    detail: { seat: 'dev', model: DEFAULT_MODEL },
+  });
+  store.append('waiting-ended', {
+    actor: 'daemon',
+    kind: 'seat',
+    outcome: 'daemon-stopped',
+    waitSeq: opened.seq,
+  });
+  const slept = [];
+  let calls = 0;
+  const result = await runSeat(store, {
+    sleep: (ms) => {
+      slept.push(ms);
+      return Promise.resolve();
+    },
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: () => {
+      calls++;
+      return fixtureCommand({ reportPath, exitCode: 3 });
+    },
+  });
+  assert.equal(result.ok, false);
+  // The rungs that were left, and not the ladder from its foot.
+  assert.deepEqual(slept, SEAT_LADDER.slice(1));
+  assert.equal(calls, 1 + CRASH_RETRIES + SEAT_LADDER.slice(1).length);
+  const attempts = readEvents(runLedgerPath(paths, 'r1'))
+    .filter((e) => e.event === 'waiting' && e.kind === 'seat')
+    .map((e) => e.attempt);
+  assert.deepEqual(attempts, [1, 2, 3]);
+});
+
+test('a report this seat delivered puts its ladder back at the foot', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev');
+  const opened = store.append('waiting', {
+    actor: 'daemon',
+    kind: 'seat',
+    reason: 'exit',
+    attempt: 1,
+    detail: { seat: 'dev', model: DEFAULT_MODEL },
+  });
+  store.append('waiting-ended', { actor: 'daemon', kind: 'seat', outcome: 'elapsed', waitSeq: opened.seq });
+  // The seat then delivered: whatever it met before that is not this failure.
+  store.append('seat-report', { actor: 'dev', seat: 'dev', path: reportPath, attempt: 1 });
+  const slept = [];
+  const result = await runSeat(store, {
+    sleep: (ms) => {
+      slept.push(ms);
+      return Promise.resolve();
+    },
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: () => fixtureCommand({ reportPath, exitCode: 3 }),
+  });
+  assert.equal(result.ok, false);
+  assert.deepEqual(slept, [...SEAT_LADDER]);
+});
+
+test('a wait holds no model slot, and the dispatch behind it takes one again', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev');
+  // One slot on this model, and this seat is holding it.
+  const semaphores = new ModelSemaphores({ [DEFAULT_MODEL]: 1 });
+  const free = [];
+  let calls = 0;
+  const result = await runSeat(store, {
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    semaphores,
+    // The wait is where another run's seat must be able to get in. A slot the
+    // waiting seat kept would stop every other seat on this model for
+    // forty-five minutes (ADR-0005).
+    sleep: async () => {
+      const granted = await Promise.race([
+        semaphores.acquire(DEFAULT_MODEL, { store, seat: 'another-run' }).then((release) => {
+          release();
+          return true;
+        }),
+        new Promise((resolve) => setTimeout(() => resolve(false), 200)),
+      ]);
+      free.push(granted);
+    },
+    commandFor: () => {
+      calls++;
+      return calls <= 1 + CRASH_RETRIES
+        ? fixtureCommand({ reportPath, exitCode: 3 })
+        : fixtureCommand({ report: { verdict: 'pass' }, reportPath });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(free, [true], 'the slot was free while the seat waited');
+  // And held again at the dispatch: the seat that came back is counted.
+  const granted = readEvents(runLedgerPath(paths, 'r1')).filter(
+    (e) => e.event === 'semaphore-granted' && e.seat === 'dev',
+  );
+  assert.equal(granted.length, 2, 'one grant at the start and one after the wait');
+});
+
 test('a seat silent through its whole retry allowance ends the session', async (t) => {
   const { paths, store } = setup(t);
   const reportPath = runReportPath(paths, 'r1', 'dev');
   let calls = 0;
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'dev',
     roleBlock: 'ROLE',
     reportPath,
@@ -881,10 +1113,12 @@ test('a seat silent through its whole retry allowance ends the session', async (
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'silence');
-  assert.equal(calls, 4);
+  // Three retries in place, then the ladder: silence is the transient class
+  // exactly as a nonzero exit is (ADR-0069).
+  assert.equal(calls, 4 + SEAT_LADDER.length);
   const events = readEvents(runLedgerPath(paths, 'r1'));
   const failures = events.filter((e) => e.event === 'seat-failure');
-  assert.equal(failures.length, 4);
+  assert.equal(failures.length, 4 + SEAT_LADDER.length);
   assert.ok(failures.every((e) => e.reason === 'silence'));
   assert.ok(!events.some((e) => e.event === 'seat-report'));
 });
@@ -898,6 +1132,7 @@ test('a deliberate termination and a cost ceiling are never retried', async (t) 
   ]) {
     let calls = 0;
     const result = await runSeat(store, {
+      sleep: NO_WAIT,
       seat: 'dev',
       roleBlock: 'ROLE',
       reportPath,
@@ -918,6 +1153,7 @@ test('a schema outside the flat subset refuses the dispatch', async (t) => {
   const { paths, store } = setup(t);
   await assert.rejects(
     runSeat(store, {
+      sleep: NO_WAIT,
       seat: 'dev',
       roleBlock: 'ROLE',
       reportPath: runReportPath(paths, 'r1', 'dev'),
@@ -940,6 +1176,7 @@ test('two seats on one capped model run one at a time, with wait stamps', async 
   const semaphores = new ModelSemaphores({ [DEFAULT_MODEL]: 1 });
   const run = (store, runId) =>
     runSeat(store, {
+      sleep: NO_WAIT,
       seat: 'dev',
       roleBlock: 'ROLE',
       reportPath: runReportPath(paths, runId, 'dev'),
@@ -1012,6 +1249,7 @@ test('a prompt too long for a command line is spilled to a file the spawn points
     '\n',
   );
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'dev',
     roleBlock,
     reportPath,
@@ -1046,6 +1284,7 @@ test('a prompt that fits rides the command line unchanged, and writes no file', 
   const reportPath = runReportPath(paths, 'fits', 'dev-1');
   const dump = join(dirname(reportPath), 'spawned-prompt.txt');
   const result = await runSeat(store, {
+    sleep: NO_WAIT,
     seat: 'dev',
     roleBlock: 'ROLE',
     reportPath,

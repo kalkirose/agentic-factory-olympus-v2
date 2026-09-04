@@ -66,10 +66,12 @@ export function stageVisits(events) {
 
 /**
  * What a stage band counts as waiting: the human's answer, the inert stretch
- * under an unresolved violation, the ship-token queue, and the operator hold. A
- * band is a statement about work, and none of the four is the stage working.
+ * under an unresolved violation, the ship-token queue, the operator hold, and
+ * the wait a ladder spends on a provider, a host or a service. A band is a
+ * statement about work, and none of the five is the stage working — a band
+ * that counted a 45-minute provider outage would learn the outage.
  */
-export const BAND_CLASSES = ['human', 'queue', 'hold'];
+export const BAND_CLASSES = ['human', 'queue', 'hold', 'wait'];
 
 /**
  * The work inside one window of a run, in milliseconds: the wall of it, less

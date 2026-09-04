@@ -26,6 +26,7 @@ import {
   projectConfigJson,
   FIXTURE_ACCEPTANCE,
   FIXTURE_SPEC,
+  NO_WAIT,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -146,7 +147,7 @@ function fixture(t, { originFiles = {} } = {}) {
       },
     }),
   };
-  const daemon = new Daemon(join(root, 'home'), { lanes });
+  const daemon = new Daemon(join(root, 'home'), { waitSleep: NO_WAIT, lanes });
   t.after(async () => {
     await daemon.stop();
     removeDir(root);

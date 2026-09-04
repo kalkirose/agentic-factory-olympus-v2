@@ -12,7 +12,7 @@ import { readEvents } from '../src/ledger/ledger.mjs';
 import { INSTANCE_EVENTS, LOUD_EVENTS } from '../src/ledger/registry.mjs';
 import { validateInstanceConfig } from '../src/config/instance.mjs';
 import { openInstanceStore } from '../src/telemetry/stores.mjs';
-import { tempDir, removeDir, waitFor } from './helpers.mjs';
+import { tempDir, removeDir, waitFor, NO_WAIT } from './helpers.mjs';
 
 const CONFIG = { version: 1 };
 
@@ -440,7 +440,7 @@ async function daemonWith(t, notifier) {
     paths.instanceConfig,
     JSON.stringify({ version: 1, projects: {}, ...(notifier && { notifier }) }, null, 2) + '\n',
   );
-  const daemon = new Daemon(home, { lanes: { story: spendingLane } });
+  const daemon = new Daemon(home, { waitSleep: NO_WAIT, lanes: { story: spendingLane } });
   t.after(async () => {
     await daemon.stop();
     removeDir(home);

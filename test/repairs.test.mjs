@@ -28,6 +28,7 @@ import {
   initOriginRepo,
   projectConfigJson,
   fakeComposeRunner,
+  NO_WAIT,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -94,7 +95,7 @@ function fixture(t, { cards = ['s1'], slotCap = 1, storyHeld = null, config = {}
     story: stubLane('story', launched, storyHeld),
     repair: stubLane('repair', launched),
   };
-  const daemon = new Daemon(join(root, 'home'), { lanes, composeRunner: fakeComposeRunner() });
+  const daemon = new Daemon(join(root, 'home'), { waitSleep: NO_WAIT, lanes, composeRunner: fakeComposeRunner() });
   t.after(async () => {
     await daemon.stop();
     removeDir(root);
@@ -482,6 +483,7 @@ test('a restarted daemon owes nothing the first one already launched', async (t)
   await fx.daemon.stop();
   const launched = [];
   const second = new Daemon(join(fx.root, 'home'), {
+    waitSleep: NO_WAIT,
     lanes: { story: stubLane('story', launched), repair: stubLane('repair', launched) },
     composeRunner: fakeComposeRunner(),
   });

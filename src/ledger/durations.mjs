@@ -33,8 +33,15 @@
  *
  * `hold` is the run waiting on an operator hold: it settled a stage, the hold
  * stood, and it stopped at the boundary until somebody released it. The run
- * holds no child at all in that stretch, so it is the purest wait of the three
- * (ADR-0040).
+ * holds no child at all in that stretch, so it is the purest wait of the
+ * three (ADR-0040).
+ *
+ * `wait` is the run waiting on something outside the factory that no person
+ * was asked about: a provider that killed a seat, a host that dropped a
+ * connection, a service that is down. `waiting` opens the span and
+ * `waiting-ended` closes it. It counts as waiting for the same reason a park
+ * does — nothing of the run's own work happens in it, and a ladder that sat
+ * out a 45-minute provider outage is not 45 minutes of harness.
  */
 export const WAIT_CLASSES = {
   human: {
@@ -52,16 +59,22 @@ export const WAIT_CLASSES = {
     closes: (e) => e.event === 'stage-released',
     inert: () => false,
   },
+  wait: {
+    opens: (e) => e.event === 'waiting',
+    closes: (e) => e.event === 'waiting-ended',
+    inert: () => false,
+  },
 };
 
 /**
  * What a run duration counts as waiting. The wall-versus-active pair on the
- * close stamp answers "how long did the humans take", so it counts the waits a
- * person owns: the answer to a park, and the operator hold that stopped the run
- * at a stage boundary. A queue wait is one run of the harness waiting for
+ * close stamp answers how much of a run was the harness working, so it counts
+ * every wait the harness was not: the answer to a park, the operator hold that
+ * stopped the run at a stage boundary, and the wait a ladder spent on a
+ * provider or a host. A queue wait is one run of the harness waiting for
  * another, which is the harness's own pace and belongs in its number.
  */
-const RUN_CLASSES = ['human', 'hold'];
+const RUN_CLASSES = ['human', 'hold', 'wait'];
 
 /**
  * The spans of one run ledger that are not active time, merged so that a park

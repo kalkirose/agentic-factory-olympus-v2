@@ -13,7 +13,7 @@ import { escalationQueue, openCardParks, sortQueue } from '../src/telemetry/queu
 import { appendStreamEntry } from '../src/telemetry/streams.mjs';
 import { openLoud } from '../src/telemetry/readers.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
-import { tempDir, removeDir, waitFor, initOriginRepo, projectConfigJson, fakeComposeRunner } from './helpers.mjs';
+import { tempDir, removeDir, waitFor, initOriginRepo, projectConfigJson, fakeComposeRunner, NO_WAIT } from './helpers.mjs';
 
 const CONFIG = '.olympus/project.json';
 
@@ -205,7 +205,7 @@ test('the daemon answers an instance park and rejects a bad one', async (t) => {
     gist: 'card-invalidated: stories/s2.md',
   });
   seeded.close();
-  const daemon = new Daemon(join(root, 'home'), { lanes: {}, composeRunner: fakeComposeRunner() });
+  const daemon = new Daemon(join(root, 'home'), { waitSleep: NO_WAIT, lanes: {}, composeRunner: fakeComposeRunner() });
   t.after(async () => {
     await daemon.stop();
     removeDir(root);
@@ -249,7 +249,7 @@ test('resolve routes: open-run liveness recovery, closed run, instance', async (
       },
     },
   };
-  const daemon = new Daemon(join(root, 'home'), { lanes, composeRunner: fakeComposeRunner() });
+  const daemon = new Daemon(join(root, 'home'), { waitSleep: NO_WAIT, lanes, composeRunner: fakeComposeRunner() });
   t.after(async () => {
     await daemon.stop();
     removeDir(root);

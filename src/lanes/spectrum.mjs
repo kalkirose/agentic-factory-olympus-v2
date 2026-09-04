@@ -908,6 +908,13 @@ function recordedParts(parts = [], { green = false } = {}) {
     status: p.failed ? 'red' : p.ok || green ? 'green' : 'unknown',
     ...(p.inputs?.length > 0 && { inputs: p.inputs }),
     ...(evidence.has(p.name) && { output: evidence.get(p.name) }),
+    // The files a red part said failed inside it, on the record rather than
+    // in the re-run's environment alone. Two readers need them: the transient
+    // read, which asks whether every failed file shows a cause outside the
+    // tree, and the ladder behind it, which narrows its re-runs to exactly
+    // these files (ADR-0065, ADR-0069). A green part carries none — it named
+    // no failure.
+    ...(p.failed && p.failedFiles?.length > 0 && { failedFiles: p.failedFiles }),
   }));
 }
 
@@ -929,6 +936,109 @@ function rootRed(status, name) {
     if (record?.status === 'not-runnable' && record.attributedTo) current = record.attributedTo;
     else return current;
   }
+}
+
+/**
+ * One more attempt of each named layer, narrowed to what that layer's standing
+ * result of this cycle failed on.
+ *
+ * This is the step of both wait ladders (ADR-0069). The layer ladder takes it
+ * after a red the harness read as a condition outside the tree; the substrate
+ * ladder takes it after an env finding survived its operational fix. Neither
+ * is a new cycle: no finding is minted, no plan is derived from a diff, and
+ * the layer's own record is what says what to ask for again.
+ *
+ * The narrowing is ADR-0065's, applied to the standing result rather than to a
+ * replaced attempt: the parts that did not pass, the files those parts named,
+ * and the greens carried into the new result so the record stays one complete
+ * part table at one sha. Every doubt buys the whole layer, exactly as it does
+ * inside the flake filter — a layer that named no part, a part that named no
+ * file, a result with no part table at all.
+ *
+ * @param {object} ctx run-engine handler context
+ * @param {{layers: Array<object>, commands: Record<string, string[]>,
+ *   cwd: string, env?: object, cycle: number, sha: string,
+ *   credentials?: Array<object>, exec?: typeof runCommand,
+ *   trigger: string}} opts `trigger` names the ladder on every stamp, so a
+ *   re-run after a wait never reads as the flake filter's.
+ * @returns {Promise<{results?: Array<object>, error?: string}>} the same
+ *   result shape `runSpectrum` answers with, for the layers it ran
+ */
+export async function rerunLayers(
+  ctx,
+  { layers, commands, cwd, env, cycle, sha, credentials = [], exec = runCommand, trigger },
+) {
+  const results = [];
+  for (const layer of layers) {
+    const standing = standingResult(runEvents(ctx), cycle, layer.name);
+    const attempt = (standing?.attempt ?? ATTEMPTS) + 1;
+    const narrowed = narrowRerun(rerunParts(standing?.parts), env, standing?.attempt ?? attempt);
+    const outcome = await runAttempt(ctx, {
+      argv: commands[layer.command],
+      layer,
+      cwd,
+      env: narrowed?.env ?? env,
+      cycle,
+      sha,
+      mark: {},
+      exec,
+      // Read before the layer runs, as `executeLayer` reads it: the
+      // attribution is a fact about the host this attempt started on.
+      absent: absentCredentials(credentials, layer.name, env),
+      concurrentWith: [],
+      target: null,
+      keep: narrowed?.keep?.length > 0 ? { parts: narrowed.keep, mark: { attempt } } : null,
+      attempt,
+      ...(narrowed && { narrowedTo: narrowed.narrowedTo }),
+      ...(standing && { retryOf: standing.seq }),
+      trigger,
+    }).catch((error) => ({ error }));
+    if (outcome.error) return { error: outcome.error.message ?? String(outcome.error) };
+    const record = outcome.record;
+    // A ladder step judges: the attempt is past the flake filter's own, so the
+    // disposition is a result and never a supersede. A disposition that is not
+    // one is a command that could not run, which ends the ladder.
+    if (!record || record.event !== 'layer-result') {
+      return { error: outcome.disposition?.detail ?? `layer ${layer.name} produced no result` };
+    }
+    results.push({
+      layer: layer.name,
+      status: record.status,
+      mode: 'run',
+      ...(record.credentialAbsent?.length > 0 && { credentialAbsent: record.credentialAbsent }),
+      ...(record.resources && { resources: record.resources }),
+      ...(record.exhaustion && { exhaustion: record.exhaustion }),
+      ...(record.output && { output: record.output }),
+      ...(record.log && { log: record.log }),
+      ...(record.parts?.length > 0 && { parts: record.parts }),
+      ...(record.narrowedTo && { narrowedTo: record.narrowedTo }),
+    });
+  }
+  return { results };
+}
+
+/** The newest result one layer holds inside one cycle, or null. */
+function standingResult(events, cycle, layer) {
+  let found = null;
+  for (const e of events) {
+    if (e.event === 'layer-result' && e.cycle === cycle && e.layer === layer) found = e;
+  }
+  return found;
+}
+
+/**
+ * A recorded part table read back as the shape the narrowing asks about. A
+ * part the record calls green passed; everything else did not, which is what
+ * `narrowRerun` re-runs.
+ */
+function rerunParts(parts) {
+  if (!Array.isArray(parts)) return [];
+  return parts.map((part) => ({
+    name: part.name,
+    ok: part.status === 'green',
+    ...(part.inputs?.length > 0 && { inputs: part.inputs }),
+    ...(part.failedFiles?.length > 0 && { failedFiles: part.failedFiles }),
+  }));
 }
 
 /** The red layers of a spectrum result set — the persistent reds. */
