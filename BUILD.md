@@ -496,11 +496,13 @@ never carries a project's specifics.
   pass, as it does for every other stall. `stall` loses the reason
   `approach-finding`, and the eval role text carries the four reasons that are
   left. The verdict stage now reads the ledger at its entry, before it runs a
-  layer: a `fresh-pass` stamp with no implementation behind it, or a dev seat
-  a stop ended — by terminating its child, or by closing the wait it was
-  standing in — is a step the next instance dispatches again, once, with the
-  open set of the render it acts on. Every other resume runs the layers as it
-  always did. And a run the daemon start finds under a hold holds at the stage
+  layer: a `fresh-pass` stamp with no implementation behind it, or a repair
+  round whose seat left no commit, is a step the next instance dispatches
+  again, once, with the open set of the render it acts on and over a worktree
+  reset to its last commit. How the session ended is not asked, because a stop,
+  a stop inside a wait, a stop at the hold barrier and a crash leave four
+  different records or none. Every other resume runs the layers as it always
+  did. And a run the daemon start finds under a hold holds at the stage
   the stop caught it in, `resumed` on the stamp, so a start under an instance
   hold spends no seat and no layer until the release. ADR-0070 is new; ADR-0007
   is rewritten around the ledger evidence, which is one interface-lens finding

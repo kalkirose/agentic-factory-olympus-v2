@@ -19,6 +19,7 @@ import {
   PROJECT,
   buildFixture,
   cleanup,
+  crashDaemon,
   ctl,
   diagnostics,
   endProcess,
@@ -243,9 +244,11 @@ test('a restart inside the verdict stage finishes the step, and a hold governs t
     'the resumed stage judged a tree the interrupted repair never touched',
   );
 
-  // -- a stop between the fresh pass and its dev report ----------------------
+  // -- a crash between the fresh pass and its dev report ---------------------
   // The repair round closed nothing, so the run stalls and the stall buys the
-  // one fresh pass. The stop lands between the reset and the report.
+  // one fresh pass. This ending is a crash rather than a stop: nothing is
+  // stamped, no seat is terminated, and what the ledger holds is a dev seat
+  // that was spawned and never answered.
   const devPid = await stalledSeat(fx, runId);
   const beforeDevStop = runEvents(fx, runId);
   const fresh = beforeDevStop.find((e) => e.event === 'fresh-pass');
@@ -255,8 +258,18 @@ test('a restart inside the verdict stage finishes the step, and a hold governs t
     !beforeDevStop.some((e) => e.event === 'implementation-committed' && e.seq > fresh.seq),
     'the pass was implemented before the stop',
   );
-  await stopDaemon(fx);
+  const cutSeat = [...beforeDevStop]
+    .reverse()
+    .find((e) => e.event === 'seat-spawned' && e.seat === 'dev');
+  await crashDaemon(fx);
   await endProcess(devPid);
+  assert.deepEqual(
+    runEvents(fx, runId)
+      .filter((e) => e.seq > cutSeat.seq && e.event === 'seat-terminated')
+      .map((e) => e.seat),
+    [],
+    'the crash stamped an ending for the seat it took',
+  );
 
   updateScenario(fx, { stallSeat: null, devFiles: { 'src/feature.mjs': RIGHT } });
   await startDaemon(fx);

@@ -11,31 +11,49 @@ for each end of a restart.
 ### The verdict stage's entry reads the ledger before it runs a layer
 
 The stage handler asks one question before its loop: which step of the ladder
-did a stop interrupt? It is read from the run ledger and from nothing else
+never finished? It is read from the run ledger and from nothing else
 (`interruptedStep`, `src/lanes/verdict.mjs`), and two shapes answer it.
 
 - **A `fresh-pass` stamp that nothing implemented.** When the newest of
   `fresh-pass`, `repair-round` and `verdict-rendered` is a `fresh-pass`, and no
   `implementation-committed` follows it, the pass was born and never written:
-  the tree under it is the freeze with the frozen suite carried onto it. The
-  stage enters `freshPass` again. The stamp is already on the ledger, so the
-  reset and the suite carry are skipped — they ran before the stamp — and the
-  capture's own restore discards whatever the dead seat had left in the tree.
-- **A dev seat the stop ended.** When the newest `seat-spawned` for `dev` or
-  `repair-dev` after the last render has no `implementation-committed` behind
-  it, and the instance stopped on it, the stage runs that step again with the
-  same open set: the fresh pass for `dev`, the repair round for `repair-dev`.
-  A round dispatched again stamps `repair-round` once, because the stamp comes
-  after the seat and the interrupted round never reached it.
+  the tree under it is the one the pass was born on, the freeze with the frozen
+  suite carried onto it. The stage enters `freshPass` again. The stamp is
+  already on the ledger, so the reset and the suite carry inside it are skipped,
+  because they ran before the stamp.
+- **A repair round with no commit behind it.** When the newest `seat-spawned`
+  for `repair-dev` after the last render has no `implementation-committed`
+  behind it, the round never reached its own stamp, and the stage runs it again
+  with the same open set. It stamps `repair-round` once, because that stamp
+  comes after the seat.
 
-"The instance stopped on it" has two records, and both count. A stop with a
-child alive stamps `seat-terminated` with reason `daemon-stopped`. A stop
-while the seat was standing in a wait has no child to terminate at all: the
-crash retries are spent, the seat is on its ladder (ADR-0069), and what the
-next start closes is the wait — a `waiting-ended` of kind `seat` with outcome
-`daemon-stopped`. The scan reads either. Waits between a `fresh-pass` and the
-dev report are stepped over by both scans, because a wait is none of the four
-events that bound a step.
+Neither rule asks how the step ended, and that is the whole of the second one.
+The endings do not all leave a record: a stop with the child alive stamps
+`seat-terminated` with reason `daemon-stopped`; a stop while the seat stood in
+a wait leaves a `waiting-ended` and no termination at all, because the child
+had already died of the provider and the seat was on its ladder (ADR-0069); a
+stop while that wait stood at the hold barrier leaves a wait that reads
+`elapsed`, which is the documented restart recipe of hold, wait for boundaries,
+stop; and a crash leaves nothing at all. A rule keyed on any of those records
+answers some of the endings and sends the rest into a cycle over a tree nobody
+implemented, which is the failure this decision exists to remove. A round that
+ended in a `seat-failure` park is included by the same rule and costs nothing:
+the answer to that park re-dispatches exactly the round the ladder would.
+
+A `dev` seat of this stage belongs to a fresh pass, which stamps before it
+spawns, so the first rule answers it and there is no second rule for it.
+`waiting` pairs between a `fresh-pass` and the dev report are stepped over by
+both scans, because a wait is none of the stamps that bound a step.
+
+**The tree goes back to its last commit before the step is dispatched again.**
+A seat that died mid-edit leaves what it had written. The candidate capture
+restores the test paths and nothing else, so those writes stand, and the
+`git add -A` behind the next seat would commit half of a dead session and half
+of a live one as one implementation. So the resume resets the worktree hard to
+its head and cleans it before either step: the commit under the run at that
+point is the tree the step was dispatched over, the pass's own birth commit for
+a fresh pass and the render's tree for a repair round. The run cache is
+excluded from git and survives the clean (ADR-0048).
 
 Every other resume runs the layers as it always did. A stop inside the
 spectrum, inside triage, inside a review seat: those are judgments of a tree

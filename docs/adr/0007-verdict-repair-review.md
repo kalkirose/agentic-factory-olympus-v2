@@ -135,12 +135,12 @@ the whole implementation again, and it is the run's only one.
 
 The ledger says what the immediate discard cost. One confirmed interface-lens
 finding about a single form input discarded a pass that had twelve other
-findings open against it. Every one of those twelve was work the repair round would have
-carried, and none of them reached the tree that replaced it: the fresh pass
-began from the freeze with a stall brief, and the twelve came back as whatever
-the new implementation raised. The run bought a second implementation to
-answer a finding a repair round could have answered, and it spent its one pass
-on it, so the stall that came later had nothing left to buy.
+findings open against it. Every one of those twelve was work the repair round
+would have carried, and none of them reached the tree that replaced it: the
+fresh pass began from the freeze with a stall brief, and the twelve came back
+as whatever the new implementation raised. The run bought a second
+implementation to answer a finding a repair round could have answered, and it
+spent its one pass on it, so the stall that came later had nothing left to buy.
 
 The severity of a structural finding is real, and it is answered by saying so
 in the brief rather than by discarding the work. A repair seat told that the

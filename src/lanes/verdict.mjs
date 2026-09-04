@@ -357,26 +357,33 @@ function verdictHandler(mode, nextStage) {
 
 // -- what a stop left half done ----------------------------------------------
 
-/** The two stamps that bound a step of the ladder, and the render behind it. */
+/** The stamps that bound a step of the ladder. */
 const STEP_BOUNDARIES = new Set(['fresh-pass', 'repair-round', 'verdict-rendered']);
 
-/** The seats that write an implementation. Every other seat judges one. */
-const DEV_SEATS = new Set(['dev', 'repair-dev']);
-
 /**
- * The step of the ladder a stop interrupted, read from the ledger alone, or
- * null when the stage stopped between steps.
+ * The step of the ladder that never finished, read from the ledger alone, or
+ * null when the stage owes no step.
  *
- * Two shapes say a step is owed. A `fresh-pass` stamp with no
- * `implementation-committed` behind it is a pass whose tree was reset and
- * never implemented — the stamp is the last thing the pass wrote, and the
- * only tree under it is the freeze. And a dev seat spawned since the last
- * render whose session the stop ended is a step that was in flight: the
- * `seat-terminated` the stop stamps, or, for a seat that was standing in a
- * wait when the instance went, the `seat` wait the next start closes
- * `daemon-stopped` — that path leaves no termination stamp at all, because
- * there was no child to terminate.
+ * Two shapes say a step is owed, and neither one asks how the step ended.
  *
+ * A `fresh-pass` stamp with no `implementation-committed` behind it is a pass
+ * whose tree was reset and never implemented: the stamp is the last thing the
+ * pass wrote, and the only tree under it is the one the pass was born on.
+ *
+ * A `repair-dev` seat spawned since the last render with no
+ * `implementation-committed` behind it is a repair round that never reached
+ * its own stamp. What ended that session is not asked, because the endings do
+ * not all leave a record: a stop with the child alive stamps `seat-terminated`
+ * `daemon-stopped`, a stop while the seat stood in a wait leaves a
+ * `waiting-ended` and no termination at all, a stop while that wait stood at
+ * the hold barrier leaves a wait that reads as elapsed, and a crash leaves
+ * nothing. A rule keyed on any of those records would answer three of the four
+ * and send the fourth into a cycle over a tree nobody implemented. A round
+ * that ended in a seat-failure park is included and costs nothing: the answer
+ * to that park re-dispatches the same round the ladder would.
+ *
+ * A `dev` seat of this stage belongs to a fresh pass, which stamps before it
+ * spawns, so the first shape answers it and there is no second rule for it.
  * `waiting` pairs between a `fresh-pass` and the dev report are stepped over:
  * the scans read the stamps that bound a step, and a wait is none of them.
  * @param {object[]} events the run's ledger, in order
@@ -392,22 +399,10 @@ export function interruptedStep(events) {
     return { kind: 'fresh-pass', stamp: bound };
   }
   const spawn = reversed.find(
-    (e) => e.event === 'seat-spawned' && DEV_SEATS.has(e.seat) && e.seq > last.seq,
+    (e) => e.event === 'seat-spawned' && e.seat === 'repair-dev' && e.seq > last.seq,
   );
-  if (!spawn || committedAfter(spawn.seq) || !stoppedAfter(events, spawn.seq)) return null;
-  if (spawn.seat === 'repair-dev') return { kind: 'repair-round', spawn };
-  const stamp = reversed.find((e) => e.event === 'fresh-pass');
-  return stamp ? { kind: 'fresh-pass', stamp, spawn } : null;
-}
-
-/** Whether the instance stopped on a seat: the termination, or its open wait. */
-function stoppedAfter(events, seq) {
-  return events.some(
-    (e) =>
-      e.seq > seq &&
-      ((e.event === 'seat-terminated' && e.reason === 'daemon-stopped') ||
-        (e.event === 'waiting-ended' && e.kind === 'seat' && e.outcome === 'daemon-stopped')),
-  );
+  if (!spawn || committedAfter(spawn.seq)) return null;
+  return { kind: 'repair-round' };
 }
 
 /**
@@ -415,9 +410,17 @@ function stoppedAfter(events, seq) {
  * on left. Nothing else of the ladder re-runs: the arms in front of this step
  * stamped before the stop and their records are what the ladder reads.
  *
- * The `fresh-pass` stamp is already on the ledger, so the reset inside
- * `freshPass` is skipped and the pass is not born a second time; the capture's
- * own restore discards whatever the dead seat had written into the tree.
+ * The tree is put back to its last commit first. A seat that died mid-edit
+ * leaves whatever it had written, the capture restores the test paths and
+ * nothing else, and `git add -A` behind the next seat would commit both halves
+ * as one implementation. The commit under the run at this point is the tree
+ * the step was dispatched over — the pass's own birth commit for a fresh pass,
+ * the render's tree for a repair round — so the reset is what makes the second
+ * dispatch the same dispatch as the first (ADR-0070). The run cache is
+ * excluded from git and survives it (ADR-0048).
+ *
+ * The `fresh-pass` stamp is already on the ledger, so the reset and the suite
+ * carry inside `freshPass` are skipped and the pass is not born a second time.
  */
 async function resumeInterrupted(ctx, base, mode) {
   const events = runEvents(ctx);
@@ -426,6 +429,7 @@ async function resumeInterrupted(ctx, base, mode) {
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   const last = renders[renders.length - 1];
   const { code, suiteDefects } = openSets(events, last, mode);
+  await resetHard(base.worktree, await headSha(base.worktree));
   if (step.kind === 'fresh-pass') {
     const outcome = await freshPass(ctx, base, mode, {
       newPass: step.stamp.pass,

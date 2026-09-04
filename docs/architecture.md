@@ -616,13 +616,16 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   round may change the shape rather than patch around it. It discards no pass.
   What buys the pass is the round behind it that closed nothing, which is the
   progress rule above and no second mechanism beside it.
-- **The stage entry finishes the step a stop interrupted** (ADR-0070). Before
+- **The stage entry finishes the step that never finished** (ADR-0070). Before
   it runs a layer, the verdict stage asks the ledger which step of the ladder
-  was in flight when the last instance went: a `fresh-pass` stamp with no
-  implementation behind it, or a dev seat the stop ended, either by
-  terminating its child or by closing the wait it was standing in. That step
-  is dispatched again, once, with the open set of the render it acts on;
-  every other resume runs the layers as it always did.
+  owes an answer: a `fresh-pass` stamp with no implementation behind it, or a
+  repair round whose seat left no commit. How that session ended is not asked.
+  A stop with the child alive, a stop inside a wait, a stop at the hold
+  barrier and a crash leave four different records or none at all, and the
+  step is owed under every one of them. It is dispatched again, once, with the
+  open set of the render it acts on, over a worktree reset to its last commit
+  so that no part of the dead session rides the next one. Every other resume
+  runs the layers as it always did.
 - **Substrate probe before the fix.** An env finding sends the route to the
   host before it spends anything: the run stack's published ports, read off
   the compose project and asked on both loopback families with a write and a

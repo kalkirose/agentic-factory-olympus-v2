@@ -4,8 +4,6 @@ Status: accepted (2026-08-10)
 Superseded in part by ADR-0015: the park catalog holds twelve types, and
 the close directive is reserved for the ship path, a kill, and an abandoned
 park.
-Superseded in part by ADR-0070: a run the start finds under a hold holds at
-the stage the stop caught it in, instead of re-entering that stage.
 
 ## Decision
 
@@ -35,10 +33,14 @@ The run engine from the locked design gets these concrete shapes:
   parked, any lane. The cap gates launch only; an answer always resumes.
   A transient over-cap after answers blocks new launches, never a resume.
 - **Restart resume.** The daemon derives each open run's state from its
-  ledger alone and re-enters the recorded stage with a `resumed: true`
-  stamp. Parked and violated runs stay waiting on the human. A run the
-  engine cannot resume (unknown lane or stage) violates loud instead of
-  vanishing.
+  ledger alone. A run no hold covers re-enters its recorded stage with a
+  `resumed: true` stamp. A run any hold covers — the instance's, its
+  project's, or its own — holds instead, at the boundary it was standing at or
+  at the stage the stop caught it in, with `resumed` on the `stage-held`
+  stamp, and the release runs that stage. Parked and violated runs stay
+  waiting on the human. A run the engine cannot resume (unknown lane or stage)
+  violates loud instead of vanishing. ADR-0070 owns the rules a resumed stage
+  reads.
 - **Answer validation.** An answer applies only to a parked run and must
   name an offered option or carry answer text. The `answer` stamp carries
   who (actor) and when (ts); `resume` re-runs the parked stage with the

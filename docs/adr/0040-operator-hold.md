@@ -1,9 +1,6 @@
-# ADR-0040: An operator hold stops the stage chain, and nothing else
+# ADR-0040: An operator hold stops every entry to the stage chain, and nothing else
 
 Status: accepted (2026-08-27)
-Superseded in part by ADR-0070: the hold governs the daemon start as well as
-the stage chain, so a run the stop caught inside a stage holds there rather
-than re-entering it.
 
 ## The condition
 
