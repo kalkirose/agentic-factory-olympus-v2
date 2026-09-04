@@ -967,7 +967,17 @@ async function outsideTheTree(ctx, base, { cycle, sha, gates, spectrum, reds }) 
   const patterns = base.config?.gates?.transientPatterns ?? [];
   let read = readTransient(reds, { patterns });
   if (!read.ok) return {};
+  const since = ladderSince(events);
+  // One reading per layer per ladder. A run that comes back here on an
+  // answered retry reads the red again and climbs a fresh ladder, and a second
+  // copy of the same stamp would say the harness had recognised it twice.
+  const already = new Set(
+    events
+      .filter((e) => e.event === 'layer-transient' && e.cycle === cycle && e.seq > since)
+      .map((e) => e.layer),
+  );
   for (const layer of read.layers) {
+    if (already.has(layer.layer)) continue;
     ctx.store.append('layer-transient', {
       actor: ACTOR,
       cycle,
@@ -977,7 +987,6 @@ async function outsideTheTree(ctx, base, { cycle, sha, gates, spectrum, reds }) 
       signatures: layer.signatures,
     });
   }
-  const since = ladderSince(events);
   let current = spectrum;
   let open = reds;
   for (;;) {

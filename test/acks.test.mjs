@@ -220,7 +220,16 @@ function rejections(paths) {
 
 /** A parked run as the engine holds one, without a lane behind it. */
 function parkedRun(parkRecord) {
-  return { project: 'proj', parked: true, parkRecord, seats: new Set(), store: { close() {} } };
+  return {
+    project: 'proj',
+    parked: true,
+    parkRecord,
+    seats: new Set(),
+    // The shape the engine holds: a run carries the waits it is standing in,
+    // and a stop ends every one of them (ADR-0069).
+    waits: new Set(),
+    store: { close() {} },
+  };
 }
 
 test('an ack answer records what the park record names, and nothing it does not', async (t) => {
