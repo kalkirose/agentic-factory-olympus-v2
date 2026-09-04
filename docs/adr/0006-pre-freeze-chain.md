@@ -29,24 +29,23 @@ adversary, freeze — gets these concrete shapes:
   `spec-born` or `grounding-conflict`. A valid report whose spec file is
   missing or empty is a seat contract breach (`artifact-missing`), not a
   park. The spec archives with the run and is never written back.
-- **Spec-gate accounting.** Two counted rounds run on the gate's own
-  authority: round 1 reviews the whole spec; the birth seat amends; round 2
-  re-checks the amended sections only. An intent conflict stamps no round —
-  it parks, the answer directs one amendment, and the counted ladder resumes
-  with its budget intact. The conflict is a boolean in the seat report, never
-  the presence of text: a field whose only "no" is emptiness collects prose
-  that means "no conflict", and that prose stops the run. The parking round
-  stamps nothing, so its findings ride into the amendment beside the conflict
-  answer instead of dying with the round. Blocking findings open after the
-  last counted round park the run (`spec-gate-exhausted`, options `round` and
-  `abandon`). `round` buys exactly one more amendment plus re-check, and the
-  next cap parks again; `abandon` closes the run `failed` with the same
-  reason. The park question carries the round count, the blocking count and
-  the note count as separate numbers, and the spec path, so the answer needs
-  nothing else. The cap is not what usually stops the gate: a round that closes
-  none of the blocking findings the round before it raised parks first, on
-  identity rather than on either count, and leaves the rest of the cap unspent
-  (ADR-0020).
+- **Spec-gate accounting.** The gate runs on its own authority for as long as
+  it converges, with no round cap: round 1 reviews the whole spec; the birth
+  seat amends; every later round re-checks the amended sections only. An intent
+  conflict stamps no round — it parks, the answer directs one amendment, and
+  the ladder resumes. The conflict is a boolean in the seat report, never the
+  presence of text: a field whose only "no" is emptiness collects prose that
+  means "no conflict", and that prose stops the run. The parking round stamps
+  nothing, so its findings ride into the amendment beside the conflict answer
+  instead of dying with the round. What stops the gate is a round that stopped
+  closing findings, by either of two rules — a round that closed none of the
+  previous round's blocking set, or a round whose blocking count is not below
+  the count two rounds back — and that is one park, `spec-gate-stalled`, with
+  options `round` and `abandon` (ADR-0020). `round` buys exactly one more
+  amendment plus re-check, and a round that stalls again parks again;
+  `abandon` closes the run `failed` with the same reason. The park question
+  carries both blocking counts with the rounds they came from, the note count,
+  and the spec path, so the answer needs nothing else.
 - **Two finding channels at the gate.** Every gate finding carries a
   `severity`. `blocking` means the spec is wrong, a clause is not assertable,
   or the shape it states would force a defective implementation; it holds the
@@ -138,8 +137,8 @@ through. Neither is acceptable, so the channel splits.
 The split is by the place a defect can be settled, not by how much it
 matters. A wrong claim, a clause no test can assert, a shape that would force
 a defective implementation — each is a defect in the document, and the
-document is the only place to repair it. Those still block, and the cap over
-them is unchanged.
+document is the only place to repair it. Those still block, and the
+convergence rules over them are unchanged.
 
 The other kind is a claim about the tree. The spec says the tree holds three
 helpers; the tree holds two. A round of document repair settles that for one

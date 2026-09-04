@@ -1,9 +1,21 @@
 // Read-only credential checks. An external credential — a payment provider's
 // key, a forge token, an API key the suite needs — fails silently until
 // something expensive asks it a question. The project config names each one
-// and the read-only command that proves it, and the run asks that question at
-// the two gates where the next step costs money: the launch gate, before the
-// first seat, and the ship gate, before the PR that starts a CI round.
+// and the read-only command that proves it, and the question is asked at the
+// launch door, before a slot, a workspace or a stack exists (ADR-0068), and
+// again at the ship gate, before the PR that starts a CI round.
+//
+// The door is the cheap place because of the cache. A pass carries
+// `validUntil` and the fingerprint of the value it proved, both on the
+// instance ledger, and a door that finds a live pass for the same value asks
+// the service nothing. A value that moved has a different fingerprint and
+// misses the cache by construction, which is the whole rule: a credential is
+// re-probed when it changes or when its answer ages out, and never otherwise.
+//
+// The gates inside a run stay, and they are guards rather than admissions: the
+// door proved every declared credential before the run existed, so what these
+// can still catch is a value that moved while the run was in flight. Their
+// text says so.
 //
 // The gate has two halves. The first is parity: a credential is wired on every
 // surface that will need it, not just on the one this host can see. A key that
@@ -17,9 +29,10 @@
 // the whole answer. The probe's own output never reaches the ledger or the
 // park text, because the process holds a credential and anything it prints can
 // carry one (ADR-0027).
-import { cloneDir, fetchClone } from '../isolation/clones.mjs';
+import { cloneDir, fetchClone, readBranchFile } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
+import { DEFAULT_PROBE_TIMEOUT_MS, parseProjectConfig } from '../config/project.mjs';
 import { listRunEvents } from '../telemetry/readers.mjs';
 import {
   declaredNames,
@@ -39,46 +52,174 @@ import {
   worldGate,
 } from './shared.mjs';
 
+// How long one green probe stands for the value it proved. A day: long enough
+// that a burst of launches asks the service once, short enough that a
+// credential a service retires is re-read the next day without anybody saying
+// so. The key is the value's fingerprint, so the window never covers a value
+// that changed (ADR-0068).
+const PROBE_CACHE_MS = 24 * 60 * 60 * 1000;
+
 /**
  * Checks every credential the project config declares: the declared surfaces
  * first, then the live probes, and stops at the first answer that is not yes.
- * @param {object} ctx the stage context
- * @param {object} config the project config
+ * @param {object} ctx the stage context, or the launch door's own: `paths`,
+ *   `project`, `store` (where the stamps land) and `instanceStore`. A context
+ *   with no `runId` is the door, which reads no acknowledgments.
+ * @param {object} config the project config the caller is judged under
  * @param {{phase: 'launch'|'ship', cwd: string, env?: object, forge?: object,
- *   defaultBranch?: string}} opts `forge` answers for the CI surface; without
+ *   defaultBranch?: string, surfaceCredentials?: Array<object>|null,
+ *   now?: number}} opts `forge` answers for the CI surface; without
  *   one a declared CI surface reads as unproven rather than as wired. `env` is
  *   the run's own environment; the machine's stored credential values are read
- *   here and ride in front of it.
+ *   here and ride in front of it. `surfaceCredentials` replaces the declared
+ *   set the parity half reads, for a caller whose question is about the
+ *   world's config rather than the blob it pinned (ADR-0068); the probe half
+ *   always reads the caller's own config, because a probe names a command in
+ *   it. `readCache` lets a green probe of the same value stand for this one:
+ *   the launch door takes it, and the gates inside a run never do, because a
+ *   run's gate exists to catch the value that moved under it. `now` is the
+ *   clock the cache reads.
  * @returns {Promise<object|null>} a park directive, or null when every check
  *   passed and the caller may spend what comes next
  */
 export async function probeCredentials(
   ctx,
   config,
-  { phase, cwd, env, forge = null, defaultBranch = 'main' },
+  {
+    phase,
+    cwd,
+    env,
+    forge = null,
+    defaultBranch = 'main',
+    surfaceCredentials = null,
+    readCache = false,
+    now = Date.now(),
+  },
 ) {
   const credentials = config.credentials ?? [];
-  if (credentials.length === 0) return null;
+  const surfaces = surfaceCredentials ?? credentials;
+  if (credentials.length === 0 && surfaces.length === 0) return null;
   // The machine's store, read here rather than inherited from the window that
   // started the daemon. A value the owner replaced an hour ago is the value
   // this gate asks the service about (ADR-0064). A home that declares no store
   // reads nothing, records nothing, and the gate holds what it always held.
   const store = declaredStore(ctx.paths);
-  const fresh = readCredentials(store, declaredNames(config));
+  const names = declaredNames({ credentials: [...credentials, ...surfaces] });
+  const fresh = readCredentials(store, names);
   recordRead(ctx, store, fresh.records);
   const held = { ...process.env, ...env, ...fresh.values };
-  const gap = await surfaceGate(ctx, config, { phase, held, forge, defaultBranch });
+  const gap = await surfaceGate(ctx, surfaces, {
+    phase,
+    held,
+    forge,
+    defaultBranch,
+    world: surfaceCredentials !== null,
+  });
   if (gap) return gap;
+  const cache = readCache ? probeCache(ctx, now) : new Map();
   for (const credential of credentials) {
     const directive = await probeOne(ctx, config, credential, {
       phase,
       cwd,
       env: { ...env, ...fresh.values },
       held,
+      cache,
+      now,
     });
     if (directive) return directive;
   }
   return null;
+}
+
+/**
+ * One refused credential gate, said as a launch refusal rather than as a park.
+ *
+ * The door has no run to hold, so it has nothing to offer an acknowledgment
+ * against and nothing to answer `retry` on: the console fixes the world and
+ * launches again, and that costs a slot, a workspace and a stack less than a
+ * run parked at readiness did (ADR-0068). The evidence is the gate's own, and
+ * the fingerprint rides it, so a reader of the instance ledger can tell a dead
+ * credential from a value somebody replaced badly (ADR-0064).
+ * @param {object} directive the park directive `probeCredentials` returned
+ * @returns {{message: string, detail: object}}
+ */
+export function credentialRefusal(directive) {
+  const park = directive.park;
+  const detail = park.detail ?? {};
+  if (detail.gate === SURFACE_GATE) {
+    return {
+      message:
+        'these credential surfaces are not wired, read from the default branch at the launch ' +
+        `door:\n${(detail.gaps ?? []).map((gap) => `- ${surfaceLine(gap)}`).join('\n')}\n` +
+        'Wire every one of them, then launch again. The harness writes no secret on any surface.',
+      detail,
+    };
+  }
+  if (typeof detail.gate === 'string' && detail.gate.startsWith(`${PROBE_GATE}:`)) {
+    return {
+      message:
+        `the ${detail.credential} credential probe answered no at the launch door: the value ` +
+        `in ${detail.variable} does not work. ${detail.history ?? ''}Replace it on this host, ` +
+        'run the probe command yourself to confirm, then launch again. The probe output is not ' +
+        'recorded, because it can carry the credential.',
+      detail,
+    };
+  }
+  // The probe did not answer — it could not run, or it ran past its bound and
+  // was killed. The park text is already the whole account of it, minus the
+  // options a door cannot offer.
+  return { message: `${park.question.split('\n')[0]} Repair it, then launch again.`, detail };
+}
+
+/**
+ * The project config the world holds, read from the default branch of the
+ * project's bare clone: the file the next launch will read and the file CI
+ * runs under. Null when it cannot be read or does not parse, and the caller
+ * falls back to the config it already has, because a gate that could not look
+ * states no judgment about what it did not see.
+ * @param {object} ctx a context carrying `paths`, `project` and a payload with
+ *   `configPath`
+ * @param {string} branch the default branch
+ */
+export async function worldConfig(ctx, branch) {
+  const path = ctx.payload?.configPath;
+  if (typeof path !== 'string' || path.length === 0) return null;
+  // The same reader the door uses, with the two choices a lane makes
+  // differently: the clone exists already, because this run launched from it,
+  // and a fetch that fails leaves the refs where the launch left them rather
+  // than failing a gate over the network.
+  const read = await readBranchFile(ctx.paths, ctx.project, {
+    branch,
+    path,
+    fetch: 'best-effort',
+  });
+  if (read.error !== undefined) return null;
+  try {
+    return parseProjectConfig(read.text, `${branch}:${path}`, { launch: true });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every live probe pass on the instance ledger, keyed by variable and by the
+ * fingerprint of the value that passed. The door that finds its value here
+ * asks the service nothing: the answer is this project's, it is about this
+ * exact value, and it has not aged out (ADR-0068). The instance ledger and not
+ * a run's, because the cache is the instance's memory of what the world
+ * answered, and it outlives every run that read it.
+ */
+function probeCache(ctx, now) {
+  const cache = new Map();
+  const at = new Date(now).toISOString();
+  for (const e of readEvents(ctx.paths.instanceLedger)) {
+    if (e.event !== 'credential-probe' || e.ok !== true) continue;
+    if (e.project !== ctx.project) continue;
+    if (typeof e.variable !== 'string' || typeof e.fingerprint !== 'string') continue;
+    if (typeof e.validUntil !== 'string' || e.validUntil <= at) continue;
+    cache.set(`${e.variable}:${e.fingerprint}`, e);
+  }
+  return cache;
 }
 
 /**
@@ -138,8 +279,8 @@ const PROBE_GATE = 'credential-probe';
  * cost the owner a wiring round per surface, and each round ends in the same
  * place as the last.
  */
-async function surfaceGate(ctx, config, { phase, held, forge, defaultBranch }) {
-  const credentials = config.credentials;
+async function surfaceGate(ctx, credentials, { phase, held, forge, defaultBranch, world }) {
+  if (credentials.length === 0) return null;
   // The operator's standing statement that this gate is wrong about the world.
   // The sweep runs anyway and every gap it finds is still stamped: what the ack
   // changes is whether the run stops, never what the ledger says was read
@@ -175,7 +316,12 @@ async function surfaceGate(ctx, config, { phase, held, forge, defaultBranch }) {
     ctx.store.append('credential-surface', {
       actor: ACTOR,
       phase,
+      project: ctx.project,
       credential: credential.name,
+      // Which declaration this read judged: the world's, read from the default
+      // branch, or the blob the caller pinned. A ship asks about the CI that
+      // will run, so it reads the world (ADR-0068).
+      ...(world && { source: 'default-branch' }),
       ok: missing.length === 0,
       ...(missing.length > 0 && { missing }),
       // The record of a read that found gaps and stopped nothing names the
@@ -193,11 +339,23 @@ async function surfaceGate(ctx, config, { phase, held, forge, defaultBranch }) {
       gaps.map((gap) => `- ${surfaceLine(gap)}`).join('\n') +
       '\nWire every one of them, then answer to read them again. ' +
       'The harness writes no secret on any surface.\n' +
-      'A surface list is a declaration the run pinned at launch, so this gate can be ' +
-      'wrong about a surface that was deliberately retired since. ' +
+      (world
+        ? 'The surface list was read from the default branch, so it is the world as it ' +
+          'stands and not the blob this run pinned. '
+        : 'A surface list is a declaration the run pinned at launch, so this gate can be ' +
+          'wrong about a surface that was deliberately retired since. ') +
+      GUARD_NOTE +
       WORLD_GATE_NOTE,
+    detail: { gate: SURFACE_GATE, gaps },
   });
 }
+
+// What a gate inside a run is for, said at the gate. The launch door proves
+// every declared credential before a run exists (ADR-0068), so a gate that
+// stops a live run is answering a question about a value that moved since.
+const GUARD_NOTE =
+  'The launch door proved every declared credential before this run existed, so ' +
+  'what this gate found is a change since that read. ';
 
 /**
  * The names of the repository's CI secrets, and whether they could be read at
@@ -265,7 +423,12 @@ function surfaceLine(gap) {
 
 // -- the live probe ----------------------------------------------------------
 
-async function probeOne(ctx, config, { name, env: variable, probe }, { phase, cwd, env, held }) {
+async function probeOne(
+  ctx,
+  config,
+  { name, env: variable, probe },
+  { phase, cwd, env, held, cache, now },
+) {
   // The value this probe carries, named without being revealed. Every answer
   // carries it, so a refusal is tied to the exact value the service refused and
   // a later reader can tell a dead credential from a stale copy (ADR-0064).
@@ -274,11 +437,24 @@ async function probeOne(ctx, config, { name, env: variable, probe }, { phase, cw
     ctx.store.append('credential-probe', {
       actor: ACTOR,
       phase,
+      project: ctx.project,
       credential: name,
       variable,
       ...(mark !== null && { fingerprint: mark }),
       ...fields,
     });
+  // A pass this instance already holds for this exact value, still inside its
+  // window. The service was asked and it answered; asking again inside a day
+  // buys nothing and costs a round trip per credential per launch (ADR-0068).
+  // Only the door reads the cache. A gate inside a run is there to catch a
+  // value that moved while the run was in flight, and one that stood on a
+  // day-old answer would catch nothing at all. The answer is stamped either
+  // way, so the ledger says what every gate read.
+  const cached = mark === null ? undefined : cache?.get(`${variable}:${mark}`);
+  if (cached) {
+    stamp({ ok: true, cached: cached.seq, validUntil: cached.validUntil });
+    return null;
+  }
   // The probe reads the variable out of the environment it is spawned with —
   // the same environment the suite runs with, whole, because a project-config
   // command keeps every name a seat would lose (ADR-0023), and with the
@@ -291,19 +467,33 @@ async function probeOne(ctx, config, { name, env: variable, probe }, { phase, cw
   // output can carry the credential it just asked about. Nothing reads that
   // output, so there is nothing here for a file to make readable — only a key
   // for a file to leave lying about (ADR-0027).
-  const run = await runCommand(config.commands[probe], { cwd, env, log: false });
+  const run = await runCommand(config.commands[probe], {
+    cwd,
+    env,
+    log: false,
+    // A probe that never returns holds whatever is awaiting it, and at the
+    // door that is the control drain with the frontier sweep behind it. The
+    // bound is the project's, because the project wrote the command (ADR-0068).
+    timeoutMs: config.probes?.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS,
+  });
   if (run.code === null) {
-    // The probe could not run at all — a defect of this machine, not a verdict
-    // about the credential, so it takes the route every unrunnable command
-    // takes rather than accusing the key.
-    stamp({ ok: false, reason: 'unrunnable' });
+    // The probe did not answer: it could not run at all, or it ran past its
+    // bound and was killed. Either way this is a defect of this machine and
+    // not a verdict about the credential, so it takes the route every
+    // unrunnable command takes rather than accusing the key. Nothing is
+    // cached either way — only an answer of yes is worth standing on later.
+    const timedOut = run.timedOut === true;
+    stamp({ ok: false, reason: timedOut ? 'timeout' : 'unrunnable' });
     return commandError(
       ctx,
-      'probe-command-error',
-      `The ${name} credential probe could not run: ${run.error}\n` +
+      timedOut ? 'probe-timeout' : 'probe-command-error',
+      (timedOut
+        ? `The ${name} credential probe did not answer: it ${run.error}, and was killed.\n`
+        : `The ${name} credential probe could not run: ${run.error}\n`) +
+        GUARD_NOTE +
         'Repair the environment, then answer "retry" for one more attempt, or ' +
         '"abandon" to close the run.',
-      { credential: name, error: run.error },
+      { credential: name, error: run.error, ...(timedOut && { timedOut: true }) },
     );
   }
   if (run.code !== 0) {
@@ -314,19 +504,34 @@ async function probeOne(ctx, config, { name, env: variable, probe }, { phase, cw
     const acked = gateAck(runEvents(ctx), gate);
     stamp({ ok: false, reason: 'refused', code: run.code, ...(acked && { acknowledged: acked.seq }) });
     if (acked) return null;
+    // Which of the two refusals this is. It rides the detail as well as the
+    // question, because the door renders its own refusal from the detail and
+    // the diagnosis is the most useful sentence either reader gets.
+    const history = historyLine(ctx, variable, mark);
     return parkDirective('provisioning-gate', {
       ...worldGate(gate),
       question:
         `The ${name} credential probe answered no at the ${phase} gate: ` +
         `the value in ${variable} does not work (exit ${run.code}). ` +
-        historyLine(ctx, variable, mark) +
+        history +
         'Replace it on this host, run the probe command yourself to confirm, then answer to ' +
         'probe again. The probe output is not recorded here, because it can carry the credential.\n' +
+        GUARD_NOTE +
         'The verdict is the probe command\'s, so this gate is wrong wherever the command is. ' +
         WORLD_GATE_NOTE,
+      detail: {
+        gate,
+        credential: name,
+        variable,
+        ...(mark !== null && { fingerprint: mark }),
+        ...(history.length > 0 && { history }),
+      },
     });
   }
-  stamp({ ok: true });
+  // The window this pass stands for, on the record beside the value it proved.
+  // A later gate reads it off the instance ledger and asks the service nothing
+  // while it holds (ADR-0068).
+  stamp({ ok: true, validUntil: new Date(now + PROBE_CACHE_MS).toISOString() });
   return null;
 }
 

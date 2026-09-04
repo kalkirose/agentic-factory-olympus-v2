@@ -257,9 +257,12 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 
 - **Readiness** is mechanical: card on the graph frontier, open decisions
   empty (a foreseen-amendment note is not one, ADR-0052), references
-  lint-green, worktree provisioned, and every external
-  credential the project declares wired on every surface it declared and
-  proven by its read-only probe (ADR-0027).
+  lint-green, worktree provisioned, and every external credential the project
+  declares still wired and still proven by its read-only probe (ADR-0027). The
+  launch door already read the card and proved every credential before this run
+  existed (ADR-0068), so what this stage catches is what moved since: a card a
+  seat or a merge changed in the worktree, and a value the world stopped
+  taking. It says so at every park it raises.
 - **Spec birth** authors the buildable spec from the intent card, grounded
   against the repo as it exists that day. AFK; escalates only on open
   decisions or a grounding conflict with the card's intent. The born spec is
@@ -287,22 +290,28 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   invocation, then the `seat-failure` park — and never spends a gate round.
 - **Spec gate**: one fresh-context round on the born spec (grounding
   spot-checks, scope against the card, AC encodability), evidence-cited. The
-  birth seat amends; the gate re-checks amended sections only. Cap 2 rounds.
-  An intent conflict the card does not cover escalates instead of burning a
-  round; one the card mandates is superseded on the card's own words and buys
-  one amendment, which burns no round either (ADR-0044, ADR-0053). Findings
-  carry a severity: blocking findings hold the spec; notes do not, and travel
-  to the suite seat as obligations to prove against running code. An omitted
-  severity is blocking.
+  birth seat amends; the gate re-checks amended sections only. There is no
+  round cap: the gate runs for as long as it converges, and the cost informs
+  through the budget record and stops nothing (ADR-0021). An intent conflict
+  the card does not cover escalates instead of burning a round; one the card
+  mandates is superseded on the card's own words and buys one amendment, which
+  burns no round either (ADR-0044, ADR-0053). Findings carry a severity:
+  blocking findings hold the spec; notes do not, and travel to the suite seat
+  as obligations to prove against running code. An omitted severity is
+  blocking.
 - **Gate convergence** (ADR-0020): every round past the first is a re-check.
   Its scope is computed, not declared — the round's spec copy diffed against
   the spec as it stands, part by part — and it carries the previous round's
   findings verbatim. A new defect in an unamended section is a note, except
-  an authority contradiction, which blocks anywhere. A round that closes none
-  of the blocking findings the round before it raised — by identity, the
-  section and the defect it states, so equal counts with moved identities are
-  progress — parks the run at once (`spec-gate-stalled`, same options as the
-  cap park, remaining cap unspent). The round stamp carries the identities.
+  an authority contradiction, which blocks anywhere. Two conditions stop the
+  gate and either one parks it: a round that closes none of the blocking
+  findings the round before it raised — by identity, the section and the
+  defect it states, so equal counts with moved identities are progress — and a
+  round whose blocking count is not below the count two rounds back, which is
+  what bounds a gate trading one finding for another for ever. Either parks
+  `spec-gate-stalled`, the one gate park, with both counts and the rounds they
+  came from; `round` buys one amendment plus one re-check, `abandon` closes
+  the run. The round stamp carries the identities.
 - **Adversary**: throwaway wrong implementations, all evaluated to verdict, in
   disposable worktrees. The brief names the security dimensions beside the
   behavior the spec states, so a suite that asserts nothing about
@@ -742,7 +751,15 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   came from an operator or from the harness converting a red merge of its own.
   Those three add no alert and answer to nobody — the record they ride already
   has whatever loudness it is owed, and the word is there so a class that
-  recurs after its fix is a count.
+  recurs after its fix is a count. The fourth of that shape is `harness`, the
+  word for a defect of the machinery that judges, recorded as an escape by the
+  provisioning gate that asks about it (ADR-0068). It carries the ack
+  fingerprint and no ticket, so no repair sweep launches against it and the
+  quality-bar rate never moves; `kindEscapesWindow` counts it, and
+  `escapes-window` answers that count rather than the rate when its entry names
+  `params.kind`. The revoke that ends the acknowledgment closes it — the one
+  escape kind whose owner is a console act rather than a repair
+  (`ESCAPE_KIND_OWNERSHIP` in `src/ledger/resolution.mjs`).
 - **One red regime.** CI reds get one automatic re-run of failed jobs, then
   the same four-class triage and the same routes as in-run reds. Budgets are
   shared.
@@ -885,21 +902,43 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 
 ## Escalations and the human
 
-- **Touchpoint catalog** (closed, eleven park events): open decisions at build
+- **Touchpoint catalog** (closed, ten park events): open decisions at build
   start; grounding conflict at spec birth; intent conflict at spec gate;
-  spec-gate exhaustion; spec-gate non-convergence; unkilled-gap survivor;
-  second 0/3 adversary round; second stall; card invalidated at ship-time
-  sweep; card decision at ship-time sweep; provisioning gate.
+  spec-gate non-convergence; unkilled-gap survivor; second 0/3 adversary
+  round; second stall; card invalidated at ship-time sweep; card decision at
+  ship-time sweep; provisioning gate.
 - Park = stamped escalation record (question, context refs, answer forms) + a
   queued-stream event. The answer is a state change from any console session;
   the daemon validates, stamps who and when, resumes at the parked state.
+- **A park that asks for a ruling shows the whole render.** The
+  `intent-conflict` park at the spec gate and at the verdict lists every
+  finding open at the round or render that raised it, each with its id, its
+  class, its severity and one line, intent findings first and the card's
+  refusals last. The text slot says the answer may address any finding by id,
+  and the amendment that carries the ruling carries every ruling given: a
+  ruling is given against the state the round found, and a question that quoted
+  the conflict alone asked for a ruling on half of it (ADR-0068).
 - **Every park states what it accepts, on the record**: the options it offers,
   the free-text slot it wants, or both. The engine adds `abandon` to every
   park of a run, so the close-by-abandon route is open at all of them; the two
   card parks have no run behind them and offer none. A refusal quotes the
   forms, and the queue renders the answer line off the same declaration.
-- **A known harness defect is answered once.** A provisioning gate that names
-  a harness finding also offers `ack`, which answers the gate and records that
+- **A known harness defect is answered once, and counted meanwhile.** A
+  provisioning gate splits on the class of the findings it holds (ADR-0068).
+  An env finding is the substrate's, and only a person in front of the host can
+  repair it, so that gate asks for the repair and takes `retry`. A harness
+  finding is a defect of the machinery that judges, and no answer at that gate
+  repairs it, so that gate offers no retry at all: `ack` leads, with each
+  finding's fingerprint beside it, and `abandon` closes. A gate holding both
+  asks the substrate first and names the harness findings the next gate will
+  ask about; when that next gate finds the same substrate findings by identity,
+  the retry moved nothing and the harness question is asked there, with the env
+  findings it stands on named beside it. Before it parks, the harness gate
+  records one escape per fingerprint on the escapes ledger under the kind
+  `harness`, with no ticket,
+  so no repair sweep launches against it and the quality-bar rate never moves;
+  what the record buys is a count of what the harness is costing the runs it
+  judges, open until `olympusctl revoke` names the fix. The ack records the
   finding as known and deferred, by an identity derived from the defect — its
   class and the gate layer it names — rather than from the run that raised it
   or the sentence a seat wrote about it. A later gate whose findings are all
@@ -912,8 +951,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   which carries the fix it stands on (ADR-0032).
 - **A gate that judges the world can be acknowledged** (ADR-0062). Three checks
   state a judgment the harness formed about the world rather than a refusal the
-  world gave: the credential-surface sweep, which reads a declaration the run
-  pinned at launch against the surfaces as they now stand; a credential probe,
+  world gave: the credential-surface sweep, which reads a declaration
+  against the surfaces as they now stand — the declaration the default branch
+  holds at the ship gate, because the question there is about the CI that will
+  run the request, and the blob the run pinned at every other gate; a credential probe,
   which reports what a project-declared command made of a value; and the
   substrate probe, which infers a broken host from two loopback families. Each
   offers `ack` with a required written reason, records `gate-acknowledged`
@@ -1052,14 +1093,46 @@ before stories (ADR-0026): shipped runs judged owed at close-out, minus
 those a reconciliation run's launch stamp already names — derived from the
 run ledgers at every sweep, stored nowhere, restart-idempotent.
 
-A repair ticket is read at launch, before a slot or a workspace is spent
-(ADR-0067). Its `touched-paths` block is judged against the repair lane's
+Every input a run will be judged on is read at the launch door, before a slot,
+a workspace or a stack is spent (ADR-0067, ADR-0068).
+
+A repair ticket's `touched-paths` block is judged against the repair lane's
 `deniedPaths` and `forbiddenPatterns`; one offending entry refuses the launch,
 and the reason names every offending entry and its rule. A ticket with no
 block launches as it always did, and the capture gate and the review seat
-still read the whole ticket. Every refused launch, console or frontier, is a
-`launch-rejected` stamp on the instance ledger with the card or ticket it
-named, and `olympusctl status` prints the last five under `REJECTED`.
+still read the whole ticket.
+
+A story's intent card is read from the default branch and parsed. A launch
+that names no card, a path the branch does not hold, or a card the parser
+refuses is refused with the path and the first three errors. A resume takes its
+card from the prior run's own record before the check runs, so an inherited
+freeze is judged on the card it was born for.
+
+Every credential the project declares is proven: the parity sweep over every
+declared surface, and the live probe of every declared value, both read from
+the config the default branch holds. A gap or a refusal refuses the launch
+with the gate's evidence and the fingerprint of the value a service would not
+take. A green probe is cached on the instance ledger for a day, keyed on the
+value's fingerprint, so a burst of launches asks each service once and a value
+that moved misses the cache by construction. Each probe is killed at
+`probes.timeoutMs` (default one minute): the door awaits it inside the control
+drain, and a probe that never returns would hold a queue nobody can see
+waiting. The door has no run to hold, so it offers no acknowledgment and no
+retry: the console fixes the world and launches again, which costs nothing. The
+gates inside a run stay, they read no cache, and they are the guards for a
+value that moves while the run is in flight.
+
+One reader does the whole walk for every read above — `readBranchFile` in
+`src/isolation/clones.mjs` — with its three choices named: whether the clone is
+made on first use, whether the project's clone lock is taken, and whether a
+failed fetch fails the read. The door takes the lock and requires the fetch; a
+lane holds no lock and stands on the refs the launch left rather than failing a
+gate over the network.
+
+Every refused launch, console or frontier, is a `launch-rejected` stamp on the
+instance ledger with the card or ticket it named, the reason, and the evidence
+the check that refused had in its hands; `olympusctl status` prints the last
+five under `REJECTED`.
 
 ## Tripwires
 

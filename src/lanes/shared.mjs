@@ -80,7 +80,15 @@ export function runEnv(ctx, config) {
   return { ...stack, ...cache, ...credentials };
 }
 
+/**
+ * The run ledger of a context, or nothing where there is no run. The launch
+ * door runs the credential gate before a run exists (ADR-0068), and every
+ * ledger-derived rule those gates read — an acknowledgment, an abandoned park
+ * — is about a run. A door reads none of them and refuses instead of walking
+ * past a gate on somebody else's answer.
+ */
 export function runEvents(ctx) {
+  if (typeof ctx.runId !== 'string' || ctx.runId.length === 0) return [];
   return readEvents(runLedgerPath(ctx.paths, ctx.runId));
 }
 
@@ -236,6 +244,21 @@ export function parkDirective(
 export const GATE_FORMS = Object.freeze({
   options: ['retry'],
   text: 'a note on what you repaired',
+});
+
+// The forms of a gate whose finding is a defect of the harness itself.
+//
+// It offers no `retry`, because a retry re-runs the same harness against the
+// same tree and cannot answer differently: ten provisioning parks on the
+// ledger named four harness defects, one of them three times inside a single
+// run, and every one of them offered `retry` first. What the operator can say
+// is that the defect is known and the run may go on, which is the ack, or that
+// this run is not worth finishing under it, which is the abandon every park
+// owes. So `ack` leads and `abandon` closes, and the defect is counted
+// meanwhile (ADR-0068).
+export const HARNESS_GATE_FORMS = Object.freeze({
+  options: [ACK_OPTION],
+  text: 'a note on the defect and what is being done about it',
 });
 
 // -- gates that state a judgment about the world (ADR-0062) -------------------

@@ -59,14 +59,16 @@ import {
   violationLine,
 } from '../seats/diffpolicy.mjs';
 import {
-  ACK_OPTION,
   ackFingerprint,
   coveringAck,
+  findingFingerprint,
   isAckable,
   standingAcksFor,
 } from '../ledger/acks.mjs';
 import { cycleRepeat, openIdentities } from '../ledger/cycles.mjs';
 import { assertDefectKind } from '../ledger/registry.mjs';
+import { openEscapesStore } from '../telemetry/stores.mjs';
+import { readEscapeSet, recordEscape } from '../telemetry/escapes.mjs';
 import {
   PROBE_REQUEST_PROPERTY,
   asksForProbe,
@@ -107,6 +109,7 @@ import {
   readJson,
   parkDirective,
   GATE_FORMS,
+  HARNESS_GATE_FORMS,
   withAbandonGuard,
   withTreeRefresh,
   boughtRetry,
@@ -121,6 +124,12 @@ import {
 
 const REPAIR_CAP = 3;
 const TRIAGE_CLASSES = ['code-defect', 'suite-defect', 'env', 'harness'];
+
+// The closed name a harness defect met at a provisioning gate is counted
+// under. It is the finding's class, deliberately: the triage seat classes the
+// defect and the escape records the same word, so nobody has to decide whether
+// two vocabularies mean one thing (ADR-0024, ADR-0068).
+const HARNESS_DEFECT_KIND = assertDefectKind('harness');
 
 // Why a CI verdict whose findings all point outside the tree goes back to
 // ship without a local cycle. The stamp carries it, because a skipped sweep
@@ -894,14 +903,18 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
       const park = answeredPark(events, 'intent-conflict');
       if (!park?.answer || park.answer.seq < last.seq) {
         return parkDirective('intent-conflict', {
+          // Every finding the render left open, and not the intent set alone.
+          // A ruling is given against the state the render found, and the
+          // findings beside the conflict are that state: the amendment that
+          // carries the ruling meets them all anyway, and an owner who reads
+          // the conflict on its own rules on half a verdict (ADR-0068). The
+          // intent findings come first, because they are what the park asks
+          // about; the card's refusals close the question.
           question:
-            'Verdict triage found an intent-level suite conflict:\n' +
-            intent.map((f) => `- ${f.summary} (evidence: ${f.evidence})`).join('\n') +
-            '\n\nThe card did not settle it:\n' +
+            'Verdict triage found an intent-level suite conflict. Every finding open at this ' +
+            `render:\n${openFindingsBlock(open, intent)}\n\nThe card did not settle it:\n` +
             card.refusals.map((r) => `- ${r}`).join('\n'),
-          text:
-            'the decision the amendment must follow. Name the frozen test file to ' +
-            'amend when the ruling reaches the suite',
+          text: RULING_TEXT,
           refs: [last.record],
         });
       }
@@ -958,7 +971,7 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
         // and reaches the human, which is where an ack comes from (ADR-0032).
         const standing = standingAcksFor(ctx.paths, ctx.project);
         const used = ops.map((f) => coveringAck(standing, f));
-        if (!used.every(Boolean)) return gateFor(ops, last);
+        if (!used.every(Boolean)) return gateFor(ctx, ops, last, { events, standing });
         ctx.store.append('finding-ack-used', {
           actor: ACTOR,
           findings: ops.map((f) => f.id),
@@ -1113,40 +1126,190 @@ function cycleRepeatPark({ fingerprint, occurrences }, last) {
 
 // What an `ack` answer at the gate is worth, said at the gate. The operator
 // reads the fingerprints off this text and hands one back to the revoke.
-const ACK_NOTE =
-  'Answer "ack" to record every harness finding above as known and deferred, ' +
-  'by the fingerprint beside it: a later gate whose findings are all ' +
-  'acknowledged answers itself, on the record, and never reaches you. An ack ' +
-  'stands until `olympusctl revoke` names its fingerprint and the fix behind ' +
-  'it — a restart never clears one.';
+const HARNESS_NOTE =
+  'This is a defect of the harness, not of the substrate and not of the tree, ' +
+  'so the gate offers no retry: a retry re-runs the same harness on the same ' +
+  'tree. Answer "ack" to record every finding above as known, by the ' +
+  'fingerprint beside it — the run goes on, a later gate on the same ' +
+  'fingerprint answers itself in this run and in every other, and the defect ' +
+  'is counted on the escapes ledger until `olympusctl revoke` names its ' +
+  'fingerprint and the fix behind it. Answer "abandon" if the run is not worth ' +
+  'finishing under it.';
 
 /**
- * The provisioning gate for a set of persisting findings. It offers `ack`
- * only when it names a finding an ack may cover, and then it carries those
- * fingerprints on the record: the answer records what the record names
- * (ADR-0032).
+ * The provisioning gate for a set of persisting findings, split on class.
+ *
+ * An env finding says the host this run stands on is wrong, and only a person
+ * standing in front of that host can repair it: the gate asks for the repair
+ * and takes `retry`. A harness finding says the machinery that judges is
+ * wrong, and no answer the operator can give repairs it here — so that gate
+ * asks the one question the operator can answer, which is whether the run goes
+ * on under a defect somebody already holds (ADR-0068).
+ *
+ * A render that holds both takes the substrate gate first, because the env
+ * findings are the ones a repair can still clear. The harness question is
+ * asked when nothing but harness findings is left, or when the substrate half
+ * is exhausted: a gate whose env findings are the same ones the previous
+ * substrate gate of this run named is a gate the retry did not move, and
+ * holding the harness question behind it for ever is the loop this split
+ * exists to end.
  */
-function gateFor(ops, last) {
-  const offered = ops.filter(isAckable).map((f) => ({
+function gateFor(ctx, ops, last, { events, standing }) {
+  // The split is the ack's own scope rule (`ACKABLE_CLASSES`), read through
+  // `isAckable`: a finding an ack may cover is a defect of the harness, and
+  // every other finding at this gate is a statement about the host. The two
+  // halves therefore stay in step with that set rather than with a second copy
+  // of it here.
+  const harness = ops.filter(isAckable);
+  const substrate = ops.filter((f) => !isAckable(f));
+  if (substrate.length === 0) return harnessGateFor(ctx, harness, last, []);
+  // Only what the operator has not already answered. A harness finding a
+  // standing ack covers is not a question, and asking it again at every
+  // exhausted substrate gate would be the same loop in the other direction.
+  const unasked = harness.filter((f) => !coveringAck(standing, f));
+  if (unasked.length > 0 && substrateExhausted(events, substrate)) {
+    return harnessGateFor(ctx, unasked, last, substrate);
+  }
+  return substrateGateFor(substrate, harness, last);
+}
+
+/**
+ * Whether the substrate half of this gate has already been asked and answered
+ * with no effect: the env findings of this render are, by identity, the set
+ * the last substrate gate of this run named.
+ *
+ * The identity is the finding fingerprint, which is the harness's own answer
+ * to "is this the same finding" (ADR-0022) and survives the fresh ids a triage
+ * seat mints for a red it meets again.
+ *
+ * This is the placeholder for the wait ladder: once a persisting env finding
+ * waits and re-runs on its own before it asks anybody, "exhausted" is what the
+ * spent ladder says, and this comparison goes with the rule it stands in for.
+ */
+function substrateExhausted(events, substrate) {
+  const asked = [...events]
+    .reverse()
+    .find((e) => e.event === 'park' && e.type === 'provisioning-gate' && e.detail?.substrate);
+  if (!asked) return false;
+  const now = substrate.map((f) => findingFingerprint(f)).sort();
+  const before = [...asked.detail.substrate].sort();
+  return now.length === before.length && now.every((id, i) => id === before[i]);
+}
+
+/**
+ * The substrate half: the gate as it was, with `retry` and nothing else. No
+ * finding it names may carry an ack — that is what put the other half on the
+ * other side of the split — so the option that walks past a judgment is not
+ * offered here at all.
+ *
+ * Harness findings the same render holds are named and not asked about. The
+ * gate after this one asks them, and an operator handed a list they cannot act
+ * on answers the wrong half of it.
+ */
+function substrateGateFor(ops, harness, last) {
+  const line = (f) => `- [${f.class}] ${f.summary} (evidence: ${f.evidence})`;
+  return parkDirective('provisioning-gate', {
+    ...GATE_FORMS,
+    question:
+      'These findings persist after an operational fix; confirm the substrate is repaired:\n' +
+      ops.map(line).join('\n') +
+      (harness.length > 0
+        ? `\nThis render also holds ${harness.length} harness finding(s). They are a defect of ` +
+          'the machinery and not of this host. The gate after this one asks about them, and a ' +
+          'gate that finds these same substrate findings again asks about them there.'
+        : ''),
+    refs: [last.record],
+    // What this gate asked about, by identity. The gate after it reads this to
+    // know whether the retry moved anything, and hands the harness question
+    // over when it did not.
+    detail: { substrate: ops.map((f) => findingFingerprint(f)).sort() },
+  });
+}
+
+/**
+ * The harness half: no retry, the ack first with its fingerprint, the abandon
+ * every park owes. The escape is recorded before the park, because the count
+ * is what the ack buys against: a defect the harness walks past is a cost, and
+ * a cost nobody wrote down is an anecdote (ADR-0024, ADR-0068).
+ */
+function harnessGateFor(ctx, ops, last, standingOn) {
+  const offered = ops.map((f) => ({
     fingerprint: ackFingerprint(f),
     class: f.class,
     summary: gist(f.summary),
   }));
-  const line = (f) =>
-    `- [${f.class}] ${f.summary} (evidence: ${f.evidence})` +
-    (isAckable(f) ? ` · ${ackFingerprint(f)}` : '');
+  const counted = recordHarnessDefects(ctx, ops, offered);
+  const line = (f, i) =>
+    `- [${f.class}] ${f.summary} (evidence: ${f.evidence}) · ${offered[i].fingerprint}` +
+    ` · escape #${counted.get(offered[i].fingerprint)}`;
   return parkDirective('provisioning-gate', {
-    ...GATE_FORMS,
-    ...(offered.length > 0 && {
-      options: [...GATE_FORMS.options, ACK_OPTION],
-      acks: offered,
-    }),
+    ...HARNESS_GATE_FORMS,
+    acks: offered,
     question:
-      'These findings persist after an operational fix; confirm the substrate is repaired:\n' +
+      'These harness findings persist after an operational fix:\n' +
       ops.map(line).join('\n') +
-      (offered.length > 0 ? `\n${ACK_NOTE}` : ''),
+      (standingOn.length > 0
+        ? '\nThe substrate findings under them are unchanged since the last gate, so the ' +
+          'question the retry could answer has been asked:\n' +
+          standingOn.map((f) => `- [${f.class}] ${f.summary} (evidence: ${f.evidence})`).join('\n')
+        : '') +
+      `\n${HARNESS_NOTE}`,
     refs: [last.record],
+    // The records this gate is asking against, and no others: an escape the
+    // project already carried for some other defect is not what an answer here
+    // is about.
+    detail: { escapes: offered.map((a) => counted.get(a.fingerprint)) },
   });
+}
+
+/**
+ * One counted escape per harness defect this gate asks about, on the escapes
+ * ledger. Idempotent by fingerprint: a defect already counted and still open
+ * is the same defect, however many gates of however many runs meet it, and the
+ * revoke that ends its acknowledgment is what closes it (`resolution.mjs`).
+ * The escape carries no ticket, so no repair sweep launches against it — the
+ * fix of a harness defect is not a run of the project it was met in.
+ * @returns {Map<string, number>} fingerprint → the seq of the open escape that
+ *   counts it, so the gate's question names the record the ack is answering
+ *   against
+ */
+function recordHarnessDefects(ctx, ops, offered) {
+  const store = openEscapesStore(ctx.paths, { onAppend: ctx.onAppend });
+  try {
+    const counted = new Map(
+      readEscapeSet(ctx.paths.escapesLedger)
+        .filter((e) => e.kind === HARNESS_DEFECT_KIND && !e.fixed && e.refs?.project === ctx.project)
+        .map((e) => [e.refs?.fingerprint, e.seq]),
+    );
+    ops.forEach((finding, i) => {
+      const fingerprint = offered[i].fingerprint;
+      if (counted.has(fingerprint)) return;
+      const line = recordEscape(store, {
+        actor: ACTOR,
+        category: 'harness',
+        defectLine: `${finding.summary} (evidence: ${finding.evidence})`,
+        detectionSource: 'harness-self',
+        attribution: 'harness',
+        kind: HARNESS_DEFECT_KIND,
+        refs: {
+          project: ctx.project,
+          runId: ctx.runId,
+          fingerprint,
+          findingId: finding.id,
+          ...(hasLayers(finding.layers) && { layers: finding.layers }),
+        },
+      });
+      counted.set(fingerprint, line.seq);
+    });
+    return counted;
+  } finally {
+    store.close();
+  }
+}
+
+/** True when a layer list is worth carrying: the subject an ack keys on. */
+function hasLayers(layers) {
+  return Array.isArray(layers) && layers.length > 0;
 }
 
 /**
@@ -2010,6 +2173,36 @@ function layerNote(r) {
     ` (${carried.length} of ${r.parts.length} parts carried from ` +
     `cycle ${from.join(', ')}, not re-run)`
   );
+}
+
+// What a park asking for a ruling takes back. One statement, and it may rule
+// on more than the conflict that raised the park: every finding the question
+// lists carries its id for exactly that (ADR-0068).
+const RULING_TEXT =
+  'the decision the amendment must follow. Address any finding above by its id, and name the ' +
+  'frozen test file to amend when the ruling reaches the suite; the amendment carries every ' +
+  'ruling the answer gives';
+
+/**
+ * Every open finding of a render, by id, with its class, its severity and the
+ * defect it states. The set the park asks about comes first, and the rest
+ * follows in render order.
+ *
+ * A triage finding carries a class and no severity; a review finding carries a
+ * lens and a severity, and `confirmed` is the only grading a triage finding
+ * has. The line prints what the finding holds and says `unrated` where the
+ * kind has no severity at all, rather than inventing one.
+ */
+function openFindingsBlock(open, first = []) {
+  const ordered = [...first, ...open.filter((f) => !first.includes(f))];
+  return ordered.map((f) => `- ${openFindingLine(f)}`).join('\n');
+}
+
+function openFindingLine(f) {
+  const grade = f.severity ?? (f.confirmed === true ? 'confirmed' : 'unrated');
+  const cls = f.class ?? f.lens ?? 'unclassed';
+  const depth = f.depth ? ` ${f.depth}` : '';
+  return `[${f.id}] [${cls}${depth}] ${grade} — ${f.summary} (evidence: ${f.evidence})`;
 }
 
 function findingLine(f) {

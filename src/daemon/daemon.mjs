@@ -32,6 +32,7 @@ import { ModelSemaphores } from '../seats/semaphore.mjs';
 import { RunIsolation } from '../isolation/isolation.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
 import { checkAnswer } from '../ledger/parks.mjs';
+import { escapesRevokeCloses } from '../ledger/resolution.mjs';
 import { recoverOpenAttempts } from '../ledger/attempts.mjs';
 import { ACK_OPTION, standingAcksFor } from '../ledger/acks.mjs';
 import {
@@ -41,11 +42,13 @@ import {
   hasBranch,
   hasCommit,
   readBlobFromBranch,
+  readBranchFile,
 } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 import { parseProjectConfig } from '../config/project.mjs';
 import { diffPolicyViolations, laneDiffPolicy, parseTouchedBlock } from '../seats/diffpolicy.mjs';
 import { parseIntentCard } from '../lanes/card.mjs';
+import { credentialRefusal, probeCredentials } from '../lanes/probes.mjs';
 import { readInheritance, closeState } from '../lanes/resume.mjs';
 import { FrontierLauncher } from '../frontier/autolaunch.mjs';
 import { launchEscape } from '../frontier/repairs.mjs';
@@ -89,6 +92,11 @@ const FAULT_MAX = 600; // a stamp carries the head of a stack, not the stack
 // whole by the second read, and a file that is really corrupt is refused
 // while the console that wrote it is still watching. Not a detector — the
 // verdict comes from the read, never from the wait running out.
+// The refusals a door raises name the errors a reader can act on and stop
+// there. A parser that found nine faults in one card is describing one badly
+// written card, and a console line that carries all nine is a wall of text
+// nobody reads to the end.
+const CARD_ERRORS_NAMED = 3;
 const CONTROL_READS = 2;
 const CONTROL_REREAD_MS = 50;
 
@@ -507,6 +515,12 @@ export class Daemon {
    * fact that would otherwise be guessed is settled here, before anything is
    * provisioned: the prior run's own record supplies the card, and the clone
    * must still hold the branch and the frozen commit.
+   *
+   * Every input this launch will be judged on is read here, from the default
+   * branch, before a slot, a workspace or a stack exists: the intent card of a
+   * story, the touched-paths block of a repair ticket, and the credentials the
+   * project declares (ADR-0067, ADR-0068). A refusal costs nothing and leaves
+   * nothing behind, and the console fixes the input and launches again.
    * @param {{project: string, lane: string, runId?: string, [k: string]: unknown}} opts
    */
   async launchRun({ project, lane, runId, ...payload }) {
@@ -529,9 +543,11 @@ export class Daemon {
         throw new Error(`run ${runId} already has a ledger`);
       }
       if (inherit) await this.requireFrozenTree(project, entry, inherit);
+      if (lane === 'story') await this.refuseUnreadableCard(project, entry, payload.card);
       if (lane === 'repair' && typeof payload.ticket === 'string') {
         await this.refuseForbiddenTicket(project, entry, payload.ticket);
       }
+      await this.refuseUnprovenCredentials(project, entry);
       const ws = await this.isolation.provision({
         runId,
         project,
@@ -553,6 +569,11 @@ export class Daemon {
           baseSha: ws.baseSha,
           defaultBranch: entry.defaultBranch,
           configBlob: ws.configBlob,
+          // Where that blob lives on the default branch. A stage whose
+          // question is about the world rather than about the tree this run
+          // holds re-reads it from there (ADR-0068); a ledger from before this
+          // field carries none, and every such stage falls back to the blob.
+          configPath: entry.projectConfigPath,
           // The lane's budget rides the launch stamp, so the run carries the
           // threshold it was launched under through every resume.
           ...(typeof ws.projectConfig.budgets?.[lane] === 'number' && {
@@ -603,6 +624,136 @@ export class Daemon {
   }
 
   /**
+   * A story launch whose intent card the default branch does not hold, or does
+   * not hold in a shape the parser reads, is refused here — before a slot, a
+   * workspace, a stack or a seat is spent on it (ADR-0068). The card is the
+   * spec of everything the story lane does, and a launch without one reached
+   * readiness, took the whole workspace with it and parked `stage-blocked` on
+   * an input nobody could fix from a park.
+   *
+   * The refusal names the path and the first errors the parser reported. The
+   * lane's own card checks stay where they are: they guard a card that moves
+   * between this read and readiness, which is the one thing a door cannot see.
+   *
+   * A resume takes its card from the prior run's record before this runs
+   * (`resolveResume`), so an inherited freeze is judged on the card it was
+   * born for and not on whatever the payload named.
+   *
+   * The read fetches first, because the card sweep pushes to the default
+   * branch and a card written minutes ago is only there afterwards.
+   */
+  async refuseUnreadableCard(project, entry, card) {
+    if (typeof card !== 'string' || card.length === 0) {
+      throw new Error(
+        'a story launch is a card and everything derived from it; this launch names no ' +
+          'intent card. Name one with --card.',
+      );
+    }
+    const read = await this.readFromDefaultBranch(project, entry, card);
+    if (read.error) {
+      const error = new Error(
+        `the intent card ${card} is not on ${entry.defaultBranch} in ${project}: ${read.error}. ` +
+          'Push the card, or name the path it is at.',
+      );
+      error.detail = { card };
+      throw error;
+    }
+    const { errors } = parseIntentCard(read.text);
+    if (errors.length === 0) return;
+    const named = errors.slice(0, CARD_ERRORS_NAMED);
+    const rest = errors.length - named.length;
+    const error = new Error(
+      `the intent card ${card} does not parse: ${named.join('; ')}` +
+        (rest > 0 ? `; and ${rest} more` : '') +
+        '. Fix the card and launch again.',
+    );
+    error.detail = { card, errors };
+    throw error;
+  }
+
+  /**
+   * One file of this project's default branch, read the way every door reader
+   * reads one: the clone lock, the clone made on first use, a fetch that must
+   * succeed, and the blob. `{text}` or `{error}`.
+   */
+  readFromDefaultBranch(project, entry, path) {
+    return readBranchFile(this.paths, project, {
+      branch: entry.defaultBranch,
+      path,
+      repoUrl: entry.repoUrl,
+      withClone: (read) => this.isolation.withClone(project, read),
+    });
+  }
+
+  /**
+   * The credentials the project declares, proven at the door: every declared
+   * surface wired, and every declared value answered yes by the command the
+   * project names for it. A gate that is not yes refuses the launch with the
+   * evidence and the value's fingerprint, and nothing is provisioned
+   * (ADR-0068).
+   *
+   * Three facts make this cheap enough to run on every launch. The declaration
+   * is read from the default branch, so a surface the world retired is not a
+   * gap and one it added is. A green probe is cached on the instance ledger
+   * per value fingerprint for a day, so a burst of launches asks each service
+   * once and a value that moved misses the cache. And the probe runs in the
+   * bare clone rather than in a worktree, because there is no worktree yet: a
+   * probe is a read-only question to a service, and a project whose probe
+   * command needs a working tree names an absolute one.
+   *
+   * A config the branch does not hold or does not parse is left to
+   * provisioning, which reads the same blob next and refuses with the config
+   * error itself.
+   */
+  async refuseUnprovenCredentials(project, entry) {
+    const config = await this.readLaunchConfig(project, entry);
+    if (!config || (config.credentials ?? []).length === 0) return;
+    const directive = await probeCredentials(
+      {
+        paths: this.paths,
+        project,
+        store: this.ledger,
+        instanceStore: this.ledger,
+        payload: { configPath: entry.projectConfigPath },
+      },
+      config,
+      {
+        phase: 'launch',
+        cwd: cloneDir(this.paths, project),
+        forge: this.launchForge(project),
+        defaultBranch: entry.defaultBranch,
+        // The config this gate holds is the default branch's own, so the
+        // parity half is reading the world and the stamp says which
+        // declaration it judged (ADR-0068).
+        surfaceCredentials: config.credentials ?? [],
+        // The door is the one reader of the probe cache. A gate inside a run
+        // exists to catch a value that moved under it, and this one exists to
+        // keep a burst of launches from asking every service the same question.
+        readCache: true,
+      },
+    );
+    if (!directive) return;
+    const refused = credentialRefusal(directive);
+    const error = new Error(refused.message);
+    error.detail = refused.detail;
+    throw error;
+  }
+
+  /**
+   * The forge the door asks about the CI surface, or null. A resolver that
+   * refuses — a project the instance holds no repository for — answers null
+   * rather than failing the launch: an unreadable secret list reads as
+   * unproven and the gate says so, which is the same answer readiness gave.
+   */
+  launchForge(project) {
+    try {
+      return this.forgeFor(project) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * A repair ticket whose touched-paths block names ground the repair lane may
    * never ship is refused here, before a slot, a workspace or a seat is spent
    * on it (ADR-0067). The block is judged against the lane's `deniedPaths` and
@@ -648,16 +799,15 @@ export class Daemon {
    * failure to the stage that owns it.
    */
   async readTicketText(project, entry, ticket) {
-    try {
-      if (isAbsolute(ticket)) return readFileSync(ticket, 'utf8');
-      return await this.isolation.withClone(project, async () => {
-        const dir = await ensureBareClone(this.paths, project, entry.repoUrl, entry.defaultBranch);
-        await fetchClone(dir);
-        return (await readBlobFromBranch(dir, entry.defaultBranch, ticket)).text;
-      });
-    } catch {
-      return null;
+    if (isAbsolute(ticket)) {
+      try {
+        return readFileSync(ticket, 'utf8');
+      } catch {
+        return null;
+      }
     }
+    const read = await this.readFromDefaultBranch(project, entry, ticket);
+    return read.error === undefined ? read.text : null;
   }
 
   /**
@@ -666,14 +816,11 @@ export class Daemon {
    * blob next and refuses the launch with the config error itself.
    */
   async readLaunchConfig(project, entry) {
+    const read = await this.readFromDefaultBranch(project, entry, entry.projectConfigPath);
+    if (read.error !== undefined) return null;
     try {
-      return await this.isolation.withClone(project, async () => {
-        const dir = await ensureBareClone(this.paths, project, entry.repoUrl, entry.defaultBranch);
-        await fetchClone(dir);
-        const { text } = await readBlobFromBranch(dir, entry.defaultBranch, entry.projectConfigPath);
-        return parseProjectConfig(text, `${entry.defaultBranch}:${entry.projectConfigPath}`, {
-          launch: true,
-        });
+      return parseProjectConfig(read.text, `${entry.defaultBranch}:${entry.projectConfigPath}`, {
+        launch: true,
       });
     } catch {
       return null;
@@ -1032,7 +1179,7 @@ export class Daemon {
           (standing.size > 0 ? ` — standing: ${[...standing.keys()].join(', ')}` : ''),
       );
     }
-    return this.ledger.append('finding-ack-revoked', {
+    const revoked = this.ledger.append('finding-ack-revoked', {
       actor,
       project,
       fingerprint,
@@ -1040,6 +1187,39 @@ export class Daemon {
       ackSeq: ack.seq,
       ...(note !== undefined && { note }),
     });
+    this.closeAckedDefects({ actor, project, fingerprint, fix, note });
+    return revoked;
+  }
+
+  /**
+   * Closes the counted defect an ack was holding open. A harness finding that
+   * reached a provisioning gate is recorded on the escapes ledger under the
+   * kind `harness`, and it stays open for as long as the acknowledgment
+   * stands: the count is the answer to "how much is the harness costing the
+   * runs it judges" (ADR-0068). The revoke is the statement that the defect is
+   * gone and the evidence it stands on, which is exactly what an operator's
+   * fix mark is, so that is what it writes.
+   *
+   * A revoke that names a fingerprint no escape carries writes nothing: an ack
+   * is older than this record, and a defect nobody counted needs no closing.
+   */
+  closeAckedDefects({ actor, project, fingerprint, fix, note }) {
+    const store = openEscapesStore(this.paths);
+    try {
+      for (const escape of escapesRevokeCloses(readEscapeSet(this.paths.escapesLedger), {
+        project,
+        fingerprint,
+      })) {
+        appendFixedMark(store, {
+          actor,
+          fixes: escape.seq,
+          evidence: fix,
+          ...(note !== undefined && { note }),
+        });
+      }
+    } finally {
+      store.close();
+    }
   }
 
   // -- tripwire watcher reads ------------------------------------------------
@@ -1441,6 +1621,11 @@ export class Daemon {
         ...(error.runId !== undefined && { runId: error.runId }),
         ...(command.card !== undefined && { card: command.card }),
         ...(command.ticket !== undefined && { ticket: command.ticket }),
+        // What the check that refused had in its hands: the parser's errors,
+        // the surfaces that were not wired, the credential and the fingerprint
+        // of the value a service would not take (ADR-0068). The reason is the
+        // sentence; this is the evidence behind it.
+        ...(error.detail && { detail: error.detail }),
         reason: error.message,
       });
     } catch {

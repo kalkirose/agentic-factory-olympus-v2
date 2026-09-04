@@ -98,8 +98,8 @@ stamp correctly under contention.
 - Readiness process (mechanical checks; self-park at spec-birth escalation).
 - Spec-birth seat (grounded authoring from the intent card; AFK; two
   escalation cases).
-- Spec gate: one fresh-context round, amended-sections re-check, cap 2;
-  intent conflict escalates.
+- Spec gate: one fresh-context round, amended-sections re-check, no round
+  cap; intent conflict escalates.
 - Suite-authoring seat; test-edit boundary enforcement (deny dev-seat test
   edits at the tool level).
 - Adversary: 3 waves in disposable worktrees, all to verdict; survivor
@@ -241,10 +241,11 @@ never carries a project's specifics.
   suite → adversary → freeze; every handler re-derives its position from
   ledger + git (restart-safe). Readiness parses the intent card (frontmatter
   + open-decisions section) and runs the reference lint. Born spec is a run
-  artifact at `runs/<id>/spec.md`. Spec gate: cap 2 counted rounds,
-  amended-sections re-check, intent conflict parks without burning a round,
-  exhaustion closes failed. Suite seat under a lane-level contract loop (one
-  corrective on boundary/red-class/coverage defects, then seat-failure);
+  artifact at `runs/<id>/spec.md`. Spec gate: as many rounds as it converges
+  for, amended-sections re-check, intent conflict parks without burning a
+  round, a stall parks and an abandon closes failed. Suite seat under a
+  lane-level contract loop (one corrective on boundary/red-class/coverage
+  defects, then seat-failure);
   commits stamped `suite-committed` (new registry event; phases author /
   amendment / strengthening / fix). Adversary: 3 waves in disposable
   worktrees at the suite sha, test paths restored from the sha before every

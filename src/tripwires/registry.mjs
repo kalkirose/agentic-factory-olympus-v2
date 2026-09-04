@@ -12,10 +12,16 @@ export const TRIPWIRE_METRICS = {
   // Escaped defects per ship: counted escapes over the last N shipped runs
   // of any lane, divided by the window size. Recency-based — unknown origin
   // still counts.
+  //
+  // `params.kind` narrows it to one closed defect kind, and the reading
+  // becomes a count rather than a rate: a kind names a defect the harness
+  // recognises in itself, and the question about one of those is how many
+  // there were, never what share of the ships carried one (ADR-0068).
   'escapes-window': {
     unit: 'ships',
     defaultWindow: 10,
     defaultTriggers: ['escape-recorded', 'escape-fixed', 'merged'],
+    optionalParams: ['kind'],
   },
   // Defects that reached the default branch through a ship which carried its
   // certification over a moved base (ADR-0056), counted over the last N

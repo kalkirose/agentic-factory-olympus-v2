@@ -84,3 +84,47 @@ export async function readBlobFromBranch(dir, branch, path) {
   const text = await git(['show', `${branch}:${path}`], { cwd: dir });
   return { blob, text };
 }
+
+/**
+ * One file of the project's default branch, for every reader that asks the
+ * world what it holds rather than the run what it pinned.
+ *
+ * Four callers had four copies of this walk — the repair ticket at the door,
+ * the intent card at the door, the project config at the door, and the
+ * project config at the ship gate — and they drifted: two took the clone lock
+ * and two did not, two fetched and one read raw `git show`. One reader with
+ * its three choices named is what keeps them one thing.
+ *
+ * `repoUrl` clones on first use; without one the clone must already exist,
+ * which is true for every reader inside a live run. `withClone` wraps the read
+ * in the project's clone lock, which the daemon holds and a lane does not.
+ * `fetch` is `'require'` — a fetch that fails fails the read, so nothing is
+ * judged on refs that may be stale — or `'best-effort'`, where the refs the
+ * launch left stand rather than failing a gate over the network.
+ *
+ * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ * @param {string} project
+ * @param {{branch: string, path: string, repoUrl?: string|null,
+ *   withClone?: ((fn: Function) => Promise<unknown>)|null,
+ *   fetch?: 'require'|'best-effort'}} opts
+ * @returns {Promise<{text: string, blob: string}|{error: string}>}
+ */
+export async function readBranchFile(
+  paths,
+  project,
+  { branch, path, repoUrl = null, withClone = null, fetch = 'require' },
+) {
+  const read = async () => {
+    const dir = repoUrl
+      ? await ensureBareClone(paths, project, repoUrl, branch)
+      : cloneDir(paths, project);
+    if (fetch === 'require') await fetchClone(dir);
+    else await fetchClone(dir).catch(() => {});
+    return readBlobFromBranch(dir, branch, path);
+  };
+  try {
+    return await (withClone ? withClone(read) : read());
+  } catch (error) {
+    return { error: error.message };
+  }
+}

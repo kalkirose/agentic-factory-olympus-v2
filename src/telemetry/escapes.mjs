@@ -202,6 +202,10 @@ export function readEscapeSet(path) {
       recordedTs: e.ts,
       defectLine: e.defectLine,
       kind: e.kind ?? null,
+      // The identity the escape is counted under, where its kind has one: the
+      // ack fingerprint of a harness defect, so the revoke that ends the ack
+      // reaches the escape it was holding open (ADR-0068).
+      fingerprint: e.refs?.fingerprint ?? null,
       detectionSource: e.detectionSource,
       // An operator mark carries no classification: the record's own category
       // and attribution stand, so the quality-bar window counts the escape as
@@ -233,25 +237,41 @@ export function openEscapes(path) {
 export const FAST_PATH_ESCAPE_KIND = 'fast-path-escape';
 
 /**
- * The cost of the fast-path trade, counted. Window = the most recent shipped
- * runs of any lane; count = escapes recorded at or after the oldest ship of
- * the window whose kind names the fast path. A count and not a rate: the owner
- * turned the flag on knowing some defects would ship, and the question the
- * tripwire asks is how many, not what share.
- * @param {{ships: Array<{ts: string}>, escapes: ReturnType<typeof readEscapeSet>,
- *   windowSize?: number}} input `ships` in ship order
+ * Escapes of one closed kind over a window of ships. Window = the most recent
+ * shipped runs of any lane; count = escapes recorded at or after the oldest
+ * ship of the window whose `kind` is the one named.
+ *
+ * A count and not a rate. A kind names a defect the harness recognises in
+ * itself, and the question about one of those is how many there were, never
+ * what share of the ships carried one: a harness defect a run walked past
+ * belongs to no ship, and a deferred proof belongs to the one that carried it.
+ * The quality-bar window (`escapesWindow`) is the rate, and it counts
+ * categories, so a kind-counted escape never moves it.
+ * @param {{kind: string, ships: Array<{ts: string}>,
+ *   escapes: ReturnType<typeof readEscapeSet>, windowSize?: number}} input
+ *   `ships` in ship order
  */
-export function fastPathEscapesWindow({ ships, escapes, windowSize = 10 }) {
+export function kindEscapesWindow({ kind, ships, escapes, windowSize = 10 }) {
   const window = ships.slice(-windowSize);
   const oldest = window[0];
-  const counted = escapes.filter(
-    (e) => e.kind === FAST_PATH_ESCAPE_KIND && oldest && e.recordedTs >= oldest.ts,
-  );
+  const counted = escapes.filter((e) => e.kind === kind && oldest && e.recordedTs >= oldest.ts);
   return {
     ships: window.length,
     counted: counted.length,
     escapes: counted.map((e) => e.seq),
   };
+}
+
+/**
+ * The cost of the fast-path trade, counted: the kind window over the kind the
+ * ship assigns when it carries a certification it did not earn again
+ * (ADR-0056). The owner turned the flag on knowing some defects would ship,
+ * and the question the tripwire asks is how many.
+ * @param {{ships: Array<{ts: string}>, escapes: ReturnType<typeof readEscapeSet>,
+ *   windowSize?: number}} input `ships` in ship order
+ */
+export function fastPathEscapesWindow({ ships, escapes, windowSize = 10 }) {
+  return kindEscapesWindow({ kind: FAST_PATH_ESCAPE_KIND, ships, escapes, windowSize });
 }
 
 /**

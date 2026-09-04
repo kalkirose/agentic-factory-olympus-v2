@@ -1,4 +1,5 @@
-// Loud-item lifecycle: which event owns each loud record.
+// Record lifecycle: which event owns each loud record, and which act closes
+// an escape kind no repair can.
 //
 // A loud record is a request for the owner's eyes. It stops being one at the
 // moment the event that answers it lands — the re-freeze that re-takes an
@@ -150,6 +151,43 @@ export const LOUD_OWNERSHIP = {
   'factory-starvation': [{ name: 'starvation', by: 'the frontier sweep' }],
   'repairs-owed': [{ name: 'owed', by: 'the frontier sweep' }],
 };
+
+// The escape kinds no event of the escapes ledger's own lifecycle answers, and
+// the console act that does.
+//
+// An escape is normally closed by a repair run's fix or by an operator's mark
+// on evidence they name (ADR-0024). A defect of the harness that a run walked
+// past on a standing acknowledgment is neither: no repair of the project's
+// code closes it, and nothing about the run says it is gone. The one statement
+// that does is the revoke — it names the fingerprint and the fix behind it
+// (ADR-0032) — so the revoke is the owner of this class, and closing the
+// escape is what it means (ADR-0068).
+/** @type {Record<string, {name: string, by: string, match: Function}>} */
+export const ESCAPE_KIND_OWNERSHIP = {
+  harness: {
+    name: 'acknowledged-harness-defect',
+    by: 'olympusctl revoke, naming the fingerprint and the fix',
+    // The ack the escape was counted under, in the project it was counted for.
+    // A fingerprint is the identity of one defect and nothing else, so a
+    // revoke closes exactly the defect it names.
+    match: (escape, { project, fingerprint }) =>
+      escape.refs?.project === project && escape.refs?.fingerprint === fingerprint,
+  },
+};
+
+/**
+ * The open escapes one revoke closes: the kinds the table gives that owner,
+ * matched on the revoke's own project and fingerprint. An empty answer is the
+ * ordinary case — an ack older than this record, or a defect nobody counted.
+ * @param {ReturnType<import('../telemetry/escapes.mjs').readEscapeSet>} escapes
+ * @param {{project: string, fingerprint: string}} revoke
+ */
+export function escapesRevokeCloses(escapes, { project, fingerprint }) {
+  return escapes.filter((escape) => {
+    const rule = ESCAPE_KIND_OWNERSHIP[escape.kind];
+    return Boolean(rule) && !escape.fixed && rule.match(escape, { project, fingerprint });
+  });
+}
 
 /** The events that can answer a loud record. The engine's sweep key. */
 export const OWNER_EVENTS = new Set(
