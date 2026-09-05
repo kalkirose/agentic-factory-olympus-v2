@@ -95,6 +95,12 @@ proposals get these concrete shapes:
     the reading of what serial merges cost, kept out of the update-stage
     duration band so no band learns a queue wait as a stage's work
     (ADR-0039).
+  - `ship-token-hold`: the longest single ship-token hold of the last N runs
+    that held it, in minutes, measured from an acquire to the release, the
+    merge or the close behind it. A hold nobody has ended is measured up to
+    the read, for the reason the wait beside it is. The wait says what the
+    queue cost; this says what bought it, and a hold far past a request's own
+    CI is a run that held the token over work no merge needed (ADR-0033).
   - `layer-peak-headroom`: the worst gate layer's measured peak memory as a
     fraction of the ceiling its project declared, over the last N runs
     (ADR-0045). The worst reading in the window rather than the last, and

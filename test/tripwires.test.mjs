@@ -904,6 +904,79 @@ test('ship-token-wait reads the longest queue wait, open ones included', async (
   assert.equal(none.eligible, false);
 });
 
+test('ship-token-hold reads the longest single hold, open ones included', async (t) => {
+  const paths = home(t);
+  const at = (day, minute) => `2026-08-0${day}T00:${String(minute).padStart(2, '0')}:00Z`;
+  const held = (runId, day, lines) =>
+    writeLedger(runLedgerPath(paths, runId), [
+      line(1, at(day, 0), 'run-launched', { project: 'p', lane: 'story' }),
+      ...lines(day),
+    ]);
+  // One hold, ended by the merge.
+  held('t1', 1, (d) => [
+    line(2, at(d, 1), 'ship-token', { state: 'acquired' }),
+    line(3, at(d, 13), 'merged', { pr: 1 }),
+    line(4, at(d, 20), 'run-closed', { state: 'shipped' }),
+  ]);
+  // Two holds with a release between them. The reading is the longest of the
+  // two and never their sum: a waiter pays one hold, not a run's total.
+  held('t2', 2, (d) => [
+    line(2, at(d, 1), 'ship-token', { state: 'acquired' }),
+    line(3, at(d, 6), 'ship-token', { state: 'released', reason: 're-verdict' }),
+    line(4, at(d, 40), 'ship-token', { state: 'acquired' }),
+    line(5, at(d, 50), 'merged', { pr: 2 }),
+    line(6, at(d, 55), 'run-closed', { state: 'shipped' }),
+  ]);
+  const closed = await evaluateMetric('ship-token-hold', { paths, project: 'p', window: 5 });
+  assert.equal(closed.value, 12);
+  assert.deepEqual(closed.detail, { runs: 2, run: 't1' });
+  // A hold nobody has ended is measured up to the read, for the reason an open
+  // wait is: leaving it out is how the metric goes quiet when the token sticks.
+  held('t3', 3, (d) => [line(2, at(d, 0), 'ship-token', { state: 'acquired' })]);
+  const open = await evaluateMetric('ship-token-hold', {
+    paths,
+    project: 'p',
+    window: 5,
+    now: Date.parse('2026-08-03T02:00:00Z'),
+  });
+  assert.equal(open.value, 120);
+  assert.equal(open.detail.run, 't3');
+  // A run that never held says nothing at all, and a released hold that never
+  // came back is the hold it was and no more.
+  writeLedger(runLedgerPath(paths, 'q1'), [
+    line(1, '2026-08-04T00:00:00Z', 'run-launched', { project: 'q', lane: 'story' }),
+    line(2, '2026-08-04T00:00:00Z', 'ship-token', { state: 'waiting', holder: 'other' }),
+  ]);
+  assert.equal(
+    (await evaluateMetric('ship-token-hold', { paths, project: 'q', window: 5 })).eligible,
+    false,
+  );
+});
+
+test('the standing hold band fires on a hold that carried a verdict cycle', async (t) => {
+  const paths = home(t);
+  const ledger = openInstanceStore(paths);
+  t.after(() => ledger.close());
+  const watcher = new TripwireWatcher({ paths, ledger });
+  watcher.setRegistry(
+    'p',
+    [standingTripwires().find((e) => e.id === 'ship-token-hold')].map(withTripwireDefaults),
+  );
+  writeLedger(runLedgerPath(paths, 'h1'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-01T00:10:00Z', 'ship-token', { state: 'acquired' }),
+    // Two verdict cycles under the token, which is the shape this band exists
+    // to name: the branch stood still for work no merge needed.
+    line(3, '2026-08-01T02:18:00Z', 'merged', { pr: 1 }),
+    line(4, '2026-08-01T02:30:00Z', 'run-closed', { state: 'shipped' }),
+  ]);
+  await watcher.notify('p', { event: 'merged' });
+  const breach = readEvents(paths.instanceLedger).find((e) => e.event === 'tripwire-breach');
+  assert.equal(breach.tripwire, 'ship-token-hold');
+  assert.equal(breach.value, 128);
+  assert.match(breach.answer, /work that does not need the branch to stand still/);
+});
+
 test('the frontier width is possible parallelism, not the launchable set', () => {
   const card = (key, blockedBy = [], phase = null) => ({ key, path: `${key}.md`, phase, blockedBy });
   const runs = new Map([

@@ -20,10 +20,12 @@ import {
   certifiedTree,
   checksByName,
   fastPathTaken,
+  releasedForVerdict,
   shipStep,
   CHECKLESS_POLLS,
   UPDATE_CAP,
 } from '../src/lanes/ship.mjs';
+import { shipTokenState, takeShipToken } from '../src/ship/token.mjs';
 import { FLAKE_LIMIT, RERUN_BUDGET } from '../src/ledger/cycles.mjs';
 import { gitHubForge, noLogReason, parseGitHubRepo, PartialLogRefusal } from '../src/ship/forge.mjs';
 import { derivedLabels } from '../src/ship/labels.mjs';
@@ -3088,6 +3090,204 @@ test('a run waits for the ship token, and its first act under it is the update',
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   // The request opened on the post-merge base: it never went behind.
   assert.ok(!events.some((e) => e.event === 'branch-update'));
+});
+
+// -- the token window: the merge to the merge --------------------------------
+
+/**
+ * A second run of the fixture project, as a ledger and nothing else. It drives
+ * the real token gate, which is a reading of the run ledgers, so a ledger is
+ * the whole of what a competitor needs to be.
+ */
+function otherRun(fx, t, runId = 'proj-other') {
+  const store = openRunStore(fx.paths, runId);
+  t.after(() => store.close());
+  store.append('run-launched', { actor: 'daemon', project: 'proj', lane: 'story' });
+  return { paths: fx.paths, project: 'proj', runId, store };
+}
+
+test('a fast-path ship holds the token from the update to the merge', async (t) => {
+  const fx = fastPathFixture(t);
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'freeze', 'freeze');
+  commitTree(fx.origin, { 'docs/note.md': 'unrelated main work\n' }, 'docs: a note');
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  // The request is open and its checks are running. The run took the token in
+  // the update stage and has not let go of it, so no other run of the project
+  // enters the seam.
+  const other = otherRun(fx, t);
+  assert.equal(takeShipToken(other), false);
+  assert.equal(shipTokenState(fx.paths, 'proj').holder, runId);
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.find((e) => e.event === 'fast-path-ship').taken, true);
+  // One acquire and no release: the window was the merge to the merge.
+  assert.deepEqual(
+    events.filter((e) => e.event === 'ship-token').map((e) => e.state),
+    ['acquired'],
+  );
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 1);
+});
+
+test('a refused fast path gives the token back, and another run ships on it', async (t) => {
+  // Three runs of one project at the seam, ordered by the gate rather than by
+  // the clock: a holder that takes the token while this run is still in its
+  // implementation stage, and a waiter that queues behind this run. Every
+  // reading below is a state the queue order forces, so no assertion depends on
+  // which run the machine reaches first.
+  //
+  // Both are born inside the dev seat, which runs after the daemon started and
+  // well before the seam. A ledger written before the start would be resumed as
+  // an open run of this project and would take a slot from the launch.
+  let holder = null;
+  let waiter = null;
+  const fx = fastPathFixture(t, {
+    seats: {
+      dev: () => {
+        if (holder === null) {
+          holder = otherRun(fx, t, 'proj-holder');
+          waiter = otherRun(fx, t, 'proj-waiter');
+          assert.equal(takeShipToken(holder), true);
+        }
+        return { files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } };
+      },
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'freeze', 'freeze');
+  // Ground the layer declared and the story never touched: the merge is clean
+  // and the certification does not cover it.
+  commitTree(fx.origin, { 'src/base.mjs': 'export const base = 2;\n' }, 'src: a competing edit');
+  const queued = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'ship-token' && e.state === 'waiting',
+    'the run in the queue',
+  );
+  assert.equal(queued.holder, 'proj-holder');
+  // The waiter queues behind the run, so the token reaches the run first and
+  // the waiter is next after it.
+  assert.equal(takeShipToken(waiter), false);
+  // The holder merges. The run takes the token and meets the moved base.
+  holder.store.append('pr-opened', { actor: 'daemon', pr: 98 });
+  holder.store.append('merged', { actor: 'daemon', pr: 98, sha: 'b'.repeat(40), red: false });
+  const fast = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'fast-path-ship',
+    'the fast-path answer',
+  );
+  assert.equal(fast.taken, false);
+  assert.equal(fast.refusal, 'ground-intersects');
+  const released = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'ship-token' && e.state === 'released',
+    'the release',
+  );
+  assert.equal(released.reason, 're-verdict');
+  assert.ok(released.seq > fast.seq);
+  // The waiter takes the token the release freed, and the gate is what makes
+  // that certain: the run cannot take it back while a run that queued during
+  // its hold waits, so this reads the same whether or not the run has finished
+  // its cycle.
+  assert.equal(takeShipToken(waiter), true);
+  assert.equal(shipTokenState(fx.paths, 'proj').holder, 'proj-waiter');
+  const midCycle = readEvents(runLedgerPath(fx.paths, runId));
+  assert.equal(midCycle.filter((e) => e.event === 'ship-token' && e.state === 'acquired').length, 1);
+  // The waiter ships inside the fallen-back run's verdict cycle.
+  waiter.store.append('pr-opened', { actor: 'daemon', pr: 99 });
+  waiter.store.append('merged', { actor: 'daemon', pr: 99, sha: 'a'.repeat(40), red: false });
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const states = events.filter((e) => e.event === 'ship-token').map((e) => e.state);
+  // The run queued, held, gave it back once, and took it again to ship.
+  assert.deepEqual(states.slice(0, 3), ['waiting', 'acquired', 'released']);
+  assert.equal(states.filter((s) => s === 'released').length, 1);
+  assert.equal(states.at(-1), 'acquired');
+  // The whole second cycle ran with the token given back: the release is
+  // before the render, and the re-take is behind it.
+  const stamps = events.filter((e) => e.event === 'ship-token');
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.equal(renders.length, 2);
+  assert.ok(released.seq < renders[1].seq);
+  assert.ok(stamps.at(-1).seq > renders[1].seq);
+  // The waiter's turn sat inside the window the release opened. Its own stamps
+  // are the wait it queued with and the acquire the release handed it.
+  assert.deepEqual(
+    waiter.store.events().filter((e) => e.event === 'ship-token').map((e) => e.state),
+    ['waiting', 'acquired'],
+  );
+  const waiterAcquire = waiter.store
+    .events()
+    .find((e) => e.event === 'ship-token' && e.state === 'acquired');
+  assert.ok(Date.parse(waiterAcquire.ts) >= Date.parse(released.ts));
+  assert.ok(Date.parse(waiterAcquire.ts) <= Date.parse(stamps.at(-1).ts));
+});
+
+test('a run resumed on its own release goes to the verdict, not to the queue', () => {
+  // The crash window between the release stamp and the stage transition behind
+  // it. Without this the run would take the token back, or stand in the queue
+  // for it, to be told to go and judge its tree.
+  const held = { seq: 9, event: 'ship-token', state: 'acquired' };
+  const released = { seq: 10, event: 'ship-token', state: 'released', reason: 're-verdict' };
+  assert.equal(releasedForVerdict([held, released]), true);
+  assert.equal(releasedForVerdict([held]), false);
+  assert.equal(releasedForVerdict([]), false);
+  // A release for a park stopped the run at this stage. The answer resumes the
+  // stage to finish the update, and sending it to the verdict would buy a whole
+  // cycle to arrive back here with the same merge still owed.
+  assert.equal(releasedForVerdict([held, { ...released, reason: 'park' }]), false);
+  // A green render after the release is the run coming back the way it left.
+  assert.equal(
+    releasedForVerdict([released, { seq: 11, event: 'verdict-rendered', verdict: 'green' }]),
+    false,
+  );
+  // A red one is not: it certifies nothing, and the run has no tree to ship.
+  assert.equal(
+    releasedForVerdict([released, { seq: 11, event: 'verdict-rendered', verdict: 'red' }]),
+    true,
+  );
+  // A run that took the token again is holding it, not resuming on a release.
+  assert.equal(releasedForVerdict([released, { ...held, seq: 12 }]), false);
+});
+
+test('the close-out card sweep pushes with no ship token', async (t) => {
+  let atSweep = null;
+  let tookAtSweep = null;
+  let other = null;
+  const fx = shipFixture(t, {
+    seats: {
+      'card-sweep': () => {
+        // The sweep runs after the merge, where the sweeping run holds nothing.
+        // The token is free for the next run, and this push is outside it.
+        atSweep = shipTokenState(fx.paths, 'proj');
+        tookAtSweep = takeShipToken(other);
+        return {
+          files: { 'stories/alpha.md': DEFAULT_CARD + '\n<!-- swept -->\n' },
+          report: { updatedCards: ['stories/alpha.md'], invalidated: [], summary: 'swept' },
+        };
+      },
+    },
+  });
+  other = otherRun(fx, t);
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(atSweep.holder, null);
+  assert.deepEqual(atSweep.waiting, []);
+  assert.equal(tookAtSweep, true);
+  // The push landed while another run of the project held the token.
+  const sweep = events.find((e) => e.event === 'card-sweep');
+  assert.equal(sweep.pushed, true);
+  assert.match(gitSync(['show', 'main:stories/alpha.md'], fx.origin), /<!-- swept -->/);
+  assert.equal(shipTokenState(fx.paths, 'proj').holder, other.runId);
 });
 
 // -- the restore anchor after an update --------------------------------------

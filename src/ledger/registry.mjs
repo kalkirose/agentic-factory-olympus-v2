@@ -354,11 +354,15 @@ export const RUN_EVENTS = new Set([
   // nothing leaves a capture in silence (ADR-0017).
   'capture-swept',
   // ship
-  // The per-project ship token, at the two moments a run's own ledger is what
-  // says where the token went: the wait, and the acquire. The token itself is
-  // derived from these stamps and from `pr-opened`/`merged` across the open
-  // runs of a project, never from a file — so a restart re-derives the holder
-  // it had, and a stamp records a move rather than storing a right (ADR-0033).
+  // The per-project ship token, at the three moments a run's own ledger is what
+  // says where the token went: the wait, the acquire, and the release. The
+  // token itself is derived from these stamps and from `pr-opened`/`merged`
+  // across the open runs of a project, never from a file — so a restart
+  // re-derives the holder it had, and a stamp records a move rather than
+  // storing a right (ADR-0033). A release carries the reason out of the closed
+  // set in `src/ship/token.mjs`, and it takes the run out of the token
+  // altogether: it holds nothing, waits for nothing, and queues at the back
+  // when it comes back to the seam.
   'ship-token',
   // The branch update the run takes under the token, just before its final
   // verdict: the tree the verdict certifies is then the tree that lands.
