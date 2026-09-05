@@ -114,6 +114,13 @@ import {
 } from './supersede.mjs';
 import { SUITE_SCHEMA, SPEC_AMEND_SCHEMA, specLintDefects } from './story.mjs';
 import {
+  runSuiteChecks,
+  storySuiteChecks,
+  suiteCheckLines,
+  unrunQuestion,
+  unrunSuiteCheck,
+} from './suitechecks.mjs';
+import {
   ACTOR,
   loadProjectConfig,
   readConstitution,
@@ -2302,9 +2309,23 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
           );
         }
       }
+      // The re-freeze is a suite write like the four before the freeze, so the
+      // project's own checks run over it too. Without this the amendment that
+      // repairs one Tier-1 red can ship a second one, and the run pays another
+      // cycle for a file the seat could have fixed while it was live (ADR-0071).
+      await runSuiteChecks(ctx, base.suiteChecks, 're-freeze', defects);
       return defects;
     },
   });
+  const unrun = unrunSuiteCheck(runEvents(ctx), 're-freeze');
+  if (unrun) {
+    return {
+      fail: commandError(ctx, 'suite-check-error', unrunQuestion(unrun), {
+        command: unrun.command,
+        cause: unrun.cause,
+      }),
+    };
+  }
   if (fail) return { fail };
   const sha = await commitAll(base.worktree, `suite re-freeze: ${ctx.runId}`);
   ctx.store.append('suite-committed', {
@@ -2826,6 +2847,7 @@ function refreezeRole(base, findings, record, intentAnswer, ruled, brief) {
     `Amend the tests so they encode the spec at: ${base.specRef}`,
     `Write test files only under: ${base.testPaths.join(', ')}. Touch nothing else.`,
     'In the report, list every amended suite file; list expected residual reds (none when the amended suite is green).',
+    ...suiteCheckLines(base.suiteChecks),
   ];
   if (intentAnswer) {
     lines.push(
@@ -3003,6 +3025,14 @@ async function verdictBase(ctx, mode) {
       // The frozen suite by name. The re-freeze reads it to tell which files an
       // answered intent ruling names.
       frozenSuiteFiles: freezeSuiteFiles(ctx.paths, ctx.runId),
+      // The project's own checks over a suite write. The re-freeze amendment is
+      // one, so it runs the same list the pre-freeze chain runs (ADR-0071).
+      suiteChecks: {
+        names: storySuiteChecks(config),
+        commands: config.commands,
+        cwd: worktree,
+        env: runEnv(ctx, config),
+      },
       suiteSha: currentSuiteSha(events),
       resetSha: freeze.sha,
       constitution: readConstitution(worktree, config),

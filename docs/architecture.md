@@ -155,8 +155,9 @@ Two levels; the ownership test decides placement.
   the optional close-out extras (`closeout`), the gate layers that may hold
   the machine together (`gates.concurrencyGroups`), the ground the project
   states no suite of it reads (`gates.groundlessPaths`), what a flake re-run
-  asks for (`gates.flakeRerun`), the project's own declared-ground check for
-  its suite (`lanes.story.groundCommand`), whether a run's commands are
+  asks for (`gates.flakeRerun`), the project's own checks over every suite
+  write, in the order they run (`lanes.story.suiteChecks`), whether a run's
+  commands are
   offered a cache directory (`runCache`), the directory a route id in a
   spec resolves under (`repo.routesRoot`, default `apps/storefront/src/routes`,
   `null` for a project whose specs name no routes), the directory a component
@@ -351,17 +352,21 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   spec-indifferent (recorded) or unkilled gap (blocks; escalates). Zero kills:
   one full strengthening round + a fresh round of waves; a second zero
   escalates.
-- **Declared ground, checked while the seat is live** (ADR-0060). A project may
-  name its own declared-ground check in `lanes.story.groundCommand`, and every
-  suite write of this chain runs it over the tree as the seat left it: the
-  authoring round, an adversary amendment, a strengthening round, the red-state
-  fix. A red is a work-product defect and re-briefs that seat with the check's
-  own output; a command that could not run is a defect of the host and parks
-  under `command-error` instead. The `ground-check` stamp carries the phase and
-  one of `green`, `red`, `unrun`. A project that names no command runs no step.
-  The point is where the repair lands: the same check after the freeze finds
-  the file frozen, and the correction then costs a repair round, a re-freeze
-  and a second verdict.
+- **The project's checks, run while the seat is live** (ADR-0060, ADR-0071). A
+  project names its own checks over a suite write in `lanes.story.suiteChecks`,
+  an ordered list of `commands` keys, and every suite write runs them over the
+  tree as the seat left it: the authoring round, an adversary amendment, a
+  strengthening round, the red-state fix, and the re-freeze amendment after the
+  freeze. The order is the project's and carries every dependency between the
+  checks. Every check runs even after a red, because the seat has one corrective
+  round and one brief carries every fault. A red is a work-product defect and
+  re-briefs that seat with the check's own output; a command that could not run
+  ends the list, is a defect of the host, and parks under `command-error`
+  instead. The `suite-check` stamp carries the command, the phase, the duration
+  and one of `green`, `red`, `unrun`. A project that names no checks runs no
+  step. The point is where the repair lands: the same checks after the freeze
+  find the file frozen, and the correction then costs a triage seat, a repair
+  round, a re-freeze and a second verdict cycle.
 - **Red-state check** (process): the suite must be red against the
   pre-implementation tree, and the freeze report classes every red as
   feature-absence. Any other cause is a suite defect to fix before freeze.

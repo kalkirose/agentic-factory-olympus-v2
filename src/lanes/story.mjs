@@ -41,6 +41,13 @@ import { noCriteriaMessage, parseIntentCard } from './card.mjs';
 import { SECURITY_DIMENSIONS } from './lenses.mjs';
 import { runCommand } from './exec.mjs';
 import { probeCredentials } from './probes.mjs';
+import {
+  runSuiteChecks,
+  storySuiteChecks,
+  suiteCheckLines,
+  unrunQuestion,
+  unrunSuiteCheck,
+} from './suitechecks.mjs';
 import { readInheritance } from './resume.mjs';
 import {
   SUPERSEDE_BRIEF_LINES,
@@ -1013,10 +1020,10 @@ async function suiteStage(ctx) {
  * The suite seat on the lane's contract loop: one corrective invocation on a
  * deterministic defect in the work product, then the seat-failure park.
  *
- * The one failure it re-routes is a declared-ground check that could not run at
- * all. That is a defect of this host and not of the suite the seat wrote, so it
- * takes the route every unrunnable command takes rather than spending the
- * seat's corrective round on a brief no seat can answer (ADR-0060).
+ * The one failure it re-routes is a suite check that could not run at all. That
+ * is a defect of this host and not of the suite the seat wrote, so it takes the
+ * route every unrunnable command takes rather than spending the seat's
+ * corrective round on a brief no seat can answer (ADR-0071).
  */
 async function suiteSeatWithChecks(ctx, base, { phase, schema, buildRole, checks }) {
   const outcome = await seatWithChecks(ctx, {
@@ -1029,18 +1036,13 @@ async function suiteSeatWithChecks(ctx, base, { phase, schema, buildRole, checks
     checks,
     defectReason: 'suite-defect',
   });
-  const unrun = lastGroundCheck(runEvents(ctx));
-  if (unrun?.result === 'unrun' && unrun.phase === phase) {
+  const unrun = unrunSuiteCheck(runEvents(ctx), phase);
+  if (unrun) {
     return {
-      fail: commandError(
-        ctx,
-        'ground-command-error',
-        'The declared-ground check of this project could not run, so nothing read the suite ' +
-          `this run wrote: ${unrun.cause}\n` +
-          'Repair the environment, then answer "retry" for one more attempt, or ' +
-          '"abandon" to close the run.',
-        { cause: unrun.cause },
-      ),
+      fail: commandError(ctx, 'suite-check-error', unrunQuestion(unrun), {
+        command: unrun.command,
+        cause: unrun.cause,
+      }),
     };
   }
   return outcome;
@@ -1064,63 +1066,11 @@ async function suiteChecks(ctx, base, report, phase) {
       defects.push(`expected red "${red.test}" is classed ${red.class}; every red must be feature-absence`);
     }
   }
-  await groundCheck(ctx, base, phase, defects);
+  // The project's own checks over the tree as the seat left it: nothing is
+  // committed behind a red, and the seat that wrote the file is still live
+  // (ADR-0071).
+  await runSuiteChecks(ctx, base.suiteChecks, phase, defects);
   return defects;
-}
-
-/**
- * The project's own declared-ground check, run over the suite as the seat left
- * it. It is here rather than after the freeze because of where the two put the
- * repair: a suite file that declares no ground is a lost skip and no more, but
- * the check that finds it after the freeze finds it in a frozen file, and the
- * correction then costs a repair round, a re-freeze and a second verdict. Three
- * runs paid that in one week. Here the file is not committed, the seat that
- * wrote it is still live, and the correction is one brief (ADR-0060).
- *
- * Every suite write of the pre-freeze chain passes through it — the authoring
- * round, an adversary amendment, a strengthening round, the red-state fix —
- * because each of them can add the file that declares nothing, and a check at
- * the authoring round alone would let the other three past.
- *
- * A red is a work-product defect and re-briefs the seat with the check's own
- * output, which names the file and the family. A command that could not run is
- * not a defect of the suite and pushes no defect: it is stamped, and the lane's
- * seat wrapper turns it into the command-error park it belongs in. A project
- * that names no ground command stamps nothing and the step is not there.
- */
-async function groundCheck(ctx, base, phase, defects) {
-  const name = base.story.groundCommand;
-  if (!name) return;
-  const n = runEvents(ctx).filter((e) => e.event === 'ground-check').length + 1;
-  const run = await runCommand(base.config.commands[name], {
-    cwd: base.worktree,
-    env: base.env,
-    log: commandLogPath(ctx.paths, ctx.runId, `ground-check-${n}`),
-  });
-  const stamp = (result, fields) =>
-    ctx.store.append('ground-check', { actor: ACTOR, phase, result, ...fields });
-  if (run.code === null) {
-    stamp('unrun', { cause: run.error ?? 'the command did not start' });
-    return;
-  }
-  if (run.code === 0) {
-    stamp('green');
-    return;
-  }
-  stamp('red', { code: run.code });
-  defects.push(
-    'the declared-ground check of this project is red on the suite you wrote; every suite ' +
-      'file must belong to a family and every family must declare the ground that can change ' +
-      `its answer:\n${run.output}`,
-  );
-}
-
-/** The last declared-ground check this run ran, or null. */
-function lastGroundCheck(events) {
-  for (let i = events.length - 1; i >= 0; i--) {
-    if (events[i].event === 'ground-check') return events[i];
-  }
-  return null;
 }
 
 // -- adversary ---------------------------------------------------------------
@@ -1754,23 +1704,8 @@ function suiteReportLines(base) {
     // does not name is a pin on somebody else's surface, and the story that
     // changes that surface later pays for it.
     "The spec's Components section names the design-system components this story renders. Target those components and no others, through the story's own test ids; never through a page-wide locator by element type or role.",
-    ...groundLines(base),
+    ...suiteCheckLines(base.suiteChecks),
     ...noteLines(base),
-  ];
-}
-
-/**
- * The declared-ground rule, stated to every seat that writes a suite file. The
- * check runs on what comes back either way; saying it first is what lets a seat
- * meet it without spending a corrective round on it (ADR-0060).
- */
-function groundLines(base) {
-  const name = base.story.groundCommand;
-  if (!name) return [];
-  return [
-    `This project checks the declared ground of its suite with: ${base.config.commands[name].join(' ')}`,
-    'Run it yourself before you report, and repair whatever it names. It runs again on what ' +
-      'you hand back, and a red is a defect of your work product.',
   ];
 }
 
@@ -1891,6 +1826,14 @@ async function laneBase(ctx) {
     // owner question (ADR-0044).
     cardAuthorizedSupersede: story.cardAuthorizedSupersede !== false,
     suiteArgv: config.commands[story.suiteCommand],
+    // The project's own checks over a suite write, in the order the project
+    // wrote them: the order carries every dependency between them (ADR-0071).
+    suiteChecks: {
+      names: storySuiteChecks(config),
+      commands: config.commands,
+      cwd: worktree,
+      env: runEnv(ctx, config),
+    },
     env: runEnv(ctx, config),
     specPath: join(ctx.paths.runs, ctx.runId, 'spec.md'),
   };

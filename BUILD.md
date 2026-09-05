@@ -540,3 +540,25 @@ never carries a project's specifics.
   metric names, and a param the metric does not take is refused rather than
   ignored. ADR-0067 and ADR-0010 are rewritten around the fourth rule and the
   four metrics.
+- 2026-09-05 — every check a frozen suite must pass runs while the seat that
+  wrote it is live. `lanes.story.groundCommand` becomes
+  `lanes.story.suiteChecks`, an ordered list of names from the project's
+  `commands` table, and `src/lanes/suitechecks.mjs` is the one implementation
+  the story lane and the verdict lane share. The order is the project's and
+  carries every dependency between the checks, so the harness holds no graph of
+  its own. Every suite write runs the list over the tree as the seat left it:
+  the authoring round, an adversary amendment, a strengthening round, the
+  red-state fix, and the re-freeze amendment after the freeze, which ran no
+  check at all before. Every check runs even after a red, because the lane
+  gives a seat one corrective invocation and a list that stopped at the first
+  red would park on the second fault; one brief carries every red with its own
+  command's output. A command that could not run ends the list and parks
+  `command-error` with reason `suite-check-error`, and that reading is bounded
+  by the last suite-seat spawn, so a seat that died before its own checks ran is
+  not reported as an older host defect. The stamp is `suite-check`, one per
+  check, with the command, the write, the duration and green, red or unrun;
+  `ground-check` leaves the registry. `groundCommand` stays readable for one
+  release as the one-entry form, and the validator holds the two fields to the
+  same set while both are read, so a project may merge its config before or
+  after the daemon moves. ADR-0060 is rewritten around the new shape and
+  renamed; ADR-0071 records the list decision.

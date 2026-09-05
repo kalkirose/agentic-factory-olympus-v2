@@ -200,14 +200,14 @@ export const RUN_EVENTS = new Set([
   'adversary-wave',
   'survivor-disposition',
   'red-state-check',
-  // The project's own declared-ground check, run over the suite as a seat left
-  // it and before anything is committed or frozen: green, red, or unrun. A
-  // suite file that declares no ground is a lost skip and nothing more, but the
-  // check that finds it runs after the freeze today, where the file is frozen
-  // and the repair costs a re-freeze and a second verdict. This is the same
-  // check at the moment the seat that wrote the file is still live. A project
-  // that names no ground command stamps nothing, exactly as before (ADR-0060).
-  'ground-check',
+  // One of the project's own checks over one suite write, run over the tree as
+  // the seat left it and before anything is committed: the command, the write
+  // it ran over, its duration, and green, red or unrun. The same checks run at
+  // the verdict as Tier-1 layers, where the file is frozen and the correction
+  // costs a triage seat, a repair round, a re-freeze and a second verdict
+  // cycle. These stamps are that cost, not paid. A project that names no
+  // checks stamps nothing (ADR-0071).
+  'suite-check',
   'freeze',
   // A launch that inherited a prior run's freeze instead of deriving one.
   // A resumed run never stamps `freeze`: it did not earn one.
