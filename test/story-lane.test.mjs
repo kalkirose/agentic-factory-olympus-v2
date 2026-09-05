@@ -10,9 +10,13 @@ import { basename, join } from 'node:path';
 import { COMMAND_LOG_ROOT } from '../src/lanes/exec.mjs';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
-import { storyLane } from '../src/lanes/story.mjs';
+import { SUITE_AMEND_SCHEMA, SUITE_SCHEMA, storyLane } from '../src/lanes/story.mjs';
 import { unrunSuiteCheck } from '../src/lanes/suitechecks.mjs';
+import { SURFACE_KINDS } from '../src/lanes/surfacemap.mjs';
+import { SECURITY_DIMENSIONS } from '../src/lanes/lenses.mjs';
+import { checkReportSchema, validateReport } from '../src/seats/contract.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
+import { RUN_EVENTS } from '../src/ledger/registry.mjs';
 import { fingerprint } from '../src/daemon/credentials.mjs';
 import { openWorkspaceLeftovers } from '../src/telemetry/readers.mjs';
 import { OWNER_PIN_MARKER } from '../src/lanes/supersede.mjs';
@@ -25,6 +29,8 @@ import {
   projectConfigJson,
   fakeComposeRunner,
   FIXTURE_ACCEPTANCE,
+  NO_SURFACE,
+  surfaceMapping,
   FIXTURE_SPEC,
   NO_WAIT,
 } from './helpers.mjs';
@@ -197,6 +203,7 @@ function shippingSeats(gate) {
       report: {
         suiteFiles: ['tests/feature.test.mjs'],
         reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        ...NO_SURFACE,
         summary: 'authored',
       },
     }),
@@ -473,6 +480,7 @@ test('a fixture story reaches a valid freeze record with kills and dispositions'
               { test: 'feature exists', class: 'feature-absence' },
               { test: 'f doubles', class: 'feature-absence' },
             ],
+            ...surfaceMapping('f doubles', { survivors: [1, 3] }),
             summary: 'amended',
             killingTests: [{ wave: 1, test: 'f doubles' }],
             dispositions: [{ wave: 3, disposition: 'spec-indifferent', reason: 'slope unconstrained' }],
@@ -484,6 +492,7 @@ test('a fixture story reaches a valid freeze record with kills and dispositions'
         report: {
           suiteFiles: ['tests/feature.test.mjs'],
           reds: [{ test: 'feature exists', class: 'feature-absence' }],
+          ...NO_SURFACE,
           summary: 'authored',
         },
       };
@@ -614,6 +623,7 @@ test('the adversary runs one wave a round, and a survivor still hardens the suit
                 { test: 'feature exists', class: 'feature-absence' },
                 { test: 'f doubles', class: 'feature-absence' },
               ],
+              ...surfaceMapping('f doubles', { survivors: [1] }),
               summary: 'strengthened',
             },
           }
@@ -622,6 +632,7 @@ test('the adversary runs one wave a round, and a survivor still hardens the suit
             report: {
               suiteFiles: ['tests/feature.test.mjs'],
               reds: [{ test: 'feature exists', class: 'feature-absence' }],
+              ...NO_SURFACE,
               summary: 'authored',
             },
           },
@@ -1287,6 +1298,7 @@ test('blocking findings hold the spec; notes pass it and reach the suite seat', 
       report: {
         suiteFiles: ['tests/feature.test.mjs'],
         reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        ...NO_SURFACE,
         summary: 'authored; both counts asserted',
       },
     }),
@@ -1355,6 +1367,7 @@ test('a grounding conflict parks spec birth; a bad red class takes one correctiv
             report: {
               suiteFiles: ['tests/feature.test.mjs'],
               reds: [{ test: 'f doubles', class: 'fixture-defect' }],
+              ...NO_SURFACE,
               summary: 'authored',
             },
           }
@@ -1362,6 +1375,7 @@ test('a grounding conflict parks spec birth; a bad red class takes one correctiv
             report: {
               suiteFiles: ['tests/feature.test.mjs'],
               reds: [{ test: 'f doubles', class: 'feature-absence' }],
+              ...NO_SURFACE,
               summary: 'corrected',
             },
           },
@@ -1469,6 +1483,7 @@ test('an unkilled gap blocks the freeze until the human accepts it', async (t) =
               { test: 'feature exists', class: 'feature-absence' },
               { test: 'bogus kill', class: 'feature-absence' },
             ],
+            ...surfaceMapping('bogus kill', { survivors: [1] }),
             summary: 'amended',
             killingTests: [{ wave: 1, test: 'bogus kill' }],
             dispositions: [],
@@ -1480,6 +1495,7 @@ test('an unkilled gap blocks the freeze until the human accepts it', async (t) =
         report: {
           suiteFiles: ['tests/feature.test.mjs'],
           reds: [{ test: 'feature exists', class: 'feature-absence' }],
+          ...NO_SURFACE,
           summary: 'authored',
         },
       };
@@ -1532,6 +1548,7 @@ test('a second zero-kill round escalates with the survivor set', async (t) => {
             report: {
               suiteFiles: ['tests/feature.test.mjs'],
               reds: [{ test: 'feature exists', class: 'feature-absence' }],
+              ...surfaceMapping('feature exists', { survivors: [1, 2, 3] }),
               summary: 'no stronger suite found',
             },
           }
@@ -1540,6 +1557,7 @@ test('a second zero-kill round escalates with the survivor set', async (t) => {
             report: {
               suiteFiles: ['tests/feature.test.mjs'],
               reds: [{ test: 'feature exists', class: 'feature-absence' }],
+              ...NO_SURFACE,
               summary: 'authored',
             },
           },
@@ -1584,6 +1602,7 @@ test('a green red-state check routes one suite fix round before the freeze', asy
           report: {
             suiteFiles: ['tests/feature.test.mjs'],
             reds: [{ test: 'f doubles', class: 'feature-absence' }],
+            ...surfaceMapping('f doubles'),
             summary: 'fixed',
           },
         };
@@ -1593,6 +1612,7 @@ test('a green red-state check routes one suite fix round before the freeze', asy
           report: {
             suiteFiles: ['tests/feature.test.mjs'],
             reds: [{ test: 'f doubles when present', class: 'feature-absence' }],
+            ...surfaceMapping('f doubles when present', { survivors: [2] }),
             summary: 'disposed',
             killingTests: [],
             dispositions: [
@@ -1606,6 +1626,7 @@ test('a green red-state check routes one suite fix round before the freeze', asy
         report: {
           suiteFiles: ['tests/feature.test.mjs'],
           reds: [{ test: 'f doubles when present', class: 'feature-absence' }],
+          ...NO_SURFACE,
           summary: 'authored',
         },
       };
@@ -1727,6 +1748,7 @@ test('the freeze records the test-path files the spec gave the dev pass', async 
       report: {
         suiteFiles: ['tests/feature.test.mjs'],
         reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        ...NO_SURFACE,
         summary: 'authored',
       },
     }),
@@ -1892,6 +1914,7 @@ function collisionSeats(gate) {
       report: {
         suiteFiles: ['tests/feature.test.mjs'],
         reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        ...NO_SURFACE,
         summary: 'authored',
       },
     }),
@@ -1992,6 +2015,7 @@ test('the freeze records which frozen tests are pinned to the owner', async (t) 
       report: {
         suiteFiles: ['tests/feature.test.mjs', 'tests/pinned.test.mjs'],
         reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        ...NO_SURFACE,
         summary: 'authored',
       },
     }),
@@ -2023,6 +2047,7 @@ const CLEAN_SEATS = {
     report: {
       suiteFiles: ['tests/feature.test.mjs'],
       reds: [{ test: 'f doubles', class: 'feature-absence' }],
+      ...NO_SURFACE,
       summary: 'authored',
     },
   }),
@@ -2123,6 +2148,7 @@ test('every check the project names runs on the authoring round, in its own orde
       report: {
         suiteFiles: ['tests/feature.test.mjs'],
         reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        ...NO_SURFACE,
         summary: 'authored',
       },
     }),
@@ -2161,6 +2187,7 @@ test('a red re-briefs the suite seat with every check that is red, and nothing i
       report: {
         suiteFiles: ['tests/feature.test.mjs'],
         reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        ...NO_SURFACE,
         summary: 'authored',
       },
     }),
@@ -2238,6 +2265,7 @@ test('the checks run again on the round that hardens the suite', async (t) => {
             report: {
               suiteFiles: ['tests/feature.test.mjs', 'tests/feature-kill.test.mjs'],
               reds: [{ test: 'f doubles', class: 'feature-absence' }],
+              ...surfaceMapping('f doubles', { survivors: [1] }),
               summary: 'strengthened',
             },
           }
@@ -2246,6 +2274,7 @@ test('the checks run again on the round that hardens the suite', async (t) => {
             report: {
               suiteFiles: ['tests/feature.test.mjs'],
               reds: [{ test: 'f doubles', class: 'feature-absence' }],
+              ...NO_SURFACE,
               summary: 'authored',
             },
           },
@@ -2315,6 +2344,7 @@ test('a config that still names the one-entry field keeps its check', async (t) 
       report: {
         suiteFiles: ['tests/feature.test.mjs'],
         reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        ...NO_SURFACE,
         summary: 'authored',
       },
     }),
@@ -2435,6 +2465,657 @@ test('the credential probe gate names the credential it is about', async (t) => 
   const probes = live.filter((e) => e.event === 'credential-probe');
   assert.equal(probes.at(-1).ok, false);
   assert.ok(probes.at(-1).acknowledged > 0);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
+});
+
+// -- the surface map ---------------------------------------------------------
+//
+// Every suite write maps the story's surface along the four security
+// dimensions, and the daemon checks the shape and the coverage of that map
+// (ADR-0072). The scenarios below prove each check on a running lane, because
+// what a defect must buy is one corrective invocation and nothing else.
+
+const MAP_DIMENSION = SECURITY_DIMENSIONS[0];
+
+/** One valid map row over the fixture story, with the fields given replaced. */
+function mapRow(over = {}) {
+  return {
+    dimension: MAP_DIMENSION,
+    kind: 'route',
+    item: 'the module entry point',
+    where: 'src/feature.mjs',
+    test: 'f doubles',
+    ...over,
+  };
+}
+
+/** The three dimensions the fixture story does not touch. */
+function restOut() {
+  return SECURITY_DIMENSIONS.slice(1).map((dimension) => ({
+    dimension,
+    reason: 'the fixture story renders no surface on this dimension',
+  }));
+}
+
+/** A whole map: the rows given, and every other dimension out of scope. */
+function wholeMap(rows) {
+  return { surfaceMap: rows, dimensionsOutOfScope: restOut() };
+}
+
+/**
+ * A story whose author write carries the map given on its first invocation and
+ * a whole map on its second. Returns the correction brief, so a scenario about
+ * one check asserts the defect text the seat was handed.
+ */
+async function authorMapDefect(t, broken) {
+  const seats = {
+    ...CLEAN_SEATS,
+    suite: ({ label }) => ({
+      files: { 'tests/feature.test.mjs': STRONG_TEST },
+      report: {
+        suiteFiles: ['tests/feature.test.mjs'],
+        reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        ...(label === 'suite-1' ? broken : wholeMap([mapRow()])),
+        summary: 'authored',
+      },
+    }),
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const calls = fx.calls.filter((c) => c.seat === 'suite');
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].prompt, /Correction brief/);
+  return calls[1].prompt;
+}
+
+/**
+ * A story whose adversary survives round 1, so the lane strengthens on its own.
+ * The strengthening write carries `broken` on its first invocation and `whole`
+ * on its second; round 2 kills and the run ships. Returns the correction brief.
+ */
+async function strengtheningMapDefect(t, { author, broken, whole }) {
+  const seats = {
+    'spec-birth': ({ prompt }) => ({
+      files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
+      report: { outcome: 'spec-born', summary: 'born' },
+    }),
+    'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
+    suite: ({ label }) =>
+      label === 'suite-1'
+        ? {
+            files: { 'tests/feature.test.mjs': WEAK_TEST },
+            report: {
+              suiteFiles: ['tests/feature.test.mjs'],
+              reds: [{ test: 'feature exists', class: 'feature-absence' }],
+              ...author,
+              summary: 'authored',
+            },
+          }
+        : {
+            files: { 'tests/feature-kill.test.mjs': STRONG_TEST },
+            report: {
+              suiteFiles: ['tests/feature.test.mjs', 'tests/feature-kill.test.mjs'],
+              reds: [
+                { test: 'feature exists', class: 'feature-absence' },
+                { test: 'f doubles', class: 'feature-absence' },
+              ],
+              ...(label === 'suite-2' ? broken : whole),
+              summary: 'strengthened',
+            },
+          },
+    adversary: () => ({
+      files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
+      report: { approach: 'stub', wrongness: 'f returns 0' },
+    }),
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const calls = fx.calls.filter((c) => c.seat === 'suite');
+  assert.equal(calls.length, 3);
+  assert.match(calls[2].prompt, /Correction brief/);
+  return calls[2].prompt;
+}
+
+test('the dimension list has one definition, and the adversary and the suite both hold it', async (t) => {
+  const fx = storyFixture(t, {
+    seats: {
+      ...CLEAN_SEATS,
+      suite: () => ({
+        files: { 'tests/feature.test.mjs': STRONG_TEST },
+        report: {
+          suiteFiles: ['tests/feature.test.mjs'],
+          reds: [{ test: 'f doubles', class: 'feature-absence' }],
+          ...wholeMap([mapRow()]),
+          summary: 'authored',
+        },
+      }),
+    },
+  });
+  const runId = await fx.launch();
+  await waitClosed(fx.paths, runId);
+  const wave = fx.calls.find((c) => c.seat === 'adversary').prompt;
+  const suite = fx.calls.find((c) => c.seat === 'suite').prompt;
+  for (const dimension of SECURITY_DIMENSIONS) {
+    assert.ok(wave.includes(dimension), `wave brief: ${dimension}`);
+    assert.ok(suite.includes(dimension), `suite brief: ${dimension}`);
+  }
+});
+
+test('the wave brief is blind to the map', async (t) => {
+  // The adversary is the only independent measure of whether the map is the
+  // surface. One that reads the map is told where the seat already looked.
+  const fx = storyFixture(t, {
+    seats: {
+      ...CLEAN_SEATS,
+      suite: () => ({
+        files: { 'tests/feature.test.mjs': STRONG_TEST },
+        report: {
+          suiteFiles: ['tests/feature.test.mjs'],
+          reds: [{ test: 'f doubles', class: 'feature-absence' }],
+          ...wholeMap([mapRow()]),
+          summary: 'authored',
+        },
+      }),
+    },
+  });
+  const runId = await fx.launch();
+  await waitClosed(fx.paths, runId);
+  const wave = fx.calls.find((c) => c.seat === 'adversary').prompt;
+  assert.ok(!wave.includes('surfaceMap'));
+  assert.ok(!wave.includes('map the surface'));
+  assert.ok(!wave.includes('dimensionsOutOfScope'));
+  for (const kind of SURFACE_KINDS) assert.ok(!wave.includes(`- ${kind}:`), kind);
+});
+
+test('a suite report without the two map fields is refused by both schemas', () => {
+  assert.deepEqual(checkReportSchema(SUITE_SCHEMA), []);
+  assert.deepEqual(checkReportSchema(SUITE_AMEND_SCHEMA), []);
+  const author = { suiteFiles: ['tests/feature.test.mjs'], reds: [], summary: 'authored' };
+  const missing = (schema, report) =>
+    validateReport(schema, report).map((e) => `${e.path} ${e.message}`);
+  assert.deepEqual(missing(SUITE_SCHEMA, author), [
+    '$.surfaceMap required field missing',
+    '$.dimensionsOutOfScope required field missing',
+  ]);
+  assert.deepEqual(missing(SUITE_SCHEMA, { ...author, surfaceMap: [] }), [
+    '$.dimensionsOutOfScope required field missing',
+  ]);
+  assert.deepEqual(missing(SUITE_SCHEMA, { ...author, dimensionsOutOfScope: [] }), [
+    '$.surfaceMap required field missing',
+  ]);
+  const amend = { ...author, killingTests: [], dispositions: [] };
+  assert.deepEqual(missing(SUITE_AMEND_SCHEMA, amend), [
+    '$.surfaceMap required field missing',
+    '$.dimensionsOutOfScope required field missing',
+  ]);
+  assert.deepEqual(validateReport(SUITE_AMEND_SCHEMA, { ...amend, ...wholeMap([mapRow()]) }), []);
+});
+
+test('a dimension or a kind outside the frozen lists is refused by the schema', () => {
+  const base = { suiteFiles: [], reds: [], summary: 'authored', ...wholeMap([mapRow()]) };
+  const errors = (report) => validateReport(SUITE_SCHEMA, report).map((e) => e.message);
+  assert.deepEqual(errors({ ...base, surfaceMap: [mapRow({ dimension: 'timing' })] }), [
+    `must be one of: ${SECURITY_DIMENSIONS.join(', ')}`,
+  ]);
+  assert.deepEqual(errors({ ...base, surfaceMap: [mapRow({ kind: 'widget' })] }), [
+    `must be one of: ${SURFACE_KINDS.join(', ')}`,
+  ]);
+  assert.deepEqual(
+    errors({ ...base, dimensionsOutOfScope: [{ dimension: 'timing', reason: 'none' }] }),
+    [`must be one of: ${SECURITY_DIMENSIONS.join(', ')}`],
+  );
+  assert.deepEqual(errors(base), []);
+});
+
+test('check 1: a dimension in neither field buys one corrective invocation', async (t) => {
+  const brief = await authorMapDefect(t, {
+    surfaceMap: [mapRow()],
+    dimensionsOutOfScope: restOut().slice(1),
+  });
+  assert.ok(
+    brief.includes(
+      `the dimension "${SECURITY_DIMENSIONS[1]}" has no row in "surfaceMap" and no entry in ` +
+        '"dimensionsOutOfScope".',
+    ),
+    brief,
+  );
+});
+
+test('check 2: a dimension in both fields buys one corrective invocation', async (t) => {
+  const brief = await authorMapDefect(t, {
+    surfaceMap: [mapRow()],
+    dimensionsOutOfScope: [{ dimension: MAP_DIMENSION, reason: 'nothing here' }, ...restOut()],
+  });
+  assert.ok(
+    brief.includes(
+      `the dimension "${MAP_DIMENSION}" is in "surfaceMap" and in "dimensionsOutOfScope".`,
+    ),
+    brief,
+  );
+});
+
+test('check 3: an out-of-scope dimension with no reason buys one corrective invocation', async (t) => {
+  const brief = await authorMapDefect(t, {
+    surfaceMap: [mapRow()],
+    dimensionsOutOfScope: restOut().map((e, i) => (i === 0 ? { ...e, reason: '  ' } : e)),
+  });
+  assert.ok(
+    brief.includes(
+      `the "dimensionsOutOfScope" entry for "${SECURITY_DIMENSIONS[1]}" states no reason.`,
+    ),
+    brief,
+  );
+});
+
+test('check 4: a row with no item and no where buys one corrective invocation', async (t) => {
+  const brief = await authorMapDefect(t, wholeMap([mapRow({ item: '', where: '' })]));
+  assert.ok(brief.includes('surface map row 1 names no item.'), brief);
+  assert.ok(brief.includes('surface map row 1 states no "where".'), brief);
+});
+
+test('check 5: a row closed twice, and a row closed not at all', async (t) => {
+  const brief = await authorMapDefect(
+    t,
+    wholeMap([
+      mapRow({ outOfScope: 'the spec says nothing about it' }),
+      {
+        dimension: MAP_DIMENSION,
+        kind: 'store',
+        item: 'the generated URL',
+        where: 'src/feature.mjs',
+      },
+    ]),
+  );
+  assert.ok(
+    brief.includes(
+      'the surface map row "the module entry point" carries both "test" and "outOfScope".',
+    ),
+    brief,
+  );
+  assert.ok(
+    brief.includes(
+      'the surface map row "the generated URL" carries neither "test" nor "outOfScope".',
+    ),
+    brief,
+  );
+});
+
+test('check 6: an empty out-of-scope reason on a row buys one corrective invocation', async (t) => {
+  const brief = await authorMapDefect(
+    t,
+    wholeMap([
+      {
+        dimension: MAP_DIMENSION,
+        kind: 'route',
+        item: 'the module entry point',
+        where: 'src/feature.mjs',
+        outOfScope: '',
+      },
+    ]),
+  );
+  assert.ok(
+    brief.includes(
+      'the surface map row "the module entry point" carries an empty "outOfScope" reason.',
+    ),
+    brief,
+  );
+});
+
+test('check 7: a test no declared suite file holds buys one corrective invocation', async (t) => {
+  const brief = await authorMapDefect(t, wholeMap([mapRow({ test: 'f triples' })]));
+  assert.ok(
+    brief.includes(
+      'the surface map row "the module entry point" names the test "f triples" and no declared ' +
+        'suite file holds that name. The files searched: tests/feature.test.mjs.',
+    ),
+    brief,
+  );
+});
+
+test('check 8: a survivor wave no row names buys one corrective invocation', async (t) => {
+  const row = mapRow({ test: 'feature exists' });
+  const brief = await strengtheningMapDefect(t, {
+    author: wholeMap([row]),
+    broken: wholeMap([row]),
+    whole: wholeMap([{ ...row, survivors: [1] }]),
+  });
+  assert.ok(brief.includes('survivor wave 1 sits on no row of "surfaceMap".'), brief);
+});
+
+test('check 9: a survivor row closed with an excuse buys one corrective invocation', async (t) => {
+  const row = mapRow({ test: 'feature exists' });
+  const brief = await strengtheningMapDefect(t, {
+    author: wholeMap([row]),
+    broken: wholeMap([
+      {
+        dimension: row.dimension,
+        kind: row.kind,
+        item: row.item,
+        where: row.where,
+        survivors: [1],
+        outOfScope: 'the spec does not constrain it',
+      },
+    ]),
+    whole: wholeMap([{ ...row, survivors: [1] }]),
+  });
+  assert.ok(
+    brief.includes(
+      'the surface map row "the module entry point" names survivor wave 1 and carries "outOfScope".',
+    ),
+    brief,
+  );
+});
+
+test('check 10: a map that drops an item of the previous map buys one corrective invocation', async (t) => {
+  const first = mapRow({ test: 'feature exists' });
+  const second = mapRow({ item: 'the exported name', test: 'f doubles', survivors: [1] });
+  const brief = await strengtheningMapDefect(t, {
+    author: wholeMap([first]),
+    broken: wholeMap([second]),
+    whole: wholeMap([first, second]),
+  });
+  assert.ok(
+    brief.includes(
+      'the previous map holds the item "the module entry point" on the dimension ' +
+        `"${MAP_DIMENSION}" and this map does not.`,
+    ),
+    brief,
+  );
+});
+
+test('check 11: one item on two rows buys one corrective invocation', async (t) => {
+  const brief = await authorMapDefect(t, wholeMap([mapRow(), mapRow({ kind: 'carrier' })]));
+  assert.ok(
+    brief.includes(
+      `the item "the module entry point" appears twice on the dimension "${MAP_DIMENSION}" in ` +
+        '"surfaceMap".',
+    ),
+    brief,
+  );
+});
+
+test('a map defect that survives its corrective invocation parks the suite seat', async (t) => {
+  const seats = {
+    ...CLEAN_SEATS,
+    suite: () => ({
+      files: { 'tests/feature.test.mjs': STRONG_TEST },
+      report: {
+        suiteFiles: ['tests/feature.test.mjs'],
+        reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        surfaceMap: [mapRow()],
+        dimensionsOutOfScope: restOut().slice(1),
+        summary: 'authored',
+      },
+    }),
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'seat-failure');
+  assert.equal(park.detail.seat, 'suite');
+  assert.equal(park.detail.cause, 'suite-defect');
+  assert.equal(fx.calls.filter((c) => c.seat === 'suite').length, 2);
+  const failure = readEvents(runLedgerPath(fx.paths, runId)).find((e) => e.event === 'seat-failure');
+  assert.equal(failure.reason, 'suite-defect');
+  assert.ok(failure.defects.some((d) => d.includes('has no row in "surfaceMap"')));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
+});
+
+test('the author write carries the map brief and its check', async (t) => {
+  const brief = await authorMapDefect(t, wholeMap([mapRow({ test: 'f triples' })]));
+  assert.ok(brief.includes('map the surface of this story'));
+  assert.ok(brief.includes('no declared suite file holds that name'));
+});
+
+test('the strengthening write carries the map brief, its survivor line and its check', async (t) => {
+  const row = mapRow({ test: 'feature exists' });
+  const brief = await strengtheningMapDefect(t, {
+    author: wholeMap([row]),
+    broken: wholeMap([{ ...row, test: 'a test nobody wrote', survivors: [1] }]),
+    whole: wholeMap([{ ...row, survivors: [1] }]),
+  });
+  assert.ok(brief.includes('map the surface of this story'));
+  assert.ok(brief.includes('Put the wave number in "survivors"'));
+  assert.ok(brief.includes('names the test "a test nobody wrote"'));
+});
+
+test('the amendment write carries the map brief, its survivor line and its check', async (t) => {
+  const row = mapRow({ test: 'feature exists' });
+  const amendReport = (map) => ({
+    suiteFiles: ['tests/feature.test.mjs', 'tests/feature-kill.test.mjs'],
+    reds: [
+      { test: 'feature exists', class: 'feature-absence' },
+      { test: 'f doubles', class: 'feature-absence' },
+    ],
+    ...map,
+    summary: 'amended',
+    killingTests: [{ wave: 1, test: 'f doubles' }],
+    dispositions: [],
+  });
+  const seats = {
+    'spec-birth': ({ prompt }) => ({
+      files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
+      report: { outcome: 'spec-born', summary: 'born' },
+    }),
+    'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
+    suite: ({ label }) =>
+      label === 'suite-1'
+        ? {
+            files: { 'tests/feature.test.mjs': WEAK_TEST },
+            report: {
+              suiteFiles: ['tests/feature.test.mjs'],
+              reds: [{ test: 'feature exists', class: 'feature-absence' }],
+              ...wholeMap([row]),
+              summary: 'authored',
+            },
+          }
+        : {
+            files: { 'tests/feature-kill.test.mjs': STRONG_TEST },
+            report: amendReport(
+              label === 'suite-2' ? wholeMap([row]) : wholeMap([{ ...row, survivors: [1] }]),
+            ),
+          },
+    adversary: ({ label }) =>
+      Number(/-w(\d+)$/.exec(label)[1]) === 1
+        ? {
+            files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
+            report: { approach: 'stub', wrongness: 'f returns 0' },
+          }
+        : { report: { approach: 'absent', wrongness: 'no implementation' } },
+  };
+  const fx = storyFixture(t, { seats, waves: 2 });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const calls = fx.calls.filter((c) => c.seat === 'suite');
+  assert.equal(calls.length, 3);
+  assert.ok(calls[1].prompt.includes('map the surface of this story'));
+  assert.ok(calls[1].prompt.includes('Put the wave number in "survivors"'));
+  assert.match(calls[2].prompt, /Correction brief/);
+  assert.ok(calls[2].prompt.includes('survivor wave 1 sits on no row of "surfaceMap".'));
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'surface-map')
+      .map((e) => [e.phase, e.items, e.covered, e.outOfScope, e.dimensionsOut, e.kinds]),
+    [
+      ['author', 1, 1, 0, 3, 1],
+      ['amendment', 1, 1, 0, 3, 1],
+    ],
+  );
+});
+
+test('the red-state fix carries the map brief and its check, and the freeze record carries the map', async (t) => {
+  const row = mapRow({ test: 'f doubles when present' });
+  const fixed = mapRow({ test: 'f doubles' });
+  const seats = {
+    'spec-birth': ({ prompt }) => ({
+      files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
+      report: { outcome: 'spec-born', summary: 'born' },
+    }),
+    'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
+    suite: ({ label }) =>
+      label === 'suite-1'
+        ? {
+            files: { 'tests/feature.test.mjs': CONDITIONAL_TEST },
+            report: {
+              suiteFiles: ['tests/feature.test.mjs'],
+              reds: [{ test: 'f doubles when present', class: 'feature-absence' }],
+              ...wholeMap([row]),
+              summary: 'authored',
+            },
+          }
+        : {
+            files: { 'tests/feature.test.mjs': STRONG_TEST },
+            report: {
+              suiteFiles: ['tests/feature.test.mjs'],
+              reds: [{ test: 'f doubles', class: 'feature-absence' }],
+              // The first fix write drops the author's row: the map does not
+              // shrink, and every dimension it drops is declared instead.
+              ...(label === 'suite-2' ? NO_SURFACE : wholeMap([fixed])),
+              summary: 'fixed',
+            },
+          },
+    adversary: () => ({
+      files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
+      report: { approach: 'stub', wrongness: 'f returns 0' },
+    }),
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const calls = fx.calls.filter((c) => c.seat === 'suite');
+  assert.equal(calls.length, 3);
+  assert.ok(calls[1].prompt.includes('map the surface of this story'));
+  assert.match(calls[2].prompt, /Correction brief/);
+  assert.ok(calls[2].prompt.includes('the previous map holds the item "the module entry point"'));
+  // One stamp per suite write, with its counts.
+  assert.ok(RUN_EVENTS.has('surface-map'));
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'surface-map')
+      .map((e) => [e.phase, e.items, e.covered, e.outOfScope, e.dimensionsOut, e.kinds]),
+    [
+      ['author', 1, 1, 0, 3, 1],
+      ['fix', 1, 1, 0, 3, 1],
+    ],
+  );
+  // The freeze record takes the map off the last suite report, the source it
+  // already takes the reds off.
+  const record = JSON.parse(readFileSync(join(fx.paths.archivedRuns, runId, 'freeze.json'), 'utf8'));
+  assert.deepEqual(record.surfaceMap, [fixed]);
+  assert.deepEqual(record.dimensionsOutOfScope, restOut());
+});
+
+test('the strengthening brief of round 3 carries the wrongness of rounds 1 and 2', async (t) => {
+  const row = mapRow({ test: 'feature exists' });
+  const seats = {
+    'spec-birth': ({ prompt }) => ({
+      files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
+      report: { outcome: 'spec-born', summary: 'born' },
+    }),
+    'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
+    // Every write leaves the weak suite in place, so every round scores zero.
+    suite: ({ label }) => ({
+      ...(label === 'suite-1' && { files: { 'tests/feature.test.mjs': WEAK_TEST } }),
+      report: {
+        suiteFiles: ['tests/feature.test.mjs'],
+        reds: [{ test: 'feature exists', class: 'feature-absence' }],
+        ...wholeMap([{ ...row, survivors: [1] }]),
+        summary: label === 'suite-1' ? 'authored' : 'strengthened',
+      },
+    }),
+    adversary: ({ label }) => {
+      const round = Number(/-r(\d+)-/.exec(label)[1]);
+      return {
+        files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
+        report: { approach: `stub ${round}`, wrongness: `wrongness of round ${round}` },
+      };
+    },
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  // Round 1 strengthens on its own; rounds 2 and 3 each ask.
+  await waitParked(fx.paths, runId, 'second-zero-kill');
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'strengthen-again' });
+  await waitParked(fx.paths, runId, 'second-zero-kill', 2);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'strengthen-again' });
+  await waitParked(fx.paths, runId, 'second-zero-kill', 3);
+  const calls = fx.calls.filter((c) => c.seat === 'suite');
+  // suite-1 author, suite-2 round 1, suite-3 round 2, suite-4 round 3.
+  const round3 = calls[3].prompt;
+  assert.ok(round3.includes('Survivor wave 1:'));
+  assert.ok(round3.includes('wrongness of round 3'));
+  assert.ok(round3.includes('Every earlier adversary round of this run:'));
+  assert.ok(round3.includes('- round 2, wave 1: approach: stub 2; wrongness: wrongness of round 2'));
+  assert.ok(round3.includes('- round 1, wave 1: approach: stub 1; wrongness: wrongness of round 1'));
+  // Newest first, and no diff for a round whose tree the lane already dropped.
+  assert.ok(round3.indexOf('round 2, wave 1') < round3.indexOf('round 1, wave 1'));
+  // The first strengthening brief had no earlier round to carry.
+  assert.ok(!calls[1].prompt.includes('Every earlier adversary round of this run:'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
+});
+
+test('a whole map buys a survivor nothing: the wave loop and its parks are unchanged', async (t) => {
+  // The map is a document a seat writes about its own work. Nothing in it lets
+  // a survivor past, and nothing in it shortens the wave loop.
+  const row = mapRow({ test: 'feature exists', survivors: [1] });
+  const seats = {
+    'spec-birth': ({ prompt }) => ({
+      files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
+      report: { outcome: 'spec-born', summary: 'born' },
+    }),
+    'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
+    suite: ({ label }) => ({
+      ...(label === 'suite-1' && { files: { 'tests/feature.test.mjs': WEAK_TEST } }),
+      report: {
+        suiteFiles: ['tests/feature.test.mjs'],
+        reds: [{ test: 'feature exists', class: 'feature-absence' }],
+        ...wholeMap([row]),
+        summary: label === 'suite-1' ? 'authored' : 'strengthened',
+      },
+    }),
+    adversary: () => ({
+      files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
+      report: { approach: 'stub', wrongness: 'f returns 0' },
+    }),
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'second-zero-kill');
+  assert.deepEqual(park.answers.options, ['strengthen-again', 'abandon']);
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  // Every map was whole: no corrective invocation, no seat failure.
+  assert.equal(fx.calls.filter((c) => c.seat === 'suite').length, 2);
+  assert.ok(!live.some((e) => e.event === 'seat-failure'));
+  // Round 2 ran, and the strengthening write between the rounds happened.
+  const waves = live.filter((e) => e.event === 'adversary-wave' && e.phase === 'initial');
+  assert.deepEqual(
+    waves.map((e) => [e.round, e.result]),
+    [
+      [1, 'survived'],
+      [2, 'survived'],
+    ],
+  );
+  assert.deepEqual(
+    live.filter((e) => e.event === 'suite-committed').map((e) => e.phase),
+    ['author', 'strengthening'],
+  );
+  assert.deepEqual(
+    live
+      .filter((e) => e.event === 'surface-map')
+      .map((e) => [e.phase, e.items, e.covered, e.outOfScope, e.dimensionsOut, e.kinds]),
+    [
+      ['author', 1, 1, 0, 3, 1],
+      ['strengthening', 1, 1, 0, 3, 1],
+    ],
+  );
   fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   await waitClosed(fx.paths, runId);
 });

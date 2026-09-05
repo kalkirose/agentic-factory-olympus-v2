@@ -26,6 +26,7 @@ import {
   projectConfigJson,
   FIXTURE_ACCEPTANCE,
   FIXTURE_SPEC,
+  NO_SURFACE,
   NO_WAIT,
 } from './helpers.mjs';
 
@@ -283,6 +284,7 @@ test('a resume inherits a real freeze and enters the post-freeze stage seatless'
       report: {
         suiteFiles: ['tests/feature.test.mjs'],
         reds: [{ test: 'f doubles', class: 'feature-absence' }],
+        ...NO_SURFACE,
         summary: 'authored',
       },
     }),

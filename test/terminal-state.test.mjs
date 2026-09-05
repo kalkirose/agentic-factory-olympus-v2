@@ -22,6 +22,7 @@ import {
   projectConfigJson,
   FIXTURE_ACCEPTANCE,
   FIXTURE_SPEC,
+  NO_SURFACE,
   NO_WAIT,
 } from './helpers.mjs';
 
@@ -384,6 +385,7 @@ test('a suite work-product defect parks; each answer buys exactly one invocation
       report: {
         suiteFiles: ['src/stray.mjs'],
         reds: [{ test: 'stray', class: 'feature-absence' }],
+        ...NO_SURFACE,
         summary: 'authored',
       },
     })),

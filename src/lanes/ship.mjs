@@ -97,7 +97,7 @@ import { authorizedSupersedes, supersedeLines } from './supersede.mjs';
 import { fastPathDecision } from './fastpath.mjs';
 import { runCommand } from './exec.mjs';
 import { probeCredentials, worldConfig } from './probes.mjs';
-import { SUITE_SCHEMA } from './story.mjs';
+import { MERGE_SUITE_SCHEMA } from './story.mjs';
 import {
   DEV_SCHEMA,
   triageStep,
@@ -1475,7 +1475,7 @@ async function mergeRound(
       seat: 'suite',
       roleBlock: testConflictRole(base, testConflicts, brief),
       reportPath: runReportPath(ctx.paths, ctx.runId, `suite-${n}`),
-      schema: SUITE_SCHEMA,
+      schema: MERGE_SUITE_SCHEMA,
       cwd: base.worktree,
       env: base.env,
       constitution: base.constitution,

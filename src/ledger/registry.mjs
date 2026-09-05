@@ -208,6 +208,15 @@ export const RUN_EVENTS = new Set([
   // cycle. These stamps are that cost, not paid. A project that names no
   // checks stamps nothing (ADR-0071).
   'suite-check',
+  // The surface map of one suite write: the write it rode, the number of rows,
+  // how many of them a test closes, how many an out-of-scope reason closes, the
+  // dimensions the story declared out of scope, and how many distinct kinds the
+  // rows name. Counts only, so the ledger stays small; the rows stay in the
+  // seat report on disk and the freeze record carries the map of the last
+  // write. Two readings sit on it: a run that reaches the freeze with no stamp
+  // at all ran no map step, and a row count that grows between the author write
+  // and the freeze is a map the adversary wrote (ADR-0072).
+  'surface-map',
   'freeze',
   // A launch that inherited a prior run's freeze instead of deriving one.
   // A resumed run never stamps `freeze`: it did not earn one.

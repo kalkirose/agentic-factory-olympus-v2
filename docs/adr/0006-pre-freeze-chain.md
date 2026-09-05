@@ -64,13 +64,24 @@ adversary, freeze — gets these concrete shapes:
   the suite command and the test paths, the same two facts the suite seat
   gets. The spec writes the test plan, so a spec without them can name a
   runner the suite seat is not allowed to reach.
-- **Lane-level contract loop.** A deterministic defect in a seat's work
-  product — a change outside the test paths, a declared suite file that does
-  not exist, an expected red not classed `feature-absence`, a survivor with
-  neither killing test nor disposition — takes the same route as an invalid
-  report: one corrective invocation with the defect list, then
-  `seat-failure`. Any seat-failure closes the run `failed`; the response
-  ladder that refines this arrives with the verdict milestone.
+- **The suite report contract.** Every suite write of this chain reports the
+  files it wrote, the expected reds with their class, and the surface map: the
+  story's own items along the four security dimensions, each row closed by the
+  test that kills a wrong implementation of it or by a stated reason the spec
+  does not constrain it (ADR-0072). The amendment write adds a killing test or a
+  disposition per survivor. The map is required at all four pre-freeze writes
+  and at the re-freeze after the freeze, because each seat runs in fresh context
+  and each one can drop what the write before it earned.
+- **Lane-level contract loop.** A deterministic defect in a seat's work product
+  takes the same route as an invalid report: one corrective invocation with the
+  defect list, then `seat-failure`. The defects are a change outside the test
+  paths, a declared suite file that does not exist, an expected red not classed
+  `feature-absence`, a survivor with neither killing test nor disposition, and a
+  surface map that leaves a dimension unaccounted for, closes a row twice or not
+  at all, names a test no declared suite file holds, leaves a survivor wave on
+  no row, or drops an item of the previous map. Any seat-failure closes the run
+  `failed`; the response ladder that refines this arrives with the verdict
+  milestone.
 - **`suite-committed` event** (new in the run registry): sha, file list, and
   phase — `author`, `amendment`, `strengthening`, or `fix`. It is the
   resume anchor for the adversary stage and the audit trail for every suite
@@ -85,6 +96,14 @@ adversary, freeze — gets these concrete shapes:
   structurally void — no detection, no trust. Kill = suite red. Killed
   trees are removed at verdict; survivor trees persist as amendment
   evidence (report + working-tree diff) until their disposition.
+- **The amendment and strengthening briefs carry every round, not the last.**
+  The current round's survivors ride with their report and their tree diff.
+  Every earlier round of the run rides beside them, newest first, with its
+  approach and its wrongness and no diff, because the lane drops each survivor
+  tree when it ends a round. A seat in fresh context cannot see a pattern across
+  rounds that nobody puts in front of it, and three rounds read together are one
+  instruction where three rounds read apart are three requests to add one test
+  (ADR-0072).
 - **Survivor resolution.** The amendment report covers every survivor with
   a killing test or a disposition. Killing-test waves re-run against the
   amended sha; a re-run that stays green becomes an `unkilled-gap`
@@ -105,7 +124,10 @@ adversary, freeze — gets these concrete shapes:
 - **Freeze record.** `runs/<runId>/freeze.json`: story key, born-spec ref,
   suite sha and file set (from `ls-tree` under the test paths), every wave
   verdict with its sha, final-round kill count, amendment kills, latest
-  disposition per wave, and the red-state result with the declared reds.
+  disposition per wave, the surface map and the dimensions declared out of
+  scope, and the red-state result with the declared reds. The map and the reds
+  come off the same source, the last suite report, because the record is where
+  the frozen set is fixed and every later reader takes them off one document.
   The `freeze` event carries the sha and the counts. The valid record is
   the chain's completion signal.
 - **Test-edit boundary.** `testEditDenyRules(testPaths)` produces
@@ -204,6 +226,13 @@ Nothing else about the stage moves. A survivor is still a demonstrated suite
 gap, and it still sends the suite back: zero kills buys the strengthening round
 and a fresh round of waves, exactly as before. The reduction applies only while
 the suite kills.
+
+What no wave count buys is coverage of a surface. A wave finds one wrong
+implementation. It does not enumerate the set that wrongness belongs to, and a
+seat shown one member closes that member. So the enumeration is asked of the
+suite seat itself, as a surface map checked before the write commits
+(ADR-0072), and the wave stays the independent measure of whether the map is
+the surface.
 
 The count is config rather than a constant so that the raise is one line in the
 project that wants it, and so that it lands where it is safe. The launch pins
