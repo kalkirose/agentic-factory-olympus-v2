@@ -107,6 +107,15 @@ export const LOUD_OWNERSHIP = {
       owns: (item, result) => result.layer === item.layer && result.status === 'green',
       fields: (item) => ({ layer: item.layer }),
     },
+    // The story merged and its owed records went nowhere. The run that could
+    // have answered it is closing as this lands, and no later stamp of any
+    // ledger brings the work back: the records are owed against a merge that
+    // has happened, and a person decides what to do about it (ADR-0026).
+    {
+      name: 'reconciliation-lost',
+      match: (item) => item.kind === 'reconciliation-lost',
+      by: 'the human, from a console',
+    },
   ],
   // A red merge stays loud while the defect is still in the product. The
   // repair run's close-out fixes the escapes it ticketed, and pairs the

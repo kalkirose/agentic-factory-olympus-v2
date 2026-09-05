@@ -24,6 +24,14 @@ Tier-1 spectrum, and no green verdict rests on a result the cycle did not earn.
   not-runnable layer to its root red. Repair rounds, re-freeze steps, and
   operational fixes all take this rule; their subject layers are red by
   definition, so the set is never empty by accident.
+- **A cycle that judges the reconciliation commit runs the ground-keyed set.**
+  That set is every layer whose declared ground the record commit reached,
+  every layer with no standing green, and every layer no source declared a
+  ground for, plus the same `needs` closure. It sweeps nothing before it turns
+  green, and that is the whole difference between the two carries: a targeted
+  carry stands on work this cycle did not reach, and a reconciliation carry
+  stands on the project's own statement of what each layer reads. Part-level
+  narrowing stays off there, so a layer that runs, runs whole (ADR-0026).
 - **Every other green carries forward, marked.** The result carries the stamp
   of the cycle that earned it. It stamps nothing new, and the verdict record
   gives every layer a `mode` of `run` or `carried`. A layer stamped under this
@@ -192,6 +200,15 @@ could in principle turn a carried lint layer red, and the targeted set would
 not know. The sweep runs before green, so the worst case is a red found one
 cycle later than a full sweep would have found it. A false green is not
 reachable.
+
+The reconciliation cycle is the one cycle that turns green with layers it
+carried and no sweep behind them, and it is not an exception to the paragraph
+above. A targeted set is derived from reds and knows nothing about what an
+edit reached; the reconciliation set is derived from the commit's own files
+against each layer's declared ground, which is a statement about what the
+layer reads. Where no such statement exists the layer runs. So the sweep would
+prove a claim the plan already holds, at the price of the full spectrum this
+cycle exists to avoid (ADR-0026).
 
 ## Why a CI verdict of out-of-tree findings is worth no local layers
 

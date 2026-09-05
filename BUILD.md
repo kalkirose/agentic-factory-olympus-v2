@@ -635,3 +635,26 @@ never carries a project's specifics.
   band of 90 minutes: the wait says what the queue cost, and the hold says what
   bought it. ADR-0033 is rewritten around the window, the release and the queue
   order; ADR-0010 gains the new reading.
+- 2026-09-05 — the decision records ride the ship they belong to. The
+  reconciliation judgment moves from the close-out to the head of the update
+  stage, in front of the ship token: a story run judges its own diff against
+  the decision records, and an owed judgment sends the new `reconcile-write`
+  seat to rewrite those records on the run branch. The commit stamps
+  `implementation-committed` with `phase: 'reconcile'`, so the review reads the
+  record change alone; the cycle behind it runs the layers whose declared
+  ground the record diff reached, carries the rest on that declaration and
+  sweeps nothing, and its judgment seat is the generalist review rather than
+  the Fury panel. One pull request then carries the code and the records, and
+  `merged` says `reconciled`. Before this, every reconciled story moved the
+  default branch twice and the second move cost a whole repair-lane run: one
+  of them spent 79 layer executions, a 70 minute ship-token wait and two full
+  spectrums on a three file documentation diff. The write seat is contained by
+  checks over what it left in the tree, on the lane contract loop; a defect
+  past its corrective round ships the certified sha with no person asked, and
+  a crashed seat parks offering `ship-without-records`, which is a `reasoned`
+  option. Either way the close writes the ticket the sweep has always launched
+  from, so the repair-lane path and the eighteen tickets already on disk keep
+  working unchanged. A story that merges with records owed and no ticket
+  behind them stamps `gate-integrity` under the new `reconciliation-lost`
+  kind, loud, owned by a person. ADR-0026 is rewritten around the new
+  placement; ADR-0022 states the third sweep and why it sweeps nothing.

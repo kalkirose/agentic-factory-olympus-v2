@@ -1,11 +1,14 @@
-// Owed decision-record reconciliations: the shipped story runs whose
-// close-out judgment named records this diff implements or contradicts,
-// minus those a reconciliation run already carries. The set is derived from
-// the run ledgers at every sweep and stored nowhere — the shipping run's
-// `reconciliation-judged` stamp says what is owed, the reconciliation runs'
-// own launch stamps say what has been answered (the owed-repairs pattern,
-// ADR-0024). A daemon that dies between the judgment and the launch owes the
-// same reconciliation after the restart.
+// Owed decision-record reconciliations: the shipped story runs that owed a
+// record rewrite and did not write it themselves, minus those a reconciliation
+// run already carries. A story run judges its own diff before it ships and
+// rewrites the records on its own branch (ADR-0026); this set is the fallback,
+// and it holds the ships where that rewrite could not be made.
+//
+// The set is derived from the run ledgers at every sweep and stored nowhere.
+// The shipping run's `reconciliation-judged` stamp with a ticket on it says
+// what is owed, the reconciliation runs' own launch stamps say what has been
+// answered (the owed-repairs pattern, ADR-0024). A daemon that dies between
+// the ticket and the launch owes the same reconciliation after the restart.
 import { listRunEvents } from '../telemetry/readers.mjs';
 
 /** The story-run ids some reconciliation run already carries, open or closed. */
@@ -21,8 +24,10 @@ export function launchedReconciliations(paths) {
 /**
  * The owed reconciliations of one project, oldest ship first. Owed = closed
  * shipped, judged owed with a ticket, and named by no reconciliation run's
- * launch. A run that launched and failed is not owed again: a reconciliation
- * that cannot land is a console decision, like a spent card.
+ * launch. The ticket is written at the close of the shipping run, and only
+ * where the records did not ride its own merge. A run that launched and failed
+ * is not owed again: a reconciliation that cannot land is a console decision,
+ * like a spent card.
  * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
  */
 export function owedReconciliations(paths, project) {

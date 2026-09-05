@@ -149,6 +149,41 @@ export function seatFailureAfter(events, seat, seq) {
   return null;
 }
 
+/**
+ * The last record a match finds that no later `fresh-pass` discarded, or null.
+ *
+ * A fresh pass resets the tree to the commit the pass is born on, so every
+ * statement an earlier pass made about the tree is about a tree that is gone.
+ * The reconciliation round reads its own three stamps through here, and every
+ * one of them is such a statement (ADR-0026).
+ */
+export function sinceFreshPass(events, match) {
+  let fresh = -1;
+  let found = null;
+  for (const e of events) {
+    if (e.event === 'fresh-pass') fresh = e.seq;
+    if (match(e)) found = e;
+  }
+  return found && found.seq > fresh ? found : null;
+}
+
+/**
+ * The reconciliation commit the run's tree still holds, or null.
+ *
+ * The rewrite of the decision records is committed as an implementation of
+ * this run, under `phase: 'reconcile'` (ADR-0026). Nothing but a fresh pass
+ * discards it: a repair round edits the tree the commit built.
+ *
+ * Two lanes read this. The update stage asks whether the rewrite is still to
+ * do; the verdict cycle asks whether the diff it judges is a record diff.
+ */
+export function reconcileCommit(events) {
+  return sinceFreshPass(
+    events,
+    (e) => e.event === 'implementation-committed' && e.phase === 'reconcile',
+  );
+}
+
 export function lastSeatReportEvent(events, seat) {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
@@ -502,8 +537,12 @@ const RECOVERY_TEXT = 'what you changed before the retry';
  * `text` names the free-text slot for parks that read the answer's words (the
  * corrected ticket path); it is a declaration, not park detail, so it never
  * reaches the close an abandon takes.
+ *
+ * `options` and `reasoned` add a site's own answer beside `retry`. The site
+ * that adds one owns the route it takes, and a `reasoned` option owes the
+ * operator's sentence as well as the word (ADR-0062).
  */
-export function recover(ctx, { type, reason, question, refs, text, ...detail }) {
+export function recover(ctx, { type, reason, question, refs, text, options, reasoned, ...detail }) {
   const abandoned = abandonedClose(runEvents(ctx));
   if (abandoned) return abandoned;
   return {
@@ -511,7 +550,8 @@ export function recover(ctx, { type, reason, question, refs, text, ...detail }) 
       type,
       reason,
       question,
-      options: [...RECOVERY_OPTIONS],
+      options: [...RECOVERY_OPTIONS, ...(options ?? [])],
+      ...(reasoned?.length > 0 && { reasoned }),
       text: text ?? RECOVERY_TEXT,
       ...(refs && { refs }),
       ...(Object.keys(detail).length > 0 && { detail }),
@@ -536,19 +576,27 @@ export function commandError(ctx, reason, question, detail = {}) {
  * A seat that could not deliver a usable work product past its machine retry
  * allowance. The failure evidence stays in the ledger; a bought retry
  * carries it into the next invocation's brief.
+ *
+ * `park` lets one site offer an option beside `retry` and `abandon`, with the
+ * sentence that says what it does. The route belongs to the site: a seat whose
+ * failure the run can go past without its work has a third answer, and every
+ * other seat has the two it always had.
  */
-export function seatFail(ctx, seat, result) {
+export function seatFail(ctx, seat, result, park = null) {
   const cause = result.reason ?? null;
   return recover(ctx, {
     type: 'seat-failure',
     reason: 'seat-failure',
     seat,
     ...(cause && { cause }),
+    ...(park?.options?.length > 0 && { options: park.options }),
+    ...(park?.reasoned?.length > 0 && { reasoned: park.reasoned }),
     question:
       `The ${seat} seat failed` +
       (cause ? ` (${cause})` : '') +
       ` and no machine retry remains. Answer "retry" for one fresh ${seat} ` +
-      'invocation carrying the failure evidence, or "abandon" to close the run.',
+      'invocation carrying the failure evidence, or "abandon" to close the run.' +
+      (park?.note ? `\n${park.note}` : ''),
   });
 }
 
@@ -625,6 +673,7 @@ export async function seatWithChecks(
     buildRole,
     checks,
     defectReason = 'work-product-defect',
+    park = null,
   },
 ) {
   const limit = attemptLimit(runEvents(ctx), seat);
@@ -644,12 +693,12 @@ export async function seatWithChecks(
       constitution,
       ...(denyTools && { denyTools }),
     });
-    if (!result.ok) return { fail: seatFail(ctx, seat, result) };
+    if (!result.ok) return { fail: seatFail(ctx, seat, result, park) };
     const defects = await checks(result.report);
     if (defects.length === 0) return { report: result.report };
     if (attempt >= limit) {
       ctx.store.append('seat-failure', { actor: ACTOR, seat, reason: defectReason, defects });
-      return { fail: seatFail(ctx, seat, { reason: defectReason }) };
+      return { fail: seatFail(ctx, seat, { reason: defectReason }, park) };
     }
     brief = defects;
   }

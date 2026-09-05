@@ -16,8 +16,8 @@ conduct.
   other section — an unknown key, a missing path, or a repo-relative path
   is a config error at launch.
 - **Story-lane close-out only.** The seat runs after the card sweep and the
-  reconciliation judgment (ADR-0026), against the merge commit, as the last
-  act before the ledger closes. A repair-lane run never reaches it: a
+  reconciliation ticket step (ADR-0026), against the merge commit, as the
+  last act before the ledger closes. A repair-lane run never reaches it: a
   repair has no card, no story spec, and nothing to teach from.
 - **The instructions are the conduct.** The harness reads the file and
   carries its text in the role block. It states what the artifact is, how
@@ -51,8 +51,9 @@ good at: knowing when a story shipped, and recording what happened.
 ## Why the failure isolation is absolute
 
 This is the only close-out step whose absence costs the project nothing.
-The card sweep keeps the story graph honest; the reconciliation judgment
-keeps the decision records honest; both earn their place in the close. A
+The card sweep keeps the story graph honest; the reconciliation ticket is
+the one route left to records a shipped story owes; both earn their place
+in the close. A
 learning artifact is a gift to a future reader. A gift may never delay a
 merged story's close, park a run, or raise an alert the owner has to clear
 at the end of work that already succeeded — so the step has exactly one

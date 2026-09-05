@@ -20,6 +20,7 @@ import {
   certifiedTree,
   checksByName,
   fastPathTaken,
+  reconcileStep,
   releasedForVerdict,
   shipStep,
   CHECKLESS_POLLS,
@@ -41,6 +42,7 @@ import { recordEscape, ticketEscape, readEscapeSet } from '../src/telemetry/esca
 import { standingTripwires, withTripwireDefaults } from '../src/tripwires/registry.mjs';
 import { owedRepairs } from '../src/frontier/repairs.mjs';
 import { owedReconciliations, reconciliationLaunch } from '../src/frontier/reconciliations.mjs';
+import { reconcileCommit, sinceFreshPass } from '../src/lanes/shared.mjs';
 import {
   tempDir,
   removeDir,
@@ -629,16 +631,114 @@ test('the ship stage beats while it waits, once per batch of poll outcomes', asy
   );
 });
 
-test('an owed judgment writes the reconciliation ticket the sweep derives from', async (t) => {
-  const fx = shipFixture(t, {
-    seats: {
-      'reconcile-judge': () => ({
-        report: {
-          owed: true,
-          records: ['docs/adr/0001-doubling.md'],
-          reason: 'the diff implements the doubling decision',
-        },
-      }),
+// -- the reconciliation round (ADR-0026) -------------------------------------
+
+const ADR_FILE = 'docs/adr/0001-doubling.md';
+const ADR_TEXT = '# ADR-0001: Doubling\n\nStatus: accepted\n\nf(x) will double x.\n';
+const ADR_REWRITTEN = '# ADR-0001: Doubling\n\nStatus: accepted\n\nf(x) returns 2*x.\n';
+
+/** Whether the default branch of the fixture origin holds a path. */
+function mainHolds(origin, path) {
+  const tree = gitSync(['ls-tree', '-r', '--name-only', 'main'], origin);
+  return tree
+    .split('\n')
+    .map((line) => line.trim())
+    .includes(path);
+}
+
+/** The judge, owed on the one record the fixture repo carries. */
+const judgeOwed = () => ({
+  report: {
+    owed: true,
+    records: [ADR_FILE],
+    reason: 'the diff implements the doubling decision',
+  },
+});
+
+/** A write seat that rewrites the record and reports it. */
+const writeClean = () => ({
+  files: { [ADR_FILE]: ADR_REWRITTEN },
+  report: { rewritten: [ADR_FILE], unchanged: [], summary: 'the record states what shipped' },
+});
+
+/** The seats an owed round spawns: the judge, the writer, and the review. */
+function reconcileSeats(write = writeClean) {
+  return {
+    'reconcile-judge': judgeOwed,
+    'reconcile-write': write,
+    'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+  };
+}
+
+function reconcileFixture(t, { seats, config = {} } = {}) {
+  return shipFixture(t, {
+    files: { [ADR_FILE]: ADR_TEXT },
+    seats,
+    config,
+  });
+}
+
+test('an owed judgment writes the records onto the run branch and one request carries both', async (t) => {
+  const fx = reconcileFixture(t, { seats: reconcileSeats() });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+
+  // The judgment is in front of the request, not behind the merge.
+  const judged = events.find((e) => e.event === 'reconciliation-judged');
+  assert.equal(judged.ok, true);
+  assert.equal(judged.owed, true);
+  assert.deepEqual(judged.records, [ADR_FILE]);
+  assert.equal(judged.ticket, undefined);
+  assert.ok(judged.seq < events.find((e) => e.event === 'pr-opened').seq);
+
+  // The write seat's own record, and the commit that carries it.
+  const written = events.find((e) => e.event === 'reconciliation-written');
+  assert.equal(written.ok, true);
+  assert.deepEqual(written.rewritten, [ADR_FILE]);
+  const commit = events.find(
+    (e) => e.event === 'implementation-committed' && e.phase === 'reconcile',
+  );
+  assert.equal(commit.sha, written.sha);
+  assert.equal(commit.pass, 1);
+
+  // A cycle certified the record commit before the run took the token.
+  const render = [...events].reverse().find((e) => e.event === 'verdict-rendered');
+  assert.equal(render.sweep, 'reconcile');
+  assert.equal(render.sha, commit.sha);
+  assert.equal(render.verdict, 'green');
+  assert.ok(render.seq < events.find((e) => e.event === 'ship-token').seq);
+  // The review over the record diff is the generalist seat, not the panel.
+  const reviewed = fx.calls.filter((c) => c.seat === 'generalist-review');
+  assert.equal(reviewed.length, 1);
+  assert.ok(reviewed[0].prompt.includes(ADR_FILE));
+
+  // One request, one merge, and the merge says the records rode it.
+  assert.equal(events.filter((e) => e.event === 'pr-opened').length, 1);
+  const merged = events.filter((e) => e.event === 'merged');
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].reconciled, true);
+  assert.equal(gitSync(['show', `main:${ADR_FILE}`], fx.origin), ADR_REWRITTEN);
+
+  // Nothing is owed afterwards: no ticket, and no reconciliation to launch.
+  assert.ok(!existsSync(reconcileTicketPath(fx.paths, runId)));
+  assert.deepEqual(owedReconciliations(fx.paths, 'proj'), []);
+
+  // The round runs once. The stage is entered again after the cycle and both
+  // seats read the ledger and stop.
+  assert.equal(fx.calls.filter((c) => c.seat === 'reconcile-judge').length, 1);
+  assert.equal(fx.calls.filter((c) => c.seat === 'reconcile-write').length, 1);
+  assert.ok(events.filter((e) => e.event === 'stage-entered' && e.stage === 'update').length >= 2);
+});
+
+test('the reconciliation cycle carries a layer whose declared ground the records do not touch', async (t) => {
+  const fx = reconcileFixture(t, {
+    seats: reconcileSeats(),
+    config: {
+      gates: { tier1: [{ name: 'unit', command: 'suite', ground: ['src', 'tests'] }] },
     },
   });
   fx.forge.state.autoChecks = () => [running()];
@@ -646,26 +746,175 @@ test('an owed judgment writes the reconciliation ticket the sweep derives from',
   const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
   fx.forge.setChecks(opened.sha, [green()]);
   const events = await waitClosed(fx.paths, runId);
+  const render = [...events].reverse().find((e) => e.event === 'verdict-rendered');
+  assert.equal(render.sweep, 'reconcile');
+  assert.equal(render.verdict, 'green');
+  // The record diff reaches no declared ground of the one layer, so the cycle
+  // stands on the green the cycle before it earned. A carried result stamps
+  // nothing of its own, so this cycle executed no layer at all.
+  assert.deepEqual(
+    events.filter((e) => e.event === 'layer-result' && e.cycle === render.cycle),
+    [],
+  );
+  assert.ok(!events.some((e) => e.event === 'layer-started' && e.cycle === render.cycle));
+  assert.equal(events.find((e) => e.event === 'merged').reconciled, true);
+});
+
+test('a layer that declares no ground runs in the reconciliation cycle', async (t) => {
+  const fx = reconcileFixture(t, { seats: reconcileSeats() });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const render = [...events].reverse().find((e) => e.event === 'verdict-rendered');
+  assert.equal(render.sweep, 'reconcile');
+  // No declaration is no proof: the one layer of this fixture names no ground
+  // through either source, so the cycle runs it.
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'layer-result' && e.cycle === render.cycle)
+      .map((e) => [e.layer, e.status]),
+    [['unit', 'green']],
+  );
+});
+
+test('the write seat is corrected once, and the corrected write ships', async (t) => {
+  let attempt = 0;
+  const fx = reconcileFixture(t, {
+    seats: reconcileSeats(() => {
+      attempt += 1;
+      // The first report accounts for the judged record nowhere. The tree is
+      // right and the statement about it is not, which is what the corrective
+      // round is for.
+      if (attempt === 1) {
+        return {
+          files: { [ADR_FILE]: ADR_REWRITTEN },
+          report: { rewritten: [], unchanged: [], summary: 'said nothing about it' },
+        };
+      }
+      return writeClean();
+    }),
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const calls = fx.calls.filter((c) => c.seat === 'reconcile-write');
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].prompt, /accounts for it nowhere/);
+  assert.equal(events.find((e) => e.event === 'reconciliation-written').ok, true);
+  assert.equal(events.find((e) => e.event === 'merged').reconciled, true);
+  // One corrective round, and no park: the loop settled it.
+  assert.ok(!events.some((e) => e.event === 'park' && e.detail?.seat === 'reconcile-write'));
+});
+
+test('a write that cannot be made ships the certified sha and leaves the ticket', async (t) => {
+  const fx = reconcileFixture(t, {
+    seats: reconcileSeats(() => ({
+      files: { 'src/sneaky.mjs': 'export const x = 1;\n' },
+      report: { rewritten: [ADR_FILE], unchanged: [], summary: 'wrote the wrong thing twice' },
+    })),
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
-  const judged = events.find((e) => e.event === 'reconciliation-judged');
-  assert.equal(judged.ok, true);
-  assert.equal(judged.owed, true);
-  assert.deepEqual(judged.records, ['docs/adr/0001-doubling.md']);
-  assert.equal(judged.ticket, reconcileTicketPath(fx.paths, runId));
-  // Ticket before stamp: a stamped judgment always has a ticket to launch from.
-  const ticket = readFileSync(judged.ticket, 'utf8');
-  assert.match(ticket, /docs\/adr\/0001-doubling\.md/);
-  assert.match(ticket, /never\s+absorbed silently/);
-  // The frontier derives the owed reconciliation and its launch payload.
+
+  // The corrective round is spent and no person was asked: the ship goes out.
+  assert.equal(fx.calls.filter((c) => c.seat === 'reconcile-write').length, 2);
+  assert.ok(!events.some((e) => e.event === 'park' && e.detail?.seat === 'reconcile-write'));
+  const written = events.find((e) => e.event === 'reconciliation-written');
+  assert.equal(written.ok, false);
+  assert.equal(written.cause, 'work-product-defect');
+  // The boundary the checks hold: the seat wrote code, and the code is named.
+  const failure = events.find((e) => e.event === 'seat-failure' && e.seat === 'reconcile-write');
+  assert.match(failure.defects.join('\n'), /change outside the decision-record tree: src\/sneaky\.mjs/);
+
+  // The tree that shipped is the tree the verdict certified.
+  const certified = events.filter((e) => e.event === 'verdict-rendered').pop();
+  assert.equal(written.reset, certified.sha);
+  assert.equal(events.find((e) => e.event === 'pr-opened').sha, certified.sha);
+  assert.ok(!mainHolds(fx.origin, 'src/sneaky.mjs'));
+  assert.equal(gitSync(['show', `main:${ADR_FILE}`], fx.origin), ADR_TEXT);
+  assert.equal(events.find((e) => e.event === 'merged').reconciled, undefined);
+
+  // The reconciliation stays owed, and the sweep derives it exactly as before.
+  const ticketed = events.filter((e) => e.event === 'reconciliation-judged').pop();
+  assert.equal(ticketed.ticket, reconcileTicketPath(fx.paths, runId));
+  assert.equal(ticketed.cause, 'work-product-defect');
+  const ticket = readFileSync(ticketed.ticket, 'utf8');
+  assert.match(ticket, new RegExp(ADR_FILE.replaceAll('/', '\\/')));
+  assert.match(ticket, /merge commit: [0-9a-f]{7}/);
   const owed = owedReconciliations(fx.paths, 'proj');
   assert.equal(owed.length, 1);
-  assert.equal(owed[0].runId, runId);
   assert.deepEqual(reconciliationLaunch(owed[0]), {
     project: 'proj',
     lane: 'repair',
-    ticket: judged.ticket,
+    ticket: ticketed.ticket,
     reconcilesRunId: runId,
   });
+});
+
+test('a crashed write seat parks, and ship-without-records ships the certified sha', async (t) => {
+  const fx = reconcileFixture(t, { seats: reconcileSeats(() => ({ exitCode: 3 })) });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'seat-failure');
+  assert.equal(park.detail.seat, 'reconcile-write');
+  assert.deepEqual(park.answers.options, ['retry', 'ship-without-records', 'abandon']);
+  assert.deepEqual(park.answers.reasoned, ['ship-without-records']);
+  assert.match(park.question, /the close writes the ticket/);
+  // The park holds no ship token: nothing else of the project waits on it.
+  assert.ok(!readEvents(runLedgerPath(fx.paths, runId)).some((e) => e.event === 'ship-token'));
+  fx.daemon.engine.answer({
+    runId,
+    actor: 'operator',
+    option: 'ship-without-records',
+    answer: 'the record tree moved under the seat; the ticket covers it',
+  });
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.find((e) => e.event === 'reconciliation-written').cause, 'operator');
+  assert.equal(events.filter((e) => e.event === 'reconciliation-judged').pop().cause, 'operator');
+  assert.equal(owedReconciliations(fx.paths, 'proj').length, 1);
+});
+
+test('a ticket the close cannot write is loud, and the kind names it', async (t) => {
+  const fx = reconcileFixture(t, { seats: reconcileSeats(() => ({ exitCode: 3 })) });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'seat-failure');
+  assert.equal(park.detail.seat, 'reconcile-write');
+  // The ticket path is taken by something the close cannot write over.
+  mkdirSync(reconcileTicketPath(fx.paths, runId), { recursive: true });
+  fx.daemon.engine.answer({
+    runId,
+    actor: 'operator',
+    option: 'ship-without-records',
+    answer: 'the records are owed and the ticket is the route',
+  });
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  // The story still ships: the code was certified before any of this.
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // And the records the ship owes are a loud record with a countable word on
+  // it, not a silence.
+  const lost = events.find((e) => e.event === 'gate-integrity');
+  assert.equal(lost.kind, 'reconciliation-lost');
+  assert.deepEqual(lost.records, [ADR_FILE]);
+  assert.equal(lost.pr, opened.pr);
+  assert.ok(
+    openLoud(fx.paths).some((item) => item.event === 'gate-integrity' && item.seq === lost.seq),
+  );
+  // Nothing is owed to the sweep either: there is no ticket to launch from.
+  assert.deepEqual(owedReconciliations(fx.paths, 'proj'), []);
 });
 
 test('a not-owed judgment stamps its reason and derives nothing', async (t) => {
@@ -679,8 +928,11 @@ test('a not-owed judgment stamps its reason and derives nothing', async (t) => {
   assert.equal(judged.ok, true);
   assert.equal(judged.owed, false);
   assert.equal(judged.reason, 'no decision-record tree');
+  assert.ok(!events.some((e) => e.event === 'reconciliation-written'));
   assert.ok(!existsSync(reconcileTicketPath(fx.paths, runId)));
   assert.deepEqual(owedReconciliations(fx.paths, 'proj'), []);
+  // One verdict cycle: a not-owed judgment costs the run nothing but the seat.
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 1);
 });
 
 test('a failed judgment is a recorded miss; the story ships regardless', async (t) => {
@@ -696,6 +948,61 @@ test('a failed judgment is a recorded miss; the story ships regardless', async (
   assert.equal(judged.cause, 'seat-failure');
   assert.ok(!existsSync(reconcileTicketPath(fx.paths, runId)));
   assert.deepEqual(owedReconciliations(fx.paths, 'proj'), []);
+});
+
+test('the close writes no ticket for a judgment that is not this tree\'s', async (t) => {
+  // A fresh pass discards the tree every reconciliation stamp was about, so
+  // the round is owed again and the close reads the round the new tree ran.
+  const events = [
+    { seq: 1, event: 'reconciliation-judged', ok: true, owed: true, records: ['docs/adr/1.md'] },
+    { seq: 2, event: 'implementation-committed', phase: 'reconcile', sha: 'aaa' },
+    { seq: 3, event: 'fresh-pass', pass: 2 },
+    { seq: 4, event: 'reconciliation-judged', ok: true, owed: false, reason: 'nothing recorded' },
+  ];
+  assert.equal(reconcileCommit(events), null);
+  assert.equal(sinceFreshPass(events, (e) => e.event === 'reconciliation-judged').owed, false);
+  // Without the pass, both stamps stand.
+  const kept = events.filter((e) => e.event !== 'fresh-pass').slice(0, 2);
+  assert.equal(reconcileCommit(kept).sha, 'aaa');
+});
+
+test('the round derives its next step from the ledger at every anchor', () => {
+  const judged = { seq: 1, event: 'reconciliation-judged', ok: true, owed: true, records: ['a.md'] };
+  const commit = { seq: 3, event: 'implementation-committed', phase: 'reconcile', sha: 'aaa' };
+  const green = { seq: 4, event: 'verdict-rendered', verdict: 'green', sha: 'aaa' };
+  const written = { seq: 2, event: 'reconciliation-written', ok: true, sha: 'aaa' };
+
+  // 1. Nothing judged this tree.
+  assert.equal(reconcileStep([]), 'judge');
+  // 2. A judgment nobody could make, and a judgment that owes nothing.
+  assert.equal(reconcileStep([{ seq: 1, event: 'reconciliation-judged', ok: false }]), 'done');
+  assert.equal(
+    reconcileStep([{ seq: 1, event: 'reconciliation-judged', ok: true, owed: false }]),
+    'done',
+  );
+  // 3. Owed, and nothing has written the records.
+  assert.equal(reconcileStep([judged]), 'write');
+  // 4. The fallback is spent.
+  assert.equal(
+    reconcileStep([judged, { seq: 2, event: 'reconciliation-written', ok: false, cause: 'x' }]),
+    'done',
+  );
+  // 5. The seat wrote and committed, and no verdict covers the commit yet.
+  assert.equal(reconcileStep([judged, written, commit]), 'certify');
+  // 6. A verdict covers the commit.
+  assert.equal(reconcileStep([judged, written, commit, green]), 'done');
+  // A green at another sha is no proof about this commit.
+  assert.equal(
+    reconcileStep([judged, written, commit, { ...green, sha: 'bbb' }]),
+    'certify',
+  );
+  // 7. The seat read the records and found nothing to change.
+  assert.equal(
+    reconcileStep([judged, { seq: 2, event: 'reconciliation-written', ok: true, rewritten: [] }]),
+    'done',
+  );
+  // A fresh pass discards all of it, and the round is owed again.
+  assert.equal(reconcileStep([judged, written, commit, green, { seq: 5, event: 'fresh-pass' }]), 'judge');
 });
 
 // -- the close-out learning artifact (ADR-0031) ------------------------------
