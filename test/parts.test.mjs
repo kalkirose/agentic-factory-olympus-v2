@@ -18,6 +18,8 @@ import { runCommand } from '../src/lanes/exec.mjs';
 import {
   PARTS_ENV,
   PART_REASONS,
+  layerGround,
+  partGround,
   partPlan,
   partReasons,
   carriedParts,
@@ -153,6 +155,130 @@ test('provenance names the cycle that ran the part, not the cycle that carried i
     'apps/alpha/other.tsx',
   ]);
   assert.deepEqual(second.narrow.carry, [carried]);
+});
+
+// -- the two ground sources ---------------------------------------------------
+
+test('a layer ground is the union of both sources, and the floor is the config half', () => {
+  const layer = { name: 'gate', command: 'gate', ground: ['apps/alpha'] };
+  const record = { parts: [ALPHA, BETA] };
+  const both = layerGround(layer, record, ['package-lock.json']);
+  assert.deepEqual(both.entries, [
+    'apps/alpha',
+    'apps/beta',
+    'package-lock.json',
+    'tests/alpha',
+    'tests/beta',
+  ]);
+  // The floor leaves the parts' own claims out. A sibling's declaration is a
+  // statement about that sibling, and a part that says nothing may not stand
+  // on it.
+  assert.deepEqual(both.floor, ['apps/alpha', 'package-lock.json']);
+  assert.deepEqual(both.sources, { declared: true, config: true });
+});
+
+test('each shape of a layer ground answers for itself', () => {
+  const layer = { name: 'gate', command: 'gate', ground: ['apps/alpha'] };
+  const declaring = { parts: [BETA] };
+  // Config only: no part of the layer declared anything.
+  const config = layerGround(layer, { parts: [{ name: 'gamma', status: 'green' }] });
+  assert.deepEqual(config.entries, ['apps/alpha']);
+  assert.deepEqual(config.sources, { declared: false, config: true });
+  // Stream only: the project states nothing for the layer.
+  const stream = layerGround({ name: 'gate', command: 'gate' }, declaring);
+  assert.deepEqual(stream.entries, ['apps/beta', 'tests/beta']);
+  // No config ground, so no floor: a part of this layer that declared nothing
+  // stands on nothing.
+  assert.deepEqual(stream.floor, []);
+  assert.deepEqual(stream.sources, { declared: true, config: false });
+  // Neither: nothing is known about this layer at all.
+  const neither = layerGround(undefined, { parts: [] });
+  assert.deepEqual(neither.entries, []);
+  assert.deepEqual(neither.sources, { declared: false, config: false });
+  // An entry that canonicalises to nothing is no declaration at all, and it
+  // drops out beside one that is.
+  const dropped = layerGround({ name: 'gate', ground: ['.', './', '/abs', 'a/../b', 'apps/x/'] }, {
+    parts: [],
+  });
+  assert.deepEqual(dropped.entries, ['apps/x']);
+  assert.equal(dropped.sources.config, true);
+  const nothing = layerGround({ name: 'gate', ground: ['.'] }, { parts: [] });
+  assert.deepEqual(nothing.entries, []);
+  assert.equal(nothing.sources.config, false, 'an entry matching nothing declared nothing');
+  // The breadth list joins every layer's ground, so a project states it once.
+  const breadth = layerGround(layer, declaring, ['package-lock.json', './db/migrations/']);
+  assert.ok(breadth.entries.includes('package-lock.json'));
+  assert.ok(breadth.floor.includes('db/migrations'));
+});
+
+test('a part keeps its own inputs and takes the floor only where it stated none', () => {
+  const ground = layerGround({ name: 'gate', ground: ['apps/alpha'] }, { parts: [BETA] });
+  assert.deepEqual(partGround(BETA, ground), ['apps/beta', 'tests/beta']);
+  assert.deepEqual(partGround({ name: 'gamma' }, ground), ['apps/alpha']);
+  assert.deepEqual(partGround({ name: 'gamma', inputs: ['.'] }, ground), ['apps/alpha']);
+  assert.deepEqual(partGround({ name: 'gamma' }, layerGround(undefined, { parts: [] })), []);
+});
+
+test('the config ground answers for a part whose command declared none', () => {
+  // The carry half of the two sources. A part that stated nothing takes the
+  // layer's floor, and the record says which source answered, so the fallback
+  // is countable.
+  const layer = { name: 'gate', command: 'gate', ground: ['apps/alpha'] };
+  const bare = { name: 'gamma', status: 'green' };
+  const reached = partReasons(prior(1, [bare]), ['apps/alpha/mail.tsx'], { layer });
+  assert.deepEqual(asObject(reached.reasons), { gamma: 'touched' });
+  assert.equal(reached.groundFrom.get('gamma'), 'config');
+  // The diff reaches a sibling's ground and not the floor, so the bare part
+  // carries. The stamp stands either way: it names where the ground came from,
+  // never whether the part ran, and the reading it feeds is about the carries.
+  const missed = partPlan(prior(1, [bare, BETA]), ['apps/beta/api.ts'], { layer });
+  assert.deepEqual(asObject(missed.reasons), { beta: 'touched' });
+  assert.deepEqual(missed.narrow.carry.map((part) => part.name), ['gamma']);
+  assert.equal(missed.groundFrom.get('gamma'), 'config');
+  assert.deepEqual(withPartReasons(missed.narrow.carry, missed.reasons, missed.groundFrom), [
+    { name: 'gamma', status: 'green', carriedFrom: 1, groundFrom: 'config' },
+  ]);
+  // A part no source describes keeps `undeclared`.
+  const groundless = partReasons(prior(1, [bare]), ['apps/alpha/mail.tsx']);
+  assert.deepEqual(asObject(groundless.reasons), { gamma: 'undeclared' });
+  assert.equal(groundless.groundFrom.get('gamma'), undefined);
+});
+
+test('the record stamps the source that answered for a part', () => {
+  const layer = { name: 'gate', command: 'gate', ground: ['apps/alpha'] };
+  const plan = partPlan(prior(1, [{ name: 'gamma', status: 'green' }]), ['apps/alpha/x'], {
+    layer,
+  });
+  assert.deepEqual(
+    withPartReasons([{ name: 'gamma', status: 'green' }], plan.reasons, plan.groundFrom),
+    [{ name: 'gamma', status: 'green', reason: 'touched', groundFrom: 'config' }],
+  );
+  // A part that spoke for itself carries no stamp: the config answered nothing
+  // for it.
+  const spoke = partPlan(prior(1, [ALPHA]), ['apps/alpha/x'], { layer });
+  assert.deepEqual(withPartReasons([ALPHA], spoke.reasons, spoke.groundFrom), [
+    { ...ALPHA, reason: 'touched' },
+  ]);
+});
+
+test('the breadth list widens a floor and is never a floor of its own', () => {
+  const bare = prior(1, [{ name: 'gamma', status: 'green' }]);
+  const layer = { name: 'gate', command: 'gate', ground: ['apps/alpha'] };
+  // With a config ground under it, the breadth list is part of the floor, so a
+  // lockfile change reads `touched` rather than `blind`: `blind` names a hole
+  // in the mapping, and a lockfile the project declared shared ground is not
+  // one.
+  const widened = partReasons(bare, ['package-lock.json'], {
+    layer,
+    breadth: ['package-lock.json'],
+  });
+  assert.deepEqual(asObject(widened.reasons), { gamma: 'touched' });
+  assert.equal(widened.groundFrom.get('gamma'), 'config');
+  // With no config ground under it, the breadth list describes no layer, so the
+  // part stands on nothing and everything reaches it.
+  const alone = partReasons(bare, ['package-lock.json'], { breadth: ['package-lock.json'] });
+  assert.deepEqual(asObject(alone.reasons), { gamma: 'undeclared' });
+  assert.equal(alone.groundFrom.get('gamma'), undefined);
 });
 
 // -- the reasons -------------------------------------------------------------

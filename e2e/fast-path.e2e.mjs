@@ -143,6 +143,14 @@ const CONFIG = {
   ...PROJECT_CONFIG,
   gates: {
     ...PROJECT_CONFIG.gates,
+    // Every Tier-1 layer states what its command reads. The launch requires it
+    // while the flag is on, because a layer whose ground nothing declares
+    // refuses every ship of the project and says so in one word of a ledger
+    // (ADR-0056).
+    tier1: PROJECT_CONFIG.gates.tier1.map((layer) => ({
+      ...layer,
+      ground: layer.name === 'suite' ? ['src', 'tests'] : ['src'],
+    })),
     fastPathShip: true,
     breadthGround: ['package-lock.json', 'db/migrations'],
     // The ground this project states no suite of it can reach. A change the

@@ -237,9 +237,11 @@ export const RUN_EVENTS = new Set([
   // the attempt the flake filter replaced, or the pass a confirmation sweep is
   // confirming — and `confirmation` where the sweep itself ran it. A table
   // holding either of the last two holds no `carriedFrom`: every part of it
-  // ran at this sha. `narrowedTo` (parts, files) rides the flake filter's
-  // re-run alone and says what that attempt was asked for, so a re-run that
-  // answered a failure never reads as a re-run of the layer.
+  // ran at this sha. A part whose own command declared no inputs carries
+  // `groundFrom` where the project config answered for it, which is what makes
+  // that fallback countable (ADR-0056). `narrowedTo` (parts, files) rides the
+  // flake filter's re-run alone and says what that attempt was asked for, so a
+  // re-run that answered a failure never reads as a re-run of the layer.
   'layer-result',
   // The attempt that ended without a verdict about the tree: the red the flake
   // filter's re-run replaced, a command that could not run, a child a signal

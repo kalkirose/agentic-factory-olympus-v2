@@ -808,6 +808,7 @@ function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, target = 
       keep,
       carry,
       reasons: target?.reasons,
+      groundFrom: target?.groundFrom,
     });
     return {
       event: 'layer-result',
@@ -830,7 +831,12 @@ function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, target = 
     };
   }
   const ran = recordedParts(outcome.parts, { green: false });
-  const parts = partTable(ran, { keep, carry, reasons: target?.reasons });
+  const parts = partTable(ran, {
+    keep,
+    carry,
+    reasons: target?.reasons,
+    groundFrom: target?.groundFrom,
+  });
   return {
     event: 'layer-result',
     status: 'red',
@@ -868,9 +874,13 @@ function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, target = 
  *
  * A layer with nothing kept takes the table it always took, unmarked.
  */
-function partTable(stated, { keep = null, carry = [], reasons }) {
+function partTable(stated, { keep = null, carry = [], reasons, groundFrom }) {
   const own = keep ? stated.map((part) => ({ ...part, ...keep.mark })) : stated;
-  return withPartReasons(mergeParts(mergeParts(own, keep?.parts ?? []), carry), reasons);
+  return withPartReasons(
+    mergeParts(mergeParts(own, keep?.parts ?? []), carry),
+    reasons,
+    groundFrom,
+  );
 }
 
 /**

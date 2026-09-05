@@ -2326,7 +2326,7 @@ test('a service down past the wait parks, and the ship may go without the proof'
   assert.deepEqual(render.deferred[0].parts, ['api']);
   // The fast path will not carry a certification that defers a proof.
   assert.equal(
-    declaredGround([{ name: 'ext' }], new Map(), render.deferred).refusal,
+    declaredGround([{ name: 'ext' }], new Map(), { deferred: render.deferred }).refusal,
     'deferred-proof',
   );
 });

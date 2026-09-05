@@ -17,10 +17,10 @@ import {
   declaredGround,
   fastPathFacts,
   fastPathVerdict,
-  groundEntry,
   groundVerdict,
   parseRawDiff,
 } from '../src/lanes/fastpath.mjs';
+import { groundEntry } from '../src/config/project.mjs';
 
 // One raw-diff record, in the shape `git diff --raw -z` writes it.
 const raw = (path, { srcMode = '100644', dstMode = '100644', status = 'M' } = {}) =>
@@ -148,19 +148,53 @@ test('the declared ground is every input of every suite of every layer', () => {
 });
 
 test('a layer with no standing green declares nothing the path can use', () => {
+  // Its own word, because the repair is not the repair a groundless layer
+  // needs: this one is a layer with no green result to carry at all, and a
+  // count that mixed the two would be a count of nothing (ADR-0008).
   const ground = declaredGround([layer('unit')], new Map());
   assert.equal(ground.taken, false);
-  assert.equal(ground.refusal, 'undeclared-suite');
+  assert.equal(ground.refusal, 'no-standing-green');
   assert.match(ground.detail, /no green result stands for layer unit/);
 });
 
-test('a layer that reported no suite of its own refuses', () => {
+test('a layer whose ground neither source declares refuses', () => {
   const ground = declaredGround([layer('unit')], new Map([['unit', result([])]]));
   assert.equal(ground.refusal, 'undeclared-suite');
-  assert.match(ground.detail, /reported no suite/);
+  assert.match(ground.detail, /no source declares the ground of layer unit/);
+});
+
+test('a layer the config alone describes declares a ground the path can use', () => {
+  // The command printed no part of its own. The project states what it reads,
+  // and that is the whole of this layer's ground.
+  const ground = declaredGround(
+    [{ name: 'deps', command: 'deps', ground: ['scripts/check-deps.mjs', './manifest.json'] }],
+    new Map([['deps', result([])]]),
+  );
+  assert.equal(ground.ok, true);
+  assert.deepEqual(ground.entries, ['manifest.json', 'scripts/check-deps.mjs']);
+  assert.deepEqual(ground.suites, []);
+  assert.deepEqual(ground.counts, { declared: 0, config: 1 });
+  assert.deepEqual(ground.selfDeclaring, []);
+  assert.deepEqual(ground.ground, ['deps manifest.json', 'deps scripts/check-deps.mjs']);
+});
+
+test('the breadth list joins every layer ground the path reads', () => {
+  const ground = declaredGround([layer('unit')], new Map([['unit', result([part('api', ['src/api'])])]]), {
+    breadth: ['package-lock.json'],
+  });
+  assert.deepEqual(ground.entries, ['package-lock.json', 'src/api']);
+});
+
+test('a certified verdict naming no Tier-1 layer carries nothing', () => {
+  const ground = declaredGround([], new Map());
+  assert.equal(ground.refusal, 'undeclared-suite');
+  assert.match(ground.detail, /names no Tier-1 layer/);
 });
 
 test('one suite without a declaration refuses for the whole verdict', () => {
+  // A sibling part's declaration is a statement about that sibling. The floor
+  // a silent part stands on is the config list and the breadth list, and this
+  // layer has neither.
   const ground = declaredGround(
     [layer('unit')],
     new Map([['unit', result([part('api', ['src/api']), part('core')])]]),
@@ -169,9 +203,25 @@ test('one suite without a declaration refuses for the whole verdict', () => {
   assert.match(ground.detail, /unit\/core declared no inputs/);
 });
 
+test('a config ground answers for a part that declared none', () => {
+  // The one shape on the reference project that this repairs: a layer that
+  // declares six parts of which two are prerequisites and state nothing.
+  const ground = declaredGround(
+    [{ name: 'unit', command: 'unit', ground: ['src'] }],
+    new Map([['unit', result([part('api', ['src/api']), part('core')])]]),
+  );
+  assert.equal(ground.ok, true);
+  assert.deepEqual(ground.entries, ['src', 'src/api']);
+  assert.deepEqual(ground.suites, ['unit/api', 'unit/core']);
+  assert.deepEqual(ground.counts, { declared: 1, config: 1 });
+});
+
 test('a red layer standing behind the certification refuses', () => {
   const red = { event: 'layer-result', status: 'red', parts: [part('api', ['src/api'])] };
-  assert.equal(declaredGround([layer('unit')], new Map([['unit', red]])).refusal, 'undeclared-suite');
+  assert.equal(
+    declaredGround([layer('unit')], new Map([['unit', red]])).refusal,
+    'no-standing-green',
+  );
 });
 
 test('an input entry that can match no path is no declaration at all', () => {
@@ -626,7 +676,11 @@ test('a disjoint merge over declared ground carries its certification', () => {
   assert.deepEqual(out.certification, CERTIFICATION);
   assert.equal(out.declaration.sha, CERTIFICATION.sha);
   assert.deepEqual(out.declaration.suites, ['unit/api']);
-  assert.equal(out.declaration.entries, 1);
+  // The declared ground of a layer is the union of what the config states,
+  // what its parts stated, and the shared breadth list, so the count covers
+  // the two breadth entries beside the one input the part named.
+  assert.equal(out.declaration.entries, 3);
+  assert.deepEqual(out.declaration.ground, { declared: 1, config: 0 });
   assert.match(out.declaration.digest, /^[0-9a-f]{12}$/);
 });
 
@@ -693,12 +747,163 @@ test('every refusal the module can return is in the closed set', () => {
     'lens-ground',
     'no-breadth-ground',
     'no-certification',
+    'no-standing-green',
     'no-suite-ground',
     'self-declared-ground',
     'unclaimed-ground',
     'unclassifiable-change',
     'undeclared-suite',
   ]);
+});
+
+// -- a spectrum of forty layers, most of them silent --------------------------
+//
+// The shape a real project has: a few layers whose runner prints the part
+// protocol, and many more that are single-purpose gate scripts running one
+// check and exiting. The silent ones declare nothing about themselves, so
+// before the config ground the first of them refused every ship of that
+// project, for ever, and the only sign of it was one word in a ledger.
+
+/** The runner the self-declaring layers share, and the helper it prints from. */
+const SUITE_TREE = {
+  'scripts/run-suite.mjs': "import { families } from './lib/inputs.mjs';\nconsole.log(families);\n",
+  'scripts/lib/inputs.mjs': 'export const families = [];\n',
+};
+
+/**
+ * Forty Tier-1 layers, each with a config ground, and a standing green for
+ * each. Thirty-two run a bare command and print no part of their own. Eight
+ * run the shared runner and declare their parts, and the last of those holds
+ * two prerequisite steps that declare no inputs at all.
+ */
+function spectrumOfForty() {
+  const layers = [];
+  const prior = new Map();
+  const commands = {};
+  for (let i = 1; i <= 40; i++) {
+    const name = `gate-${String(i).padStart(2, '0')}`;
+    const declares = i > 32;
+    layers.push({ name, command: name, ground: [`src/mod-${String(i).padStart(2, '0')}`] });
+    commands[name] = declares
+      ? ['node', 'scripts/run-suite.mjs', name]
+      : ['pnpm', `check:${name}`];
+    const parts = !declares
+      ? []
+      : i === 40
+        ? [
+            // The two prerequisites: they are not suites, so the runner states
+            // no family for them and they print no inputs.
+            part('path-budget'),
+            part('compile'),
+            part('suite-a', [`src/mod-${i}/a`]),
+            part('suite-b', [`src/mod-${i}/b`]),
+            part('suite-c', [`src/mod-${i}/c`]),
+            part('suite-d', [`src/mod-${i}/d`]),
+          ]
+        : [part(`suite-${i}`, [`src/mod-${i}`])];
+    prior.set(name, result(parts));
+  }
+  return { layers, prior, commands };
+}
+
+/** Eleven planning cards, which is ground the project declares inert. */
+const ELEVEN_CARDS = Array.from({ length: 11 }, (_, i) => `.olympus/cards/story-${i + 1}.md`);
+
+function fortyLayerInputs(overrides = {}) {
+  const { layers, prior, commands } = spectrumOfForty();
+  return {
+    certification: CERTIFICATION,
+    layers,
+    prior,
+    commands,
+    readSource: sourceTree(SUITE_TREE),
+    testPaths: ['tests'],
+    breadth: ['package-lock.json', 'db/migrations'],
+    inert: ['.olympus/cards', '.olympus/constitution.md'],
+    lensFindings: [],
+    storyDiffBefore: 'diff --git a/src/mod-05/f.mjs b/src/mod-05/f.mjs\n',
+    storyDiffAfter: 'diff --git a/src/mod-05/f.mjs b/src/mod-05/f.mjs\n',
+    mainChanged: { files: [...ELEVEN_CARDS], unclassifiable: [] },
+    storyChanged: ['src/mod-05/f.mjs'],
+    ...overrides,
+  };
+}
+
+test('a spectrum whose silent layers carry a config ground ships over inert ground', () => {
+  // The refusal this repairs, replayed from facts. Every layer is green, the
+  // story's patch is unchanged, and the default branch gained eleven planning
+  // cards, which the project declares inert. Before the config ground, the
+  // first silent layer refused the whole check on a fact about itself that had
+  // nothing to do with the merge.
+  const out = fastPathVerdict(fortyLayerInputs());
+  assert.equal(out.taken, true, out.detail);
+  // Eight layers answered for themselves and forty were answered for by the
+  // config. A reading that moves to seven declared says a runner stopped
+  // printing its markers, and nothing else in the record says so.
+  assert.deepEqual(out.declaration.ground, { declared: 8, config: 40 });
+  // Seven single-part layers and the six steps of the last one, two of which
+  // declared no inputs and stand on that layer's config ground.
+  assert.equal(out.declaration.suites.length, 13);
+  assert.ok(out.declaration.suites.includes('gate-40/path-budget'));
+  assert.deepEqual(out.certification, CERTIFICATION);
+});
+
+test('the same spectrum refuses when the branch moves real source', () => {
+  // The proof the mechanism still refuses when it should. One card of the
+  // eleven becomes a source file under a layer's ground, and the detail names
+  // the file.
+  const files = [...ELEVEN_CARDS.slice(0, 10), 'src/mod-05/api.mjs'];
+  const out = fastPathVerdict(fortyLayerInputs({ mainChanged: { files, unclassifiable: [] } }));
+  assert.equal(out.taken, false);
+  assert.equal(out.refusal, 'ground-intersects');
+  assert.match(out.detail, /src\/mod-05\/api\.mjs/);
+});
+
+test('the same spectrum refuses when the branch moves the config the run pinned', () => {
+  // The config now carries the ground of forty layers. A run judges against the
+  // blob it pinned at its launch, so a branch that has widened a layer's ground
+  // since decided nothing this run may stand on.
+  const files = [...ELEVEN_CARDS.slice(0, 10), '.olympus/project.json'];
+  const out = fastPathVerdict(fortyLayerInputs({ mainChanged: { files, unclassifiable: [] } }));
+  assert.equal(out.taken, false);
+  assert.equal(out.refusal, 'ground-intersects');
+  assert.match(out.detail, /\.olympus\/project\.json is the project config the run pinned/);
+  // A project that pins its config elsewhere is judged against the file it
+  // pinned, and the default path claims nothing for it.
+  const moved = fastPathVerdict(
+    fortyLayerInputs({
+      configPath: 'ops/olympus.json',
+      mainChanged: { files, unclassifiable: [] },
+    }),
+  );
+  assert.equal(moved.refusal, 'unclaimed-ground');
+});
+
+test('the declaration walk covers the self-reporting layers and no others', () => {
+  // A layer whose ground is config-only is produced in no tree, so a story
+  // cannot narrow it and there is nothing to bound. Thirty-two of the forty
+  // run `pnpm check:<name>`, which names no file of this repository, and the
+  // check takes the fast path anyway.
+  assert.equal(fastPathVerdict(fortyLayerInputs()).taken, true);
+  // A layer that DOES declare its parts is walked, and a command of the same
+  // shape refuses there.
+  const { layers, prior, commands } = spectrumOfForty();
+  commands['gate-33'] = ['pnpm', 'check:gate-33'];
+  const out = fastPathVerdict(fortyLayerInputs({ layers, prior, commands }));
+  assert.equal(out.taken, false);
+  assert.equal(out.refusal, 'self-declared-ground');
+  assert.match(out.detail, /gate-33 runs a command that names no file/);
+});
+
+test('a spectrum no command declares at all still bounds nothing and still ships', () => {
+  // Every layer config-ground only: no marker of the run's tree decides this
+  // skip, so the declaration surface is empty and refuses nothing.
+  const { layers, commands } = spectrumOfForty();
+  const prior = new Map(layers.map((l) => [l.name, result([])]));
+  const out = fastPathVerdict(fortyLayerInputs({ layers, prior, commands }));
+  assert.equal(out.taken, true, out.detail);
+  assert.deepEqual(out.declaration.ground, { declared: 0, config: 40 });
+  assert.deepEqual(out.declaration.suites, []);
 });
 
 // -- the git reads ------------------------------------------------------------
@@ -756,6 +961,7 @@ test('the digest moves when a declaration moves and at no other time', () => {
     breadth: ['package-lock.json'],
     inert: ['docs'],
     sources: ['.olympus/gates'],
+    ground: ['unit src/api'],
   };
   assert.equal(declarationDigest(base), declarationDigest({ ...base }));
   // The order the sets arrive in is not a version.
@@ -769,4 +975,14 @@ test('the digest moves when a declaration moves and at no other time', () => {
   assert.notEqual(declarationDigest({ ...base, suites: ['unit/core'] }), declarationDigest(base));
   assert.notEqual(declarationDigest({ ...base, inert: ['docs', 'ops'] }), declarationDigest(base));
   assert.notEqual(declarationDigest({ ...base, sources: ['tools'] }), declarationDigest(base));
+  // The config ground is a claim like any other, so the version moves when one
+  // entry of one layer's list moves.
+  assert.notEqual(declarationDigest({ ...base, ground: ['unit src/core'] }), declarationDigest(base));
+  assert.notEqual(
+    declarationDigest({ ...base, ground: ['unit src/api', 'lint src/api'] }),
+    declarationDigest(base),
+  );
+  // And a layer's name is part of the line: the same entry under another layer
+  // is another claim.
+  assert.notEqual(declarationDigest({ ...base, ground: ['lint src/api'] }), declarationDigest(base));
 });

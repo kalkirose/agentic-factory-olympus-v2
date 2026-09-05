@@ -36,6 +36,9 @@ function line(seq, ts, event, extra = {}) {
   return { seq, ts, event, actor: 'daemon', ...extra };
 }
 
+/** The rounding every fraction in the metrics takes. */
+const round3 = (value) => Math.round(value * 1000) / 1000;
+
 // A story-lane run ledger with a freeze after `waves` initial waves.
 function freezeRun(paths, runId, project, ts, { kills, waves = 3 }) {
   const lines = [line(1, ts, 'run-launched', { project, lane: 'story' })];
@@ -119,19 +122,25 @@ test('the fast path cannot be turned on without the counter that measures it', (
     armedTripwires(off).map((e) => e.metric),
     ['gate-acks-window', 'run-reconfigures-window'],
   );
+  // Two counters ride the flag, and they measure the two halves of one trade:
+  // what it costs, and what it buys. A cut with only the cost measured cannot
+  // be judged, because a cost of nought over a check that never fires reads
+  // exactly like a cut that works.
   const on = { gates: { tier1: [], fastPathShip: true }, tripwires: [] };
   const armed = armedTripwires(on);
   assert.deepEqual(
     armed.map((e) => e.metric),
-    ['fast-path-escapes', 'gate-acks-window', 'run-reconfigures-window'],
+    ['fast-path-escapes', 'fast-path-takes', 'gate-acks-window', 'run-reconfigures-window'],
   );
   assert.match(armed[0].answer, /gates\.fastPathShip to false/);
+  assert.match(armed[1].answer, /refusal histogram/);
   // A project that wrote its own band keeps it: the arming fills a gap, it
   // never overrides a decision somebody made.
   const own = {
     gates: { tier1: [], fastPathShip: true },
     tripwires: [
       { id: 'mine', metric: 'fast-path-escapes', window: 20, breach: { op: '>', value: 4 }, answer: 'x' },
+      { id: 'takes', metric: 'fast-path-takes', window: 20, breach: { op: '<', value: 0.1 }, answer: 'w' },
       { id: 'acks', metric: 'gate-acks-window', window: 5, breach: { op: '>', value: 0 }, answer: 'y' },
       { id: 'pins', metric: 'run-reconfigures-window', window: 5, breach: { op: '>', value: 0 }, answer: 'z' },
     ],
@@ -144,7 +153,7 @@ test('the fast path cannot be turned on without the counter that measures it', (
   };
   assert.deepEqual(
     armedTripwires(mixed).map((e) => e.id),
-    ['k', 'fast-path-escapes', 'gate-acks', 'run-reconfigures'],
+    ['k', 'fast-path-escapes', 'fast-path-takes', 'gate-acks', 'run-reconfigures'],
   );
 });
 
@@ -196,6 +205,95 @@ test('escapes-window counts escapes after the oldest ship of the project', async
   assert.deepEqual(result.detail, { ships: 1, counted: 5 });
   const empty = await evaluateMetric('escapes-window', { paths, project: 'r', window: 10 });
   assert.equal(empty.eligible, false);
+});
+
+// A shipped run of one project that met `decisions` moved bases, each stated as
+// a fast-path record: `true` for a take, a refusal word for a refusal.
+function fastPathRun(paths, runId, project, ts, decisions) {
+  const lines = [line(1, ts, 'run-launched', { project, lane: 'story' })];
+  decisions.forEach((decision, i) => {
+    lines.push(
+      line(2 + i, ts, 'fast-path-ship', {
+        pass: 1,
+        mainSha: 'm'.repeat(7),
+        fromSha: 'f'.repeat(7),
+        toSha: 't'.repeat(7),
+        ...(decision === true ? { taken: true } : { taken: false, refusal: decision }),
+      }),
+    );
+  });
+  lines.push(line(2 + decisions.length, ts, 'merged', { sha: 'a'.repeat(7) }));
+  writeLedger(runLedgerPath(paths, runId), lines);
+}
+
+test('fast-path-takes is the share of moved bases the check carried', async (t) => {
+  const paths = home(t);
+  // The three moved bases of one measured day: one take over inert ground, and
+  // two refusals where the branch had gained source the story also touched.
+  fastPathRun(paths, 's1', 'p', '2026-09-01T00:00:00Z', ['diff-changed']);
+  fastPathRun(paths, 's2', 'p', '2026-09-02T00:00:00Z', ['diff-changed', true]);
+  // A shipped run whose base never moved asks the check nothing and counts in
+  // no part of the reading.
+  writeLedger(runLedgerPath(paths, 's3'), [
+    line(1, '2026-09-03T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-09-03T01:00:00Z', 'merged', { sha: 'b'.repeat(7) }),
+  ]);
+  // Another project's ships never reach this reading.
+  fastPathRun(paths, 'q1', 'q', '2026-09-02T00:00:00Z', [true, true]);
+  const result = await evaluateMetric('fast-path-takes', { paths, project: 'p', window: 10 });
+  assert.equal(result.value, round3(1 / 3));
+  assert.equal(result.eligible, false, 'two runs met a moved base, and the floor is three');
+  assert.deepEqual(result.detail, {
+    ships: 3,
+    runs: 2,
+    records: 3,
+    taken: 1,
+    // The histogram is the answer's own evidence: each word names a different
+    // repair, so a reader of a breach needs the counts and not the rate.
+    refusals: { 'diff-changed': 2 },
+  });
+});
+
+test('fast-path-takes is no reading until three runs of the window met a moved base', async (t) => {
+  const paths = home(t);
+  // Two runs with a moved base is an ordinary busy branch. Three that all
+  // refused is the shape of a check that cannot fire, and that is the reading
+  // the band exists to catch.
+  fastPathRun(paths, 's1', 'p', '2026-09-01T00:00:00Z', ['undeclared-suite']);
+  fastPathRun(paths, 's2', 'p', '2026-09-02T00:00:00Z', ['undeclared-suite']);
+  const two = await evaluateMetric('fast-path-takes', { paths, project: 'p', window: 10 });
+  assert.equal(two.value, 0);
+  assert.equal(two.eligible, false);
+  fastPathRun(paths, 's3', 'p', '2026-09-03T00:00:00Z', ['undeclared-suite']);
+  const three = await evaluateMetric('fast-path-takes', { paths, project: 'p', window: 10 });
+  assert.equal(three.value, 0);
+  assert.equal(three.eligible, true);
+  assert.deepEqual(three.detail.refusals, { 'undeclared-suite': 3 });
+  // The standing band fires on exactly that reading.
+  const band = standingTripwires().find((entry) => entry.metric === 'fast-path-takes');
+  assert.deepEqual(band.breach, { op: '<=', value: 0 });
+  // A window with no ship at all is no reading either.
+  const none = await evaluateMetric('fast-path-takes', { paths, project: 'r', window: 10 });
+  assert.equal(none.value, null);
+  assert.equal(none.eligible, false);
+});
+
+test('fast-path-takes reads the last window of ships and no older one', async (t) => {
+  const paths = home(t);
+  // The oldest three runs all refused; the newest three all carried. A window
+  // of three reads the newest three alone.
+  fastPathRun(paths, 's1', 'p', '2026-09-01T00:00:00Z', ['ground-intersects']);
+  fastPathRun(paths, 's2', 'p', '2026-09-02T00:00:00Z', ['ground-intersects']);
+  fastPathRun(paths, 's3', 'p', '2026-09-03T00:00:00Z', ['ground-intersects']);
+  fastPathRun(paths, 's4', 'p', '2026-09-04T00:00:00Z', [true]);
+  fastPathRun(paths, 's5', 'p', '2026-09-05T00:00:00Z', [true]);
+  fastPathRun(paths, 's6', 'p', '2026-09-06T00:00:00Z', [true]);
+  const recent = await evaluateMetric('fast-path-takes', { paths, project: 'p', window: 3 });
+  assert.equal(recent.value, 1);
+  assert.equal(recent.eligible, true);
+  assert.deepEqual(recent.detail, { ships: 3, runs: 3, records: 3, taken: 3, refusals: {} });
+  const all = await evaluateMetric('fast-path-takes', { paths, project: 'p', window: 10 });
+  assert.equal(all.value, 0.5);
 });
 
 test('escapes-window named a kind answers that count, not the quality-bar rate', async (t) => {

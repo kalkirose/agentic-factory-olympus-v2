@@ -589,3 +589,28 @@ never carries a project's specifics.
   the map is the surface. ADR-0072 records the decision; ADR-0038 states the six
   readers of the dimension list and ADR-0006 states the suite report contract
   and the two-section survivor evidence.
+- 2026-09-05 — every Tier-1 layer has a declared ground. A layer states what it
+  reads through its own command's part markers, through `ground` on its
+  `gates.tier1` entry, or through both, and `layerGround()` in
+  `src/lanes/parts.mjs` is the one derivation the ship path and the part carry
+  both call. `entries` is the union of the config list, the parts' own
+  declarations and `gates.breadthGround`; `floor` is the config list widened by
+  the breadth list, and it is what a part that declared no inputs stands on. A
+  sibling part's declaration is in no floor, because it speaks for that sibling
+  alone. The stream still wins wherever it spoke. With `gates.fastPathShip` on,
+  the launch refuses a layer that carries no `ground`, by name, and refuses an
+  entry of that list that can match no path; a project that has not set the flag
+  is validated exactly as before. Behind that, the ship path's declaration walk
+  narrows to the layers whose own command declared a ground, because a config
+  ground is produced in no tree and no story can narrow it; the project config
+  the run pinned joins the ground question as a sixth set, so a default branch
+  that moved the file carrying forty layers' claims refuses; and
+  `undeclared-suite` splits, with `no-standing-green` taking the layer that
+  holds no green to carry. A record gains `groundFrom` on a part the config
+  answered for, `declaration.ground` with the layer counts per source, and one
+  `ground <layer> <entry>` digest line per config entry. `fast-path-takes`
+  joins `TRIPWIRE_METRICS`, armed beside `fast-path-escapes` on any project that
+  sets the flag, and reads the share of the window's fast-path records that
+  carried, eligible only past three runs with a moved base. `groundEntry()`
+  moves to `src/config/project.mjs`, beside the path vocabulary it belongs to.
+  ADR-0056 and ADR-0046 are rewritten around the two sources.

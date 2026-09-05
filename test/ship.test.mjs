@@ -2436,7 +2436,9 @@ function fastPathFixture(t, { gates = {}, files = {}, ...rest } = {}) {
     config: {
       commands: { suite: ['node', '.olympus/suite.mjs'] },
       gates: {
-        tier1: [{ name: 'unit', command: 'suite' }],
+        // The layer states what its command reads. The launch requires a ground
+        // on every Tier-1 layer while the flag is on (ADR-0056).
+        tier1: [{ name: 'unit', command: 'suite', ground: ['src'] }],
         fastPathShip: true,
         breadthGround: ['package-lock.json'],
         // The ground this project states no suite of it can reach. Without a
@@ -2662,15 +2664,18 @@ test('a merge onto the shared breadth list takes the full re-verdict', async (t)
   assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 2);
 });
 
-test('one suite without a declaration takes the full re-verdict', async (t) => {
+test('a layer that prints no part markers ships on the ground its config states', async (t) => {
   // The stock suite command prints no part markers, so the certified verdict
-  // says nothing about what its layer depends on.
+  // holds nothing that layer said about itself. Before the config ground that
+  // refused every ship of this project, for ever, and the only sign of it was
+  // one word in a ledger. The project states what the command reads instead.
   const fx = shipFixture(t, {
     config: {
       gates: {
-        tier1: [{ name: 'unit', command: 'suite' }],
+        tier1: [{ name: 'unit', command: 'suite', ground: ['src', 'tests'] }],
         fastPathShip: true,
         breadthGround: ['package-lock.json'],
+        inertGround: ['docs'],
       },
     },
   });
@@ -2680,8 +2685,37 @@ test('one suite without a declaration takes the full re-verdict', async (t) => {
     'docs: a note',
   );
   const fast = events.find((e) => e.event === 'fast-path-ship');
-  assert.equal(fast.refusal, 'undeclared-suite');
-  assert.match(fast.detail, /reported no suite/);
+  assert.equal(fast.taken, true, fast.detail);
+  // No source declared a ground of its own, and the config answered for the
+  // one layer there is.
+  assert.deepEqual(fast.declaration.ground, { declared: 0, config: 1 });
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 1);
+  assert.equal(events.find((e) => e.event === 'run-closed').fastPath, true);
+});
+
+test('the same layer refuses when the branch moves the ground its config states', async (t) => {
+  // The proof the config ground refuses where it should. The branch gains a
+  // source file under the layer's own list, and the certification was never
+  // earned over it.
+  const fx = shipFixture(t, {
+    config: {
+      gates: {
+        tier1: [{ name: 'unit', command: 'suite', ground: ['src', 'tests'] }],
+        fastPathShip: true,
+        breadthGround: ['package-lock.json'],
+        inertGround: ['docs'],
+      },
+    },
+  });
+  const { events } = await shipOverMerge(
+    fx,
+    { 'src/other.mjs': 'export const other = 1;\n' },
+    'feat: an unrelated module',
+  );
+  const fast = events.find((e) => e.event === 'fast-path-ship');
+  assert.equal(fast.taken, false);
+  assert.equal(fast.refusal, 'ground-intersects');
+  assert.match(fast.detail, /src\/other\.mjs/);
   assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 2);
 });
 

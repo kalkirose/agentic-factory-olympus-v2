@@ -510,16 +510,19 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   by (ADR-0065).
 - **Part-level targeted re-runs** (ADR-0046). Inside a layer that runs in
   parts, a cycle re-runs the parts its diff could have reached and carries the
-  rest. A part is affected unless the diff falls fully outside its declared
-  input set; a part that declared none is affected by everything; a changed
-  path no part claims — a lockfile, a shared package, a migration, a config
-  file — makes every part of that layer affected. A part that was not proven
-  green never carries. The parts a cycle wants are named in `OLYMPUS_PARTS` on
+  rest. A part is affected unless the diff falls fully outside its ground; a
+  part that declared no inputs takes the layer's floor, which is the layer's
+  own `ground` list widened by `gates.breadthGround`, and is affected by
+  everything where the layer has no floor; a changed path no part's ground
+  claims — a lockfile, a shared package, a migration, a config file — makes
+  every part of that layer affected. A part that was not proven green never
+  carries. The parts a cycle wants are named in `OLYMPUS_PARTS` on
   the command's environment, and a command that ignores it runs everything and
   is recorded for everything it ran. `layer-result.parts[]` is the layer's
   whole part table, and a carried part carries `carriedFrom` — the cycle whose
   execution earned its green — into the verdict record and into the repair
-  seat's layer line. A re-freeze invalidates every carry, and the confirmation
+  seat's layer line. A part whose ground the config answered for carries
+  `groundFrom` into both, so the fallback is countable. A re-freeze invalidates every carry, and the confirmation
   sweep will not stand on a result that carried anything, so the cycle whose
   green ships proves every part at its own sha.
   `gates.partTargeting: false` returns every layer to a whole re-run per cycle.
@@ -546,6 +549,21 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   A full spectrum and a confirmation sweep derive no plan from a diff, so
   neither gives any part a reason; a part the sweep keeps holds the reason of
   the pass that ran it, which is the pass its `seq` names.
+- **A layer's ground has two sources and one derivation** (ADR-0056). A Tier-1
+  layer states what it reads through its own command's part markers, through
+  `ground` on its `gates.tier1` entry, or through both. `layerGround()` in
+  `src/lanes/parts.mjs` is the one derivation every reader calls: `entries` is
+  the union of the config list, every input the layer's parts declared and
+  `gates.breadthGround`, and it is what the ship path tests a changed file
+  against; `floor` is the config list widened by the breadth list, and it is
+  what a part that declared no inputs stands on. A sibling part's declaration
+  is in neither floor, because it speaks for that sibling alone, and the
+  breadth list is no floor of its own, because it names ground that belongs to
+  every suite on top of what that suite declared. The stream wins wherever it
+  spoke: `partGround()` keeps a part's own inputs and never widens or narrows
+  them. With `gates.fastPathShip` on, the launch refuses a `gates.tier1` entry
+  that carries no `ground`, by name, and refuses an entry of that list that can
+  match no path.
 - **Ground no suite reads** (ADR-0059). `gates.groundlessPaths` names the path
   entries the project states no test suite of it opens. A verdict cycle drops
   them out of its diff before the blind test and before any part is matched, so
@@ -741,24 +759,29 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   that the incoming work and the story cannot interact: the story's own diff is
   byte-identical before and after the merge, and every file the default branch
   gained is ground the project declared inert (`gates.inertGround`). A file that
-  instead hits the story's own diff, a declared suite input of the certified
-  verdict (ADR-0046), a suite file, the project's shared breadth list
-  (`gates.breadthGround`) or a file the declarations are produced from is an
-  intersection, and a file no set reaches at all is unclaimed ground: both
-  refuse, because doubt re-runs exactly as it does inside a layer
-  (`src/lanes/parts.mjs`). An undeclared suite, a project with no breadth list
-  or no suite files, a certification carrying a review-lens finding, a story
-  diff that moved the ground its own declarations come from, a change the
-  harness cannot read as a file of this repository (a submodule, a symlink, a
-  mode-only change), and any error inside the check itself all take the full
-  re-verdict: the path removes work and never blocks a ship. Every git read of
-  the check is bounded in time, because the check runs inside the ship token. A
-  taken fast path stamps `fast-path-ship` with the commits examined (capped, and
-  marked `truncated` past the cap), the declaration version and the
-  certification it reuses, and the close carries `fastPath`. The cost of the
-  trade is counted per project under the `fast-path-escape` defect kind and
-  watched by the `fast-path-escapes` tripwire, whose answer is the one config
-  line that reverts it.
+  instead hits the story's own diff, a file the declarations are produced from,
+  the project config the run pinned, a suite file, the project's shared breadth
+  list (`gates.breadthGround`) or the whole declared ground of any Tier-1 layer
+  (ADR-0046) is an intersection, and a file no set reaches at all is unclaimed
+  ground: both refuse, because doubt re-runs exactly as it does inside a layer
+  (`src/lanes/parts.mjs`). A layer whose ground neither source declares, a layer
+  with no standing green, a project with no breadth list or no suite files, a
+  certification carrying a review-lens finding, a story diff that moved the
+  ground its own declarations come from, a change the harness cannot read as a
+  file of this repository (a submodule, a symlink, a mode-only change), and any
+  error inside the check itself all take the full re-verdict: the path removes
+  work and never blocks a ship. The declaration-source walk covers the layers
+  whose own command declared a ground and no others, because a config ground is
+  produced in no tree and no story can narrow it. Every git read of the check is
+  bounded in time, because the check runs inside the ship token. A taken fast
+  path stamps `fast-path-ship` with the commits examined (capped, and marked
+  `truncated` past the cap), the declaration version, `declaration.ground` —
+  how many Tier-1 layers each source answered for — and the certification it
+  reuses, and the close carries `fastPath`. Both halves of the trade are
+  counted per project: `fast-path-escapes` reads what it costs, over the
+  `fast-path-escape` defect kind, and `fast-path-takes` reads what it buys, as
+  the share of the window's fast-path records that carried. Both are armed on
+  any project that sets the flag.
 - **The restore anchor** (ADR-0033) is the sha every story-mode restore of the
   test paths checks out from: the freeze commit until the tree merges the
   default branch, the merge commit after that, and the commit a fresh pass was
