@@ -752,7 +752,12 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   a base that did not move costs one fetch and a stamp. A conflict surfaces
   here, before any request, and takes the merge round it always took.
   `UPDATE_CAP` bounds the updates per implementation pass; past it the run
-  falls through to the ship-stage update.
+  falls through to the ship-stage update. Every exit from this stage that is
+  not the ship stage gives the token back first, with the reason on the stamp:
+  a refused fast path, a project with no fast path, a tree no verdict
+  certified, a merge conflict that buys a fresh pass, and a park. The stage
+  reads its own release on the way in, so a restart between the release and
+  the transition returns to the verdict rather than standing in the queue.
 - **The clean-rebase fast path** (ADR-0056), config-gated on
   `gates.fastPathShip` and off by default. With the flag on, a moved tree may
   keep the certification it already earned when two mechanical checks agree
@@ -792,12 +797,19 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   file the run never wrote, and that content belongs to the tree the request
   lands on.
 - **The ship token** (ADR-0033) is one per project, derived from the run
-  ledgers: a run between its acquire or its `pr-opened` and its `merged` or
-  its close holds it, and every other open run that stamped a wait is in the
-  queue, ordered by the stamp it queued with. No file, no lock — a restart
-  re-derives the same holder and the same order. Only the holder opens or
-  merges a request; the slot cap stays the concurrency knob for everything
-  before that.
+  ledgers: a run between its acquire or its `pr-opened` and its release, its
+  `merged` or its close holds it, and every other open run that stamped a wait
+  is in the queue, ordered by the stamp it queued with. No file, no lock — a
+  restart re-derives the same holder and the same order. Only the holder opens
+  or merges a request; the slot cap stays the concurrency knob for everything
+  before that. The window it covers is the update stage's merge to the merge of
+  the request. A run that leaves the seam for a verdict cycle or a park
+  releases it and queues again at the back when it returns, because a released
+  run had its turn and a waiter is never overtaken. A run whose request is open
+  keeps it through a CI red and the repair round behind it, because a competing
+  merge under an open request costs the update it was going to cost anyway. Two
+  readings watch the pair: `ship-token-hold` for the longest hold and
+  `ship-token-wait` for the longest queue wait.
 - **Ship preflight.** Before the PR opens: every declared credential is read
   on every surface and probes again, because a key the launch proved can go
   stale inside a run and CI is the most expensive way to learn it (ADR-0027);
@@ -1312,13 +1324,15 @@ the one split the run's own durations use, and the record carries the work and
 the wait it came out of. A band that counted a queue wait would learn the
 pathology it exists to flag (ADR-0039).
 
-Four standing tripwires watch the harness's own housekeeping rather than a
+Five standing tripwires watch the harness's own housekeeping rather than a
 project's quality: failed workspace releases over the last ten releases, the
 age of the oldest workspace no release has cleared, the verdict cycles of the
-worst run of the last five judged, and the longest ship-token queue wait of the
-last five runs that queued. All four were set from the ledgers that showed the
+worst run of the last five judged, the longest ship-token queue wait of the
+last five runs that queued, and the longest ship-token hold of the last five
+runs that held it. All five were set from the ledgers that showed the
 condition, and all take the machinery's ordinary escalation — a queued breach,
-open until a human answers it (ADR-0010).
+open until a human answers it (ADR-0010). The last two are one pair: the wait
+says what the queue cost, and the hold says what bought it.
 
 One standing tripwire watches a number for falling rather than for rising: the
 mean carried share of the last ten verdict cycles that narrowed (ADR-0058). A

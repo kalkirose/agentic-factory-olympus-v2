@@ -261,6 +261,19 @@ const IMPLEMENTATIONS = {
     };
   },
 
+  'ship-token-hold': async ({ paths, project, window, now = Date.now() }) => {
+    const holds = tokenHolds(paths, project, now).slice(-window);
+    // The longest, for the same reason the wait beside it reads the longest:
+    // one run that held the token two hours is the condition, and the short
+    // holds around it do not make it better.
+    const longest = holds.reduce((a, b) => (b.minutes > a.minutes ? b : a), { minutes: -Infinity });
+    return {
+      value: holds.length > 0 ? longest.minutes : null,
+      eligible: holds.length > 0,
+      detail: { runs: holds.length, ...(holds.length > 0 && { run: longest.runId }) },
+    };
+  },
+
   'workspace-release-failures': async ({ paths, project, window }) => {
     const releases = workspaceReleases(paths, project).slice(-window);
     const failed = releases.filter((e) => e.ok === false);
@@ -809,6 +822,45 @@ function tokenWaits(paths, project, now) {
     waits.push({ runId, ts: queued.ts, minutes: ms / 60000 });
   }
   return waits.sort(byTs);
+}
+
+/**
+ * Ship-token holds of one project, in the order the runs took the token, in
+ * minutes. One reading per run: the longest hold that run took, because a
+ * waiter pays one hold and never a run's sum.
+ *
+ * A hold opens at an `acquired` stamp, or at `pr-opened` for a run that opened
+ * a request without one, and it closes at the release, the merge, or the run's
+ * close. A hold nobody has ended is measured to `now`, for the same reason an
+ * open wait is: leaving it out until it ends is how the metric would go quiet
+ * exactly when the token is stuck.
+ */
+function tokenHolds(paths, project, now) {
+  const holds = [];
+  for (const { runId, events } of listRunEvents(paths, { project })) {
+    let openedAt = null;
+    let longest = -Infinity;
+    let first = null;
+    const close = (at) => {
+      if (openedAt === null) return;
+      const ms = Date.parse(at) - Date.parse(openedAt);
+      openedAt = null;
+      // An out-of-order pair is recording data and not a duration, exactly as
+      // `readBounds` reads one (durations.mjs).
+      if (Number.isFinite(ms) && ms >= 0) longest = Math.max(longest, ms);
+    };
+    for (const e of events) {
+      if (e.event === 'ship-token' && e.state === 'acquired') openedAt ??= e.ts;
+      else if (e.event === 'pr-opened') openedAt ??= e.ts;
+      else if (e.event === 'ship-token' && e.state === 'released') close(e.ts);
+      else if (e.event === 'merged' || e.event === 'run-closed') close(e.ts);
+      if (openedAt !== null && first === null) first = openedAt;
+    }
+    close(new Date(now).toISOString());
+    if (first === null || !Number.isFinite(longest)) continue;
+    holds.push({ runId, ts: first, minutes: longest / 60000 });
+  }
+  return holds.sort(byTs);
 }
 
 /**

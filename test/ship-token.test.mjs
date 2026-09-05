@@ -9,7 +9,12 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { scaffoldHome, homePaths } from '../src/daemon/home.mjs';
 import { openRunStore } from '../src/telemetry/stores.mjs';
-import { shipTokenState, takeShipToken, tokenPosition } from '../src/ship/token.mjs';
+import {
+  releaseShipToken,
+  shipTokenState,
+  takeShipToken,
+  tokenPosition,
+} from '../src/ship/token.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
 // An ISO stamp at a fixed minute of one fixture hour. The hour is in the past,
@@ -142,6 +147,105 @@ test('two runs at the gate serialize, and the merge is the hand-over', (t) => {
     b.store.events().filter((e) => e.event === 'ship-token').map((e) => e.state),
     ['waiting', 'acquired'],
   );
+});
+
+test('a released run holds nothing and waits for nothing', (t) => {
+  const paths = fixtureHome(t);
+  writeLedger(paths, 'run-a', [
+    { event: 'ship-token', ts: at(1), state: 'acquired' },
+    { event: 'ship-token', ts: at(2), state: 'released', reason: 're-verdict' },
+  ]);
+  // The restart shape: the run is in its verdict cycle and the token is free.
+  assert.deepEqual(shipTokenState(paths, 'proj'), { holder: null, waiting: [], next: null });
+  assert.equal(tokenPosition([{ event: 'ship-token', ts: at(1), state: 'acquired' }]).state, 'holding');
+});
+
+test('a release clears the place the run queued with, so it queues at the back', (t) => {
+  // The whole of the queue-order decision, in the fold. A run that waited,
+  // held and released has had its turn; the stamp it queued with the first
+  // time would put it ahead of every run that queued during its hold.
+  const events = [
+    { event: 'ship-token', ts: at(1), state: 'waiting' },
+    { event: 'ship-token', ts: at(2), state: 'acquired' },
+    { event: 'ship-token', ts: at(3), state: 'released', reason: 're-verdict' },
+    { event: 'ship-token', ts: at(9), state: 'waiting' },
+  ];
+  assert.deepEqual(tokenPosition(events), {
+    closed: false,
+    state: 'waiting',
+    queuedAt: at(9),
+    heldSince: null,
+    requested: false,
+  });
+  const paths = fixtureHome(t);
+  writeLedger(paths, 'run-a', events);
+  writeLedger(paths, 'run-b', [{ event: 'ship-token', ts: at(5), state: 'waiting' }]);
+  const token = shipTokenState(paths, 'proj');
+  assert.deepEqual(token.waiting, ['run-b', 'run-a']);
+  assert.equal(token.next, 'run-b');
+});
+
+test('the release hands the token to the waiter behind it', (t) => {
+  const paths = fixtureHome(t);
+  const stores = new Map();
+  const ctxFor = (runId) => {
+    if (!stores.has(runId)) {
+      const store = openRunStore(paths, runId);
+      store.append('run-launched', { actor: 'daemon', project: 'proj', lane: 'story' });
+      stores.set(runId, store);
+    }
+    return { paths, project: 'proj', runId, store: stores.get(runId) };
+  };
+  const a = ctxFor('run-a');
+  const b = ctxFor('run-b');
+  t.after(() => {
+    for (const store of stores.values()) store.close();
+  });
+
+  assert.equal(takeShipToken(a), true);
+  assert.equal(takeShipToken(b), false);
+  // The holder goes back to its verdict. Nothing it does there reads the
+  // default branch, so the waiter ships while it judges.
+  assert.equal(releaseShipToken(a, 're-verdict'), true);
+  assert.equal(takeShipToken(b), true);
+  assert.equal(shipTokenState(paths, 'proj').holder, 'run-b');
+  assert.deepEqual(
+    a.store.events().filter((e) => e.event === 'ship-token').map((e) => [e.state, e.reason]),
+    [['acquired', undefined], ['released', 're-verdict']],
+  );
+  // A run that holds nothing releases nothing, however often it asks.
+  assert.equal(releaseShipToken(a, 're-verdict'), false);
+  assert.equal(a.store.events().filter((e) => e.event === 'ship-token').length, 2);
+});
+
+test('a run whose request is open keeps the token whatever it does', (t) => {
+  const paths = fixtureHome(t);
+  const store = openRunStore(paths, 'run-a');
+  t.after(() => store.close());
+  store.append('run-launched', { actor: 'daemon', project: 'proj', lane: 'story' });
+  const a = { paths, project: 'proj', runId: 'run-a', store };
+  assert.equal(takeShipToken(a), true);
+  store.append('pr-opened', { actor: 'daemon', pr: 1 });
+  // The hold from the request to the merge covers a CI red and its repair
+  // round. A competing merge under an open request costs the update it was
+  // going to cost, so the release buys nothing and stamps nothing.
+  assert.equal(releaseShipToken(a, 're-verdict'), false);
+  assert.deepEqual(
+    store.events().filter((e) => e.event === 'ship-token').map((e) => e.state),
+    ['acquired'],
+  );
+  assert.equal(shipTokenState(paths, 'proj').holder, 'run-a');
+});
+
+test('a release reason outside the closed set never reaches a stamp', (t) => {
+  const paths = fixtureHome(t);
+  const store = openRunStore(paths, 'run-a');
+  t.after(() => store.close());
+  store.append('run-launched', { actor: 'daemon', project: 'proj', lane: 'story' });
+  const a = { paths, project: 'proj', runId: 'run-a', store };
+  assert.equal(takeShipToken(a), true);
+  assert.throws(() => releaseShipToken(a, 'because'), /unknown ship-token release reason/);
+  assert.equal(shipTokenState(paths, 'proj').holder, 'run-a');
 });
 
 test('the front of the queue takes the free token, and nobody jumps it', (t) => {

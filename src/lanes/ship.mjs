@@ -12,7 +12,10 @@
 // stage holds the seam: a run takes the project's ship token there, merges the
 // default branch into its tree under it, and hands a moved tree back to the
 // verdict — so the verdict certifies the tree that lands, and no other run of
-// the project can merge between the two (ADR-0033).
+// the project can merge between the two (ADR-0033). The token covers that
+// merge to the merge of the request. A run that goes back to the verdict, or
+// parks, gives it back first and takes it again from the back of the queue when
+// it returns to this stage.
 //
 // These three stages run no seat, so they are the run's silent stretches: a
 // poll outcome that changes nothing stamps nothing. Each poll loop therefore
@@ -87,7 +90,7 @@ import {
 import { testEditDenyRules } from '../seats/boundary.mjs';
 import { attemptOrder, noLogReason, PartialLogRefusal } from '../ship/forge.mjs';
 import { derivedLabels } from '../ship/labels.mjs';
-import { takeShipToken } from '../ship/token.mjs';
+import { releaseShipToken, takeShipToken } from '../ship/token.mjs';
 import {
   FORESEEN_HEADING,
   FORESEEN_MARKER,
@@ -290,9 +293,28 @@ export function shipStep({ forgeFor, pollMs = 15000, enqueueRepair = null } = {}
  * move costs one fetch and a stamp. Conflicts take the route they have always
  * taken, one stage earlier, where the repair is cheapest: no request is open,
  * no CI round is spent, and the verdict that follows covers the merged result.
+ *
+ * The token covers this stage's merge to the merge of the request, and no more.
+ * Every exit that is not the ship stage gives it back: a refused fast path, a
+ * project with the fast path off, a tree no verdict certified, a merge conflict
+ * that buys a fresh pass, and a park. None of those needs the default branch to
+ * stand still, and a run that held the token through one of them charged every
+ * other run of the project the whole of it (ADR-0033).
+ *
+ * The release lands at the exit, so a merge round runs inside the hold. That is
+ * deliberate: a round resolves conflicts against one default-branch head, and a
+ * competing merge under it can make the resolution stale and repeat the seats'
+ * work. A verdict cycle has no such tie. The human wait behind a failed round is
+ * outside the hold either way, because the stall parks and the park releases.
  */
 function updateHandler({ forgeFor, pollMs }) {
   return async function update(ctx) {
+    // The resume rule, before the token and before the clone read. A run that
+    // gave the token back and has not been judged since is a run whose tree no
+    // verdict certifies, and no hold of the token changes that. Without this a
+    // crash between the release and the stage transition puts the run in the
+    // queue to be told to go and re-verdict.
+    if (releasedForVerdict(runEvents(ctx))) return { next: 'verdict' };
     const base = await shipBase(ctx, forgeFor);
     const heart = stageHeartbeat(ctx);
     for (;;) {
@@ -305,9 +327,37 @@ function updateHandler({ forgeFor, pollMs }) {
         await sleep(pollMs);
         continue;
       }
-      return preVerdictUpdate(ctx, base);
+      const directive = await preVerdictUpdate(ctx, base);
+      // The two exits that leave work behind them. A close needs no release,
+      // because a run that is over holds nothing; and a daemon stop is no exit
+      // at all, so the run keeps the token and the restart hands it back.
+      if (directive?.next && directive.next !== 'ship') releaseShipToken(ctx, 're-verdict');
+      else if (directive?.park) releaseShipToken(ctx, 'park');
+      return directive;
     }
   };
+}
+
+/**
+ * Whether the run stands where a release for the verdict left it: the token
+ * given back on the way to a cycle, and no green verdict since.
+ *
+ * The release is the last thing the stage does before it hands the run to the
+ * verdict, so this reads exactly one state: the crash window between that stamp
+ * and the transition behind it. A green render after the release is the run
+ * coming back the way it left, and the stage takes the token again.
+ *
+ * The reason is half the question. A release for a park stops the run AT this
+ * stage, and the answer resumes the stage to finish the update it could not
+ * finish. Reading that release as a re-verdict would send the answered run to
+ * judge a tree it never merged, and buy a whole cycle to arrive back here.
+ */
+export function releasedForVerdict(events) {
+  const token = findLast(events, 'ship-token');
+  if (token?.state !== 'released' || token.reason !== 're-verdict') return false;
+  return !events.some(
+    (e) => e.event === 'verdict-rendered' && e.verdict === 'green' && e.seq > token.seq,
+  );
 }
 
 // Why a capped pass leaves the update to the ship stage. The stamp carries it,

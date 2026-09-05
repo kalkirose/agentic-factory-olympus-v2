@@ -614,3 +614,24 @@ never carries a project's specifics.
   carried, eligible only past three runs with a moved base. `groundEntry()`
   moves to `src/config/project.mjs`, beside the path vocabulary it belongs to.
   ADR-0056 and ADR-0046 are rewritten around the two sources.
+- 2026-09-05 — the ship token covers the merge and the request, not the
+  re-verdict. A run took the project's token in the update stage and kept it
+  through the verdict cycle a moved base bought, so every other run of the
+  project waited through work that reads no default branch. The token window is
+  now the update stage's merge to the merge of the request: every exit from that
+  stage which is not the ship stage releases it first, which is a refused fast
+  path, a project with the fast path off, a tree no verdict certified, a merge
+  conflict that buys a fresh pass, and a park. `ship-token` gains the state
+  `released` with a closed set of two reasons, `re-verdict` and `park`, and
+  `tokenPosition` folds it to no hold and no place in the queue: a released run
+  queues again at the back, because it already had its turn and a waiter is
+  never overtaken. A run whose request is open never releases, because a
+  competing merge under an open request costs the branch update it was going to
+  cost anyway. The update stage reads its own release on the way in, so a
+  restart between the release and the stage transition returns to the verdict
+  rather than standing in the queue for a token it does not need.
+  `ship-token-hold` joins `TRIPWIRE_METRICS` beside `ship-token-wait`, reads the
+  longest single hold of the last five runs that held the token, and stands at a
+  band of 90 minutes: the wait says what the queue cost, and the hold says what
+  bought it. ADR-0033 is rewritten around the window, the release and the queue
+  order; ADR-0010 gains the new reading.

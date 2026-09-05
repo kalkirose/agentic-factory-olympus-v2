@@ -96,6 +96,17 @@ export const TRIPWIRE_METRICS = {
     defaultWindow: 5,
     defaultTriggers: ['ship-token', 'merged'],
   },
+  // The longest single ship-token hold of the last N runs that held it, in
+  // minutes. The wait above says what the queue cost; this says what bought it.
+  // A hold is the update stage's merge to the merge of the request, so an
+  // ordinary reading is one request's CI. A reading far above that is a run
+  // holding the token over work that does not merge, which is the whole cost
+  // the queue pays for (ADR-0033).
+  'ship-token-hold': {
+    unit: 'runs',
+    defaultWindow: 5,
+    defaultTriggers: ['ship-token', 'merged'],
+  },
   // Releases that did not clear their workspace, counted over the last N
   // release attempts. The unit is the release itself: a close and a sweep tick
   // each make one, and a release is the state change the metric is about.
@@ -321,6 +332,20 @@ export function standingTripwires() {
       answer:
         'read what the token holder was doing: the queue costs every waiting ' +
         'run the whole of the holder\'s ship path',
+    },
+    {
+      id: 'ship-token-hold',
+      metric: 'ship-token-hold',
+      window: 5,
+      // Ninety minutes. A hold is the request stretch, which is one CI round
+      // and a merge. A hold that carries a CI red and its repair round adds one
+      // verdict cycle on top, and that is the most expensive hold the design
+      // allows. Above this bound the run is holding the token over work that
+      // does not merge, and every other run of the project is paying for it.
+      breach: { op: '>', value: 90 },
+      answer:
+        'read the holder\'s stamps between its acquire and its merge: a hold ' +
+        'this long is work that does not need the branch to stand still',
     },
     {
       id: 'workspace-release-failures',
