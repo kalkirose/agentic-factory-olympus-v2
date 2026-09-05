@@ -14,6 +14,7 @@ import {
   runSpectrum,
   persistentReds,
   cyclePlan,
+  groundedLayers,
   priorStatus,
   targetedLayers,
 } from '../src/lanes/spectrum.mjs';
@@ -1098,4 +1099,85 @@ test('a batch that throws waits for its siblings and throws in declared order', 
       ['b', 'runner-error'],
     ],
   );
+});
+
+// -- the reconciliation set (ADR-0026) ---------------------------------------
+
+const GROUNDED = [
+  { name: 'lint', command: 'green', ground: ['src', 'docs'] },
+  { name: 'unit', command: 'green', ground: ['src'], needs: ['lint'] },
+  { name: 'docs', command: 'green', ground: ['docs/**'] },
+  { name: 'bare', command: 'green' },
+];
+
+/** Every layer green, with the part table each one declared, if any. */
+function groundPrior(parts = {}) {
+  return new Map(
+    GROUNDED.map((l) => [l.name, { layer: l.name, status: 'green', ...(parts[l.name] ?? {}) }]),
+  );
+}
+
+test('the reconciliation set runs the layers the record diff reaches, and the ones that claim nothing', () => {
+  const target = groundedLayers(GROUNDED, groundPrior(), {
+    changed: ['docs/adr/0001-x.md'],
+  });
+  // lint and docs claim the record tree; unit claims src alone and carries;
+  // bare declares nothing at all, so it has no claim to carry on.
+  assert.deepEqual([...target].sort(), ['bare', 'docs', 'lint', 'unit']);
+  // unit is in the set because it needs lint, not because of its own ground.
+  const noChain = GROUNDED.map(({ needs, ...l }) => l);
+  assert.deepEqual(
+    [...groundedLayers(noChain, groundPrior(), { changed: ['docs/adr/0001-x.md'] })].sort(),
+    ['bare', 'docs', 'lint'],
+  );
+});
+
+test('a layer whose ground the record diff misses carries', () => {
+  const noChain = GROUNDED.map(({ needs, ...l }) => l);
+  const target = groundedLayers(noChain, groundPrior(), { changed: ['notes/0001-x.md'] });
+  assert.deepEqual([...target].sort(), ['bare']);
+});
+
+test('a part declaration is ground too, and the breadth list joins every layer', () => {
+  const noChain = GROUNDED.map(({ needs, ...l }) => l);
+  // The bare layer's command declared its inputs, so it has a claim to carry.
+  const prior = groundPrior({ bare: { parts: [{ name: 'all', inputs: ['tools'] }] } });
+  assert.deepEqual([...groundedLayers(noChain, prior, { changed: ['notes/x.md'] })], []);
+  assert.deepEqual([...groundedLayers(noChain, prior, { changed: ['tools/x.mjs'] })], ['bare']);
+  // The breadth list belongs to every layer whatever it declared.
+  assert.deepEqual(
+    [...groundedLayers(noChain, prior, { changed: ['pnpm-lock.yaml'], breadth: ['pnpm-lock.yaml'] })].sort(),
+    ['bare', 'docs', 'lint', 'unit'],
+  );
+});
+
+test('a layer with no standing green runs whatever its ground says', () => {
+  const noChain = GROUNDED.map(({ needs, ...l }) => l);
+  const prior = groundPrior();
+  prior.set('unit', { layer: 'unit', status: 'red' });
+  prior.delete('docs');
+  assert.deepEqual([...groundedLayers(noChain, prior, { changed: ['notes/x.md'] })].sort(), [
+    'bare',
+    'docs',
+    'unit',
+  ]);
+});
+
+test('the reconciliation plan is the third sweep, and it needs a render behind it', () => {
+  const events = [
+    { event: 'implementation-committed', pass: 1 },
+    ...GROUNDED.map((l) => ({ event: 'layer-result', cycle: 1, layer: l.name, status: 'green' })),
+    { event: 'verdict-rendered', cycle: 1, pass: 1, verdict: 'green' },
+  ];
+  const plan = cyclePlan(events, {
+    cycle: 2,
+    pass: 1,
+    layers: GROUNDED,
+    reconcile: { changed: ['docs/adr/0001-x.md'] },
+  });
+  assert.equal(plan.sweep, 'reconcile');
+  assert.deepEqual([...plan.run].sort(), ['bare', 'docs', 'lint', 'unit']);
+  // Without the record diff the same ledger plans the targeted set, which is
+  // empty because every layer is green.
+  assert.equal(cyclePlan(events, { cycle: 2, pass: 1, layers: GROUNDED }).sweep, 'targeted');
 });

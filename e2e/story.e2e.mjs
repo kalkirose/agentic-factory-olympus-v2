@@ -212,12 +212,14 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
     'verdict-rendered',
     'repair-round',
     'verdict-rendered',
+    // The reconciliation judgment sits in front of the ship token, so the
+    // records an owed story writes ride its own request (ADR-0026).
+    'reconciliation-judged',
     'pr-opened',
     'check-transition',
     'merged',
     'merge-commit-check',
     'card-sweep',
-    'reconciliation-judged',
     'run-closed',
   ]);
 

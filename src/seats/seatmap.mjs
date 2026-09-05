@@ -56,9 +56,14 @@ export const SEATS = Object.freeze({
   'generalist-review': seat(),
   // ship
   'card-sweep': seat(),
-  // close-out: judges whether the shipped diff implements or contradicts any
+  // pre-ship: judges whether the run's own diff implements or contradicts any
   // decision record; read-only, reports only (ADR-0026)
   'reconcile-judge': seat(),
+  // pre-ship: rewrites the judged records inside the run worktree, under the
+  // rules the record tree binds its editors to. It writes documents and runs
+  // no gate command, so it needs no suite credentials, no web and no
+  // subagents: what it reads is one diff of one branch (ADR-0026).
+  'reconcile-write': seat(),
   // close-out: writes the learning artifact for a shipped story, under the
   // instructions the project configured; optional, judges nothing, and writes
   // only inside the workspace it is given (ADR-0031)

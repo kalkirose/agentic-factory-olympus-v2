@@ -139,6 +139,7 @@ import {
   seatReportAfter,
   seatFailureAfter,
   readJson,
+  reconcileCommit,
   parkDirective,
   GATE_FORMS,
   HARNESS_GATE_FORMS,
@@ -526,10 +527,26 @@ async function runCycle(ctx, base, mode, { cycle }) {
     cycle,
     sha,
   };
+  // The reconciliation commit this cycle judges, where it is judging one: the
+  // last thing committed, with no verdict rendered over it yet. Its diff is the
+  // record change alone, and the plan reads it to decide which layers the
+  // change could have reached (ADR-0026). A later cycle of the same pass is
+  // judging a repair round or a re-freeze and takes the ordinary set.
+  const reconciled = judgedReconcile(startEvents, impl);
+  const recordDiff = reconciled
+    ? await changedInRange(base.worktree, reconciled.baseSha, reconciled.sha).catch(() => null)
+    : null;
   // What this cycle runs, and what it carries (ADR-0022) — then, inside each
   // layer it does run, which parts of it the diff since that layer's standing
   // result could have reached (ADR-0046).
-  const plan = cyclePlan(startEvents, { cycle, pass, layers: base.layers });
+  const plan = cyclePlan(startEvents, {
+    cycle,
+    pass,
+    layers: base.layers,
+    ...(recordDiff && {
+      reconcile: { changed: recordDiff, breadth: base.config?.gates?.breadthGround ?? [] },
+    }),
+  });
   const parts = await partTargets(base, startEvents, { plan, sha });
   let spectrum = await runSpectrum(ctx, { ...gates, run: plan.run, prior: plan.prior, parts });
   if (spectrum.error) return { directive: gateCommandError(ctx, spectrum.error) };
@@ -576,8 +593,9 @@ async function runCycle(ctx, base, mode, { cycle }) {
   }
 
   // Judgment review: the Fury fan-out once per implementation pass; the
-  // generalist seat over the repair diff on repair cycles; no judgment seats
-  // after a re-freeze or an operational fix alone — the tree did not change.
+  // generalist seat over the repair diff on repair cycles and over the record
+  // diff on the reconciliation cycle; no judgment seats after a re-freeze or
+  // an operational fix alone, because the tree did not change.
   const newTree = !prevRender || prevRender.pass !== pass;
   const repaired =
     prevRender && eventsAfter(events, prevRender.seq).some((e) => e.event === 'repair-round');
@@ -623,6 +641,19 @@ async function runCycle(ctx, base, mode, { cycle }) {
       ...priorConfirmed.filter((f) => !round.resolved.includes(f.id)),
       ...round.confirmed,
     ];
+  } else if (reconciled) {
+    // The reconciliation commit changed decision records and nothing else, and
+    // the code under it is the code the Fury round already judged. So the
+    // panel is the generalist seat over the record diff alone: advisory
+    // findings recorded, HIGH findings put to the verifier, which is the
+    // review the repair lane runs over every fix (ADR-0026).
+    const diff = await readDiff(impl.baseSha, impl.sha);
+    const round = await generalistReview(ctx, base, { cycle, diff, priorConfirmed });
+    if (round.fail) return { directive: round.fail };
+    reviewOpen = [
+      ...priorConfirmed.filter((f) => !round.resolved.includes(f.id)),
+      ...round.confirmed,
+    ];
   } else if (cardRuled) {
     // A re-freeze behind a human ruling was judged by the human who ruled. A
     // re-freeze on the card's authority was judged by nobody: the quote check
@@ -647,6 +678,12 @@ async function runCycle(ctx, base, mode, { cycle }) {
   // layer it narrowed, the parts it carried. What it already ran at this sha
   // it keeps. A red the sweep turns up is a regression an edit left in an area
   // no red pointed at, and it enters triage exactly like a first-cycle red.
+  //
+  // The reconciliation cycle sweeps nothing, and the difference is what its
+  // carry rests on. A targeted carry says this cycle did not get to that
+  // layer; a reconciliation carry says the project declared that the layer
+  // does not read the files this commit changed (ADR-0026). Sweeping behind
+  // that declaration is the full spectrum the cycle exists to avoid.
   if (plan.sweep === 'targeted' && reds.length === 0 && open.length === 0) {
     const confirmed = await runSpectrum(ctx, { ...gates, confirmation: true });
     if (confirmed.error) return { directive: gateCommandError(ctx, confirmed.error) };
@@ -782,6 +819,11 @@ async function runCycle(ctx, base, mode, { cycle }) {
  * were judged against: a part's green is a statement about a pair of shas,
  * and the amendment changed the half this derivation cannot see in a diff of
  * the candidate tree.
+ *
+ * A reconciliation cycle plans no layer either, so a layer that runs there
+ * runs whole. That cycle has no confirmation sweep behind it (ADR-0026), and a
+ * narrowing whose parts all carried would leave a layer nothing ran at this
+ * sha with nothing to prove it later.
  */
 export async function partTargets(base, events, { plan, sha }) {
   if (plan.sweep !== 'targeted' || base.config?.gates?.partTargeting === false) return null;
@@ -3189,6 +3231,22 @@ export function currentPass(events) {
     if (e.event === 'implementation-committed' && e.pass > pass) pass = e.pass;
   }
   return pass;
+}
+
+/**
+ * The reconciliation commit a cycle is about to judge, or null.
+ *
+ * Three facts make one: the run holds a reconciliation commit its tree still
+ * carries, that commit is the last implementation of the run, and no verdict
+ * has been rendered over it. The second and third are what keep the reading to
+ * the one cycle it is about. A repair round after a red reconciliation cycle
+ * commits again, and a re-freeze renders again over the same commit; both are
+ * ordinary cycles with an ordinary targeted set.
+ */
+function judgedReconcile(events, impl) {
+  const commit = reconcileCommit(events);
+  if (!commit || !impl || impl.seq !== commit.seq) return null;
+  return lastRenderSeq(events) > commit.seq ? null : commit;
 }
 
 function lastImplementation(events) {

@@ -23,6 +23,12 @@
 // carries the remaining greens forward. A carried result is marked `carried`,
 // so no result of an older sha reads as a fresh proof.
 //
+// A cycle that judges the reconciliation commit runs a third set (ADR-0026):
+// the layers whose declared ground that commit reached, plus the layers with
+// no standing green and the layers no source declared a ground for. It carries
+// the rest on the project's own statement of what each layer reads, which is
+// the claim the ship fast path already carries a certification on.
+//
 // Inside a layer that runs in parts, the same carrying goes one level finer
 // (ADR-0046). A caller may hand this runner a per-layer part plan: the parts
 // this cycle must execute, and the parts whose green it may carry. The
@@ -88,9 +94,11 @@ import {
   carriedParts,
   failedFileNarrowing,
   keptParts,
+  layerGround,
   mergeParts,
   withPartReasons,
 } from './parts.mjs';
+import { underEntry } from '../config/project.mjs';
 import { exhaustionOf } from './resources.mjs';
 import { absentCredentials } from './replay.mjs';
 import { runEvents, ACTOR } from './shared.mjs';
@@ -1076,6 +1084,63 @@ export function priorStatus(events, cycle) {
  * prerequisite that has since changed, so neither has a green worth carrying.
  */
 export function targetedLayers(layers, prior) {
+  const target = new Set();
+  for (const layer of layers) {
+    if (prior.get(layer.name)?.status !== 'green') target.add(layer.name);
+  }
+  return withDependents(layers, target);
+}
+
+/**
+ * The set a reconciliation cycle runs: the layers whose declared ground the
+ * record diff reaches, and the layers that have no standing green or no
+ * declaration to stand on. Everything else carries (ADR-0026).
+ *
+ * The claim a carry rests on here is stronger than the targeted set's. A
+ * targeted cycle carries a layer it did not get to; this one carries a layer
+ * the project says does not read the files that changed. That is the ground
+ * question the ship fast path already carries a whole certification on
+ * (ADR-0056), asked of one commit inside the run instead of a moved base.
+ *
+ * Three clauses run, and all three fail towards running:
+ *
+ * - A layer with no green to carry runs, exactly as in the targeted set.
+ * - A layer neither source declared a ground for runs. No declaration is no
+ *   proof, and the union in `layerGround()` includes the project's breadth
+ *   list, which describes every layer and therefore describes none.
+ * - A layer whose ground the diff touches runs, on the widest reading of that
+ *   ground the two sources give.
+ *
+ * @param {Array<{name: string, needs?: string[], ground?: string[]}>} layers
+ * @param {Map<string, object>} prior each layer's standing `layer-result`
+ * @param {{changed: string[], breadth?: string[]}} diff the record diff
+ */
+export function groundedLayers(layers, prior, { changed, breadth = [] }) {
+  const target = new Set();
+  for (const layer of layers) {
+    const record = prior.get(layer.name);
+    if (record?.status !== 'green') {
+      target.add(layer.name);
+      continue;
+    }
+    const ground = layerGround(layer, record, breadth);
+    if (!ground.sources.config && !ground.sources.declared) {
+      target.add(layer.name);
+      continue;
+    }
+    if (changed.some((file) => ground.entries.some((entry) => underEntry(file, entry)))) {
+      target.add(layer.name);
+    }
+  }
+  return withDependents(layers, target);
+}
+
+/**
+ * One set of layers, closed over `needs` transitively. A layer downstream of
+ * one that runs either reported not-runnable or was judged against a
+ * prerequisite that may change, so neither has a green worth carrying.
+ */
+function withDependents(layers, target) {
   const dependents = new Map();
   for (const layer of layers) {
     for (const need of layer.needs ?? []) {
@@ -1083,13 +1148,7 @@ export function targetedLayers(layers, prior) {
       dependents.get(need).push(layer.name);
     }
   }
-  const target = new Set();
-  const queue = [];
-  for (const layer of layers) {
-    if (prior.get(layer.name)?.status === 'green') continue;
-    target.add(layer.name);
-    queue.push(layer.name);
-  }
+  const queue = [...target];
   for (let i = 0; i < queue.length; i++) {
     for (const dependent of dependents.get(queue[i]) ?? []) {
       if (target.has(dependent)) continue;
@@ -1107,13 +1166,21 @@ export function targetedLayers(layers, prior) {
  * cycle judges a tree a repair round, a re-freeze, or an operational fix
  * touched, and runs the targeted set.
  *
+ * A cycle that judges the reconciliation commit runs a third set: the layers
+ * whose declared ground that commit reached (ADR-0026). The caller says so by
+ * handing over the commit's own diff; nothing else in this module reads a
+ * diff.
+ *
  * The plan reads the ledger alone, and the stamps of the cycle being planned
  * never reach it, so a daemon restart mid-cycle derives the same set.
  */
-export function cyclePlan(events, { cycle, pass, layers }) {
+export function cyclePlan(events, { cycle, pass, layers, reconcile = null }) {
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   const previous = renders[renders.length - 1];
   if (!previous || previous.pass !== pass || previous.source === 'ci') return { sweep: 'full' };
   const prior = priorStatus(events, cycle);
+  if (reconcile) {
+    return { sweep: 'reconcile', run: groundedLayers(layers, prior, reconcile), prior };
+  }
   return { sweep: 'targeted', run: targetedLayers(layers, prior), prior };
 }

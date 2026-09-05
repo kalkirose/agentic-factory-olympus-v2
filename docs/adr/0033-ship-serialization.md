@@ -44,9 +44,11 @@ run that is over can neither merge nor wait.
 from the update stage's merge of the default branch to the merge of the request.
 Every exit from the update stage that is not the ship stage gives the token back
 first: a fast path that refused, a project that runs no fast path, a tree no
-verdict certified, a merge conflict that buys a fresh pass, and a park. None of
-that work reads the default branch, and a run that held the token through it
-charged every other run of the project the whole of it. The merge round that
+verdict certified, a merge conflict that buys a fresh pass, and a park. The
+reconciliation round at the head of the stage runs in front of the token
+altogether, and its own exits release on the same rule (ADR-0026). None of that
+work reads the default branch, and a run that held the token through it charged
+every other run of the project the whole of it. The merge round that
 resolves a conflict is the one piece of work before the request that keeps the
 token, for the reason stated under the conflict route below. The release stamps
 `ship-token` (released) with a reason out of a closed set of two, `re-verdict`

@@ -429,7 +429,12 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   and carries the remaining greens forward, marked `carried` in the record so
   no result reads as a fresh proof. A clean targeted cycle runs every layer it
   has not yet run, at that sha, before the verdict turns green; a red that
-  confirmation sweep turns up enters triage like any other. A CI verdict whose
+  confirmation sweep turns up enters triage like any other. The cycle that
+  judges a reconciliation commit runs a third set: the layers whose declared
+  ground that commit reached, the layers with no standing green, and the
+  layers no source declared a ground for. It carries the rest on the
+  project's own statement of what each layer reads, and it sweeps nothing
+  (ADR-0026). A CI verdict whose
   open findings are all env or harness class runs no cycle at all: every one of
   those remedies lands outside the tree, so the operational fix stamps
   `sweep: 'skipped'` with the findings and the reason, the run goes back to
@@ -744,20 +749,23 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 
 - The run ends at close-out, not at the green verdict. In-loop ship, no
   batching.
-- **The update stage** (ADR-0033) sits between the verdict and the ship. The
-  run takes the project's ship token there, and its first act under the token
-  is the branch update against the default branch as it stands after the
-  previous holder's merge. An update that moved the tree hands the run back to
-  the verdict, so the tree that opens a request is a tree a verdict certified;
-  a base that did not move costs one fetch and a stamp. A conflict surfaces
+- **The update stage** (ADR-0033) sits between the verdict and the ship. A
+  story run runs the reconciliation round at the head of it, in front of the
+  token (ADR-0026). The run then takes the project's ship token, and its
+  first act under the token is the branch update against the default branch
+  as it stands after the previous holder's merge. An update that moved the
+  tree hands the run back to the verdict, so the tree that opens a request is
+  a tree a verdict certified; a base that did not move costs one fetch and a
+  stamp. A conflict surfaces
   here, before any request, and takes the merge round it always took.
   `UPDATE_CAP` bounds the updates per implementation pass; past it the run
   falls through to the ship-stage update. Every exit from this stage that is
   not the ship stage gives the token back first, with the reason on the stamp:
   a refused fast path, a project with no fast path, a tree no verdict
-  certified, a merge conflict that buys a fresh pass, and a park. The stage
-  reads its own release on the way in, so a restart between the release and
-  the transition returns to the verdict rather than standing in the queue.
+  certified, a merge conflict that buys a fresh pass, and a park. The
+  reconciliation round's own exits take that rule too. The stage reads its own
+  release on the way in, so a restart between the release and the transition
+  returns to the verdict rather than standing in the queue.
 - **The clean-rebase fast path** (ADR-0056), config-gated on
   `gates.fastPathShip` and off by default. With the flag on, a moved tree may
   keep the certification it already earned when two mechanical checks agree
@@ -925,8 +933,9 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   daemon home and is owed a repair-lane run. The breaching run enqueues; the
   frontier sweep launches, because that run still holds its own slot.
 - Close-out: watch merge-commit checks to terminal states, run the card
-  sweep, run the reconciliation judgment, run the learning artifact if the
-  project configured one, close the run ledger.
+  sweep, write the reconciliation ticket where the records did not ride the
+  merge, run the learning artifact if the project configured one, close the
+  run ledger.
 - **The card sweep is where a supersede goes home** (ADR-0044). A run that
   amended a frozen test on its card's authority hands the sweep every executed
   supersede, and the sweep records them on that story's card under a
@@ -961,12 +970,18 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   miss exactly as the first did. One retry, bounded to the card directory,
   never a loop. The stamp carries `pushAttempts` and, when a replay ran,
   `replay` with the head it replayed onto and what came of it.
-- **Reconciliation judgment** (ADR-0026): a fresh-context seat judges
-  whether the shipped diff implements or contradicts any decision record.
-  Owed writes a reconciliation ticket and stamps `reconciliation-judged`;
-  not-owed and seat-failure stamp too — an unjudged ship is a recorded
-  miss, never a silent skip. The rewrite runs later as its own repair-lane
-  run, never inside the run that shipped the diff.
+- **Reconciliation** (ADR-0026): a fresh-context seat judges whether the
+  run's own diff implements or contradicts any decision record, at the head
+  of the update stage and in front of the ship token. Owed sends a second
+  fresh seat to rewrite those records on the run branch, under checks that
+  hold every write inside the record tree; the commit stamps
+  `implementation-committed` with `phase: 'reconcile'`, a ground-keyed cycle
+  certifies code and records together, and one pull request carries both.
+  Not-owed and a failed judgment stamp too: an unjudged ship is a recorded
+  miss, never a silent skip. A write nobody can make ships the certified sha
+  and leaves the ticket, and the close writes that ticket where no record
+  commit rode the merge, or stamps `reconciliation-lost` where it cannot.
+  The `merged` stamp carries `reconciled` where the records rode.
 - **Learning artifact** (ADR-0031): optional, by project config
   (`closeout.learning`: an instructions file and a workspace directory, both
   absolute). A fresh-context seat writes a human-readable lesson about the
@@ -1239,9 +1254,11 @@ else, and a console launch that names no open escape is refused before it
 takes a slot.
 
 Owed decision-record reconciliations launch second, after repairs and
-before stories (ADR-0026): shipped runs judged owed at close-out, minus
-those a reconciliation run's launch stamp already names — derived from the
-run ledgers at every sweep, stored nowhere, restart-idempotent.
+before stories (ADR-0026): shipped runs whose judgment carries a ticket,
+minus those a reconciliation run's launch stamp already names, derived from
+the run ledgers at every sweep, stored nowhere, restart-idempotent. A story
+run rewrites its own records before it ships, so this set holds the ships
+where that rewrite could not be made.
 
 Every input a run will be judged on is read at the launch door, before a slot,
 a workspace or a stack is spent (ADR-0067, ADR-0068).

@@ -1,12 +1,18 @@
 // The ship step: the run ends at close-out, not at the green verdict.
 // `shipStep({forgeFor})` supplies the three stages after the verdict —
-// `update` (the ship token, then the branch update that precedes the final
-// verdict), `ship` (PR open carrying the diff's labels, with auto-merge
-// armed, the check watcher, the CI red route, the competing-merge update, the
-// merge round) and `close-out`
+// `update` (the reconciliation round, the ship token, then the branch update
+// that precedes the final verdict), `ship` (PR open carrying the diff's
+// labels, with auto-merge armed, the check watcher, the CI red route, the
+// competing-merge update, the merge round) and `close-out`
 // (red-merge breach conversion, merge-commit checks to terminal, the card
-// sweep, the reconciliation judgment, the configured learning artifact, the
-// escape fix-back, ledger close).
+// sweep, the reconciliation ticket for records that did not ride, the
+// configured learning artifact, the escape fix-back, ledger close).
+//
+// The reconciliation round is the head of the update stage, in front of the
+// token (ADR-0026). A story run judges its own diff against the decision
+// records, rewrites the records it owes onto its own branch, and lets the
+// verdict certify code and records together. So the default branch moves once
+// per shipped story, and none of that work holds another run out of its merge.
 //
 // Ships are serial per project and everything before them is not. The update
 // stage holds the seam: a run takes the project's ship token there, merges the
@@ -121,7 +127,12 @@ import {
   answeredPath,
   freezeExclusions,
   invocationCount,
+  lastRecoveryPark,
   parkDirective,
+  reconcileCommit,
+  seatFailureAfter,
+  seatWithChecks,
+  sinceFreshPass,
   GATE_FORMS,
   withAbandonGuard,
   blocked,
@@ -316,6 +327,22 @@ function updateHandler({ forgeFor, pollMs }) {
     // queue to be told to go and re-verdict.
     if (releasedForVerdict(runEvents(ctx))) return { next: 'verdict' };
     const base = await shipBase(ctx, forgeFor);
+    // The reconciliation round runs here, in front of the token: the judgment,
+    // the record rewrite and the cycle that certifies it belong to this run's
+    // own branch, and none of them may hold another run of the project out of
+    // its merge (ADR-0026).
+    //
+    // Its exits release the token for the same reason every other exit of this
+    // stage does. A run reaching this line ordinarily holds nothing, so the
+    // release is a no-op; a run that comes back here after a fresh pass may
+    // hold it, and a record rewrite is no more a reason to stand on the token
+    // than a verdict cycle is (ADR-0033).
+    if (base.storyLane) {
+      const directive = await reconcileRound(ctx, base);
+      if (directive?.next && directive.next !== 'ship') releaseShipToken(ctx, 're-verdict');
+      else if (directive?.park) releaseShipToken(ctx, 'park');
+      if (directive) return directive;
+    }
     const heart = stageHeartbeat(ctx);
     for (;;) {
       if (ctx.stopped()) return null;
@@ -1434,6 +1461,10 @@ async function stampMerged(ctx, base, opened, st) {
     mergeSha: st.mergeSha,
     red: redChecks.length > 0,
     ...(redChecks.length > 0 && { redChecks }),
+    // The decision records rode this request. It is stamped where the default
+    // branch moves, because the reading this mechanism is measured by is the
+    // number of moves one shipped story costs (ADR-0026).
+    ...(reconcileCommit(runEvents(ctx)) && { reconciled: true }),
   });
 }
 
@@ -1679,9 +1710,11 @@ function closeOutHandler({ forgeFor, pollMs, enqueueRepair }) {
     if (base.storyLane && !runEvents(ctx).some((e) => e.event === 'card-sweep')) {
       await cardSweep(ctx, base, merged);
     }
-    if (base.storyLane && !runEvents(ctx).some((e) => e.event === 'reconciliation-judged')) {
-      await reconcileJudge(ctx, base, merged);
-    }
+    // The close judges no reconciliation: the judgment ran before the ship, and
+    // the records it owed rode this merge or they did not. What is left here is
+    // the ticket for the ones that did not, which names the merge commit and so
+    // could not be written before it existed (ADR-0026).
+    if (base.storyLane) reconcileClose(ctx, base, merged);
     if (base.storyLane && !runEvents(ctx).some((e) => e.event === 'learning-lesson')) {
       await learningLesson(ctx, base, merged);
     }
@@ -2330,7 +2363,7 @@ function noteWritten(worktree, note) {
   );
 }
 
-// -- the reconciliation judgment (ADR-0026) ----------------------------------
+// -- the reconciliation round (ADR-0026) -------------------------------------
 
 const RECONCILE_JUDGE_SCHEMA = {
   type: 'object',
@@ -2343,32 +2376,121 @@ const RECONCILE_JUDGE_SCHEMA = {
   required: ['owed', 'records', 'reason'],
 };
 
+const RECONCILE_WRITE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    rewritten: { type: 'array', items: { type: 'string' } },
+    unchanged: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          record: { type: 'string' },
+          reason: { type: 'string' },
+        },
+        required: ['record', 'reason'],
+      },
+    },
+    summary: { type: 'string' },
+  },
+  required: ['rewritten', 'unchanged', 'summary'],
+};
+
 /**
- * A fresh-context seat judges whether the shipped diff implements or
- * contradicts any decision record. Owed writes the reconciliation ticket
- * first, then stamps — a stamped judgment always has a ticket to launch
- * from. The sweep derives the owed set from the stamp and launches the
- * reconciliation as a repair-lane run; the rewrite never rides the run
- * that shipped the diff. Either verdict stamps with the reason, and a
- * failed judgment stamps ok:false: an unjudged ship is a recorded miss,
- * never a silent skip. The story shipped either way — nothing here blocks
- * the close.
+ * The answer that ships the certified tree and leaves the records owed. It is
+ * offered at the write seat's failure park alone, and it takes the operator's
+ * reason, because it ships work a check did not cover (ADR-0062). The word
+ * says what happens rather than what stops: an option opening with "abandon"
+ * reads at a console like the option that closes the run.
  */
-async function reconcileJudge(ctx, base, merged) {
+export const SHIP_WITHOUT_RECORDS = 'ship-without-records';
+
+const WRITE_SEAT = 'reconcile-write';
+
+/**
+ * What the reconciliation round owes next, from the run ledger alone.
+ *
+ * This is the whole of the round's restart safety. The update stage re-enters
+ * from the top on every daemon restart, so the next step is derived here and
+ * never remembered, and committed work is never repeated.
+ *
+ * - `judge`: nothing has judged this tree.
+ * - `done`: nothing is owed (not owed, or a judgment nobody could make), the
+ *   fallback is spent, the seat found nothing to rewrite, or a verdict has
+ *   already certified the record commit. The run may queue for the token.
+ * - `write`: the records are owed and no seat has written them.
+ * - `certify`: the records are committed and no verdict covers that commit.
+ *
+ * A `fresh-pass` after any of the three stamps discards the tree they were
+ * about, so the round is owed again on the tree that pass built.
+ * @param {object[]} events the run's ledger, in order
+ */
+export function reconcileStep(events) {
+  const judged = sinceFreshPass(events, (e) => e.event === 'reconciliation-judged');
+  if (!judged) return 'judge';
+  if (judged.ok !== true || judged.owed !== true) return 'done';
+  const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written');
+  if (written && written.ok !== true) return 'done';
+  const commit = reconcileCommit(events);
+  if (written && !commit) return 'done';
+  // The record commit ships only where a verdict has certified it. The proof is
+  // the one this stage already reads about every tree it may open a request
+  // over.
+  if (commit) return certifiedTree(events, commit.sha) ? 'done' : 'certify';
+  return 'write';
+}
+
+/**
+ * The reconciliation round, between the final green verdict and the ship
+ * token. It returns a directive where the run must leave this stage, and null
+ * where the round is done and the run may queue for the token.
+ */
+async function reconcileRound(ctx, base) {
+  const events = runEvents(ctx);
+  switch (reconcileStep(events)) {
+    case 'judge':
+      return reconcileJudge(ctx, base);
+    case 'write':
+      return reconcileWrite(
+        ctx,
+        base,
+        sinceFreshPass(events, (e) => e.event === 'reconciliation-judged'),
+      );
+    case 'certify':
+      return { next: 'verdict' };
+    default:
+      return null;
+  }
+}
+
+/**
+ * A fresh-context seat judges whether this run's own diff implements or
+ * contradicts any decision record. It reads the run branch against the default
+ * branch, which is the work this run is about to merge, and it judges only.
+ *
+ * Both verdicts stamp with the reason, and a failed judgment stamps ok:false
+ * with the cause: an unjudged ship is a recorded miss, never a silent skip.
+ * Nothing here blocks the ship.
+ */
+async function reconcileJudge(ctx, base) {
   try {
+    // The default-branch ref the diff is taken against. Without the fetch it
+    // is the branch as it stood when this run last met it, and the merge base
+    // behind that ref counts work this run merged in as its own.
     await fetchClone(cloneDir(ctx.paths, ctx.project));
-    await resetHard(base.worktree, merged.mergeSha);
   } catch (error) {
     ctx.store.append('reconciliation-judged', {
       actor: ACTOR,
       ok: false,
-      cause: `worktree: ${error.message}`,
+      cause: `fetch: ${error.message}`,
     });
-    return;
+    return null;
   }
   const result = await ctx.runSeat({
     seat: 'reconcile-judge',
-    roleBlock: judgeRole(base, merged),
+    roleBlock: judgeRole(base),
     reportPath: runReportPath(ctx.paths, ctx.runId, 'reconcile-judge'),
     schema: RECONCILE_JUDGE_SCHEMA,
     cwd: base.worktree,
@@ -2376,44 +2498,226 @@ async function reconcileJudge(ctx, base, merged) {
   });
   if (!result.ok) {
     ctx.store.append('reconciliation-judged', { actor: ACTOR, ok: false, cause: 'seat-failure' });
-    return;
+    return null;
   }
   const { owed, records, reason } = result.report;
   if (!owed) {
     ctx.store.append('reconciliation-judged', { actor: ACTOR, ok: true, owed: false, reason });
-    return;
+    return null;
   }
-  const ticket = reconcileTicketPath(ctx.paths, ctx.runId);
-  writeFileSync(ticket, reconcileTicket({ ctx, base, merged, records, reason }));
-  ctx.store.append('reconciliation-judged', {
+  const judged = ctx.store.append('reconciliation-judged', {
     actor: ACTOR,
     ok: true,
     owed: true,
     records,
     reason,
-    ticket,
     gist: gist(`reconciliation owed: ${records.join(', ')}`),
   });
+  return reconcileWrite(ctx, base, judged);
 }
 
-function judgeRole(base, merged) {
+/**
+ * A fresh seat rewrites the judged records inside the run worktree, and the
+ * run commits them onto its own branch. The seat implements nothing and reads
+ * the committed diff, so the rule the intake was built on holds: the context
+ * that implemented the work does not reconcile the records against it.
+ *
+ * The checks are the containment. No deny rule can say "everything except
+ * these directories" without walking the repository, so the boundary is a
+ * check over what the seat left in the tree, in the shape the card sweep
+ * already uses, and the commit is behind it.
+ */
+async function reconcileWrite(ctx, base, judged) {
+  const asked = lastRecoveryPark(runEvents(ctx));
+  if (
+    asked?.answer?.option === SHIP_WITHOUT_RECORDS &&
+    asked.park.type === 'seat-failure' &&
+    asked.park.detail?.seat === WRITE_SEAT
+  ) {
+    return reconcileFallback(ctx, base, 'operator');
+  }
+  // A seat that died mid-edit leaves whatever it had written, and the next
+  // dispatch must be the same dispatch as the first (ADR-0070).
+  await resetHard(base.worktree, await headSha(base.worktree));
+  const records = judged.records ?? [];
+  const outcome = await seatWithChecks(ctx, {
+    seat: WRITE_SEAT,
+    schema: RECONCILE_WRITE_SCHEMA,
+    cwd: base.worktree,
+    env: base.env,
+    constitution: base.constitution,
+    buildRole: (brief) => writeRole(base, judged, brief),
+    checks: (report) => writeChecks(base, records, report),
+    park: {
+      options: [SHIP_WITHOUT_RECORDS],
+      reasoned: [SHIP_WITHOUT_RECORDS],
+      note:
+        `Answer "${SHIP_WITHOUT_RECORDS}" with your reason to ship the code this run ` +
+        'already certified: the records stay owed, the close writes the ticket, and the ' +
+        'sweep launches the rewrite as a repair run.',
+    },
+  });
+  if (outcome.fail) {
+    // A work-product defect past its corrective round is the seat's answer,
+    // and it is not a question for a person: the code is certified, and the
+    // ticket is the route the harness took for every story before this round
+    // existed. A seat that never delivered a report at all is the other shape,
+    // and that one parks.
+    const failure = seatFailureAfter(runEvents(ctx), WRITE_SEAT, judged.seq);
+    if (Array.isArray(failure?.defects)) {
+      return reconcileFallback(ctx, base, 'work-product-defect');
+    }
+    return outcome.fail;
+  }
+  const report = outcome.report;
+  const baseSha = await headSha(base.worktree);
+  const sha = await commitAll(base.worktree, `reconcile: ${ctx.runId}`);
+  ctx.store.append('reconciliation-written', {
+    actor: ACTOR,
+    ok: true,
+    rewritten: report.rewritten,
+    unchanged: report.unchanged.map((u) => u.record),
+    ...(sha !== baseSha && { sha }),
+    gist: gist(`records rewritten: ${report.rewritten.join(', ')}`),
+  });
+  // A seat that changed nothing leaves the tree the verdict already certified.
+  if (sha === baseSha) return null;
+  ctx.store.append('implementation-committed', {
+    actor: ACTOR,
+    pass: currentPass(runEvents(ctx)),
+    phase: 'reconcile',
+    baseSha,
+    sha,
+  });
+  return { next: 'verdict' };
+}
+
+/**
+ * The route a write nobody could make takes: the tree goes back to the sha the
+ * last green verdict certified, and the run ships the code it earned. The
+ * reconciliation stays owed, the close writes the ticket, and the repair-lane
+ * rewrite behind it is the path the intake always had.
+ */
+async function reconcileFallback(ctx, base, cause) {
+  const events = runEvents(ctx);
+  const certified = [...events]
+    .reverse()
+    .find((e) => e.event === 'verdict-rendered' && e.verdict === 'green');
+  try {
+    if (certified?.sha) await resetHard(base.worktree, certified.sha);
+  } catch (error) {
+    // The reset is what makes this ship the ship the verdict certified. A tree
+    // that will not move is a stage precondition the run cannot settle itself.
+    return blocked(
+      ctx,
+      'reconcile-reset',
+      `The worktree could not be returned to the certified tree ${certified?.sha}: ` +
+        `${error.message}\nRepair the worktree, then answer.`,
+    );
+  }
+  ctx.store.append('reconciliation-written', {
+    actor: ACTOR,
+    ok: false,
+    cause,
+    ...(certified?.sha && { reset: certified.sha }),
+  });
+  return null;
+}
+
+function judgeRole(base) {
   return [
-    'Judge whether this shipped diff implements or contradicts any decision',
+    'Judge whether the diff of this run implements or contradicts any decision',
     'record (ADR). You judge only; change nothing.',
-    `The shipped diff is the merge commit ${merged.mergeSha} on ${base.defaultBranch}`,
-    `(PR #${merged.pr}). Read it with: git show ${merged.mergeSha}`,
+    `The diff is this branch against ${base.defaultBranch}. Read it with:`,
+    `git diff ${base.defaultBranch}...HEAD`,
     'Locate the decision-record tree (commonly docs/adr/). No such tree means',
     'owed=false with that as the reason.',
     'owed=true when the diff implements a recorded decision, contradicts one,',
-    'or deviates from one — implementation counts even when the diff never',
+    'or deviates from one. Implementation counts even when the diff never',
     'touches the record files themselves. List every affected record path in',
     'records, and state the reason in one or two sentences.',
   ].join('\n');
 }
 
 /**
- * The reconciliation ticket. The reconciliation run reads it from a fresh
- * worktree of the default branch and can see nothing else — so the ticket
+ * The write seat's brief. It carries the judged records, the diff to read them
+ * against, and the rules the record tree binds its editors to.
+ */
+function writeRole(base, judged, brief) {
+  return [
+    'Rewrite the decision records below so they stand as fact against this',
+    'branch. You did not write the code; read it before you write a word.',
+    `The diff is this branch against ${base.defaultBranch}. Read it with:`,
+    `git diff ${base.defaultBranch}...HEAD`,
+    '',
+    'Records to reconcile:',
+    ...(judged.records ?? []).map((r) => `- ${r}`),
+    '',
+    `Judged reason: ${judged.reason}`,
+    '',
+    'Rules:',
+    '- Rewrite the implemented parts of each record as standalone',
+    '  present-tense fact. Keep the rationale and the fallback paths.',
+    '- Parts the diff did not implement stay as explicit open sections.',
+    '- A divergence between the diff and a recorded decision is never absorbed',
+    '  silently: name it in the record and in your report, verbatim.',
+    '- Edit only the decision-record tree. No source, test, or config change',
+    '  rides this run.',
+    '- A record the diff turns out not to affect goes in unchanged with the',
+    '  reason. Report every judged record in rewritten or in unchanged, and',
+    '  never in both.',
+    ...briefLines(brief),
+  ].join('\n');
+}
+
+/**
+ * What the write seat left in the tree, against what it reported and against
+ * what it was asked for. The judged records are the harness's own list, so
+ * their directories are the boundary and no project has to declare one.
+ */
+async function writeChecks(base, records, report) {
+  const defects = [];
+  const trees = [...new Set(records.map((record) => dirname(record.replaceAll('\\', '/'))))].filter(
+    (dir) => dir.length > 0 && dir !== '.',
+  );
+  const changed = await changedFiles(base.worktree);
+  for (const file of changed) {
+    if (!underAny(file, trees)) {
+      defects.push(
+        `change outside the decision-record tree: ${file}. This run rewrites records and ` +
+          `nothing else; the records it was given live under ${trees.join(', ')}.`,
+      );
+    }
+  }
+  const rewritten = new Set(report.rewritten);
+  const unchanged = new Set(report.unchanged.map((u) => u.record));
+  for (const record of records) {
+    if (rewritten.has(record) && unchanged.has(record)) {
+      defects.push(`${record} is reported as rewritten and as unchanged; it is one or the other.`);
+      continue;
+    }
+    if (!rewritten.has(record) && !unchanged.has(record)) {
+      defects.push(
+        `${record} was judged owed and your report accounts for it nowhere. Rewrite it, or ` +
+          'put it in unchanged with the reason it needs no change.',
+      );
+    }
+  }
+  const touched = new Set(changed);
+  for (const record of report.rewritten) {
+    if (!records.includes(record)) {
+      defects.push(`${record} is not one of the judged records; this run rewrites those alone.`);
+    } else if (!touched.has(record)) {
+      defects.push(`you report ${record} as rewritten and the file is unchanged in the tree.`);
+    }
+  }
+  return defects;
+}
+
+/**
+ * The reconciliation ticket: the fallback route, written at the close where
+ * the merge commit it names exists. The repair-lane run reads it from a fresh
+ * worktree of the default branch and can see nothing else, so the ticket
  * carries the shipped diff's identity, the judged records, and the rewrite
  * rules the record tree binds its editors to.
  */
@@ -2449,6 +2753,56 @@ function reconcileTicket({ ctx, base, merged, records, reason }) {
     '  rides this run.',
     '',
   ].join('\n');
+}
+
+/**
+ * The close's half of the reconciliation: the records that did not ride the
+ * merge are ticketed here, where the merge commit the ticket names exists.
+ *
+ * The rule reads the ledger and not the route, so it covers the write seat's
+ * fallback and every other way the records could have been lost. A ticket the
+ * close cannot write is the one outcome this mechanism must never produce in
+ * silence, and it is stamped loud under its own defect kind.
+ */
+function reconcileClose(ctx, base, merged) {
+  const events = runEvents(ctx);
+  const judged = sinceFreshPass(events, (e) => e.event === 'reconciliation-judged');
+  if (judged?.ok !== true || judged.owed !== true) return;
+  if (events.some((e) => e.event === 'reconciliation-judged' && typeof e.ticket === 'string')) {
+    return;
+  }
+  const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written');
+  // The records rode this merge: the commit is in the branch that merged, or
+  // the seat read them and found nothing to change.
+  if (reconcileCommit(events) || written?.ok === true) return;
+  const records = judged.records ?? [];
+  try {
+    const ticket = reconcileTicketPath(ctx.paths, ctx.runId);
+    writeFileSync(ticket, reconcileTicket({ ctx, base, merged, records, reason: judged.reason }));
+    // The ticket before the stamp: a stamped ticket always exists to launch
+    // from (the owed-set ordering, ADR-0024).
+    ctx.store.append('reconciliation-judged', {
+      actor: ACTOR,
+      ok: true,
+      owed: true,
+      records,
+      reason: judged.reason,
+      ticket,
+      cause: written?.cause ?? 'not-written',
+      gist: gist(`reconciliation ticketed: ${records.join(', ')}`),
+    });
+  } catch (error) {
+    gateIntegrity(ctx, {
+      kind: 'reconciliation-lost',
+      pr: merged.pr,
+      records,
+      cause: error.message,
+      detail:
+        `PR #${merged.pr} merged with ${records.length} decision record(s) owed, and the ` +
+        `ticket could not be written: ${error.message}`,
+      gist: gist(`reconciliation lost on PR #${merged.pr}: ${records.join(', ')}`),
+    });
+  }
 }
 
 // -- the learning artifact (ADR-0031) ----------------------------------------

@@ -420,11 +420,24 @@ export const RUN_EVENTS = new Set([
   'merge-commit-check',
   'red-merge-breach',
   'card-sweep',
-  // The close-out judgment on decision-record reconciliation: owed or not,
-  // with the records named and the ticket written when owed (ADR-0026). A
-  // failed judgment stamps ok:false — an unjudged ship is visible, never a
-  // silent skip.
+  // The pre-ship judgment on decision-record reconciliation: owed or not,
+  // with the records named (ADR-0026). It is stamped after the final green
+  // verdict and before the run takes the ship token, so an owed judgment can
+  // still be answered on the run's own branch. A failed judgment stamps
+  // ok:false. An unjudged ship is visible, never a silent skip.
+  //
+  // A second line of this event lands at close-out where the records did not
+  // ride the merge: the same judgment, plus the `ticket` the frontier's owed
+  // set launches from and the `cause` that says why the run did not write them
+  // itself. The ticket names the merge commit, which is why that line waits
+  // for the close.
   'reconciliation-judged',
+  // What the reconciliation seat did with an owed judgment: the records it
+  // rewrote, the records it left alone with the reason for each, and the sha
+  // of the commit that carries them. `ok: false` with the cause is the
+  // fallback: the seat could not deliver, the run ships the code it certified,
+  // and the close writes the ticket the sweep launches from (ADR-0026).
+  'reconciliation-written',
   // The close-out learning artifact a project asks for in its config: `ok`
   // with the artifact paths the seat reported, or ok:false with the reason
   // (ADR-0031). Quiet either way — the story shipped, and nothing here can
@@ -742,6 +755,12 @@ export const GATE_INTEGRITY_KINDS = new Set([
   // the attribution costs no judgment seat a cycle — it was reasoned out by one
   // twice, after two runs had already died of it (ADR-0045).
   'resource-exhaustion',
+  // A story merged with decision records judged owed, and neither the merge
+  // carried the rewrite nor a ticket was written for it. It is the one
+  // outcome the reconciliation mechanism exists to prevent: work the harness
+  // knew was owed, lost at the close with nothing behind it. Stamped at
+  // close-out, where both routes have had their chance (ADR-0026).
+  'reconciliation-lost',
 ]);
 
 // The kinds a step stamps on the record of the defect it just met. These
