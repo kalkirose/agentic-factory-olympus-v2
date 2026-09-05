@@ -1208,6 +1208,108 @@ test('a suite defect re-freezes the tests without budget and without a new fury 
   );
 });
 
+// -- the project's checks over the re-freeze amendment (ADR-0071) ------------
+
+// One of a project's own checks, in the smallest honest form: every suite file
+// must name the family whose ground covers it. It names the file it refuses.
+const FAMILY_CMD = [
+  'node',
+  '-e',
+  "const fs=require('fs');" +
+    "const bad=fs.readdirSync('tests').filter((f)=>!fs.readFileSync('tests/'+f,'utf8').includes('olympus:family'));" +
+    "if(bad.length){console.log('no family: '+bad.join(', '));process.exit(1)}",
+];
+
+const GROUNDED_TEST = `// olympus:family unit\n${STRONG_TEST}`;
+
+/** A re-freeze that leaves the file ungrounded once, then answers the check. */
+function amendsTwice() {
+  let amended = 0;
+  return () => ({
+    files: { 'tests/feature.test.mjs': amended++ === 0 ? STRONG_TEST : GROUNDED_TEST },
+    report: { suiteFiles: ['tests/feature.test.mjs'], reds: [], summary: 're-frozen' },
+  });
+}
+
+test("the re-freeze amendment runs the project's checks over what it wrote", async (t) => {
+  // The re-freeze is a suite write like the four before the freeze, and the
+  // only one after it. Without the checks here, the amendment that repairs one
+  // Tier-1 red hands the next cycle a second one, on a file it froze.
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat(() => ({ class: 'suite-defect', depth: 'test' })),
+    ...furyClean(),
+    suite: amendsTwice(),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    suiteFiles: { 'tests/feature.test.mjs': WRONG_TEST },
+    commands: { ...DEFAULT_COMMANDS, family: FAMILY_CMD },
+    laneConfig: { story: { suiteCommand: 'suite', suiteChecks: ['family'] } },
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'suite-check')
+      .map((e) => [e.phase, e.command, e.result]),
+    [
+      ['re-freeze', 'family', 'red'],
+      ['re-freeze', 'family', 'green'],
+    ],
+  );
+  // Nothing was committed behind the red, and the seat that wrote the file was
+  // still live when it was told which file and which fault.
+  const committed = events.find((e) => e.event === 'suite-committed' && e.phase === 're-freeze');
+  const green = events.filter((e) => e.event === 'suite-check').at(-1);
+  assert.ok(committed.seq > green.seq);
+  const attempts = fx.calls.filter((c) => c.seat === 'suite');
+  assert.equal(attempts.length, 2);
+  assert.ok(attempts[0].prompt.includes('runs its own checks over every suite'));
+  assert.ok(attempts[1].prompt.includes('no family: feature.test.mjs'));
+  assert.ok(!events.some((e) => e.event === 'park'));
+});
+
+test('a check that cannot run at the re-freeze parks the environment, not the seat', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat(() => ({ class: 'suite-defect', depth: 'test' })),
+    ...furyClean(),
+    suite: () => ({
+      files: { 'tests/feature.test.mjs': GROUNDED_TEST },
+      report: { suiteFiles: ['tests/feature.test.mjs'], reds: [], summary: 're-frozen' },
+    }),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    suiteFiles: { 'tests/feature.test.mjs': WRONG_TEST },
+    commands: { ...DEFAULT_COMMANDS, missing: ['olympus-no-such-suite-check'] },
+    laneConfig: { story: { suiteCommand: 'suite', suiteChecks: ['missing'] } },
+  });
+  const { runId } = await fx.launch();
+  const park = await waitFor(
+    () =>
+      readEvents(runLedgerPath(fx.paths, runId)).find(
+        (e) => e.event === 'park' && e.type === 'command-error',
+      ),
+    { label: 'command-error park', attempts: 400, intervalMs: 100 },
+  );
+  assert.equal(park.reason, 'suite-check-error');
+  assert.equal(park.detail.command, 'missing');
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  const check = live.find((e) => e.event === 'suite-check');
+  assert.equal(check.result, 'unrun');
+  assert.equal(check.phase, 're-freeze');
+  // A host defect is not a defect of the suite: one invocation, no blame, and
+  // nothing frozen behind it.
+  assert.ok(!live.some((e) => e.event === 'seat-failure'));
+  assert.equal(fx.calls.filter((c) => c.seat === 'suite').length, 1);
+  assert.ok(!live.some((e) => e.event === 'suite-committed' && e.phase === 're-freeze'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
+});
+
 test('spec-deep and intent-deep suite defects amend the spec; the intent conflict parks first', async (t) => {
   const seats = {
     dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),

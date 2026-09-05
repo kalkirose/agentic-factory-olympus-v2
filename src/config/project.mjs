@@ -490,15 +490,44 @@ function validateStoryLane(lane, commands, err) {
       err('lanes.story.lintCommand', 'must name a key in commands');
     }
   }
-  // The project's own check that every suite file declares the ground that can
-  // change its answer. It runs over the suite as a seat left it, before any
-  // commit and before the freeze (ADR-0060). The argv is the project's, so the
-  // project is what makes it strict: the entry names the strict form of the
-  // check, not the lenient one a gate layer runs. A project that names none
-  // skips the step, which is what every project had before the field existed.
+  // The project's own checks over each suite write, run over the tree as a seat
+  // left it, before any commit and before the freeze (ADR-0071). The argv of
+  // each is the project's, so the project is what makes each strict: an entry
+  // names the strict form of a check, not the lenient one a gate layer runs.
+  // The order is the project's too, and it carries every dependency between the
+  // checks. A project that names none skips the step, which is what every
+  // project had before the field existed.
+  if (lane.suiteChecks !== undefined) {
+    if (!Array.isArray(lane.suiteChecks)) {
+      err('lanes.story.suiteChecks', 'must be an array of command names, in the order they run');
+    } else {
+      const seen = new Set();
+      lane.suiteChecks.forEach((name, i) => {
+        if (typeof name !== 'string' || !names[name]) {
+          err(`lanes.story.suiteChecks[${i}]`, 'must name a key in commands');
+        } else if (seen.has(name)) {
+          err(`lanes.story.suiteChecks[${i}]`, `names ${name} twice; each check runs once per write`);
+        } else {
+          seen.add(name);
+        }
+      });
+    }
+  }
+  // The one-entry form `suiteChecks` replaced. It is still read where no list
+  // is present, so a config written for the older harness keeps its check.
+  // Where both are present the list is what runs, and the two are held to the
+  // same set: a daemon on the older code reads this field and a daemon on the
+  // newer one reads the list, and a check only one of them runs is a difference
+  // no project declared.
   if (lane.groundCommand !== undefined) {
     if (typeof lane.groundCommand !== 'string' || !names[lane.groundCommand]) {
       err('lanes.story.groundCommand', 'must name a key in commands');
+    } else if (Array.isArray(lane.suiteChecks) && !lane.suiteChecks.includes(lane.groundCommand)) {
+      err(
+        'lanes.story.groundCommand',
+        'names a command lanes.story.suiteChecks does not hold; while both fields are read ' +
+          'they must name the same checks',
+      );
     }
   }
   // Adversary waves per round. The lane defaults it, so the entry is only

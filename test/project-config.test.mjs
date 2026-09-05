@@ -563,6 +563,55 @@ test('the story suite command must be carried by a Tier-1 layer at launch', () =
   assert.deepEqual(validateProjectConfig(noGates, { launch: true }), []);
 });
 
+test('the story lane names its suite checks in order, each one a command it holds', () => {
+  // The list the pre-freeze chain and the re-freeze run over every suite write
+  // (ADR-0071). The order is the project's, and it carries every dependency
+  // between the checks.
+  const ordered = valid();
+  ordered.lanes.story.suiteChecks = ['lint', 'test'];
+  assert.deepEqual(validateProjectConfig(ordered), []);
+  // An empty list is a project that wants no check, which is what every project
+  // had before the field existed.
+  const none = valid();
+  none.lanes.story.suiteChecks = [];
+  assert.deepEqual(validateProjectConfig(none), []);
+  // A name the command table does not hold would reach the seat as a check
+  // nothing can run, so it is refused at the door instead.
+  const unknown = valid();
+  unknown.lanes.story.suiteChecks = ['lint', 'nope'];
+  assert.deepEqual(errorPaths(unknown), ['lanes.story.suiteChecks[1]']);
+  for (const value of ['lint', {}, null]) {
+    const bad = valid();
+    bad.lanes.story.suiteChecks = value;
+    assert.deepEqual(errorPaths(bad), ['lanes.story.suiteChecks'], String(value));
+  }
+  // A check named twice runs twice and buys nothing the first run did not.
+  const twice = valid();
+  twice.lanes.story.suiteChecks = ['lint', 'lint'];
+  assert.deepEqual(errorPaths(twice), ['lanes.story.suiteChecks[1]']);
+});
+
+test('the one-entry check field is read alone and must agree with the list', () => {
+  // `groundCommand` is the field `suiteChecks` replaced. A config that still
+  // names it alone keeps exactly the check it had.
+  const alone = valid();
+  alone.lanes.story.groundCommand = 'lint';
+  assert.deepEqual(validateProjectConfig(alone), []);
+  const unknown = valid();
+  unknown.lanes.story.groundCommand = 'nope';
+  assert.deepEqual(errorPaths(unknown), ['lanes.story.groundCommand']);
+  // While both fields are read, by two daemons on two versions, a check only
+  // one of them runs is a difference no project declared.
+  const agreed = valid();
+  agreed.lanes.story.suiteChecks = ['lint', 'test'];
+  agreed.lanes.story.groundCommand = 'lint';
+  assert.deepEqual(validateProjectConfig(agreed), []);
+  const split = valid();
+  split.lanes.story.suiteChecks = ['test'];
+  split.lanes.story.groundCommand = 'lint';
+  assert.deepEqual(errorPaths(split), ['lanes.story.groundCommand']);
+});
+
 test('a raised adversary wave count is a positive integer or an error', () => {
   const raised = valid();
   raised.lanes.story.adversaryWaves = 3;
