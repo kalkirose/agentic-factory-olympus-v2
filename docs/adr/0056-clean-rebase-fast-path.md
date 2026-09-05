@@ -1,6 +1,7 @@
 # ADR-0056: A ship over a provably disjoint merge keeps the certification it earned
 
-Status: accepted (2026-08-30)
+Status: accepted (2026-08-30, the two ground sources and the launch rule
+2026-09-05)
 
 ## The trade this makes, stated plainly
 
@@ -10,16 +11,16 @@ tree, the run is judged again, from the top. This decision lets one class of
 moved tree skip that second judgment: the class where two mechanical checks
 prove the incoming work and the story cannot interact.
 
-The guarantee that thins is real and it is worth naming. Today a merged tree is
-certified against the exact bytes that land. After this, a fast-path merge is
-certified against a tree that differs from the one that lands in ways the
-project's own declarations claim cannot reach any suite. A hidden coupling
+The guarantee that thins is real and it is worth naming. Before this, a merged
+tree was certified against the exact bytes that land. After it, a fast-path
+merge is certified against a tree that differs from the one that lands in ways
+the project's own declarations claim cannot reach any suite. A hidden coupling
 outside declared ground, a shared table, a global config value, an implicit
 ordering, ships a defect the old rule would have caught before the merge. The
-owner made that trade knowingly, for speed, on 2026-08-30. What is bought is
-hours of re-proof on every story, and a ship queue that stops serialising every
-waiting run behind that re-proof. What is paid is a residual risk, and the whole
-of this decision is about making that risk measured and reversible.
+owner made that trade knowingly, for speed. What is bought is hours of re-proof
+on every story, and a ship queue that stops serialising every waiting run
+behind that re-proof. What is paid is a residual risk, and the whole of this
+decision is about making that risk measured and reversible.
 
 Detection is delayed, not removed. A scheduled full run on the default branch is
 the backstop, and the harness already reads one: a watched workflow no request
@@ -29,7 +30,7 @@ proposes the revert.
 
 ## Decision
 
-`gates.fastPathShip` gates the whole path. Absent or `false` is today's
+`gates.fastPathShip` gates the whole path. Absent or `false` is the older
 behaviour byte for byte: the flag is read once, after the `pre-verdict-update`
 stamp, and nothing above or below that line changes.
 
@@ -46,14 +47,14 @@ asked anything, and no answer is a judgment.
   the result a clean rebase would have produced. Any difference refuses.
 - **Question two, the ground.** Every file the default branch gained since the
   run last met it has to be answered by a claim somebody made. It is tested
-  against five sets: the story's own changed files, every declared input of
-  every suite in the certified verdict, the suite files (`repo.testPaths`), the
-  project's shared breadth list (`gates.breadthGround`), and the files the
-  declarations themselves are produced from. One hit refuses, because a suite
-  that depends on the file was never run over it. A file NO set reaches also
-  refuses, unless the project declared it inert (`gates.inertGround`). A suite
-  that declared no inputs refuses. A change the harness cannot read as a file of
-  this repository refuses.
+  against six sets: the story's own changed files, the files the declarations
+  themselves are produced from, the project config the run pinned, the suite
+  files (`repo.testPaths`), the project's shared breadth list
+  (`gates.breadthGround`), and the whole declared ground of every Tier-1 layer.
+  One hit refuses, because a suite that depends on the file was never run over
+  it. A file NO set reaches also refuses, unless the project declared it inert
+  (`gates.inertGround`). A layer whose ground neither source declares refuses. A
+  change the harness cannot read as a file of this repository refuses.
 - **Both answers agree or the run takes the full re-verdict.** There is no
   third ending.
 
@@ -63,6 +64,108 @@ certification it reuses. The close carries `fastPath: true`. A refusal stamps
 the same event with `taken: false` and one word from a closed refusal set, so a
 flag that fires for nothing is readable as one.
 
+## A layer's ground has two sources and one derivation
+
+A Tier-1 layer states what it reads in one of two places, and the harness reads
+the two the same way.
+
+- **The layer's own command states it, part by part.** The part-targeting
+  markers carry `::olympus part-inputs <entry> …` per part (ADR-0046). A runner
+  that dispatches per workspace knows the filter it dispatched with, and the
+  filter is the input set.
+- **The project states it on the layer entry of its config.** `ground` is an
+  array of path entries beside `command`, `needs` and `memoryCeilingMb`.
+
+`layerGround()` in `src/lanes/parts.mjs` is the one derivation, and every reader
+calls it. It answers three things about one layer.
+
+- `entries` is the union of the config list, every input every part of that
+  layer declared, and the shared breadth list. It is the widest ground the layer
+  might read, and it is what the ground question tests a changed file against.
+  A wider set refuses more and never fewer, so the union fails in the safe
+  direction.
+- `floor` is the layer's config list widened by the breadth list, and it is what
+  a part that declared no inputs stands on. A sibling part's declaration is a
+  statement about that sibling and about nothing else, so it is not in the
+  floor. The breadth list is not a floor of its own either: it is ground that
+  belongs to every suite ON TOP of what that suite declared, never a description
+  of what a layer reads. A layer the config does not describe therefore has no
+  floor, and a part of it that declared nothing is affected by everything, as
+  ADR-0046 has it.
+- `sources` says which of the two spoke, which is what decides the scope of the
+  declaration-source walk below.
+
+`partGround()` is the other half: a part's own canonical inputs where it
+declared any, and the layer's floor where it declared none. The stream wins
+wherever it spoke. A config entry that overrode a live declaration would make
+the copy nobody edits the authority, and ADR-0046 settled that argument for the
+map itself.
+
+**Why a field on the layer, and not a map keyed by layer name.** A map writes
+each layer's name twice and the two copies drift. An ordered list beside the
+fact it describes carries the same information with nothing to keep in step
+(ADR-0071).
+
+**Why the breadth list is unioned at read time.** A runner that already prints
+its parts commonly unions the shared ground into every part it prints. A config
+ground that had to repeat the same entries per layer would be one fact written
+forty times. The harness does the union where it reads, so a project states each
+layer's own ground and the shared list once.
+
+**Why not teach every runner the part protocol instead.** Most Tier-1 layers on
+a real project are single-purpose gate scripts that run one check and exit. A
+part protocol inside each declares one part per script, which is the layer, so
+it states exactly what a config line states and costs an edit, a review and a
+permanent duty on every new gate. ADR-0046's argument for the runner holding the
+map is about a runner that DISPATCHES, because such a runner knows the filter it
+dispatched with. A script that scans one tree knows nothing the config does not.
+
+**Why not infer a layer's ground from its command.** A package script names no
+tree, and the tree it walks is decided inside a source file at run time. An
+inferred ground is a guess with a failure mode nobody reads. The same argument
+rules out deriving `ground` from `inertGround` or `groundlessPaths`: two lists
+that look alike answer different questions, and a derivation makes every future
+entry of one a claim about the other that its reviewer never considered
+(ADR-0059).
+
+**Why not read a layer's ground off the run's own worktree.** It reopens the
+exact hole the narrowing rule below closes: a story would be judged against
+ground it wrote.
+
+## The launch refuses a groundless layer
+
+`validateProjectConfig(config, {launch: true})` requires every `gates.tier1`
+entry to carry a non-empty `ground` list, and it requires every entry of that
+list to canonicalise to something. The rule is armed by
+`gates.fastPathShip === true` and by nothing else. The error names the layer.
+
+Without it, a project that turns the flag on and runs one layer whose command
+prints no part markers gets a refusal for every ship, for ever, and the only
+sign of it is one word in a ledger. That was observed: a spectrum of forty
+layers where eight printed their parts and thirty-two did not refused on the
+first of the thirty-two, every time, and paid a full verdict cycle for it while
+holding the ship token.
+
+**Why armed by the flag, and why hard once armed.** An invalid config launches
+nothing, so a validation rule can take a whole project dark until a pull request
+merges. That risk is not worth running for a project that has not opted into the
+fast path, and such a project is validated exactly as it was before this field
+existed. It IS worth running for a project that HAS opted in, because there the
+alternative to a loud refusal is the silent permanent refusal above, and a
+project that pays for a check it can never take is worse off than one that is
+told so at the config. The revert stays one line: `gates.fastPathShip` back to
+`false` disarms the rule with the feature.
+
+**Why the requirement covers the self-declaring layers too.** The validator
+cannot see what a command will print. It can see only the config. And a layer
+that self-reports is not a layer with a complete ground: a layer whose runner
+declares six parts may hold two prerequisite steps that are not suites and state
+no families, so those two print no inputs at all. A ground on every layer is the
+floor under exactly that case.
+
+**Why not leave the launch rule out and refuse at ship time with a better
+word.** That is the state this rule repairs: a refusal nobody reads.
+
 ## Why silence is not safety
 
 A rule that refuses on a hit and passes everything else would read like a proof
@@ -71,32 +174,46 @@ reaches no suite; it is ground about which nobody has said anything at all, and
 the two are the same only if silence is evidence.
 
 The part machinery already answers this exact question and it answers it the
-other way (`src/lanes/parts.mjs`). A changed path no part input set claims, a
+other way (`src/lanes/parts.mjs`). A changed path no part ground claims, a
 lockfile, a shared package, a migration, a config file, a path nobody thought
 about, makes EVERY part affected there. Doubt always re-runs. A ship carrying a
 whole certification cannot hold a weaker rule than a single layer carrying one
 part of itself.
 
-So the pass now needs a positive claim, and `gates.inertGround` is that claim:
-the path entries the project states no suite of it can reach. It is the same
-kind of statement as the breadth list, made in the other direction, and it earns
-the same review weight. A project that declares none never fast-paths, which is
-the safe default and the state every project starts in.
+So the pass needs a positive claim, and `gates.inertGround` is that claim: the
+path entries the project states no suite of it can reach. It is the same kind of
+statement as the breadth list, made in the other direction, and it earns the
+same review weight. A project that declares none never fast-paths, which is the
+safe default and the state every project starts in.
+
+The same rule is why a layer nobody described refuses the whole check rather
+than being skipped past. A layer nobody described could read anything, and a
+fast path that stepped over it would carry a certification over ground nobody
+spoke for.
 
 ## Why a story may not narrow its own inputs
 
-The declarations come off the part-targeting markers, and those markers are
-printed by the layer commands running in the RUN's worktree. That makes them the
-branch's own report about itself. A story that added
-`::olympus part-inputs src/tiny` to a gate would be judged against the narrowing
-it wrote, and the narrowing would earn it the skip.
+The part-input markers are printed by the layer commands running in the RUN's
+worktree. That makes them the branch's own report about itself. A story that
+added `::olympus part-inputs src/tiny` to a gate would be judged against the
+narrowing it wrote, and the narrowing would earn it the skip.
 
 The check closes that by requiring main's copy of every file a declaration comes
-out of to be the run's copy: the story's own diff may not touch a Tier-1 layer
+out of to be the run's copy: the story's own diff may not touch a layer
 command's argv paths or the directory each one sits in, and the branch moving
 under those paths is an intersection like any other. When both sides hold the
 same bytes, the run's report is the merge target's report, which is the side
 that must decide the skip.
+
+**The walk covers the layers whose own COMMAND declared a ground, and no
+others.** That is the whole reason the set exists. A config ground is produced in
+no tree: a story cannot narrow it, and there is nothing to hold equal. So a
+layer whose ground is config-only may run a command that names no file of this
+repository, and a layer whose markers decide a skip is walked exactly as
+before. This is a narrowing of scope and never of strictness: every declaration
+that decides a skip is still bounded, and every edge the walk cannot read still
+refuses. A project where no layer declares anything of its own bounds nothing
+and refuses nothing, because no marker of the run's tree decided anything.
 
 The surface is the command's own file, every module that file reaches through a
 relative import, transitively, and the directory each one sits in. The walk is
@@ -107,13 +224,12 @@ wrong file while the story edited the right one.
 
 Every edge the walk cannot read refuses, because an edge nobody can enumerate is
 a surface with an unknown boundary: a command that names no file of this
-repository (`npm test`), an argv path that is a glob rather than a file, a file
-that will not read, a relative specifier that resolves to nothing, one that
-resolves to more than one thing, a path that reaches its content through a
-symlink, and a load whose argument is not a written literal. A bare specifier is
-the one thing followed nowhere and refused nowhere: it names a dependency and
-not a file of this repository, and a dependency moving is what the shared
-breadth list is for.
+repository, an argv path that is a glob rather than a file, a file that will not
+read, a relative specifier that resolves to nothing, one that resolves to more
+than one thing, a path that reaches its content through a symlink, and a load
+whose argument is not a written literal. A bare specifier is the one thing
+followed nowhere and refused nowhere: it names a dependency and not a file of
+this repository, and a dependency moving is what the shared breadth list is for.
 
 Three of those deserve their reasons written down.
 
@@ -148,6 +264,14 @@ semantics: a module reached only through a runtime path this parse cannot see is
 outside it. Every shape that hides one, though, is itself a refusal, so what is
 left is a module reached by a literal relative specifier the static forms miss.
 
+## The pinned project config is ground
+
+A run judges against the project config blob it pinned at its launch. That file
+now carries the ground of every Tier-1 layer, so a default branch that has moved
+it since decided this run's claims under a version the merge target no longer
+states. The config path the run pinned is therefore one of the six sets, and a
+branch that moved it refuses with `ground-intersects`.
+
 ## Why a lens finding is not carried
 
 A certification is two things: the deterministic gate results, and a review
@@ -165,15 +289,40 @@ true.
 
 ## One canonical path, everywhere
 
-Declarations, argv words, import specifiers and git's own output all name files,
-and they name the same file in different hands: `./docs`, `docs//`, `docs`. The
-comparison this check runs is a prefix comparison, so two spellings compare as
-two different paths, and a declaration written `./docs/fixtures` would clear
-every check that asks whether a declaration exists while matching no file at
-all. There is therefore one canonical form and one function that produces it,
-and every path in the module meets it before anything compares it: separators
-forward, `.` and empty segments dropped, no trailing slash, and null for a name
-that canonicalises to nothing or climbs out of the repository.
+Declarations, config lists, argv words, import specifiers and git's own output
+all name files, and they name the same file in different hands: `./docs`,
+`docs//`, `docs`. The comparison this check runs is a prefix comparison, so two
+spellings compare as two different paths, and a declaration written
+`./docs/fixtures` would clear every check that asks whether a declaration exists
+while matching no file at all. There is therefore one canonical form and one
+function that produces it, `groundEntry()` in `src/config/project.mjs`, beside
+the glob vocabulary it belongs to. Every path meets it before anything compares
+it: separators forward, `.` and empty segments dropped, no trailing slash, and
+null for a name that canonicalises to nothing or climbs out of the repository.
+
+`.` is the entry that matters most. The path vocabulary compares a plain entry
+as a prefix, no repo-relative path is `.` and none begins `./`, so an entry of
+`.` reads like a declaration of the whole repository and matches nothing. Such
+an entry is dropped, a part left with no entry at all is refused as the
+undeclared suite it is, and a `ground` list holding one is refused at the launch
+by name.
+
+## The refusal vocabulary
+
+The set is closed, because a refusal outside it is prose again and a count of
+prose is nothing (ADR-0008). Two of the words name facts that read alike and are
+not.
+
+- `no-standing-green`: a Tier-1 layer holds no green result to carry. It is
+  defensive, because the update stage runs behind a green verdict.
+- `undeclared-suite`: a layer, or a part of one, whose ground neither source
+  declares. The launch rule makes it unreachable for a project with
+  `gates.fastPathShip: true`, so one occurrence means the validator and the ship
+  reader disagree about what a declared ground is, and that is a defect of this
+  mechanism rather than of a project.
+
+They have different causes and different repairs, so a count that mixed them
+would be a count of nothing.
 
 ## What a taken record does not settle
 
@@ -183,9 +332,9 @@ moved base at the ship stage. That verdict judges the tree that lands, which is
 the whole of what the fast path skipped, so the run earned the certification it
 ships and the trade was never made. A taken record with a GREEN verdict rendered
 after it therefore marks nothing: the close carries no `fastPath`, an escape
-behind that merge is the ordinary escape, and the tripwire that measures the
-trade does not count that ship. The record itself stays in the ledger, because
-the check did run and did answer.
+behind that merge is the ordinary escape, and the tripwires that measure the
+trade do not count that ship. The record itself stays in the ledger, because the
+check did run and did answer.
 
 Green, and nothing weaker. A red render certifies nothing, and the env-only CI
 route renders one deliberately: it carries a failure the tree is not to blame
@@ -200,7 +349,9 @@ The whole check runs inside the ship token, so anything it holds it holds for
 every run waiting to ship. Every git read it takes is bounded at
 `GIT_TIMEOUT_MS` (two minutes); a read that hits the bound is killed, the call
 throws, and the throw is the `internal-error` route, which is the full
-re-verdict. A hang is not one of the endings.
+re-verdict. A hang is not one of the endings. The ground derivation itself is
+pure list work over the layers and their entries: it reads no file and runs no
+git command.
 
 The ledger record names the default-branch commits examined, and the list is
 capped at 200. A range past the cap carries `truncated: true` beside the true
@@ -209,13 +360,13 @@ of exactly 200 from a range the record stopped writing down.
 
 ## Why the merge proves the rebase
 
-The plan this implements asks for a rebase. A rebase in the run worktree would
-rewrite a branch the request is already built on, and the harness ships merges,
-not rebases. What matters is not the shape of the operation but the tree that
-lands, and the two patches above are a proof about exactly that tree: they say
-the merged tree equals the branch with the story's patch applied unchanged,
-which is the property a clean rebase would have established. The check is
-therefore about the artefact under judgment rather than about a rehearsal of it.
+A rebase in the run worktree would rewrite a branch the request is already built
+on, and the harness ships merges, not rebases. What matters is not the shape of
+the operation but the tree that lands, and the two patches above are a proof
+about exactly that tree: they say the merged tree equals the branch with the
+story's patch applied unchanged, which is the property a clean rebase would have
+established. The check is therefore about the artefact under judgment rather
+than about a rehearsal of it.
 
 A merge that conflicts never reaches the check: the conflict route runs one
 stage in front, resolves the conflict with a dev seat, and the resolved tree
@@ -225,11 +376,7 @@ fails question one on the seat's own edit.
 
 Suites that exercise HTTP routes and database state have coupling no import
 tracer can see. A declared input is an auditable claim a reviewer can check; an
-inferred one is a guess with a failure mode nobody reads. The declarations ride
-the part-targeting contract that already exists (ADR-0046): a suite says what it
-depends on in its own output, in the path vocabulary the rest of the project
-config uses. Nothing new is invented on the harness side, and a project that has
-declared nothing yet gets nothing but refusals.
+inferred one is a guess with a failure mode nobody reads.
 
 ## Why a project with no breadth list never fires
 
@@ -245,18 +392,8 @@ not already paying.
 
 `repo.testPaths` is the same case one set along, and it refuses the same way
 with `no-suite-ground`. A project that names no suite files of its own would
-have a fifth of the ground question answered by an empty list while the record
+have a sixth of the ground question answered by an empty list while the record
 read like a whole answer.
-
-## What a declaration that matches nothing is
-
-The stale-declaration gate on the project side catches a glob that resolves to
-no existing path. It does not catch an entry that could never match any path of
-any repository, and `.` is the one that matters: the path vocabulary compares a
-plain entry as a prefix, no repo-relative path is `.` and none begins `./`, so a
-suite declaring it has declared an input set that reaches no file while clearing
-every check that asks whether a declaration exists. Such an entry is dropped,
-and a part left with no entry at all is refused as the undeclared suite it is.
 
 ## Failure is never a wedge
 
@@ -284,18 +421,36 @@ to the fast path, because the shas the check reads went with the lost record,
 and a decision over shas the run cannot name is not the decision it would have
 made.
 
-## Measuring what the trade costs
+## Measuring both halves of the trade
 
 This is a gate cut, so the doctrine rule applies: a cut names its metric, its
 watch window and its breach condition in the same change, and a breach restores
-the cut by default. The rule is enforced rather than asked for. A project that
-sets `gates.fastPathShip` and registers no `fast-path-escapes` tripwire has the
-standing one armed for it, at the standing band, wherever the registry is read.
+the cut by default. Two readings are needed and not one, because a cost of
+nought over a check that never fires reads exactly like a cut that works.
 
-Arming is the answer rather than a config refusal because the flag is opt-in and
-a refusal would wedge the whole project over it: the launch reads the config, an
-invalid config launches nothing, and the project would be dark until somebody
-landed a PR. Arming cannot wedge anything, it shows in the same board the
+- `fast-path-escapes` counts what the trade costs: defects that reached the
+  default branch through a ship which carried its certification, over the last
+  ten shipped runs of ONE project. Two in ten breaches, and the answer it
+  carries is the config line that turns that project's flag off. The band is
+  deliberately tight, because the guarantee was traded away on the belief that
+  escapes would be rare, and two in ten is the reading that says the belief was
+  wrong.
+- `fast-path-takes` counts what the trade buys: the share of the fast-path
+  records of that window which carried the certification instead of refusing.
+  It is eligible only where at least three runs of the window met a moved base,
+  because one moved base that refused is an ordinary busy branch and a rate over
+  nothing is not a reading about anything. A rate of nought over an eligible
+  window says the check refuses everything and pays for itself with nothing.
+  Its answer names the refusal histogram, because each word names a different
+  repair: a run of `ground-intersects` means the ground lists are right and the
+  branch is busy, a run of `unclaimed-ground` means `inertGround` is too thin,
+  and one `undeclared-suite` means the validator and the reader disagree.
+
+Both are armed rather than required. A project that sets `gates.fastPathShip`
+and registers neither has the standing entries armed for it, at the standing
+bands, wherever the registry is read. Arming is the answer rather than a config
+refusal because the flag is opt-in and a refusal there would wedge the whole
+project over it. Arming cannot wedge anything, it shows in the same board the
 project's own wires show in, and a project that wants a different band writes
 its own entry, which the arming then leaves alone.
 
@@ -325,21 +480,35 @@ crash makes it run twice. Matching on the run id alone would let a report
 somebody filed between the merge and the close-out read as work already done,
 and the breach would then record none of its own findings at all.
 
-The `fast-path-escapes` tripwire counts that kind over the last ten shipped
-story-lane runs of ONE project, filtered by the project on the record's refs.
-Two in ten breaches, and the answer it carries is the config line that turns
-that project's flag off. That is why a second project's defects may not reach
-this reading. The band is deliberately tight, because the owner traded away a
-guarantee on the belief that escapes would be rare, and two in ten is the
-reading that says the belief was wrong.
+## What the record carries
+
+A taken record's `declaration` names the tree the declarations came out of, the
+version they were checked against, the suites they cover, how many entries the
+whole declared ground holds, and `ground: {declared, config}`, which is how many
+Tier-1 layers each source answered for. A layer both sources answered counts in
+both. A project whose reading moves from `{declared: 8, config: 40}` to
+`{declared: 7, config: 40}` has a runner that stopped printing its markers, and
+nothing else in the record says so.
+
+The version is a digest over every claim the decision rested on: the suites, the
+whole declared ground, the suite files, the breadth list, the inert list, the
+declaration sources, and one `ground <layer> <entry>` line per config entry. It
+moves when a claim moves and at no other time, so two records carrying one
+digest were decided under one set of claims. A record written before the config
+ground existed carries a digest computed without those lines, and a reader
+comparing an old digest with a new one gets a difference that is real: the
+claims did change.
 
 ## Adversarial reading
 
 Declarations become load-bearing for correctness at ship time, not only for
-speed. A declaration that is stale is caught by the project-side gate that
-resolves every glob; a declaration that is merely too narrow is caught by
-nothing but the escape metric, after the fact. That is the sharp edge of this
-decision and it does not have a mechanical answer.
+speed, and the surface they cover is now every Tier-1 layer rather than two
+project-wide lists. A `ground` list is a claim about what a command reads, and
+only a reader of that command's script can check it. A list that is too wide
+costs refusals, which is cheap. A list that is too narrow lets the fast path
+pass a change that could reach the layer, and lets a part carry that should have
+run. Nothing catches that but the escape metric, after the fact. That is the
+sharp edge of this decision and it does not have a mechanical answer.
 
 The breadth list is a single point of forgetting. Ground that belongs on it and
 is not there weakens every fast-path decision at once, silently. Its edits
@@ -347,6 +516,16 @@ deserve the review weight of a frozen test. The inert list is the same surface
 with the failure inverted: ground listed there that a suite CAN reach turns a
 refusal into a pass. Forgetting the breadth list costs proof; over-claiming the
 inert list costs the same proof, and neither is caught by anything but review.
+
+The project config file is load-bearing at ship time in a second way now. It
+carries the ground of every layer, so an edit to it deserves the review weight
+of a frozen test, and a main-side move of it refuses a fast path outright.
+
+A launch-time refusal can take a project dark. A `gates.tier1` layer that lands
+with no `ground` refuses every launch of that project until a config change
+merges. A project-side config lint that carries the same rule reduces that to a
+CI failure; it does not remove it. `gates.fastPathShip: false` is the one-line
+escape and it is the same line the revert uses.
 
 A symlink, a submodule and a mode-only change are all read as ground this check
 cannot classify, so every one of them refuses. A declaration names a path's
@@ -358,25 +537,25 @@ neither interacts with the story. That is out of scope here: the question this
 check asks is about the story and the branch, and the branch's own consistency
 is what the branch's own checks are for.
 
-The fast path reads the certified verdict's layer results for declarations. A
-project that runs a layer whose command prints no part markers gets a refusal
-for every ship, for ever, and the only sign of it is the refusal reason in the
-ledger. That is the safe direction, and the reason the refusal is stamped rather
-than silent.
-
 ## Fallback paths
 
 The revert is one config line: `gates.fastPathShip` back to `false`, or removed.
 The next ship takes the full re-verdict, no state has to be unwound, no ledger
-has to be rewritten, and the records of the ships that did fast-path stay
-readable. The standing tripwire proposes exactly this line, so the reversal is
-the answer the machine already hands over.
+has to be rewritten, the launch rule disarms with it, and the records of the
+ships that did fast-path stay readable. The standing tripwire proposes exactly
+this line, so the reversal is the answer the machine already hands over.
 
 A narrower fallback, if the ground question turns out to be the weak half: empty
 `gates.inertGround` while leaving the flag on. Every moved file is then ground
 no claim reaches, every ship refuses with `unclaimed-ground`, and the reason is
 in the ledger rather than in a config line nobody reads. It is the same one-line
 revert with the record kept.
+
+A narrower one again, if the config ground turns out to answer for nothing: the
+`ground` lists come off the layers and the flag comes off with them, because
+without the lists the silent layers refuse every ship. The trigger is a window
+where `groundFrom: "config"` never appears on a part that carried and every take
+was decided by markers alone.
 
 A wider one, if declarations prove trustworthy and the residual never
 materialises: the same two questions could carry a certification across the

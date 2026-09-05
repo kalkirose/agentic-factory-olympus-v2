@@ -34,6 +34,20 @@ export const TRIPWIRE_METRICS = {
     defaultWindow: 10,
     defaultTriggers: ['escape-recorded', 'merged'],
   },
+  // What the fast path buys: the share of its records that carried the
+  // certification instead of refusing, over the last N shipped runs of one
+  // project. `fast-path-escapes` reads what the trade costs; this reads what it
+  // pays, and a cut with only the cost measured cannot be judged at all.
+  //
+  // The reading is eligible only where the window holds at least three runs
+  // with a moved base. A project whose branch never moved under a run bought
+  // nothing and lost nothing, and a standing zero over that would read as a
+  // check that refuses everything.
+  'fast-path-takes': {
+    unit: 'ships',
+    defaultWindow: 10,
+    defaultTriggers: ['fast-path-ship', 'merged'],
+  },
   // Adversary kill rate at freeze: kills over initial waves, summed across
   // the last N freeze records. The band is a floor set from the baseline.
   'kill-rate': {
@@ -258,6 +272,22 @@ export function standingTripwires() {
         'set gates.fastPathShip to false: the fast path is carrying defects ' +
         'past the certification, and the trade it was turned on for is losing',
     },
+    // The other half of the same trade. A take rate of nought, over a window
+    // that held at least three moved bases, says the check refuses everything
+    // and pays for itself with nothing. The answer is the refusal histogram,
+    // because each word names a different repair: `ground-intersects` says the
+    // ground lists are right and the branch is busy, `unclaimed-ground` says
+    // the inert list is too thin, and `undeclared-suite` says the launch
+    // validator and the ship reader disagree.
+    {
+      id: 'fast-path-takes',
+      metric: 'fast-path-takes',
+      window: 10,
+      breach: { op: '<=', value: 0 },
+      answer:
+        'read the refusal histogram of the window: the fast path refused every ' +
+        'moved base, so it is buying nothing for the guarantee it thinned',
+    },
     {
       id: 'ci-critical-path-p50',
       metric: 'ci-critical-path',
@@ -372,8 +402,13 @@ export function standingTripwires() {
   ];
 }
 
-/** The metric that measures the one guarantee a project can trade away. */
-const FAST_PATH_METRIC = 'fast-path-escapes';
+/**
+ * The metrics that measure the one guarantee a project can trade away: what
+ * the trade costs, and what it buys. A cut with only one of the two measured
+ * cannot be judged, because a cost of nought over a check that never fires
+ * reads exactly like a cut that works.
+ */
+const FAST_PATH_METRICS = ['fast-path-escapes', 'fast-path-takes'];
 
 // The metrics that count an operator walking a run past a check. They are
 // armed on every project, because the levers they count are on every project:
@@ -389,8 +424,9 @@ const LEVER_METRICS = ['gate-acks-window', 'run-reconfigures-window'];
  * This is the doctrine rule for a gate cut, enforced rather than asked for: a
  * cut names its metric, its watch window and its breach condition in the same
  * change. `gates.fastPathShip` is a cut, and a project that turns it on without
- * the counter has traded a guarantee for speed with nothing measuring what the
- * trade costs and nothing able to propose the revert. The escapes still take
+ * the two counters has traded a guarantee for speed with nothing measuring what
+ * the trade costs, nothing measuring what it buys, and nothing able to propose
+ * the revert. The escapes still take
  * the closed kind, and nobody ever reads them. The two operator levers are cuts
  * of the same shape, taken one run at a time rather than declared in a config,
  * so their counters are armed whatever the config says.
@@ -406,7 +442,7 @@ const LEVER_METRICS = ['gate-acks-window', 'run-reconfigures-window'];
 export function armedTripwires(config) {
   const own = config?.tripwires ?? [];
   const wanted = [...LEVER_METRICS];
-  if (config?.gates?.fastPathShip === true) wanted.unshift(FAST_PATH_METRIC);
+  if (config?.gates?.fastPathShip === true) wanted.unshift(...FAST_PATH_METRICS);
   const missing = wanted.filter((metric) => !own.some((entry) => entry.metric === metric));
   if (missing.length === 0) return own;
   const standing = standingTripwires();

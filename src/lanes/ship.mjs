@@ -55,6 +55,7 @@ import {
   runReportPath,
 } from '../daemon/home.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
+import { DEFAULT_PROJECT_CONFIG_PATH } from '../config/project.mjs';
 import { assertDefectKind } from '../ledger/registry.mjs';
 import { budgetOpen, ciFlakes, deterministicRed, FLAKE_LIMIT } from '../ledger/cycles.mjs';
 import { instanceParkForms } from '../ledger/parks.mjs';
@@ -2656,6 +2657,10 @@ async function shipBase(ctx, forgeFor) {
     worktree,
     branch: ctx.payload.branch,
     defaultBranch: ctx.payload.defaultBranch ?? 'main',
+    // The project config the run pinned at its launch. It carries the ground of
+    // every Tier-1 layer, so the fast path reads a default-branch move of it as
+    // ground the certification rests on (ADR-0056).
+    configPath: ctx.payload.configPath ?? DEFAULT_PROJECT_CONFIG_PATH,
     testPaths: config.repo.testPaths ?? [],
     frozenExclusions: cardPath ? freezeExclusions(ctx.paths, ctx.runId) : [],
     env: runEnv(ctx, config),

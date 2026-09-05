@@ -11,9 +11,10 @@
 //
 // The rule is conservative by construction, and every clause of it re-runs:
 //
-// - A part is affected unless the diff falls FULLY outside its input set.
-// - A part that declared no input set is affected by everything.
-// - A changed path no part's input set claims — a lockfile, a shared package,
+// - A part is affected unless the diff falls FULLY outside its ground.
+// - A part that declared no input set takes the layer's declared ground, and
+//   is affected by everything only where no ground exists at all.
+// - A changed path no part's ground claims — a lockfile, a shared package,
 //   a migration, a config file, a path nobody thought about — makes EVERY
 //   part affected. Doubt always re-runs.
 // - A part that was not proven green is affected. A red part never carries.
@@ -38,11 +39,83 @@
 // a carried part hold.
 //
 // Nothing here knows what a workspace is, what a suite is, or what any
-// project calls its trees. The input set of a part is what that part's own
-// command declared about itself, in the marker protocol (exec.mjs), in the
-// same path vocabulary the rest of the project config uses — a plain prefix
-// or a glob.
-import { underEntry } from '../config/project.mjs';
+// project calls its trees. A layer's ground has two sources and this module
+// owns the one derivation both readers use: the command states it part by part
+// in the marker protocol (exec.mjs), and the project states it on the layer
+// entry of its own config. Both are written in the same path vocabulary as
+// every other path list — a plain prefix or a glob.
+import { groundEntries, underEntry } from '../config/project.mjs';
+
+/**
+ * One layer's whole ground: every path entry that could change what the layer
+ * decides, from both sources, canonical and sorted.
+ *
+ * Three lists go in. Two of them are the layer's own sources, and the third
+ * belongs to every layer of the project.
+ *
+ * - `config` is the layer's own `gates.tier1[].ground` list.
+ * - `stated` is the union of the inputs the layer's parts declared about
+ *   themselves in the last execution.
+ * - `breadth` is `gates.breadthGround`, the ground the project states belongs
+ *   to every suite whatever any suite declared. It joins every layer's ground
+ *   here rather than in forty config lists, because a project that had to
+ *   repeat it per layer would be writing one fact forty times.
+ *
+ * `entries` is the union of all three: the widest ground the layer might read.
+ * That is the honest answer to the question the ship path asks, because a
+ * wider set refuses more and never fewer, so it fails in the safe direction.
+ *
+ * `floor` is what a part that declared nothing takes: the layer's own config
+ * ground, widened by the breadth list. The distinction from `entries` is the
+ * whole of the carry half. A sibling part's declaration is a statement about
+ * that sibling and about nothing else, so a part that says nothing may not
+ * stand on it. The breadth list is not a floor of its own either: it is ground
+ * that belongs to every suite ON TOP of what that suite declared, never a
+ * description of what a layer reads. So a layer the config does not describe
+ * has no floor at all, and a part with no ground is affected by everything,
+ * exactly as it was before this field existed (ADR-0046).
+ *
+ * `sources` says which of the two spoke. The ship path walks the declaration
+ * surface of a layer whose COMMAND spoke, because those markers come out of
+ * the run's own tree and a story may not narrow its own inputs; a config
+ * ground is produced in no tree at all (ADR-0056).
+ *
+ * @param {{ground?: string[]}} layer the project's Tier-1 layer entry
+ * @param {{parts?: Array<{inputs?: string[]}>}} record the layer's standing
+ *   `layer-result`
+ * @param {string[]} [breadth] `gates.breadthGround`
+ * @returns {{entries: string[], floor: string[],
+ *   sources: {declared: boolean, config: boolean}}}
+ */
+export function layerGround(layer, record, breadth = []) {
+  const config = groundEntries(layer?.ground ?? []);
+  const stated = groundEntries((record?.parts ?? []).flatMap((part) => part.inputs ?? []));
+  const floor = config.length > 0 ? groundEntries([...config, ...breadth]) : [];
+  return {
+    entries: groundEntries([...config, ...stated, ...breadth]),
+    floor,
+    sources: { declared: stated.length > 0, config: config.length > 0 },
+  };
+}
+
+/**
+ * One part's effective input set: what the part declared about itself, or the
+ * layer's ground where the part declared nothing.
+ *
+ * The stream wins wherever it spoke. A part that named its own inputs keeps
+ * them, and a config entry never narrows or widens them: the runner holds the
+ * fact, and a config copy of a fact the runner already states is the copy
+ * nobody edits when a suite moves (ADR-0046). The layer ground is the floor
+ * under a part that says nothing, never a correction of one that speaks.
+ *
+ * @param {{inputs?: string[]}} part
+ * @param {{floor: string[]}} ground the layer's ground
+ * @returns {string[]}
+ */
+export function partGround(part, ground) {
+  const own = groundEntries(part?.inputs ?? []);
+  return own.length > 0 ? own : (ground?.floor ?? []);
+}
 
 /**
  * The environment variable the caller narrows a layer command with: the parts
@@ -96,8 +169,9 @@ export function failedFileNarrowing(parts = []) {
  * holds a provenance (`carriedFrom`), which is the older cycle its green was
  * earned in.
  *
- * - `touched`     a changed path is under this part's declared ground
- * - `undeclared`  the part declared no ground, so every change reaches it
+ * - `touched`     a changed path is under this part's ground
+ * - `undeclared`  neither source declared a ground for this part, so every
+ *                 change reaches it
  * - `blind`       a changed path is under no part's ground at all; the record
  *                 names the first of those paths
  * - `not-green`   the standing result for this part was not a proven green
@@ -140,33 +214,47 @@ const BLIND_PATHS_NAMED = 3;
  * @param {{parts?: Array<{name: string, status?: string, inputs?: string[]}>}} prior
  *   the layer's standing `layer-result`
  * @param {string[]} changed repo-relative paths that moved since it was earned
- * @param {{groundless?: string[]}} [options] `groundless` is the ground the
- *   project states no suite of it reads (ADR-0059)
- * @returns {{reasons: Map<string, string>, blindPaths: string[]}} a Map and
- *   not an object, because a part name is whatever a command printed after
- *   `::olympus part`. A part called `constructor` reads a reason off the
- *   object prototype it never had, and a part called `__proto__` silently
- *   keeps none at all, which would carry a part that has to run.
+ * @param {{groundless?: string[], layer?: object, breadth?: string[]}} [options]
+ *   `groundless` is the ground the project states no suite of it reads
+ *   (ADR-0059); `layer` is the project's Tier-1 entry, which carries the
+ *   config half of this layer's ground; `breadth` is `gates.breadthGround`
+ * @returns {{reasons: Map<string, string>, blindPaths: string[],
+ *   groundFrom: Map<string, string>}} two Maps and not objects, because a part
+ *   name is whatever a command printed after `::olympus part`. A part called
+ *   `constructor` reads a reason off the object prototype it never had, and a
+ *   part called `__proto__` silently keeps none at all, which would carry a
+ *   part that has to run.
  */
-export function partReasons(prior, changed, { groundless = [] } = {}) {
+export function partReasons(prior, changed, { groundless = [], layer, breadth = [] } = {}) {
   const parts = prior?.parts ?? [];
   // With no part table there is no mapping, so there is nothing to be blind
   // against: every path is unattributed and naming three of them would report
   // a hole that is not there. The absent parts answer for themselves, in
   // `withPartReasons`, where the names are known.
-  if (parts.length === 0) return { reasons: new Map(), blindPaths: [] };
+  if (parts.length === 0) return { reasons: new Map(), blindPaths: [], groundFrom: new Map() };
+  const ground = layerGround(layer, prior, breadth);
   // The groundless list leaves the diff first, before anything is attributed:
   // a path the project swears no suite reads must neither blind the cycle nor
   // reach a part (ADR-0059).
   const moved = changed.filter((file) => !groundless.some((entry) => underEntry(file, entry)));
+  // Each part's effective ground, derived once. A part that declared its own
+  // inputs keeps them; a part that declared none takes the layer's.
+  const groundOf = new Map(parts.map((part) => [part.name, partGround(part, ground)]));
   const attributed = (file) =>
-    parts.some((part) => (part.inputs ?? []).some((entry) => underEntry(file, entry)));
-  // A path under no part's declared inputs is a path this mapping cannot
-  // attribute. One of them is enough to re-run everything.
+    parts.some((part) => groundOf.get(part.name).some((entry) => underEntry(file, entry)));
+  // A path under no part's ground is a path this mapping cannot attribute. One
+  // of them is enough to re-run everything.
   const blindPaths = moved.filter((file) => !attributed(file)).slice(0, BLIND_PATHS_NAMED);
   const reasons = new Map();
+  const groundFrom = new Map();
   for (const part of parts) {
-    const inputs = part.inputs ?? [];
+    const inputs = groundOf.get(part.name);
+    // The fallback, on the record, so it is countable. A part whose own
+    // command stated nothing and whose ground the config answered for is the
+    // one line that says the config half bought something.
+    if (groundEntries(part.inputs ?? []).length === 0 && ground.sources.config) {
+      groundFrom.set(part.name, 'config');
+    }
     if (inputs.length === 0) reasons.set(part.name, assertPartReason('undeclared'));
     else if (blindPaths.length > 0) reasons.set(part.name, assertPartReason('blind'));
     else if (part.status !== 'green') reasons.set(part.name, assertPartReason('not-green'));
@@ -174,7 +262,7 @@ export function partReasons(prior, changed, { groundless = [] } = {}) {
       reasons.set(part.name, assertPartReason('touched'));
     }
   }
-  return { reasons, blindPaths };
+  return { reasons, blindPaths, groundFrom };
 }
 
 /**
@@ -191,12 +279,14 @@ export function partReasons(prior, changed, { groundless = [] } = {}) {
  *   `layer-result`, from the cycles before this one
  * @param {string[]} changed repo-relative paths that moved between the sha
  *   `prior` was earned at and the sha this cycle judges
- * @param {{groundless?: string[]}} [options] as `partReasons`
+ * @param {{groundless?: string[], layer?: object, breadth?: string[]}} [options]
+ *   as `partReasons`
  * @returns {{reasons: Map<string, string>, blindPaths: string[],
+ *   groundFrom: Map<string, string>,
  *   narrow: {run: string[], carry: Array<object>}|null}}
  */
 export function partPlan(prior, changed, options = {}) {
-  const { reasons, blindPaths } = partReasons(prior, changed, options);
+  const { reasons, blindPaths, groundFrom } = partReasons(prior, changed, options);
   const parts = prior?.parts ?? [];
   const run = [];
   const carry = [];
@@ -207,7 +297,7 @@ export function partPlan(prior, changed, options = {}) {
   // Nothing to run, or nothing to save: either way the narrowing buys nothing
   // and the layer runs as it always did.
   const narrow = run.length === 0 || carry.length === 0 ? null : { run, carry };
-  return { reasons, blindPaths, narrow };
+  return { reasons, blindPaths, groundFrom, narrow };
 }
 
 /**
@@ -284,16 +374,27 @@ export function mergeParts(ran = [], earlier = []) {
  * `no-record`, and it is derived here rather than in the plan because the plan
  * reads the standing result and only the execution knows the names.
  *
+ * A part whose ground the config answered for also carries `groundFrom`, so
+ * the fallback is countable. It rides a carried part as well as a part that
+ * ran, because the reading it feeds is about the carries: a window where it
+ * never appears on a part that carried says the fallback answers nothing. It
+ * is a read rather than a stamp of anything, so the part's `inputs` stay
+ * exactly what the command said, which is empty, because a record holds what
+ * the stream said and nothing else (ADR-0046).
+ *
  * @param {Array<object>} parts the merged part table of one result
  * @param {Map<string, string>} [reasons] the plan's reasons for this layer
+ * @param {Map<string, string>} [groundFrom] the plan's ground source per part
  */
-export function withPartReasons(parts, reasons) {
+export function withPartReasons(parts, reasons, groundFrom) {
   if (!reasons) return parts;
-  return parts.map((part) =>
-    part.carriedFrom !== undefined
-      ? part
-      : { ...part, reason: assertPartReason(reasons.get(part.name) ?? 'no-record') },
-  );
+  return parts.map((part) => {
+    const source = groundFrom?.get(part.name);
+    const ground = source === undefined ? {} : { groundFrom: source };
+    return part.carriedFrom !== undefined
+      ? { ...part, ...ground }
+      : { ...part, reason: assertPartReason(reasons.get(part.name) ?? 'no-record'), ...ground };
+  });
 }
 
 /**

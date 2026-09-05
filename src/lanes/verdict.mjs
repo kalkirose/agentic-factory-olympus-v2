@@ -788,6 +788,10 @@ export async function partTargets(base, events, { plan, sha }) {
   // Ground the project states no suite of it reads. It leaves every diff this
   // derivation reads, before anything is attributed to a part (ADR-0059).
   const groundless = base.config?.gates?.groundlessPaths ?? [];
+  // The ground that belongs to every layer whatever any command declared. It
+  // joins each layer's own ground in `layerGround()`, so a project states each
+  // layer's ground once and this list once (ADR-0056).
+  const breadth = base.config?.gates?.breadthGround ?? [];
   const refrozen = events.filter((e) => e.event === 're-freeze').pop()?.seq ?? -1;
   const diffs = new Map();
   const targets = new Map();
@@ -803,7 +807,7 @@ export async function partTargets(base, events, { plan, sha }) {
     }
     const changed = diffs.get(prior.sha);
     if (changed === null) continue;
-    targets.set(layer.name, partPlan(prior, changed, { groundless }));
+    targets.set(layer.name, partPlan(prior, changed, { groundless, layer, breadth }));
   }
   return targets.size > 0 ? targets : null;
 }
@@ -817,6 +821,11 @@ export async function partTargets(base, events, { plan, sha }) {
  *
  * A part this cycle ran also states why (ADR-0058). A carried part states
  * none: it did not run, and a reason on it would read as a reason it did.
+ *
+ * `groundFrom` rides beside both. It says the part's own command declared no
+ * ground and the project config answered for it, which is the one line that
+ * makes the config half of a layer's ground countable. A carried part carries
+ * it too, because the reading it feeds is about the carries (ADR-0056).
  */
 function partSummary(part, layerMode) {
   const carried = layerMode === 'carried' || part.carriedFrom !== undefined;
@@ -826,6 +835,7 @@ function partSummary(part, layerMode) {
     mode: carried ? 'carried' : 'run',
     ...(part.carriedFrom !== undefined && { carriedFrom: part.carriedFrom }),
     ...(!carried && part.reason !== undefined && { reason: part.reason }),
+    ...(part.groundFrom !== undefined && { groundFrom: part.groundFrom }),
   };
 }
 

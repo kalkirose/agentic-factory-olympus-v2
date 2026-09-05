@@ -85,11 +85,14 @@ export function defaultProjectConfig() {
     // `partTargeting: false` turns off part-level carrying inside a layer
     // (ADR-0046); absent leaves it on. `concurrencyGroups` names the layers
     // that may hold the machine together (ADR-0047); absent is the strict
-    // sequence. `fastPathShip: true` lets a ship carry its certification over
-    // a provably disjoint merge, `breadthGround` names the ground every suite
-    // depends on whatever it declared, and `inertGround` names the ground the
-    // project states no suite can reach (ADR-0056); all absent is today's
-    // behaviour. `groundlessPaths` names the ground the project states no
+    // sequence. A layer's `ground` names the path entries the project states
+    // that layer's command reads; it is the floor under a part that declared
+    // nothing, and the launch requires it on every layer while `fastPathShip`
+    // is on (ADR-0056). `fastPathShip: true` lets a ship carry its
+    // certification over a provably disjoint merge, `breadthGround` names the
+    // ground every suite depends on whatever it declared, and `inertGround`
+    // names the ground the project states no suite can reach (ADR-0056); all
+    // absent is today's behaviour. `groundlessPaths` names the ground the project states no
     // suite READS, which a verdict cycle drops out of its diff before it
     // attributes a path to a part (ADR-0059). `flakeRerun: "whole"` returns
     // the flake filter's re-run to a whole re-run of the layer; absent, it
@@ -176,7 +179,7 @@ export function validateProjectConfig(config, { launch = false } = {}) {
   if (config.version !== 1) err('version', 'must be 1');
   validateRepo(config.repo, err);
   validateCommands(config.commands, err);
-  validateGates(config.gates, config.commands, err);
+  validateGates(config.gates, config.commands, err, launch);
   validateStringList(config.conventions, 'conventions', err);
   validateReview(config.review, err);
   validateLanes(config.lanes, config.commands, err);
@@ -271,7 +274,7 @@ function validateCommands(commands, err) {
 /** What `gates.flakeRerun` may say. Closed, and the absent value is the first. */
 const FLAKE_RERUN = new Set(['narrowed', 'whole']);
 
-function validateGates(gates, commands, err) {
+function validateGates(gates, commands, err, launch = false) {
   if (gates === undefined) return;
   if (!isPlainObject(gates)) {
     err('gates', 'must be an object');
@@ -405,9 +408,57 @@ function validateGates(gates, commands, err) {
         err(at('memoryCeilingMb'), 'must be a positive number of mebibytes');
       }
     }
+    validateLayerGround(layer, at, gates.fastPathShip === true && launch, err);
     if (typeof layer.name === 'string') seen.add(layer.name);
   });
   validateConcurrencyGroups(gates, seen, err);
+}
+
+/**
+ * The ground of one Tier-1 layer: the path entries the project states this
+ * layer's command reads.
+ *
+ * A layer's ground has two sources and one derivation. The command states it,
+ * part by part, in the part protocol (ADR-0046). The config states it here. A
+ * layer whose command states nothing has this list and nothing else, and the
+ * two mechanisms that ask what a layer reads — the part carry and the ship
+ * fast path — both read it through `layerGround()` (ADR-0056).
+ *
+ * The shape is checked wherever the config is read, like every other field.
+ * The PRESENCE is checked at the launch alone, and only while
+ * `gates.fastPathShip` is on. A project that has not opted into the fast path
+ * is validated exactly as it was before this field existed. A project that HAS
+ * opted in pays for a check it can never take without this list: the ship
+ * refuses on the first groundless layer, every time, and the only record of it
+ * is one word in a ledger. The loud refusal at the config replaces that silent
+ * one, and `gates.fastPathShip: false` disarms the rule with the feature.
+ *
+ * An entry that canonicalises to nothing is refused by name. `.` is the entry
+ * that matters: it reads like a declaration of the whole repository and it
+ * matches no file, because the path vocabulary compares a plain entry as a
+ * prefix and no repo-relative path is `.`.
+ */
+function validateLayerGround(layer, at, required, err) {
+  if (layer.ground === undefined) {
+    if (required) {
+      err(
+        at('ground'),
+        `layer ${layer.name} declares no ground; gates.fastPathShip is on, and a layer ` +
+          'whose ground nothing declares refuses every ship',
+      );
+    }
+    return;
+  }
+  if (!isStringList(layer.ground) || layer.ground.length === 0) {
+    err(at('ground'), 'must be a non-empty array of path entries');
+    return;
+  }
+  if (!required) return;
+  layer.ground.forEach((entry, j) => {
+    if (groundEntry(entry) === null) {
+      err(at(`ground[${j}]`), `${entry} can match no path of this repository`);
+    }
+  });
 }
 
 // The layers this project lets hold the machine together (ADR-0047). Every
@@ -1133,6 +1184,48 @@ const globCache = new Map();
 /** True when a path entry is a glob pattern rather than a plain prefix. */
 export function isGlobEntry(entry) {
   return GLOB_CHARS.test(entry);
+}
+
+/**
+ * The one canonical form every path entry is compared in, or null for a name
+ * that will not compare at all.
+ *
+ * Path entries arrive from four places and they name one file in four hands:
+ * a project config list, a suite's declared input, a layer command's argv, and
+ * git's own diff output. A comparison of two spellings is not a comparison of
+ * two paths. `./docs` is the entry this exists for: it reads like a
+ * declaration of `docs` and it matches nothing, because the vocabulary above
+ * compares a plain entry as a prefix and no repo-relative path begins `./`. A
+ * declaration that matches nothing is the undeclared case wearing a
+ * declaration's clothes.
+ *
+ * The form: separators forward, `.` and empty segments dropped (which strips
+ * every `./` prefix and collapses every `//`), no trailing slash. Null for an
+ * absolute path, a path that climbs out of the repository, and a name that
+ * canonicalises to nothing at all (`.`, `./`, `/`, an empty string).
+ */
+export function groundEntry(entry) {
+  if (typeof entry !== 'string') return null;
+  const raw = entry.replaceAll('\\', '/').trim();
+  if (raw.length === 0) return null;
+  if (raw.startsWith('/') || /^[A-Za-z]:\//.test(raw)) return null;
+  const parts = [];
+  for (const segment of raw.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') return null;
+    parts.push(segment);
+  }
+  return parts.length > 0 ? parts.join('/') : null;
+}
+
+/** A list of path entries in canonical form, deduped and sorted. */
+export function groundEntries(entries = []) {
+  const canonical = new Set();
+  for (const entry of entries) {
+    const norm = groundEntry(entry);
+    if (norm !== null) canonical.add(norm);
+  }
+  return [...canonical].sort();
 }
 
 /** Compiles a glob entry to an anchored RegExp (semantics above). Cached. */

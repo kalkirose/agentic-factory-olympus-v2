@@ -30,14 +30,28 @@
 // can reach. A change this module cannot read as a repo-relative file of this
 // repository refuses for the same reason as an unclaimed one.
 //
+// A layer's ground has two sources and one derivation, and the derivation is
+// `layerGround()` in parts.mjs. The layer's own command states it, part by
+// part, in the part protocol. The project states it on the layer entry of its
+// config. A layer neither source declares refuses the whole check, and the
+// launch rule makes that refusal unreachable for a project that turned the
+// flag on.
+//
 // Every refusal costs the run the re-verdict it would have taken anyway. The
 // fast path can only remove work, so a defect in this module makes a ship
 // slow and can never make one wrong.
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { isGlobEntry, underEntry } from '../config/project.mjs';
+import {
+  DEFAULT_PROJECT_CONFIG_PATH,
+  groundEntries,
+  groundEntry,
+  isGlobEntry,
+  underEntry,
+} from '../config/project.mjs';
 import { MAX_DIFF_BYTES, git } from '../isolation/git.mjs';
+import { layerGround, partGround } from './parts.mjs';
 import { priorStatus } from './spectrum.mjs';
 
 /**
@@ -56,7 +70,15 @@ export const FAST_PATH_REFUSALS = new Set([
   // The project names no suite files, so a quarter of the ground question has
   // nothing behind it.
   'no-suite-ground',
-  // A suite of the certified verdict said nothing about what it depends on.
+  // A Tier-1 layer of the certified verdict holds no green result to carry.
+  // Defensive: the update stage runs behind a green verdict.
+  'no-standing-green',
+  // A Tier-1 layer whose ground neither source declares: its own command said
+  // nothing about what it depends on, and the project config states nothing
+  // for it either. The launch rule refuses such a config, so this word is
+  // unreachable for a project with `gates.fastPathShip: true`. One occurrence
+  // means the validator and this reader disagree about what a declared ground
+  // is, and that is a defect of the mechanism rather than of a project.
   'undeclared-suite',
   // The certification carries a proof nobody could run: a service was down
   // past the external wait and an operator let the ship go without it
@@ -184,51 +206,29 @@ function readableModes(srcMode, dstMode) {
 }
 
 /**
- * The one canonical form every path in this module is compared in, or null for
- * a name it will not compare at all.
+ * The declared ground of the certified verdict: the whole ground of every
+ * Tier-1 layer, from both sources, read through the one derivation
+ * (`layerGround` in parts.mjs).
  *
- * Every path here meets the same vocabulary: git's own output, a suite's
- * declared input, a layer command's argv, an import specifier a gate script
- * holds. They arrive written differently for the same file, and a comparison
- * of two spellings is not a comparison of two paths. `./docs` is the entry this
- * exists for: it reads like a declaration of `docs` and it matches nothing,
- * because the path vocabulary compares a plain entry as a prefix and no
- * repo-relative path begins `./`. A declaration that matches nothing is the
- * undeclared case wearing a declaration's clothes.
+ * A layer's ground comes from its own command, part by part, in the
+ * part-targeting contract's shape (ADR-0046), or from the project config, or
+ * from both. The two are unioned and read the same way. A layer neither source
+ * declares refuses the whole check: the default is always safety, because a
+ * layer that says nothing about its ground is a layer this module must assume
+ * depends on everything, and a fast path over that assumption is no proof at
+ * all. The launch rule makes that refusal unreachable for a project that
+ * turned the flag on, so one occurrence is a disagreement between the
+ * validator and this reader.
  *
- * The form: separators forward, `.` and empty segments dropped (which strips
- * every `./` prefix and collapses every `//`), no trailing slash. Null for an
- * absolute path, a path that climbs out of the repository, and a name that
- * canonicalises to nothing at all (`.`, `./`, `/`, an empty string).
- */
-export function groundEntry(entry) {
-  if (typeof entry !== 'string') return null;
-  const raw = entry.replaceAll('\\', '/').trim();
-  if (raw.length === 0) return null;
-  if (raw.startsWith('/') || /^[A-Za-z]:\//.test(raw)) return null;
-  const parts = [];
-  for (const segment of raw.split('/')) {
-    if (segment === '' || segment === '.') continue;
-    if (segment === '..') return null;
-    parts.push(segment);
-  }
-  return parts.length > 0 ? parts.join('/') : null;
-}
-
-/**
- * The declared ground of the certified verdict: every input every suite of
- * every Tier-1 layer named about itself, in the part-targeting contract's own
- * shape (ADR-0046).
- *
- * A layer without a standing green, a layer that reported no parts, a part that
- * declared no inputs, a part whose every input names ground no path can match,
- * and a certification carrying a deferred proof each refuse. The default is always safety: a suite that says nothing
- * about its ground is a suite the module must assume depends on everything, and
- * a fast path over that assumption is no proof at all.
- * @param {Array<{name: string}>} layers the project's Tier-1 layers
+ * A layer with no standing green and a certification carrying a deferred proof
+ * each refuse with a word of their own.
+ * @param {Array<{name: string, ground?: string[]}>} layers the project's
+ *   Tier-1 layers
  * @param {Map<string, object>} prior each layer's standing `layer-result`
+ * @param {{deferred?: object[], breadth?: string[]}} [options] `breadth` is
+ *   `gates.breadthGround`, which belongs to every layer's ground
  */
-export function declaredGround(layers, prior, deferred = []) {
+export function declaredGround(layers, prior, { deferred = [], breadth = [] } = {}) {
   // A deferred part is a proof the ship went out without. Whatever the
   // declarations say about the ground it rests on, the certification does not
   // hold for it, so there is nothing here to carry over a moved base.
@@ -238,30 +238,63 @@ export function declaredGround(layers, prior, deferred = []) {
       .join('; ');
     return refusal('deferred-proof', `the certification defers a proof: ${named}`);
   }
+  if (layers.length === 0) {
+    return refusal('undeclared-suite', 'the certified verdict names no Tier-1 layer');
+  }
   const suites = [];
   const entries = new Set();
+  const groundLines = [];
+  // The layers whose own COMMAND declared a ground. Only those are walked by
+  // `declarationSources`: their markers come out of the run's own tree, and a
+  // config ground is produced in no tree at all (item 6a of ADR-0056).
+  const selfDeclaring = [];
+  const counts = { declared: 0, config: 0 };
   for (const layer of layers) {
     const record = prior.get(layer.name);
     if (!record || record.status !== 'green') {
-      return refusal('undeclared-suite', `no green result stands for layer ${layer.name}`);
+      return refusal('no-standing-green', `no green result stands for layer ${layer.name}`);
     }
-    const parts = record.parts ?? [];
-    if (parts.length === 0) {
-      return refusal('undeclared-suite', `layer ${layer.name} reported no suite of its own`);
-    }
-    for (const part of parts) {
-      const inputs = (part.inputs ?? []).map(groundEntry).filter((entry) => entry !== null);
-      if (inputs.length === 0) {
-        return refusal('undeclared-suite', `${layer.name}/${part.name} declared no inputs`);
+    const ground = layerGround(layer, record, breadth);
+    // The part refusal comes first, because it is the narrower diagnosis: a
+    // layer that declares most of itself and holds one silent part is repaired
+    // in a different place from a layer nobody described at all.
+    for (const part of record.parts ?? []) {
+      // A part that declared no inputs stands on the layer's floor, which is
+      // the config ground and the breadth list. A sibling part's declaration
+      // speaks for that sibling alone, so it is not a ground this part may
+      // rest a certification on.
+      if (partGround(part, ground).length === 0) {
+        return refusal(
+          'undeclared-suite',
+          `${layer.name}/${part.name} declared no inputs, and no ground answers for it`,
+        );
       }
-      for (const entry of inputs) entries.add(entry);
       suites.push(`${layer.name}/${part.name}`);
     }
+    // The breadth list is never a layer's whole ground: it is what belongs to
+    // every suite ON TOP of what that suite declared. So the question here is
+    // whether either source spoke, and not whether the union is non-empty.
+    if (!ground.sources.declared && !ground.sources.config) {
+      return refusal('undeclared-suite', `no source declares the ground of layer ${layer.name}`);
+    }
+    if (ground.sources.declared) {
+      counts.declared += 1;
+      selfDeclaring.push(layer);
+    }
+    if (ground.sources.config) {
+      counts.config += 1;
+      for (const entry of groundEntries(layer.ground)) groundLines.push(`${layer.name} ${entry}`);
+    }
+    for (const entry of ground.entries) entries.add(entry);
   }
-  if (suites.length === 0) {
-    return refusal('undeclared-suite', 'the certified verdict names no suite');
-  }
-  return { ok: true, suites: suites.sort(), entries: [...entries].sort() };
+  return {
+    ok: true,
+    suites: suites.sort(),
+    entries: [...entries].sort(),
+    ground: groundLines.sort(),
+    selfDeclaring,
+    counts,
+  };
 }
 
 /** How many files one layer's declaration surface may reach before it refuses. */
@@ -311,7 +344,17 @@ const LITERAL_ARGUMENT = /^\s*(['"])((?:[^'"\\]|\\.)*)\1\s*[),]/;
  * A bare specifier is not followed and does not refuse: it names a dependency
  * rather than a file of this repository, and the shared breadth list is what
  * covers a dependency moving (ADR-0056).
- * @param {Array<{name: string, command: string}>} layers
+ *
+ * The walk covers the layers whose own COMMAND declared a ground, and no
+ * others. That is the whole reason the set exists: a config ground is produced
+ * in no tree, so a story cannot narrow it, so there is nothing to bound. A
+ * layer with a config-only ground may therefore run a command that names no
+ * file of this repository. This narrows the scope of the walk and never its
+ * strictness: every layer whose markers decide a skip is still walked, and
+ * every edge the walk cannot read still refuses.
+ * @param {Array<{name: string, command: string}>} layers the self-declaring
+ *   Tier-1 layers; an empty list is a project whose ground is all config, and
+ *   it bounds nothing because nothing in the run's tree declared anything
  * @param {Record<string, string[]>} commands the project's command table
  * @param {(path: string) => string|null} readSource one repo-relative file's
  *   text, or null for a file that is not there
@@ -320,6 +363,9 @@ const LITERAL_ARGUMENT = /^\s*(['"])((?:[^'"\\]|\\.)*)\1\s*[),]/;
  */
 export function declarationSources(layers, commands, readSource, isLinkPath = () => false) {
   const entries = new Set();
+  // No layer declared a ground of its own, so no marker of the run's tree
+  // decides this skip and there is no surface to hold equal.
+  if (layers.length === 0) return { ok: true, entries: [] };
   for (const layer of layers) {
     const argv = commands?.[layer.command] ?? [];
     const paths = argv.filter(looksLikeRepoPath).map(groundEntry).filter(Boolean);
@@ -533,9 +579,14 @@ function looksLikeRepoPath(word) {
  * ground the certification rests on, and the certification was never earned
  * over it. A file NO claim reaches is ground nobody described, and the part
  * machinery's rule for that is the one this follows: doubt re-runs.
+ * The project config the run pinned is one of the sets, because the config now
+ * carries the ground of every layer. A run judges against the blob it pinned
+ * at its launch; if the default branch has since widened a layer's ground, the
+ * decision was made under a claim the merge target no longer makes.
  * @param {{mainChanged: {files: string[], unclassifiable: string[]},
  *   storyChanged: string[], entries: string[], testPaths: string[],
- *   breadth: string[], sources: string[], inert: string[]}} input
+ *   breadth: string[], sources: string[], inert: string[],
+ *   configPath: string}} input
  */
 export function groundVerdict({
   mainChanged,
@@ -545,6 +596,7 @@ export function groundVerdict({
   breadth,
   sources = [],
   inert = [],
+  configPath = DEFAULT_PROJECT_CONFIG_PATH,
 }) {
   if (mainChanged.unclassifiable.length > 0) {
     return refusal(
@@ -553,12 +605,22 @@ export function groundVerdict({
     );
   }
   const story = new Set(storyChanged);
+  // The order decides which claim the refusal names, and nothing else: one hit
+  // in any set refuses. The specific claims come first. A layer's ground is the
+  // union of the config's claim, the commands' claims and the breadth list, so
+  // `a declared suite input` reaches every file the three sets before it reach,
+  // and a record that named it first would stop naming the list that actually
+  // claimed the file.
   const sets = [
     ['the story\'s own diff', (file) => story.has(file)],
-    ['a declared suite input', (file) => entries.some((entry) => underEntry(file, entry))],
+    ['a declaration source', (file) => sources.some((entry) => underEntry(file, entry))],
+    [
+      'the project config the run pinned',
+      (file) => typeof configPath === 'string' && underEntry(file, configPath),
+    ],
     ['a suite file', (file) => testPaths.some((entry) => underEntry(file, entry))],
     ['the shared breadth list', (file) => breadth.some((entry) => underEntry(file, entry))],
-    ['a declaration source', (file) => sources.some((entry) => underEntry(file, entry))],
+    ['a declared suite input', (file) => entries.some((entry) => underEntry(file, entry))],
   ];
   const unclaimed = [];
   for (const file of mainChanged.files) {
@@ -581,7 +643,15 @@ export function groundVerdict({
  * when a declaration moves and at no other time, so two fast-path records
  * carrying one digest were decided under one set of claims.
  */
-export function declarationDigest({ suites, entries, testPaths, breadth, inert = [], sources = [] }) {
+export function declarationDigest({
+  suites,
+  entries,
+  testPaths,
+  breadth,
+  inert = [],
+  sources = [],
+  ground = [],
+}) {
   const lines = [
     ...suites.map((suite) => `suite ${suite}`),
     ...entries.map((entry) => `input ${entry}`),
@@ -589,6 +659,10 @@ export function declarationDigest({ suites, entries, testPaths, breadth, inert =
     ...[...breadth].sort().map((entry) => `breadth ${entry}`),
     ...[...inert].sort().map((entry) => `inert ${entry}`),
     ...[...sources].sort().map((entry) => `source ${entry}`),
+    // One line per config ground entry, named by its layer. The config half of
+    // a layer's ground is a claim like any other, so the version moves when it
+    // moves.
+    ...[...ground].sort().map((entry) => `ground ${entry}`),
   ].sort();
   return createHash('sha256').update(lines.join('\n')).digest('hex').slice(0, 12);
 }
@@ -596,10 +670,11 @@ export function declarationDigest({ suites, entries, testPaths, breadth, inert =
 /**
  * The whole decision, from facts alone. Pure: every git read is the caller's,
  * so the routes are testable without a repository.
- * @param {{certification: object|null, layers: Array<{name: string}>,
+ * @param {{certification: object|null,
+ *   layers: Array<{name: string, ground?: string[]}>,
  *   prior: Map<string, object>, commands: object, testPaths: string[],
  *   breadth: string[], inert: string[], lensFindings: string[],
- *   readSource: (path: string) => string|null,
+ *   configPath: string, readSource: (path: string) => string|null,
  *   storyDiffBefore: string, storyDiffAfter: string,
  *   mainChanged: {files: string[], unclassifiable: string[]},
  *   storyChanged: string[]}} input
@@ -615,6 +690,7 @@ export function fastPathVerdict({
   breadth,
   inert = [],
   lensFindings = [],
+  configPath = DEFAULT_PROJECT_CONFIG_PATH,
   readSource = () => null,
   isLinkPath = () => false,
   storyDiffBefore,
@@ -637,8 +713,8 @@ export function fastPathVerdict({
   if (breadth.length === 0) {
     return refusal('no-breadth-ground', 'the project declares no shared breadth ground');
   }
-  // The suite files are one of the five sets the ground question asks. A
-  // project that names none is answering a quarter of that question with an
+  // The suite files are one of the six sets the ground question asks. A
+  // project that names none is answering a sixth of that question with an
   // empty list while the record reads like a whole answer.
   if (testPaths.length === 0) {
     return refusal('no-suite-ground', 'the project names no suite files of its own');
@@ -655,9 +731,15 @@ export function fastPathVerdict({
       `the certification carries review-lens findings whose ground nothing declares: ${list(lensFindings)}`,
     );
   }
-  const declared = declaredGround(layers, prior, deferredOf(certification.record));
+  const declared = declaredGround(layers, prior, {
+    deferred: deferredOf(certification.record),
+    breadth,
+  });
   if (declared.ok !== true) return declared;
-  const sources = declarationSources(layers, commands, readSource, isLinkPath);
+  // The self-declaring layers alone. A layer whose ground is config-only is
+  // produced in no tree, so a story cannot narrow it and there is nothing here
+  // to bound (ADR-0056).
+  const sources = declarationSources(declared.selfDeclaring, commands, readSource, isLinkPath);
   if (sources.ok !== true) return sources;
   // The declarations decide this skip and they came off the run's own tree. A
   // story that moved the ground they are produced from would be judged against
@@ -680,6 +762,7 @@ export function fastPathVerdict({
     breadth,
     sources: sources.entries,
     inert,
+    configPath,
   });
   if (ground) return ground;
   return {
@@ -695,9 +778,15 @@ export function fastPathVerdict({
         breadth,
         inert,
         sources: sources.entries,
+        ground: declared.ground,
       }),
       suites: declared.suites,
       entries: declared.entries.length,
+      // How many Tier-1 layers each source answered for. A layer both answered
+      // counts in both. A project whose reading moves from `{declared: 8,
+      // config: 40}` to `{declared: 7, config: 40}` has a runner that stopped
+      // printing its markers, and nothing else in the record says so.
+      ground: declared.counts,
     },
     certification,
   };
@@ -819,6 +908,10 @@ export async function fastPathDecision(base, events, { fromSha, toSha, mainSha }
     // file reach a test suite? Only `src/lanes/parts.mjs` reads that one, and
     // neither list is derived from the other (ADR-0056, ADR-0059).
     inert: base.config.gates.inertGround ?? [],
+    // The project config the run pinned at its launch. The config carries the
+    // ground of every layer, so a default branch that moved it decided this
+    // run's claims under a version the merge target no longer states.
+    configPath: base.configPath ?? DEFAULT_PROJECT_CONFIG_PATH,
     // A record this cannot read throws, and a throw is the internal-error
     // route, which is the full re-verdict.
     lensFindings: lensFindingsOf(certification.record),

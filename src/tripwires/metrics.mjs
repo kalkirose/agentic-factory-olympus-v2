@@ -26,6 +26,16 @@ import { ALL_LENSES } from '../lanes/lenses.mjs';
 const GREEN_CHECKS = new Set(['success', 'neutral', 'skipped']);
 
 /**
+ * How many runs of the window must have met a moved default branch before the
+ * fast path's take rate is a reading about anything.
+ *
+ * Three. One moved base that refused is an ordinary busy branch. Three that
+ * all refused is the shape of a check that cannot fire, which is what the band
+ * exists to catch.
+ */
+const MOVED_BASE_FLOOR = 3;
+
+/**
  * Evaluates one metric.
  * @param {string} metric name from the closed set
  * @param {{paths: object, project: string, window?: number, params?: object,
@@ -78,6 +88,47 @@ const IMPLEMENTATIONS = {
       // reading about anything.
       eligible: ships.length > 0,
       detail: { ships: w.ships, counted: w.counted, escapes: w.escapes },
+    };
+  },
+
+  // What the fast path bought over the same window: the share of its records
+  // that carried the certification. A record per moved base, `taken: true` over
+  // all of them.
+  //
+  // The window is the shipped runs, so this reading and `fast-path-escapes`
+  // are about one set of ships and can be read side by side. Eligibility is the
+  // moved bases inside it, and not the ships: a window whose runs never met a
+  // moved default branch asked the check nothing, and a zero over that would
+  // read as a check that refuses everything.
+  'fast-path-takes': async ({ paths, project, window }) => {
+    const ships = listShips(paths).filter((s) => s.project === project);
+    const ids = new Set(ships.slice(-window).map((s) => s.runId));
+    // Keyed on a plain object, which is safe here and only here: a refusal word
+    // reaches a stamp through `assertFastPathRefusal`, so the keys come from a
+    // closed set that holds no name of the object prototype.
+    const refusals = {};
+    let records = 0;
+    let taken = 0;
+    let moved = 0;
+    for (const { runId, events } of listRunEvents(paths, { project })) {
+      if (!ids.has(runId)) continue;
+      const decisions = events.filter((e) => e.event === 'fast-path-ship');
+      if (decisions.length === 0) continue;
+      moved += 1;
+      records += decisions.length;
+      for (const decision of decisions) {
+        if (decision.taken === true) taken += 1;
+        else if (typeof decision.refusal === 'string') {
+          refusals[decision.refusal] = (refusals[decision.refusal] ?? 0) + 1;
+        }
+      }
+    }
+    return {
+      value: records > 0 ? round(taken / records) : null,
+      eligible: moved >= MOVED_BASE_FLOOR,
+      // The histogram is the answer's own evidence: each word names a different
+      // repair, so a reader of a breach needs the counts and not the rate.
+      detail: { ships: ids.size, runs: moved, records, taken, refusals },
     };
   },
 

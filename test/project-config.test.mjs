@@ -182,6 +182,71 @@ test('a project may send the flake re-run back over the whole layer, by name', (
   }
 });
 
+test('a layer ground is a list of path entries wherever the config is read', () => {
+  // The shape is checked like every other field. The presence is not: see the
+  // launch rule below.
+  const config = valid();
+  config.gates.tier1[0].ground = ['src/lint', 'scripts/lint.mjs'];
+  assert.deepEqual(validateProjectConfig(config), []);
+  for (const bad of ['src', [], [''], [2], {}]) {
+    const wrong = valid();
+    wrong.gates.tier1[1].ground = bad;
+    assert.deepEqual(errorPaths(wrong), ['gates.tier1[1].ground'], JSON.stringify(bad));
+  }
+});
+
+test('a launch under the fast path refuses a layer whose ground nothing declares', () => {
+  // The refusal the whole plan exists for, moved to the config. A layer with no
+  // ground refuses every ship of that project, every time, and the only sign of
+  // it is one word in a ledger. Here it is one error naming the layer, before a
+  // run exists (ADR-0056).
+  const config = valid();
+  config.gates.fastPathShip = true;
+  config.gates.breadthGround = ['package-lock.json'];
+  const errors = validateProjectConfig(config, { launch: true });
+  assert.deepEqual(
+    errors.map((e) => e.path),
+    ['gates.tier1[0].ground', 'gates.tier1[1].ground'],
+  );
+  assert.match(errors[0].message, /layer lint declares no ground/);
+  assert.match(errors[0].message, /refuses every ship/);
+  // Every layer with a ground, and the launch is clean.
+  config.gates.tier1[0].ground = ['src'];
+  config.gates.tier1[1].ground = ['src', 'test'];
+  assert.deepEqual(validateProjectConfig(config, { launch: true }), []);
+});
+
+test('a launch under the fast path refuses a ground entry that can match no path', () => {
+  // `.` reads like a declaration of the whole repository and matches no file,
+  // because the path vocabulary compares a plain entry as a prefix. It is
+  // refused at the config rather than at the ship.
+  const config = valid();
+  config.gates.fastPathShip = true;
+  config.gates.tier1[0].ground = ['src'];
+  config.gates.tier1[1].ground = ['src', '.', '/etc/passwd', 'a/../b'];
+  assert.deepEqual(
+    validateProjectConfig(config, { launch: true }).map((e) => e.path),
+    ['gates.tier1[1].ground[1]', 'gates.tier1[1].ground[2]', 'gates.tier1[1].ground[3]'],
+  );
+});
+
+test('the ground rule is armed by the fast-path flag and by nothing else', () => {
+  // A project that has not opted in is validated exactly as it was before this
+  // field existed, at the launch and everywhere else. That is the whole answer
+  // to the wedge risk: `gates.fastPathShip: false` disarms the rule with the
+  // feature, and it is the same line the revert uses.
+  const off = valid();
+  assert.deepEqual(validateProjectConfig(off, { launch: true }), []);
+  off.gates.fastPathShip = false;
+  assert.deepEqual(validateProjectConfig(off, { launch: true }), []);
+  // And the rule binds the launch alone: a live run re-parses the blob it
+  // pinned at every lane stage, and a rule born after that pin would fault the
+  // run mid-flight.
+  const on = valid();
+  on.gates.fastPathShip = true;
+  assert.deepEqual(validateProjectConfig(on), []);
+});
+
 test('the fast path is off unless a project says otherwise, in a boolean', () => {
   // ADR-0056. Absent is the decision: a moved base costs the full re-verdict
   // it always cost, and the one-line revert is this flag going back to false.
