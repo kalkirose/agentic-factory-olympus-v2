@@ -340,11 +340,33 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   `spec-gate-stalled`, the one gate park, with both counts and the rounds they
   came from; `round` buys one amendment plus one re-check, `abandon` closes
   the run. The round stamp carries the identities.
+- **Suite writes and the surface map** (ADR-0072). Five writes answer the spec:
+  the authoring round, an adversary amendment, a strengthening round, the
+  red-state fix, and the re-freeze amendment after the freeze. Each one reports
+  the files it wrote, the expected reds with their class, and a surface map: one
+  row per item of this story that sits on a security dimension, with the item's
+  kind out of a closed vocabulary of eight, where it sits, and either the test
+  that kills a wrong implementation of it or the reason the spec does not
+  constrain it. A dimension the story does not touch is declared out of scope
+  with a reason. The dimensions are the four the adversary weighs, off one list
+  with six readers, and they are not project config. Eleven deterministic checks
+  hold the document: every dimension accounted for once, every row closed
+  exactly once, every named test present in a declared suite file, every
+  survivor wave on a tested row, no item of the previous map dropped, no item on
+  two rows. A defect buys one corrective invocation and then the seat-failure
+  park, the route every suite-report defect takes. The amendment and
+  strengthening briefs carry every earlier round of the run, newest first, so
+  three rounds read as one instruction instead of three requests to add one
+  test. `surface-map` stamps one set of counts per write, and the freeze record
+  carries the map of the last write.
 - **Adversary**: throwaway wrong implementations, all evaluated to verdict, in
   disposable worktrees. The brief names the security dimensions beside the
   behavior the spec states, so a suite that asserts nothing about
   authorization or input trust shows a survivor and grows a test for it
-  (ADR-0038). One wave a round by default;
+  (ADR-0038). It is never shown the surface map: the wave is the only
+  independent measure of whether the map is the surface, and an adversary that
+  read the map would prove the suite covers what the map declared (ADR-0072).
+  One wave a round by default;
   `lanes.story.adversaryWaves` raises the count, and the launch pins the config
   blob, so a raise lands at the next launch and never mid-run. A survivor is a
   demonstrated suite gap: one targeted amendment round (a killing test per
@@ -371,9 +393,10 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   pre-implementation tree, and the freeze report classes every red as
   feature-absence. Any other cause is a suite defect to fix before freeze.
 - **Freeze record**: suite file set at a SHA, kill count, survivor
-  dispositions, red-state record, born-spec ref, the frozen exclusions — the
-  test-path files the spec assigned to the implementing pass — and the frozen
-  tests pinned to the owner. The exclusions leave the dev seats' deny rules and
+  dispositions, red-state record, born-spec ref, the surface map of the last
+  suite write and the dimensions it declared out of scope, the frozen
+  exclusions (the test-path files the spec assigned to the implementing pass),
+  and the frozen tests pinned to the owner. The exclusions leave the dev seats' deny rules and
   every story-mode restore; the adversary's restore still covers them. The
   valid record is the completion signal.
 

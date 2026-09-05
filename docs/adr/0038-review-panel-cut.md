@@ -31,10 +31,17 @@ is smaller than the vocabulary.
   confirmed HIGH across the same ten ships does not pay for a seat. The lens
   itself stays on the panel, on a seat that always runs.
 - **The adversary waves carry the security dimensions.** The wave brief names
-  authorization on every entry point, input trust, secrets and trust
-  boundaries beside the behavior the spec states. The dimensions are one list
-  in the registry, read by the lens criteria and by the wave brief, so the two
-  surfaces cannot drift.
+  authorization on every entry point, input trust, secrets and trust boundaries
+  beside the behavior the spec states.
+- **One definition of the dimensions, six readers.** The list lives in the lens
+  registry and imports nothing. The lens criteria read it for the verdict panel.
+  The wave brief reads it for the adversary. The suite brief and the re-freeze
+  brief read it for the surface map every suite write owes, and the
+  deterministic check over that map reads it again in each of the two lanes that
+  hold a suite write (ADR-0072). Six readers of one list, so no surface can
+  narrow what another one still probes. The list is not project config: a
+  project that drops the security lens from its panel still gets the dimensions
+  in its waves and in its maps.
 
 The default panel is three seats where it was five, and the fan-out is the
 only place in a run where seats spawn in parallel.
@@ -79,6 +86,13 @@ So the fold is two-sided, and each side answers a different failure.
 
 The first side blocks this ship. The second side makes the next one cheaper.
 
+The suite side has a second half. A survivor names one member of a set, and a
+seat that closes the member and never lists the set makes the adversary an
+enumeration device, at a full round per member. So every suite write also maps
+the story's own surface along the same four dimensions, and the map is checked
+before the write commits (ADR-0072). The wave stays the measure of whether the
+map is the surface, and it is never shown the map.
+
 ## Why config and not a code deletion
 
 A cut with no way back is a bet that ten ships of evidence generalize. They may
@@ -108,4 +122,6 @@ of adding to it — kill rates fall while survivors cluster on security wrongnes
 the spec never named — move them to a dedicated wave: the wave loop already
 runs `lanes.story.adversaryWaves` per round, so the change is which brief wave
 1 gets. Trigger: two consecutive freezes whose survivors are all security-shaped
-and spec-indifferent. Reversal cost: moderate, one branch in the wave loop.
+and declared spec-indifferent. A freeze whose survivors were all closed by
+tests does not meet it: those survivors were spec-relevant, and they were real
+gaps in the suite. Reversal cost: moderate, one branch in the wave loop.

@@ -562,3 +562,30 @@ never carries a project's specifics.
   same set while both are read, so a project may merge its config before or
   after the daemon moves. ADR-0060 is rewritten around the new shape and
   renamed; ADR-0071 records the list decision.
+- 2026-09-05 — a suite seat maps the surface it is asked to hold, and does not
+  only close the last hole. Every seat that writes a suite file now receives the
+  four security dimensions the adversary receives, and owes an enumeration of
+  the story's own items along each one. `surfaceMap` and `dimensionsOutOfScope`
+  are required fields on all five suite writes: the authoring round, an
+  adversary amendment, a strengthening round, the red-state fix and the
+  re-freeze after the freeze. A row names the dimension, the kind out of the
+  eight `SURFACE_KINDS` carry, the item, where it sits, and either the test that
+  kills a wrong implementation of it or the reason the spec does not constrain
+  it. `src/lanes/surfacemap.mjs` is the one implementation the story lane and the
+  verdict lane share, and it is the fourth to sixth reader of the one
+  `SECURITY_DIMENSIONS` list. Eleven deterministic checks hold the document: a
+  dimension in neither field or in both, an out-of-scope entry with no reason, a
+  row with no item or no `where`, a row closed twice or not at all, an empty
+  excuse, a named test no declared suite file holds, a survivor wave on no row,
+  a survivor row closed by an excuse, a dropped item of the previous map, and
+  one item on two rows. A defect buys one corrective invocation and then the
+  seat-failure park, the route every suite-report defect already takes. The
+  amendment and strengthening briefs now carry every earlier round of the run,
+  newest first, with its approach and its wrongness, because a seat in fresh
+  context cannot read a pattern nobody puts in front of it. `surface-map` stamps
+  the counts of one write, and the freeze record carries the map of the last
+  write beside the reds it already carried. The adversary brief is unchanged and
+  is never shown the map: the wave is the only independent measure of whether
+  the map is the surface. ADR-0072 records the decision; ADR-0038 states the six
+  readers of the dimension list and ADR-0006 states the suite report contract
+  and the two-section survivor evidence.

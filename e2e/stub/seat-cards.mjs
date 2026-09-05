@@ -139,11 +139,60 @@ function specGate() {
   };
 }
 
+/**
+ * The dimensions the surface-map brief names. The stub reads them off its own
+ * prompt, so the fixture never restates the harness's list.
+ */
+function dimensions() {
+  const block = /the dimensions the adversary weighs\.\n([\s\S]*?)\nFor each dimension,/.exec(prompt);
+  if (!block) return [];
+  return block[1]
+    .split('\n')
+    .map((line) => line.replace(/^- /, '').trim())
+    .filter((line) => line.length > 0);
+}
+
+/**
+ * The surface map of one suite write: one enumerated item, closed by a test the
+ * declared suite files hold, and every other dimension declared out of scope.
+ * The item is the same at every write, so the map never shrinks, and every
+ * survivor wave of this write sits on it.
+ */
+function surfaceMap(reds) {
+  const dims = dimensions();
+  if (dims.length === 0) return {};
+  const out = (list) =>
+    list.map((dimension) => ({
+      dimension,
+      reason: 'the fixture story renders no surface on this dimension',
+    }));
+  // A scenario that declares no red names no test, so it enumerates nothing.
+  const named = reds[0]?.test;
+  if (!named) return { surfaceMap: [], dimensionsOutOfScope: out(dims) };
+  const [first, ...rest] = dims;
+  const survivors = waves();
+  return {
+    surfaceMap: [
+      {
+        dimension: first,
+        kind: 'route',
+        item: 'the module entry point',
+        where: 'src/feature.mjs',
+        test: named,
+        ...(survivors.length > 0 && { survivors }),
+      },
+    ],
+    dimensionsOutOfScope: out(rest),
+  };
+}
+
 function suiteSeat() {
   const files = plan().suiteFiles ?? {};
+  const reds = plan().suiteReds ?? [];
   const report = {
     suiteFiles: Object.keys(files),
-    reds: plan().suiteReds ?? [],
+    reds,
+    ...surfaceMap(reds),
     summary: 'the suite asserts the criterion',
   };
   if (prompt.includes('list it under killingTests')) {

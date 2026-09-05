@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { longPath, isRetryableRemoval } from '../src/isolation/removal.mjs';
+import { SECURITY_DIMENSIONS } from '../src/lanes/lenses.mjs';
 
 // The ladder a fixture teardown removes under, and the path form it removes
 // in. Both are the production ones (ADR-0004): a fixture tree is a checked-out
@@ -136,6 +137,45 @@ tests/feature.test.mjs (new) — suite
 
 None; the card names none.
 `;
+
+/**
+ * The two surface-map fields of a suite report, at their cheapest valid value:
+ * a story that touches none of the four dimensions, so it enumerates nothing
+ * and states a reason per dimension (ADR-0072). Every suite fixture whose
+ * subject is not the map itself spreads this.
+ */
+export const NO_SURFACE = {
+  surfaceMap: [],
+  dimensionsOutOfScope: SECURITY_DIMENSIONS.map((dimension) => ({
+    dimension,
+    reason: 'the fixture story renders no surface on this dimension',
+  })),
+};
+
+/**
+ * The two fields with one enumerated item, closed by a named test. `survivors`
+ * are the waves that sit on that item: the amendment write and the
+ * strengthening write owe every survivor a tested row.
+ */
+export function surfaceMapping(test, { survivors = [] } = {}) {
+  const [dimension, ...rest] = SECURITY_DIMENSIONS;
+  return {
+    surfaceMap: [
+      {
+        dimension,
+        kind: 'route',
+        item: 'the module entry point',
+        where: 'src/feature.mjs',
+        test,
+        ...(survivors.length > 0 && { survivors }),
+      },
+    ],
+    dimensionsOutOfScope: rest.map((other) => ({
+      dimension: other,
+      reason: 'the fixture story renders no surface on this dimension',
+    })),
+  };
+}
 
 /** A valid project config JSON body; override sections per test. */
 export function projectConfigJson(overrides = {}) {

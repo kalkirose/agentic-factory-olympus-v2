@@ -121,6 +121,12 @@ import {
   unrunSuiteCheck,
 } from './suitechecks.mjs';
 import {
+  previousMapReport,
+  surfaceMapCounts,
+  surfaceMapDefects,
+  surfaceMapLines,
+} from './surfacemap.mjs';
+import {
   ACTOR,
   loadProjectConfig,
   readConstitution,
@@ -2309,6 +2315,15 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
           );
         }
       }
+      // The surface map. The re-freeze is the fifth suite write, and a map that
+      // stopped at the freeze would let this write drop a row the four before
+      // it carried (ADR-0072).
+      defects.push(
+        ...surfaceMapDefects(r, {
+          worktree: base.worktree,
+          previous: readJson(previousMapReport(runEvents(ctx))?.path)?.surfaceMap ?? null,
+        }),
+      );
       // The re-freeze is a suite write like the four before the freeze, so the
       // project's own checks run over it too. Without this the amendment that
       // repairs one Tier-1 red can ship a second one, and the run pays another
@@ -2327,6 +2342,11 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
     };
   }
   if (fail) return { fail };
+  ctx.store.append('surface-map', {
+    actor: ACTOR,
+    phase: 're-freeze',
+    ...surfaceMapCounts(report),
+  });
   const sha = await commitAll(base.worktree, `suite re-freeze: ${ctx.runId}`);
   ctx.store.append('suite-committed', {
     actor: ACTOR,
@@ -2847,6 +2867,9 @@ function refreezeRole(base, findings, record, intentAnswer, ruled, brief) {
     `Amend the tests so they encode the spec at: ${base.specRef}`,
     `Write test files only under: ${base.testPaths.join(', ')}. Touch nothing else.`,
     'In the report, list every amended suite file; list expected residual reds (none when the amended suite is green).',
+    // The fifth suite write carries the same map obligation the four before the
+    // freeze carry, and the map does not shrink here either (ADR-0072).
+    ...surfaceMapLines(),
     ...suiteCheckLines(base.suiteChecks),
   ];
   if (intentAnswer) {

@@ -48,6 +48,14 @@ import {
   unrunQuestion,
   unrunSuiteCheck,
 } from './suitechecks.mjs';
+import {
+  SURFACE_MAP_PROPERTIES,
+  SURFACE_MAP_REQUIRED,
+  previousMapReport,
+  surfaceMapCounts,
+  surfaceMapDefects,
+  surfaceMapLines,
+} from './surfacemap.mjs';
 import { readInheritance } from './resume.mjs';
 import {
   SUPERSEDE_BRIEF_LINES,
@@ -210,7 +218,9 @@ export const SPEC_GATE_SCHEMA = {
 
 const RED_CLASSES = ['feature-absence', 'fixture-defect', 'env-collision', 'other'];
 
-const SUITE_PROPERTIES = {
+// What every suite report carries, whatever wrote it: the files, the expected
+// reds and the summary.
+const SUITE_REPORT_PROPERTIES = {
   suiteFiles: { type: 'array', items: { type: 'string' } },
   reds: {
     type: 'array',
@@ -227,11 +237,29 @@ const SUITE_PROPERTIES = {
   summary: { type: 'string' },
 };
 
+// The five suite writes that answer a spec carry the surface map as well: the
+// author write, the adversary amendment, the strengthening round, the red-state
+// fix and the re-freeze amendment after the freeze (ADR-0072).
+const SUITE_PROPERTIES = { ...SUITE_REPORT_PROPERTIES, ...SURFACE_MAP_PROPERTIES };
+
+/**
+ * The report of the suite seat that resolves conflict hunks in test files
+ * during the merge round of the ship step. That seat merges two versions of a
+ * frozen file; it answers no spec and it is given no map brief, so the map is
+ * not asked of it.
+ */
+export const MERGE_SUITE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: SUITE_REPORT_PROPERTIES,
+  required: ['suiteFiles', 'reds', 'summary'],
+};
+
 export const SUITE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: SUITE_PROPERTIES,
-  required: ['suiteFiles', 'reds', 'summary'],
+  required: ['suiteFiles', 'reds', 'summary', ...SURFACE_MAP_REQUIRED],
 };
 
 export const SUITE_AMEND_SCHEMA = {
@@ -265,7 +293,14 @@ export const SUITE_AMEND_SCHEMA = {
       },
     },
   },
-  required: ['suiteFiles', 'reds', 'summary', 'killingTests', 'dispositions'],
+  required: [
+    'suiteFiles',
+    'reds',
+    'summary',
+    'killingTests',
+    'dispositions',
+    ...SURFACE_MAP_REQUIRED,
+  ],
 };
 
 export const ADVERSARY_SCHEMA = {
@@ -1045,10 +1080,28 @@ async function suiteSeatWithChecks(ctx, base, { phase, schema, buildRole, checks
       }),
     };
   }
+  // One stamp per suite write, on the write the checks passed. The counts are
+  // the reading: a map that doubles between the author write and the freeze was
+  // written by adversaries and not by the seat (ADR-0072).
+  if (outcome.report) {
+    ctx.store.append('surface-map', {
+      actor: ACTOR,
+      phase,
+      ...surfaceMapCounts(outcome.report),
+    });
+  }
   return outcome;
 }
 
-async function suiteChecks(ctx, base, report, phase) {
+/**
+ * The deterministic defects of one suite write.
+ *
+ * `survivors` are the waves this write answers. The amendment write and the
+ * strengthening write pass the round's survivors, so the map check can hold
+ * every one of them to a tested surface item; the author write and the
+ * red-state fix answer no survivor and pass none (ADR-0072).
+ */
+async function suiteChecks(ctx, base, report, phase, { survivors = [] } = {}) {
   const defects = [];
   if (report.suiteFiles.length === 0) defects.push('no suite files declared');
   for (const file of report.suiteFiles) {
@@ -1066,6 +1119,17 @@ async function suiteChecks(ctx, base, report, phase) {
       defects.push(`expected red "${red.test}" is classed ${red.class}; every red must be feature-absence`);
     }
   }
+  // The surface map: the shape of the enumeration, and one closed item per row.
+  // The previous map comes off the last suite report before the last commit, so
+  // a corrective invocation inside this write is never read as the write before
+  // it (ADR-0072).
+  defects.push(
+    ...surfaceMapDefects(report, {
+      worktree: base.worktree,
+      previous: readJson(previousMapReport(runEvents(ctx))?.path)?.surfaceMap ?? null,
+      survivors,
+    }),
+  );
   // The project's own checks over the tree as the seat left it: nothing is
   // committed behind a red, and the seat that wrote the file is still live
   // (ADR-0071).
@@ -1309,9 +1373,9 @@ async function amendment(ctx, base, clone, { round, survivors }) {
   const { report, fail } = await suiteSeatWithChecks(ctx, base, {
     phase: 'amendment',
     schema: SUITE_AMEND_SCHEMA,
-    buildRole: (brief) => amendmentRole(base, evidence, brief),
+    buildRole: (brief) => amendmentRole(base, evidence, survivors, brief),
     checks: async (r) => {
-      const defects = await suiteChecks(ctx, base, r, 'amendment');
+      const defects = await suiteChecks(ctx, base, r, 'amendment', { survivors });
       const covered = new Set([
         ...(r.killingTests ?? []).map((k) => k.wave),
         ...(r.dispositions ?? []).map((d) => d.wave),
@@ -1335,8 +1399,8 @@ async function strengthen(ctx, base, clone, { round, survivors }) {
   const { report, fail } = await suiteSeatWithChecks(ctx, base, {
     phase: 'strengthening',
     schema: SUITE_SCHEMA,
-    buildRole: (brief) => strengthenRole(base, evidence, brief),
-    checks: (r) => suiteChecks(ctx, base, r, 'strengthening'),
+    buildRole: (brief) => strengthenRole(base, evidence, survivors, brief),
+    checks: (r) => suiteChecks(ctx, base, r, 'strengthening', { survivors }),
   });
   if (fail) return fail;
   const sha = await commitAll(base.worktree, `suite strengthen r${round}: ${base.card.key}`);
@@ -1350,6 +1414,21 @@ async function strengthen(ctx, base, clone, { round, survivors }) {
   return null;
 }
 
+/**
+ * What a suite seat is shown about the adversary. Two sections.
+ *
+ * The first is this round's survivors, each with its report and the diff of the
+ * tree it left. The second is every earlier round of this run, newest first,
+ * with its approach and its wrongness and no diff: `strengthen` drops each
+ * survivor tree when it ends a round, so the report is what is left, and the
+ * added text stays small.
+ *
+ * The second section exists because a seat runs in fresh context. It cannot see
+ * a pattern across rounds that nobody puts in front of it. Three rounds that
+ * named a cookie value, then a bare header, then a second cookie name are one
+ * instruction read together: enumerate the carriers. Read one at a time they
+ * are three requests to add one test (ADR-0072).
+ */
 async function survivorEvidence(ctx, round, survivors) {
   const parts = [];
   for (const wave of survivors) {
@@ -1367,7 +1446,26 @@ async function survivorEvidence(ctx, round, survivors) {
       ].join('\n'),
     );
   }
+  const earlier = earlierRoundEvidence(ctx, round);
+  if (earlier.length > 0) {
+    parts.push(['Every earlier adversary round of this run:', ...earlier].join('\n'));
+  }
   return parts.join('\n\n');
+}
+
+/** Every wave of every round before this one, newest round first. */
+function earlierRoundEvidence(ctx, round) {
+  const waves = runEvents(ctx)
+    .filter((e) => e.event === 'adversary-wave' && e.phase === 'initial' && e.round < round)
+    .map((e) => ({ round: e.round, wave: e.wave }))
+    .sort((a, b) => b.round - a.round || a.wave - b.wave);
+  return waves.map(({ round: r, wave }) => {
+    const report = readJson(runReportPath(ctx.paths, ctx.runId, `adversary-r${r}-w${wave}`)) ?? {};
+    return (
+      `- round ${r}, wave ${wave}: approach: ${report.approach ?? 'unknown'}; ` +
+      `wrongness: ${report.wrongness ?? 'unknown'}`
+    );
+  });
 }
 
 function survivorLines(ctx, round, waves) {
@@ -1443,7 +1541,8 @@ function freezeHandler(nextStage) {
       disposition: e.disposition,
       reason: e.reason,
     }));
-    const reds = readJson(lastSeatReportEvent(events, 'suite')?.path)?.reds ?? [];
+    const lastSuite = readJson(lastSeatReportEvent(events, 'suite')?.path) ?? {};
+    const reds = lastSuite.reds ?? [];
     // The exclusions: test-path files the spec assigned to the implementing
     // seat. They are named at the freeze because that is where the frozen set
     // is fixed, and every reader after it takes the two apart from one record
@@ -1468,6 +1567,11 @@ function freezeHandler(nextStage) {
       killCount,
       amendmentKills,
       dispositions,
+      // The surface map of the last suite write, off the same report the reds
+      // come off. The freeze record is where the frozen set is fixed, so every
+      // later reader takes the map off one record (ADR-0072).
+      surfaceMap: lastSuite.surfaceMap ?? [],
+      dimensionsOutOfScope: lastSuite.dimensionsOutOfScope ?? [],
       redState: { result: 'red', sha, reds },
     };
     const recordPath = join(ctx.paths.runs, ctx.runId, 'freeze.json');
@@ -1692,7 +1796,7 @@ function suiteFacts(base) {
   ];
 }
 
-function suiteReportLines(base) {
+function suiteReportLines(base, survivors = []) {
   return [
     `Write test files only under: ${base.testPaths.join(', ')}. Touch nothing else.`,
     `The suite runs with: ${base.suiteArgv.join(' ')}`,
@@ -1704,6 +1808,10 @@ function suiteReportLines(base) {
     // does not name is a pin on somebody else's surface, and the story that
     // changes that surface later pays for it.
     "The spec's Components section names the design-system components this story renders. Target those components and no others, through the story's own test ids; never through a page-wide locator by element type or role.",
+    // The surface map. Every pre-freeze suite write carries it, because each
+    // one runs in fresh context and each one can close the hole it was shown
+    // while it leaves the sibling of that hole open (ADR-0072).
+    ...surfaceMapLines({ survivors }),
     ...suiteCheckLines(base.suiteChecks),
     ...noteLines(base),
   ];
@@ -1736,26 +1844,26 @@ function suiteAuthorRole(base, brief) {
   ].join('\n');
 }
 
-function amendmentRole(base, evidence, brief) {
+function amendmentRole(base, evidence, survivors, brief) {
   return [
     'The adversary round left survivors: wrong implementations the suite did not kill.',
     `The spec: ${base.specPath}`,
     'For each survivor, do one of:',
     '- add a killing test and list it under killingTests with the wave number;',
     '- declare a disposition: "spec-indifferent" when the spec does not constrain the surviving behavior, "unkilled-gap" when the gap is real but you cannot encode a killing test.',
-    ...suiteReportLines(base),
+    ...suiteReportLines(base, survivors),
     'Survivor evidence:',
     evidence,
     ...briefLines(brief),
   ].join('\n');
 }
 
-function strengthenRole(base, evidence, brief) {
+function strengthenRole(base, evidence, survivors, brief) {
   return [
     'The adversary round scored zero kills: every wrong implementation passed the suite.',
     `Strengthen the suite against the spec at: ${base.specPath}`,
     'Use every survivor below as evidence. A fresh adversary round follows.',
-    ...suiteReportLines(base),
+    ...suiteReportLines(base, survivors),
     'Survivor evidence:',
     evidence,
     ...briefLines(brief),

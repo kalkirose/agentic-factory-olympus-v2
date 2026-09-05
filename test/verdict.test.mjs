@@ -21,6 +21,7 @@ import { OWNER_PIN_MARKER } from '../src/lanes/supersede.mjs';
 import { PARTS_ENV } from '../src/lanes/parts.mjs';
 import { LAYER_LADDER } from '../src/lanes/waiting.mjs';
 import { declaredGround } from '../src/lanes/fastpath.mjs';
+import { SECURITY_DIMENSIONS } from '../src/lanes/lenses.mjs';
 import {
   tempDir,
   removeDir,
@@ -30,6 +31,7 @@ import {
   projectConfigJson,
   FIXTURE_ACCEPTANCE,
   FIXTURE_SPEC,
+  NO_SURFACE,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -433,12 +435,13 @@ function refusesTwice() {
   let refused = 0;
   return () =>
     refused++ < 2
-      ? { report: { suiteFiles: [], reds: [], summary: 'nothing declared' } }
+      ? { report: { suiteFiles: [], reds: [], ...NO_SURFACE, summary: 'nothing declared' } }
       : {
           files: { 'tests/feature.test.mjs': STRONG_TEST, 'tests/marker.txt': 'ok' },
           report: {
             suiteFiles: ['tests/feature.test.mjs', 'tests/marker.txt'],
             reds: [],
+            ...NO_SURFACE,
             summary: 're-frozen',
           },
         };
@@ -1167,7 +1170,12 @@ test('a suite defect re-freezes the tests without budget and without a new fury 
     ...furyClean(),
     suite: () => ({
       files: { 'tests/feature.test.mjs': STRONG_TEST },
-      report: { suiteFiles: ['tests/feature.test.mjs'], reds: [], summary: 're-frozen' },
+      report: {
+        suiteFiles: ['tests/feature.test.mjs'],
+        reds: [],
+        ...NO_SURFACE,
+        summary: 're-frozen',
+      },
     }),
   };
   const fx = verdictFixture(t, { seats, suiteFiles: { 'tests/feature.test.mjs': WRONG_TEST } });
@@ -1227,7 +1235,12 @@ function amendsTwice() {
   let amended = 0;
   return () => ({
     files: { 'tests/feature.test.mjs': amended++ === 0 ? STRONG_TEST : GROUNDED_TEST },
-    report: { suiteFiles: ['tests/feature.test.mjs'], reds: [], summary: 're-frozen' },
+    report: {
+      suiteFiles: ['tests/feature.test.mjs'],
+      reds: [],
+      ...NO_SURFACE,
+      summary: 're-frozen',
+    },
   });
 }
 
@@ -1278,7 +1291,12 @@ test('a check that cannot run at the re-freeze parks the environment, not the se
     ...furyClean(),
     suite: () => ({
       files: { 'tests/feature.test.mjs': GROUNDED_TEST },
-      report: { suiteFiles: ['tests/feature.test.mjs'], reds: [], summary: 're-frozen' },
+      report: {
+        suiteFiles: ['tests/feature.test.mjs'],
+        reds: [],
+        ...NO_SURFACE,
+        summary: 're-frozen',
+      },
     }),
   };
   const fx = verdictFixture(t, {
@@ -1339,7 +1357,12 @@ test('spec-deep and intent-deep suite defects amend the spec; the intent conflic
     'spec-birth': () => ({ report: { amendedSections: ['Goal'], summary: 'amended' } }),
     suite: () => ({
       files: { 'tests/feature.test.mjs': STRONG_TEST },
-      report: { suiteFiles: ['tests/feature.test.mjs'], reds: [], summary: 're-frozen' },
+      report: {
+        suiteFiles: ['tests/feature.test.mjs'],
+        reds: [],
+        ...NO_SURFACE,
+        summary: 're-frozen',
+      },
     }),
   };
   const fx = verdictFixture(t, { seats, suiteFiles: { 'tests/feature.test.mjs': WRONG_TEST } });
@@ -1398,12 +1421,18 @@ test('an intent ruling that names a frozen test reaches the suite, once, on the 
             report: {
               suiteFiles: ['tests/pinned.test.mjs'],
               reds: [],
+              ...NO_SURFACE,
               summary: 'the pin now admits the extension',
             },
           }
         : {
             files: { 'tests/pair.test.mjs': PAIR_TEST },
-            report: { suiteFiles: ['tests/pair.test.mjs'], reds: [], summary: 'nothing amended' },
+            report: {
+              suiteFiles: ['tests/pair.test.mjs'],
+              reds: [],
+              ...NO_SURFACE,
+              summary: 'nothing amended',
+            },
           },
   };
   const fx = verdictFixture(t, {
@@ -2974,6 +3003,7 @@ function refreezeSuite() {
     report: {
       suiteFiles: ['tests/feature.test.mjs', 'tests/marker.txt'],
       reds: [],
+      ...NO_SURFACE,
       summary: 're-frozen',
     },
   };
@@ -4053,12 +4083,18 @@ function pinSuite() {
           report: {
             suiteFiles: ['tests/pinned.test.mjs'],
             reds: [],
+            ...NO_SURFACE,
             summary: 'the pin now admits the extension',
           },
         }
       : {
           files: { 'tests/pair.test.mjs': PAIR_TEST },
-          report: { suiteFiles: ['tests/pair.test.mjs'], reds: [], summary: 'nothing amended' },
+          report: {
+            suiteFiles: ['tests/pair.test.mjs'],
+            reds: [],
+            ...NO_SURFACE,
+            summary: 'nothing amended',
+          },
         };
 }
 
@@ -4451,4 +4487,62 @@ test('a project with no declared allowlist stamps no addition', async (t) => {
   const commits = events.filter((e) => e.event === 'implementation-committed');
   assert.equal(commits.length, 1);
   assert.equal(commits[0].allowlists, undefined);
+});
+
+test('the re-freeze carries the map brief and its check, and stamps its own map', async (t) => {
+  // The re-freeze is the fifth suite write. A map that stopped at the freeze
+  // would let this write drop a row the four before it carried (ADR-0072).
+  const dimension = SECURITY_DIMENSIONS[0];
+  const row = {
+    dimension,
+    kind: 'route',
+    item: 'the module entry point',
+    where: 'src/feature.mjs',
+    test: 'f doubles',
+  };
+  const out = SECURITY_DIMENSIONS.slice(1).map((other) => ({
+    dimension: other,
+    reason: 'the fixture story renders no surface on this dimension',
+  }));
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    'verdict-triage': triageSeat(() => ({ class: 'suite-defect', depth: 'test' })),
+    ...furyClean(),
+    suite: ({ label }) => ({
+      files: { 'tests/feature.test.mjs': STRONG_TEST },
+      report: {
+        suiteFiles: ['tests/feature.test.mjs'],
+        reds: [],
+        surfaceMap: [label === 'suite-1' ? { ...row, test: 'f triples' } : row],
+        dimensionsOutOfScope: out,
+        summary: 're-frozen',
+      },
+    }),
+  };
+  const fx = verdictFixture(t, { seats, suiteFiles: { 'tests/feature.test.mjs': WRONG_TEST } });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const calls = fx.calls.filter((c) => c.seat === 'suite');
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0].prompt.includes('map the surface of this story'));
+  for (const d of SECURITY_DIMENSIONS) assert.ok(calls[0].prompt.includes(d), d);
+  // A re-freeze answers no survivor wave, so the survivor line stays off it.
+  assert.ok(!calls[0].prompt.includes('Put the wave number in "survivors"'));
+  assert.match(calls[1].prompt, /Correction brief/);
+  assert.ok(
+    calls[1].prompt.includes(
+      'the surface map row "the module entry point" names the test "f triples" and no declared ' +
+        'suite file holds that name. The files searched: tests/feature.test.mjs.',
+    ),
+    calls[1].prompt,
+  );
+  const stamps = events.filter((e) => e.event === 'surface-map');
+  assert.deepEqual(
+    stamps.map((e) => [e.phase, e.items, e.covered, e.outOfScope, e.dimensionsOut, e.kinds]),
+    [['re-freeze', 1, 1, 0, 3, 1]],
+  );
+  // The stamp lands on the write the checks passed, before the commit.
+  const committed = events.find((e) => e.event === 'suite-committed');
+  assert.ok(stamps[0].seq < committed.seq);
 });
