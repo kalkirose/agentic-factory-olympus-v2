@@ -171,17 +171,47 @@ export function sinceFreshPass(events, match) {
  * The reconciliation commit the run's tree still holds, or null.
  *
  * The rewrite of the decision records is committed as an implementation of
- * this run, under `phase: 'reconcile'` (ADR-0026). Nothing but a fresh pass
- * discards it: a repair round edits the tree the commit built.
+ * this run, under `phase: 'reconcile'` (ADR-0026). Two things discard it. A
+ * fresh pass resets the tree the commit built. And the discard fallback returns
+ * the worktree to the sha the last green verdict certified, which is the tree
+ * as it stood before the rewrite; it says so by stamping
+ * `reconciliation-written` with `ok: false` behind the commit.
  *
- * Two lanes read this. The update stage asks whether the rewrite is still to
- * do; the verdict cycle asks whether the diff it judges is a record diff.
+ * Both readings are the same sentence: the tree no longer holds the rewrite, so
+ * every reader of this sees no record commit and takes the route it took before
+ * one existed. The readers are the update stage, the `merged` stamp, the close's
+ * ticket, and the verdict cycle asking whether it judges a record diff.
  */
 export function reconcileCommit(events) {
-  return sinceFreshPass(
+  const commit = sinceFreshPass(
     events,
     (e) => e.event === 'implementation-committed' && e.phase === 'reconcile',
   );
+  if (!commit) return null;
+  const discarded = events.some(
+    (e) => e.event === 'reconciliation-written' && e.ok === false && e.seq > commit.seq,
+  );
+  return discarded ? null : commit;
+}
+
+/**
+ * The last verdict rendered over the run's record commit, or null.
+ *
+ * Two lanes ask it and they ask one question in two words. The update stage
+ * asks whether the record commit is certified, which is what lets the run queue
+ * for the ship token. The verdict ladder's repair arm asks whether the red it is
+ * answering stands over the records, which is what selects the seat that
+ * repairs them: the context that implemented the code never reconciles the
+ * records against its own work (ADR-0026).
+ */
+export function renderOverReconcile(events) {
+  const commit = reconcileCommit(events);
+  if (!commit) return null;
+  let found = null;
+  for (const e of events) {
+    if (e.event === 'verdict-rendered' && e.sha === commit.sha && e.seq > commit.seq) found = e;
+  }
+  return found;
 }
 
 export function lastSeatReportEvent(events, seat) {

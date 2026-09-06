@@ -9,7 +9,15 @@ import { createServer } from 'node:net';
 import { basename, dirname, join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
-import { interruptedStep, postFreeze, repairLane } from '../src/lanes/verdict.mjs';
+import {
+  droppedFindings,
+  interruptedStep,
+  postFreeze,
+  reconcileFallbackStamp,
+  reconcileRounds,
+  repairLane,
+  repairRounds,
+} from '../src/lanes/verdict.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
 import { Ledger, readEvents } from '../src/ledger/ledger.mjs';
 import { INSTANCE_EVENTS } from '../src/ledger/registry.mjs';
@@ -2801,6 +2809,40 @@ function ledger(...events) {
   return events.map((e, i) => ({ seq: i + 1, ...e }));
 }
 
+// The two caps count two things, and a story that spent code rounds must not
+// find its record rounds gone (ADR-0007).
+test('the code repair cap and the reconcile cap count apart', () => {
+  const events = ledger(
+    { event: 'repair-round', pass: 1, round: 1 },
+    { event: 'repair-round', pass: 1, round: 2, phase: 'reconcile', seat: 'reconcile-write' },
+    { event: 'repair-round', pass: 1, round: 3, phase: 'reconcile', seat: 'reconcile-write' },
+    { event: 'repair-round', pass: 2, round: 1 },
+  );
+  assert.equal(repairRounds(events, 1), 1);
+  assert.equal(reconcileRounds(events, 1), 2);
+  assert.equal(repairRounds(events, 2), 1);
+  assert.equal(reconcileRounds(events, 2), 0);
+});
+
+// A fresh pass drops its findings by moving the pass number. These fallbacks
+// move no pass, so the drop is explicit and every derivation of the open set
+// reads it (ADR-0026).
+test('a fallback names the findings the run gave up on, and both derivations drop them', () => {
+  const events = ledger(
+    { event: 'reconciliation-written', ok: true, partial: true, residual: ['F2', 'F3'] },
+    { event: 'reconciliation-written', ok: false, cause: 'record-layer-red', discarded: ['F4'] },
+  );
+  assert.deepEqual([...droppedFindings(events)].sort(), ['F2', 'F3', 'F4']);
+  assert.deepEqual([...droppedFindings(ledger({ event: 'verdict-rendered' }))], []);
+  // Only a fallback earns a cycle. The first write, a corrective round and the
+  // write nobody could make say nothing about a rendered verdict.
+  assert.equal(reconcileFallbackStamp(events[0]), true);
+  assert.equal(reconcileFallbackStamp(events[1]), true);
+  assert.equal(reconcileFallbackStamp({ ok: true, rewritten: ['docs/adr/1.md'] }), false);
+  assert.equal(reconcileFallbackStamp({ ok: true, corrective: true, answered: ['F1'] }), false);
+  assert.equal(reconcileFallbackStamp({ ok: false, cause: 'work-product-defect' }), false);
+});
+
 test('the interrupted step is read off the ledger, and never off how it ended', () => {
   const render = { event: 'verdict-rendered', cycle: 1, pass: 1 };
   // A fresh pass whose stamp is the last thing the pass wrote: the tree was
@@ -3330,6 +3372,101 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
     [{ layer: 'unit', status: 'green', mode: 'run' }],
   );
   assert.deepEqual(record.findings, []);
+});
+
+// A record finding blocks in the repair lane too, and there the ordinary
+// ladder answers it: the fix seat wrote the records, the ticket is its spec,
+// and nothing about that lane changes except which findings are open and which
+// lens reads the diff (ADR-0007).
+test('a confirmed record finding in the repair lane takes an ordinary repair round', async (t) => {
+  const ADR = 'docs/adr/0001-doubling.md';
+  const RECORD = '# ADR-0001: Doubling\n\nStatus: accepted\n\nf(x) will double x.\n';
+  let fixes = 0;
+  let reviews = 0;
+  const seats = {
+    dev: () => {
+      fixes += 1;
+      return {
+        files: { [ADR]: `${RECORD}\nrewrite ${fixes}\n` },
+        report: { summary: `record rewrite ${fixes}` },
+      };
+    },
+    'repair-dev': () => {
+      fixes += 1;
+      return {
+        files: { [ADR]: `${RECORD}\nrewrite ${fixes}\n` },
+        report: { summary: `answered the finding in the record` },
+      };
+    },
+    'generalist-review': () => {
+      reviews += 1;
+      return {
+        report: {
+          findings:
+            reviews === 1
+              ? [
+                  {
+                    lens: 'record',
+                    severity: 'MED',
+                    finding: 'the record states a doubling the tree does not implement',
+                    evidence: 'src/base.mjs:1',
+                    file: ADR,
+                    criterion: 'truth',
+                  },
+                ]
+              : [],
+          summary: 'the record, against the tree',
+        },
+      };
+    },
+    'fury-verifier': verifierSeat(({ mode }) => ({
+      verdict: mode === 'confirm' ? 'confirmed' : 'resolved',
+    })),
+  };
+  const fx = verdictFixture(t, {
+    seats,
+    gates: [{ name: 'lint', command: 'lint' }],
+    commands: { lint: GREEN_CMD },
+    // A repair-lane scenario: the project declares no story lane here, so the
+    // only red this run can render is the one the review raises.
+    laneConfig: {},
+    originFiles: {
+      [ADR]: RECORD,
+      'tickets/t1.md': '## Defect\n\nThe decision records do not state what the tree does.\n',
+    },
+  });
+  const { runId } = await fx.launchFromConsole({ lane: 'repair', ticket: 'tickets/t1.md' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+
+  // The MED reached the verifier and blocked, and it carries neither the
+  // advisory word nor a code lens.
+  const finding = events.find((e) => e.event === 'finding');
+  assert.equal(finding.lens, 'record');
+  assert.equal(finding.severity, 'MED');
+  assert.equal(finding.record, true);
+  assert.equal(finding.criterion, 'truth');
+  assert.equal(finding.confirmed, true);
+  assert.equal(finding.advisory, undefined);
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.equal(renders[0].verdict, 'red');
+  assert.deepEqual(renders[0].open, [finding.id]);
+
+  // The ordinary round, under the ordinary cap: the fix seat of this lane wrote
+  // the records, so nothing here dispatches the reconciliation write seat.
+  const rounds = events.filter((e) => e.event === 'repair-round');
+  assert.equal(rounds.length, 1);
+  assert.equal(rounds[0].phase, undefined);
+  assert.equal(rounds[0].round, 1);
+  assert.ok(fx.calls.some((c) => c.seat === 'repair-dev'));
+  assert.ok(!fx.calls.some((c) => c.seat === 'reconcile-write'));
+  assert.equal(renders.at(-1).verdict, 'green');
+
+  // The whole diff is records, so the seat read the record criteria and no code
+  // criterion at all.
+  const brief = fx.calls.find((c) => c.seat === 'generalist-review').prompt;
+  assert.ok(brief.includes('Every file in the diff below is a decision record.'), brief);
+  assert.ok(!brief.includes('- operational:'), brief);
 });
 
 // -- the diff-policy gate at candidate capture -------------------------------

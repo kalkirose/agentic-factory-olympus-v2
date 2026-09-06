@@ -2,10 +2,17 @@
 // seats that carry them, interface conditional on UI diffs, fully parallel),
 // the generalist review seat (the same lenses on one seat, diff-scoped —
 // repair cycles and the repair lane), and the verifier. Confirm-to-block: a
-// lane finding never blocks alone; the verifier confirms or refutes each HIGH
-// against the code, and only confirmed HIGHs enter the verdict. Sub-HIGH
-// findings never block and are never verified — they land in the run ledger as
-// advisory material.
+// lane finding never blocks alone; the verifier confirms or refutes each item
+// against the code, and only confirmed items enter the verdict.
+//
+// The verifier's item list is severity OR record. A sub-HIGH finding on code
+// never blocks and is never verified: it lands in the run ledger as advisory
+// material. A finding on a decision record is verified at every grade and is
+// never advisory: a record states how the product works, so a sentence of it
+// that the tree contradicts is a defect and not a remark (ADR-0007). Which
+// findings those are is the diff's answer, not the seat's: a review of a
+// record-only diff raises record findings and nothing else, and a mixed diff
+// answers per finding from the path the seat named (ADR-0026).
 //
 // The panel is the project's `review.lenses`, resolved at the lane base; the
 // seat a lens rides and the default set live in the lens registry (ADR-0038).
@@ -19,7 +26,13 @@
 // a finding turns on what the code does under this host's credentials. The
 // lane seats never reach it — they judge a diff (ADR-0042).
 import { runReportPath } from '../daemon/home.mjs';
-import { LENS_CRITERIA, furyPanel } from './lenses.mjs';
+import {
+  LENS_CRITERIA,
+  RECORD_CRITERION_KEYS,
+  RECORD_LENS,
+  furyPanel,
+  recordCriteriaLines,
+} from './lenses.mjs';
 import { authorizedSupersedes, supersedeLines } from './supersede.mjs';
 import {
   PROBE_REQUEST_PROPERTY,
@@ -40,7 +53,49 @@ import {
   gist,
 } from './shared.mjs';
 
-export function reviewSchema(lenses) {
+/**
+ * The scope a review's findings are judged in: whether every one of them is
+ * about a decision record, and the paths that decide it for the rest.
+ *
+ * Three rules answer it, in order, and the first two need no config.
+ *
+ * A reconciliation cycle judges a record commit whose own containment check
+ * refused any other file, so every finding of that review is a record finding
+ * whatever any path list says. A review whose diff touches at least one file
+ * and no file outside the project's record paths is the same case reached from
+ * the diff, which is what covers the repair lane's reconciliation run. A mixed
+ * diff is answered per finding, from the path the seat named (ADR-0026).
+ *
+ * @param {{recordPaths?: string[]}} base the lane base
+ * @param {{diffFiles?: string[]|null, reconcile?: boolean}} [opts]
+ * @returns {{only: boolean, paths: string[], files: string[]}}
+ */
+export function recordScope(base, { diffFiles = null, reconcile = false } = {}) {
+  const paths = base?.recordPaths ?? [];
+  const files = Array.isArray(diffFiles) ? diffFiles : [];
+  const records = files.filter((f) => underAny(f, paths));
+  if (reconcile) return { only: true, paths, files: records };
+  const only = files.length > 0 && records.length === files.length;
+  return { only, paths, files: records };
+}
+
+/** A review with no record scope: every finding takes the severity ladder. */
+export const NO_RECORDS = Object.freeze({ only: false, paths: [], files: [] });
+
+/**
+ * The report shape one review seat answers in.
+ *
+ * A record-only review carries the record lens and no code lens, and it
+ * requires the two fields the rule downstream reads: the file, because a
+ * finding about no file is about no record, and the criterion, because the
+ * verifier refutes a finding whose evidence does not reach the one it cites.
+ * A mixed review carries the panel's lenses plus the record lens, and both
+ * fields stay optional there. The brief asks for them on a record file, and a
+ * finding that leaves the path out is graded as it always was.
+ */
+export function reviewSchema(lenses, records = NO_RECORDS) {
+  const carries = records.only || records.files.length > 0;
+  const names = records.only ? [RECORD_LENS] : carries ? [...lenses, RECORD_LENS] : [...lenses];
   return {
     type: 'object',
     additionalProperties: false,
@@ -51,14 +106,17 @@ export function reviewSchema(lenses) {
           type: 'object',
           additionalProperties: false,
           properties: {
-            lens: { type: 'string', enum: [...lenses] },
+            lens: { type: 'string', enum: names },
             severity: { type: 'string', enum: ['HIGH', 'MED', 'LOW'] },
             file: { type: 'string' },
             finding: { type: 'string' },
             evidence: { type: 'string' },
             approach: { type: 'boolean' },
+            ...(carries && { criterion: { type: 'string', enum: [...RECORD_CRITERION_KEYS] } }),
           },
-          required: ['lens', 'severity', 'finding', 'evidence'],
+          required: records.only
+            ? ['lens', 'severity', 'file', 'finding', 'evidence', 'criterion']
+            : ['lens', 'severity', 'finding', 'evidence'],
         },
       },
       summary: { type: 'string' },
@@ -99,10 +157,19 @@ export const VERIFIER_SCHEMA = {
 /**
  * The Fury fan-out for one implementation pass. Fires every seat the panel
  * puts on it, minus the interface seat when the diff touches no UI path; all
- * seats run in parallel. HIGHs go to the verifier; findings stamp once per
- * cycle. Returns the confirmed HIGHs.
+ * seats run in parallel. HIGHs and record findings go to the verifier; findings
+ * stamp once per cycle. Returns the confirmed findings.
+ *
+ * A pass whose whole diff is decision records is judged by the record lens and
+ * by no code lens, and the record lens rides one seat (ADR-0038). So that round
+ * is the generalist seat: the panel would spawn several seats to read a
+ * markdown tree through criteria none of them carries.
  */
 export async function furyRound(ctx, base, { cycle, diff, diffFiles }) {
+  const records = recordScope(base, { diffFiles });
+  if (records.only) {
+    return generalistReview(ctx, base, { cycle, diff, priorConfirmed: [], diffFiles });
+  }
   const panel = furyPanel(base.lenses);
   const supersedes = authorizedSupersedes(runEvents(ctx));
   const seats = Object.keys(panel).filter(
@@ -115,8 +182,8 @@ export async function furyRound(ctx, base, { cycle, diff, diffFiles }) {
       reviewSeat(ctx, {
         seat,
         label: `${seat}-c${cycle}`,
-        schema: reviewSchema(panel[seat]),
-        roleBlock: furyRole(panel[seat], base, diff, supersedes),
+        schema: reviewSchema(panel[seat], records),
+        roleBlock: furyRole(panel[seat], base, diff, supersedes, records),
         cwd: base.worktree,
         env: base.env,
         constitution: base.constitution,
@@ -133,21 +200,30 @@ export async function furyRound(ctx, base, { cycle, diff, diffFiles }) {
     collected,
     priorConfirmed: [],
     diffTruncated: diff.truncated === true,
+    records,
   });
 }
 
 /**
  * The generalist review seat: the panel's whole lens set over one diff. Used on
- * repair cycles (story lane) and as the only judgment seat of the repair lane.
- * The verifier fires only when HIGHs exist or prior confirmed HIGHs need a
- * resolution-check, so a clean small fix costs one review agent.
+ * repair cycles (story lane), on the reconciliation cycle, and as the only
+ * judgment seat of the repair lane. The verifier fires only when the round has
+ * something for it: a HIGH, a record finding, or a prior confirmed finding
+ * needing a resolution-check. So a clean small fix costs one review agent.
+ *
+ * `reconcile` says the diff is a record commit whatever its paths look like.
  */
-export async function generalistReview(ctx, base, { cycle, diff, priorConfirmed }) {
+export async function generalistReview(
+  ctx,
+  base,
+  { cycle, diff, priorConfirmed, diffFiles = null, reconcile = false },
+) {
+  const records = recordScope(base, { diffFiles, reconcile });
   const outcome = await reviewSeat(ctx, {
     seat: 'generalist-review',
     label: `generalist-review-c${cycle}`,
-    schema: reviewSchema(base.lenses),
-    roleBlock: generalistRole(base, diff, authorizedSupersedes(runEvents(ctx))),
+    schema: reviewSchema(base.lenses, records),
+    roleBlock: generalistRole(base, diff, authorizedSupersedes(runEvents(ctx)), records),
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
@@ -159,19 +235,41 @@ export async function generalistReview(ctx, base, { cycle, diff, priorConfirmed 
     collected,
     priorConfirmed,
     diffTruncated: diff.truncated === true,
+    records,
   });
 }
 
 /**
- * Splits collected findings on severity, verifies what must be verified,
- * stamps every finding once per cycle, and returns the confirmed HIGHs plus
- * the resolution results for prior confirmed findings.
+ * Splits collected findings on severity OR record, verifies what must be
+ * verified, stamps every finding once per cycle, and returns the confirmed
+ * findings plus the resolution results for prior confirmed ones.
+ *
+ * The split is the whole of the record rule. A sub-HIGH code finding is worth
+ * less than the round it would cost, so it is stamped advisory and nobody must
+ * act on it. A record finding is a claim that the record and the tree disagree,
+ * and the verifier is the one seat that reads the code and answers such a
+ * claim: it is put to that seat at every grade, a confirmed one blocks, and a
+ * refuted one carries the verifier's evidence under its own id and no advisory
+ * word (ADR-0007).
  */
-async function settleFindings(ctx, base, { cycle, collected, priorConfirmed, diffTruncated = false }) {
-  const highs = collected.filter((f) => f.severity === 'HIGH');
-  const advisory = collected.filter((f) => f.severity !== 'HIGH');
+async function settleFindings(
+  ctx,
+  base,
+  { cycle, collected, priorConfirmed, diffTruncated = false, records = NO_RECORDS },
+) {
+  const allowlist = base.allowlistPaths ?? [];
+  const marked = collected.map((f) => {
+    const place = findingPlace(f.file, allowlist, base.worktree);
+    return {
+      ...f,
+      place,
+      record: records.only || (place.file !== undefined && underAny(place.file, records.paths)),
+    };
+  });
+  const verifiable = marked.filter((f) => f.severity === 'HIGH' || f.record);
+  const advisory = marked.filter((f) => !(f.severity === 'HIGH' || f.record));
   const items = [
-    ...highs.map((f, i) => ({ id: `new-${i + 1}`, mode: 'confirm', finding: f })),
+    ...verifiable.map((f, i) => ({ id: `new-${i + 1}`, mode: 'confirm', finding: f })),
     ...priorConfirmed.map((f) => ({ id: f.id, mode: 'resolution-check', finding: f })),
   ];
   let results = new Map();
@@ -196,6 +294,9 @@ async function settleFindings(ctx, base, { cycle, collected, priorConfirmed, dif
         summary: e.summary,
         evidence: e.evidence,
         confirmed: true,
+        ...(e.file && { file: e.file }),
+        ...(e.record && { record: true }),
+        ...(e.criterion && { criterion: e.criterion }),
         ...(e.approach && { approach: true }),
       }));
     const resolved = priorConfirmed
@@ -204,10 +305,9 @@ async function settleFindings(ctx, base, { cycle, collected, priorConfirmed, dif
     return { confirmed, resolved };
   }
   let nextId = 1 + events.filter((e) => e.event === 'finding').length;
-  const allowlist = base.allowlistPaths ?? [];
   const confirmed = [];
-  for (let i = 0; i < highs.length; i++) {
-    const f = highs[i];
+  for (let i = 0; i < verifiable.length; i++) {
+    const f = verifiable[i];
     const result = results.get(`new-${i + 1}`);
     const isConfirmed = result?.verdict === 'confirmed';
     const finding = {
@@ -217,11 +317,18 @@ async function settleFindings(ctx, base, { cycle, collected, priorConfirmed, dif
       severity: f.severity,
       summary: f.finding,
       evidence: f.evidence,
-      ...findingPlace(f.file, allowlist, base.worktree),
+      ...f.place,
+      ...(f.record && { record: true, ...(f.criterion && { criterion: f.criterion }) }),
       approach: isConfirmed && (result.approach ?? f.approach ?? false),
       confirmed: isConfirmed,
     };
-    stampReviewFinding(ctx, cycle, finding, { advisory: !isConfirmed, diffTruncated });
+    // A refuted record finding is not advice. A second seat read the tree and
+    // wrote down, with evidence, why the record is right; the word for material
+    // nobody must act on would bury that under the one thing this plan removed.
+    stampReviewFinding(ctx, cycle, finding, {
+      advisory: !isConfirmed && !f.record,
+      diffTruncated,
+    });
     if (isConfirmed) confirmed.push(finding);
   }
   for (const f of advisory) {
@@ -235,7 +342,7 @@ async function settleFindings(ctx, base, { cycle, collected, priorConfirmed, dif
         severity: f.severity,
         summary: f.finding,
         evidence: f.evidence,
-        ...findingPlace(f.file, allowlist, base.worktree),
+        ...f.place,
       },
       { advisory: true, diffTruncated },
     );
@@ -301,6 +408,13 @@ function stampReviewFinding(ctx, cycle, finding, { advisory, diffTruncated = fal
     evidence: gist(finding.evidence),
     ...(finding.file && { file: finding.file }),
     ...(finding.allowlist && { allowlist: true }),
+    // The record word and the criterion it fails, assigned here against the
+    // project's declared record paths and the diff's own shape, and never read
+    // back out of the sentence the seat wrote. Every reader of the ledger counts
+    // these fields: the ladder, the two tripwires, the lens-yield metric and the
+    // close's own scan (ADR-0010).
+    ...(finding.record && { record: true }),
+    ...(finding.criterion && { criterion: finding.criterion }),
     ...(advisory ? { advisory: true } : {}),
     ...(finding.confirmed !== undefined && { confirmed: finding.confirmed }),
     ...(finding.approach && { approach: true }),
@@ -407,10 +521,11 @@ function verifierCoverageDefects(items, results) {
 
 // -- role blocks -------------------------------------------------------------
 
-function furyRole(lenses, base, diff, supersedes = []) {
+function furyRole(lenses, base, diff, supersedes = [], records = NO_RECORDS) {
   return [
     `Review the candidate implementation diff through these lenses, and label every finding with its lens:`,
     ...lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
+    ...recordLensLines(records),
     `The spec: ${base.specRef}`,
     'Judge the diff only. Do not fix anything; do not widen into unchanged code.',
     'Severity HIGH means the finding must block the ship. Cite evidence (file and line, or spec section) for every finding.',
@@ -421,16 +536,66 @@ function furyRole(lenses, base, diff, supersedes = []) {
   ].join('\n');
 }
 
-function generalistRole(base, diff, supersedes = []) {
+function generalistRole(base, diff, supersedes = [], records = NO_RECORDS) {
+  if (records.only) return recordRole(base, diff);
   return [
     'Review the diff below through these lenses, and label every finding with its lens:',
     ...base.lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
+    ...recordLensLines(records),
     `The spec: ${base.specRef}`,
     'Judge the diff only. Do not fix anything; do not widen into unchanged code.',
     'Severity HIGH means the finding must block the ship. Cite evidence (file and line, or spec section) for every finding.',
     'Set "approach": true only when the finding names the implementation structure as wrong against the spec.',
     'Put the repo-relative path of the one file a finding is about in "file"; leave it out for a finding about no single file.',
     ...(base.lenses.includes('spec') ? supersedeDutyLines(base, supersedes) : []),
+    ...diffLines(diff),
+  ].join('\n');
+}
+
+/**
+ * The record lens on a mixed diff: the criteria, the record files the diff
+ * holds, and the two fields a finding about one of them carries.
+ *
+ * The files are named because the path decides the route here. A finding about
+ * a record file that carries no path is graded on severity like any other
+ * finding, and the seat is the only reader that knows which file it meant.
+ */
+function recordLensLines(records) {
+  if (records.only || records.files.length === 0) return [];
+  return [
+    `- ${RECORD_LENS}: the decision records this diff changes, against these criteria:`,
+    ...recordCriteriaLines().map((line) => `  ${line}`),
+    'The decision records in this diff:',
+    ...records.files.map((file) => `- ${file}`),
+    `A finding about one of those files carries "lens": "${RECORD_LENS}", its "file", and the ` +
+      '"criterion" it fails.',
+  ];
+}
+
+/**
+ * The whole brief of a record-only review: the six criteria and nothing from
+ * the code lenses.
+ *
+ * A code lens reading a markdown document raises findings about failure paths
+ * and input trust, and after the record rule those findings block a ship. A
+ * seat that is not asked to read a record that way does not report it, which is
+ * the whole answer to that noise (ADR-0038).
+ */
+function recordRole(base, diff) {
+  return [
+    'Every file in the diff below is a decision record. Review the records against these',
+    'criteria, and label every finding with the criterion it fails:',
+    ...recordCriteriaLines(),
+    `The spec: ${base.specRef}`,
+    'Judge the records against the tree they describe. Read the code before you write a finding.',
+    'Do not fix anything. Do not judge the code: the code is judged elsewhere.',
+    `Every finding carries "lens": "${RECORD_LENS}", the repo-relative path of the one record it ` +
+      'is about in "file", and the "criterion" it fails.',
+    'Cite the sentence of the record your finding is about, and the file and line of the tree that',
+    'answers it. A finding that names no sentence of the record is refused by the verifier for',
+    'want of evidence. Taste is not a criterion.',
+    'Grade every finding HIGH, MED or LOW. Every grade is verified and a confirmed finding of any',
+    'grade blocks the ship, so grade what the finding is worth and nothing else.',
     ...diffLines(diff),
   ].join('\n');
 }
@@ -501,14 +666,44 @@ function verifierRole(base, items, brief, probe = null) {
     'For a "resolution-check" item, the verdict is "resolved" or "unresolved": resolved only when the code no longer shows the finding.',
     'Set "approach": true on a confirmed finding only when it names the implementation structure as wrong against the spec.',
     `The spec: ${base.specRef}`,
+    ...recordVerifierLines(items),
     'Items:',
-    ...items.map(
-      (item) =>
-        `- [${item.id}] (${item.mode}) ${item.finding.lens ?? item.finding.source ?? ''} ${
-          item.finding.severity ?? ''
-        }: ${item.finding.finding ?? item.finding.summary} (evidence: ${item.finding.evidence})`,
-    ),
+    ...items.map((item) => `- ${verifierItemLine(item)}`),
     ...(probe ? probeOfferLines(probe) : []),
     ...briefLines(brief),
   ].join('\n');
+}
+
+function verifierItemLine(item) {
+  const f = item.finding;
+  const grade = [f.lens ?? f.source ?? '', f.severity ?? ''].filter(Boolean).join(' ');
+  const criterion = f.record ? ` [criterion: ${f.criterion ?? '(none cited)'}]` : '';
+  return (
+    `[${item.id}] (${item.mode}) ${grade}${criterion}: ` +
+    `${f.finding ?? f.summary} (evidence: ${f.evidence})`
+  );
+}
+
+/**
+ * What the verifier is told about the record items, where the round holds any.
+ *
+ * A record item is a claim that a document and a tree disagree, so the verdict
+ * turns on the criterion the finding cites and on nothing else. The list is
+ * given because the criterion is load-bearing: a finding that cites the wrong
+ * one is refused here, and a refusal for want of evidence is what stops a
+ * remark about taste from blocking a ship (ADR-0007).
+ */
+function recordVerifierLines(items) {
+  if (!items.some((item) => item.finding.record)) return [];
+  return [
+    'Some items below are about a decision record. A record states how the product works, so the',
+    'question is whether the record and the tree disagree as the finding states.',
+    'The criteria a record is held to:',
+    ...recordCriteriaLines(),
+    'A record item is "confirmed" when the record and the tree disagree as the finding states, or',
+    'when the record fails the criterion the finding cites, as the finding states it.',
+    'It is "refuted" when the evidence does not reach the cited criterion. A finding that cites',
+    '"whole" or "fact" and names no sentence of the record is refuted for want of evidence.',
+    'Taste is not a criterion. Read the record and the tree; do not rewrite either.',
+  ];
 }

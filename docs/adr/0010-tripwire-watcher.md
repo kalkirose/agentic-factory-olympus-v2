@@ -65,7 +65,12 @@ proposals get these concrete shapes:
     the band the way a per-freeze average would.
   - `fury-lens-yield`: confirmed findings for one lens across the runs
     holding the last N verdicts. Zero with verdicts in the window is a live
-    value — the zero-yield lane is the cut candidate.
+    value, and the zero-yield lane is the cut candidate. Findings that carry
+    `record: true` are excluded. The reading asks whether a lens pays for the
+    seat it rides and answers with confirmations; a finding on a decision record
+    is a different population, and the record rule makes it numerous because
+    every grade of it is verified (ADR-0007). Counted together, documentation
+    findings could argue a cut lens back onto the panel.
   - `ci-critical-path`: per merge, the longest green required-check duration
     for the merged sha; the value is the median across the window, in
     minutes. The median is what makes the target "warm-cache": a cold
@@ -152,6 +157,30 @@ proposals get these concrete shapes:
     the detail: a window in which no story touched an allowlist says nothing at
     all about whether anybody reads them, and a floor that breached on it would
     breach on every quiet window of every project from the day it armed.
+  - `record-refuted-share`: refuted record findings over all record findings,
+    across the runs holding the last N verdicts that carried one, keyed on
+    `verdict-rendered`. Every finding on a decision record reaches the verifier
+    and a confirmed one blocks the ship (ADR-0007), so the verifier is the one
+    place a wrong remark can die and this is the reading of how often it has to
+    kill one. Above a half the review seat is reading documents the way it reads
+    code, and the answer is the record criteria and the brief, which is a
+    prompt-only change. The window is the verdicts that hold a record finding
+    and not every verdict: a project whose stories touch no record says nothing
+    about how its seat reads one, so a window with none in it is not eligible.
+  - `reconcile-fallbacks-window`: ships whose in-run record rewrite ended in a
+    fallback, over the last N ships of the project that were judged owed, keyed
+    on `reconciliation-written` and `merged`. Both fallbacks count and they
+    count the same: the partial ships the records with confirmed findings open
+    and tickets them, the discard puts the tree back and tickets the whole
+    rewrite, and either way the work went to a ticket. Two in ten is the band,
+    and the breach is the trigger that returns the rewrite to the sweep
+    (ADR-0026). A ship nobody judged owed asked the rewrite nothing and is not
+    in the window at all.
+- **The two record readings are armed on every project.** The record rule runs
+  on every project with no config line, so the counters that watch it are armed
+  the way the operator-lever counters are: a counter that had to be opted into
+  would be absent from exactly the projects nobody is watching. A project that
+  writes its own band for either metric keeps it.
 - **Baseline proposals.** At the 5th freeze the watcher stamps a kill-rate
   proposal (observed kills, waves, per-freeze rates, and the observed floor
   as the suggested band); at the 5th verdict a per-lens yield proposal,
@@ -290,6 +319,12 @@ how a count stops meaning one thing, and the floor would then be met by
 findings that were about something else. Trigger: allowlist additions the
 window shows and findings the metric does not. Reversal cost: one function in
 `review.mjs`; the metric and the field are unchanged.
+
+If the two record readings prove to be noise on projects that hold no decision
+records, drop them from the armed set and leave them in the metric table for a
+project to name. Both are ineligible on such a project today, so the reading is
+quiet rather than wrong. Trigger: a project whose board carries two permanent
+em-dashes nobody reads past. Reversal cost: one list in the registry.
 
 If `tripwires-armed` proves to be noise, the status page returns to the metric
 defaults and prints the window beside each reading so nothing is implied.

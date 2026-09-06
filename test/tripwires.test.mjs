@@ -116,11 +116,19 @@ test('the fast path cannot be turned on without the counter that measures it', (
   // nothing measuring the cost and nothing able to propose the revert.
   // The two operator levers are armed on every project, because they are on
   // every project: any world gate can be acknowledged and any run can be
-  // repinned, whatever the config says (ADR-0061, ADR-0062).
+  // repinned, whatever the config says (ADR-0061, ADR-0062). So are the two
+  // record readings: the record rule runs on every project with no config line,
+  // and a counter that had to be opted into would be absent from exactly the
+  // projects nobody is watching (ADR-0007).
   const off = { gates: { tier1: [] }, tripwires: [] };
   assert.deepEqual(
     armedTripwires(off).map((e) => e.metric),
-    ['gate-acks-window', 'run-reconfigures-window'],
+    [
+      'gate-acks-window',
+      'run-reconfigures-window',
+      'record-refuted-share',
+      'reconcile-fallbacks-window',
+    ],
   );
   // Two counters ride the flag, and they measure the two halves of one trade:
   // what it costs, and what it buys. A cut with only the cost measured cannot
@@ -130,7 +138,14 @@ test('the fast path cannot be turned on without the counter that measures it', (
   const armed = armedTripwires(on);
   assert.deepEqual(
     armed.map((e) => e.metric),
-    ['fast-path-escapes', 'fast-path-takes', 'gate-acks-window', 'run-reconfigures-window'],
+    [
+      'fast-path-escapes',
+      'fast-path-takes',
+      'gate-acks-window',
+      'run-reconfigures-window',
+      'record-refuted-share',
+      'reconcile-fallbacks-window',
+    ],
   );
   assert.match(armed[0].answer, /gates\.fastPathShip to false/);
   assert.match(armed[1].answer, /refusal histogram/);
@@ -143,6 +158,14 @@ test('the fast path cannot be turned on without the counter that measures it', (
       { id: 'takes', metric: 'fast-path-takes', window: 20, breach: { op: '<', value: 0.1 }, answer: 'w' },
       { id: 'acks', metric: 'gate-acks-window', window: 5, breach: { op: '>', value: 0 }, answer: 'y' },
       { id: 'pins', metric: 'run-reconfigures-window', window: 5, breach: { op: '>', value: 0 }, answer: 'z' },
+      { id: 'noise', metric: 'record-refuted-share', window: 5, breach: { op: '>', value: 0.9 }, answer: 'a' },
+      {
+        id: 'falls',
+        metric: 'reconcile-fallbacks-window',
+        window: 5,
+        breach: { op: '>=', value: 3 },
+        answer: 'b',
+      },
     ],
   };
   assert.deepEqual(armedTripwires(own), own.tripwires);
@@ -153,7 +176,15 @@ test('the fast path cannot be turned on without the counter that measures it', (
   };
   assert.deepEqual(
     armedTripwires(mixed).map((e) => e.id),
-    ['k', 'fast-path-escapes', 'fast-path-takes', 'gate-acks', 'run-reconfigures'],
+    [
+      'k',
+      'fast-path-escapes',
+      'fast-path-takes',
+      'gate-acks',
+      'run-reconfigures',
+      'record-refuted-share',
+      'reconcile-fallbacks',
+    ],
   );
 });
 
@@ -522,6 +553,157 @@ test('fury-lens-yield counts confirmed findings for one lens over the verdict wi
   });
   assert.equal(quiet.value, 0);
   assert.equal(quiet.eligible, true);
+});
+
+// The lens yield asks whether a lens pays for the seat it rides, and it answers
+// with confirmations. Record findings are a different population and the record
+// rule makes them numerous, so counting them here could argue a cut lens back
+// onto the panel (ADR-0038).
+test('fury-lens-yield leaves record findings out of the count', async (t) => {
+  const paths = home(t);
+  writeLedger(runLedgerPath(paths, 'v1'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-01T01:00:00Z', 'finding', {
+      cycle: 1,
+      id: 'F1',
+      lens: 'operational',
+      severity: 'HIGH',
+      confirmed: true,
+    }),
+    ...[3, 4, 5].map((seq) =>
+      line(seq, '2026-08-01T01:00:00Z', 'finding', {
+        cycle: 1,
+        id: `F${seq}`,
+        lens: 'operational',
+        severity: 'MED',
+        record: true,
+        criterion: 'truth',
+        confirmed: true,
+      }),
+    ),
+    line(6, '2026-08-01T02:00:00Z', 'verdict-rendered', { cycle: 1, pass: 1, verdict: 'red' }),
+  ]);
+  const yielded = await evaluateMetric('fury-lens-yield', {
+    paths,
+    project: 'p',
+    window: 5,
+    params: { lens: 'operational' },
+  });
+  assert.equal(yielded.value, 1);
+});
+
+// -- the two readings of the record rule (ADR-0007, ADR-0026) -----------------
+
+/** A run ledger holding one cycle's record findings, and its render. */
+function recordRun(paths, runId, project, ts, findings, { archived = true } = {}) {
+  const lines = [line(1, ts, 'run-launched', { project, lane: 'story' })];
+  findings.forEach((confirmed, i) => {
+    lines.push(
+      line(2 + i, ts, 'finding', {
+        cycle: 1,
+        id: `F${i + 1}`,
+        lens: 'record',
+        severity: 'MED',
+        record: true,
+        criterion: 'truth',
+        confirmed,
+      }),
+    );
+  });
+  lines.push(
+    line(2 + findings.length, ts, 'verdict-rendered', { cycle: 1, pass: 1, verdict: 'green' }),
+  );
+  writeLedger(archived ? archivedRunLedgerPath(paths, runId) : runLedgerPath(paths, runId), lines);
+}
+
+test('record-refuted-share reads the refusals over the record findings of the window', async (t) => {
+  const paths = home(t);
+  // Three findings, one confirmed: the seat is refuted two times in three.
+  recordRun(paths, 'r1', 'p', '2026-08-01T00:00:00Z', [true, false, false]);
+  const reading = await evaluateMetric('record-refuted-share', { paths, project: 'p', window: 10 });
+  assert.equal(reading.eligible, true);
+  assert.equal(reading.value, round3(2 / 3));
+  assert.equal(reading.detail.findings, 3);
+  assert.equal(reading.detail.refuted, 2);
+  assert.equal(reading.detail.confirmed, 1);
+  assert.deepEqual(reading.detail.runs, ['r1']);
+});
+
+test('a window with no record finding in it is no reading about the seat', async (t) => {
+  const paths = home(t);
+  writeLedger(archivedRunLedgerPath(paths, 'r1'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-01T01:00:00Z', 'finding', {
+      cycle: 1,
+      id: 'F1',
+      lens: 'spec',
+      severity: 'HIGH',
+      confirmed: true,
+    }),
+    line(3, '2026-08-01T02:00:00Z', 'verdict-rendered', { cycle: 1, pass: 1, verdict: 'red' }),
+  ]);
+  const reading = await evaluateMetric('record-refuted-share', { paths, project: 'p', window: 10 });
+  assert.equal(reading.eligible, false);
+  assert.equal(reading.value, null);
+});
+
+/** A shipped run judged owed, with the fallback its record round took. */
+function owedShip(paths, runId, project, ts, fallback) {
+  const lines = [
+    line(1, ts, 'run-launched', { project, lane: 'story' }),
+    line(2, ts, 'reconciliation-judged', { ok: true, owed: true, records: ['docs/adr/1.md'] }),
+  ];
+  if (fallback === 'partial') {
+    lines.push(
+      line(3, ts, 'reconciliation-written', {
+        ok: true,
+        partial: true,
+        cause: 'record-findings',
+        residual: ['F3'],
+      }),
+    );
+  } else if (fallback === 'discard') {
+    lines.push(
+      line(3, ts, 'reconciliation-written', { ok: false, cause: 'record-layer-red', reset: 'abc' }),
+    );
+  } else {
+    lines.push(line(3, ts, 'reconciliation-written', { ok: true, rewritten: ['docs/adr/1.md'] }));
+  }
+  lines.push(line(4, ts, 'merged', { pr: 1, sha: 'aaa' }));
+  writeLedger(archivedRunLedgerPath(paths, runId), lines);
+}
+
+test('reconcile-fallbacks-window counts both fallbacks over the ships judged owed', async (t) => {
+  const paths = home(t);
+  owedShip(paths, 's1', 'p', '2026-08-01T00:00:00Z', null);
+  owedShip(paths, 's2', 'p', '2026-08-02T00:00:00Z', 'partial');
+  owedShip(paths, 's3', 'p', '2026-08-03T00:00:00Z', 'discard');
+  // A ship nobody judged owed asked the rewrite nothing and is not in the
+  // window at all.
+  writeLedger(archivedRunLedgerPath(paths, 's4'), [
+    line(1, '2026-08-04T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-04T00:00:00Z', 'merged', { pr: 2, sha: 'bbb' }),
+  ]);
+  const reading = await evaluateMetric('reconcile-fallbacks-window', {
+    paths,
+    project: 'p',
+    window: 10,
+  });
+  assert.equal(reading.eligible, true);
+  assert.equal(reading.value, 2);
+  assert.equal(reading.detail.ships, 3);
+  assert.equal(reading.detail.partial, 1);
+  assert.equal(reading.detail.discarded, 1);
+  assert.deepEqual(reading.detail.runs, ['s2', 's3']);
+  // Two in ten is the band, and this window breaches it.
+  const entry = standingTripwires().find((e) => e.metric === 'reconcile-fallbacks-window');
+  assert.deepEqual(entry.breach, { op: '>=', value: 2 });
+  const noOwedShips = await evaluateMetric('reconcile-fallbacks-window', {
+    paths,
+    project: 'q',
+    window: 10,
+  });
+  assert.equal(noOwedShips.eligible, false);
 });
 
 // -- the memory forecast (ADR-0045) -------------------------------------------

@@ -4,9 +4,13 @@ import {
   ALL_LENSES,
   DEFAULT_LENSES,
   LENS_CRITERIA,
+  RECORD_CRITERIA,
+  RECORD_CRITERION_KEYS,
+  RECORD_LENS,
   SECURITY_DIMENSIONS,
   furyPanel,
   panelLenses,
+  recordCriteriaLines,
 } from '../src/lanes/lenses.mjs';
 
 test('the default panel drops architecture and minimality and keeps security', () => {
@@ -46,4 +50,32 @@ test('the security criteria and the adversary dimensions come from one list', ()
   }
   assert.ok(LENS_CRITERIA.security.startsWith('security: '));
   for (const lens of ALL_LENSES) assert.ok(LENS_CRITERIA[lens], lens);
+});
+
+// The record lens is not a panel choice. A project cannot name it in
+// `review.lenses`, no seat spawns for it, and the diff is what puts it on a
+// review: the whole diff is records, or the finding's own file is one.
+test('the record lens is outside the panel vocabulary and rides no seat', () => {
+  assert.ok(!ALL_LENSES.includes(RECORD_LENS));
+  assert.ok(!DEFAULT_LENSES.includes(RECORD_LENS));
+  assert.equal(LENS_CRITERIA[RECORD_LENS], undefined);
+  assert.deepEqual(furyPanel([RECORD_LENS]), {});
+  assert.deepEqual(furyPanel([...DEFAULT_LENSES, RECORD_LENS]), furyPanel([...DEFAULT_LENSES]));
+});
+
+test('the record criteria are six keyed lines, and each line opens with its key', () => {
+  assert.deepEqual(RECORD_CRITERION_KEYS, [
+    'fact',
+    'truth',
+    'open',
+    'divergence',
+    'reference',
+    'whole',
+  ]);
+  for (const key of RECORD_CRITERION_KEYS) {
+    assert.ok(RECORD_CRITERIA[key].startsWith(`${key}: `), key);
+  }
+  const lines = recordCriteriaLines();
+  assert.equal(lines.length, RECORD_CRITERION_KEYS.length);
+  for (const line of lines) assert.ok(line.startsWith('- '), line);
 });

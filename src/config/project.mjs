@@ -62,6 +62,25 @@ export const DEFAULT_DIFF_EXCLUSIONS = [
  */
 export const DEFAULT_EXCERPT_CHARS = 12_000;
 
+/**
+ * Where a project keeps its decision records when it declares nothing. It is
+ * the tree the reconciliation judge's own brief names as the common one, so a
+ * project that holds its records there gets the record rule with no config line
+ * at all.
+ */
+export const DEFAULT_RECORD_PATHS = Object.freeze(['docs/adr']);
+
+/**
+ * How many corrective record rewrites one implementation pass may spend.
+ *
+ * Five, and it is not the code repair cap. A record round is one seat and the
+ * layers the record diff reaches, which on a project with declared grounds is
+ * one layer; the route behind the cap is a whole repair run with a full
+ * spectrum. So five rounds cost less than one fallback, and the progress rule
+ * stops a round that closes nothing at once (ADR-0007).
+ */
+export const DEFAULT_RECONCILE_ROUNDS = 5;
+
 export function defaultProjectConfig() {
   return {
     version: 1,
@@ -76,6 +95,13 @@ export function defaultProjectConfig() {
     repo: {
       testPaths: [],
       uiPaths: [],
+      // The tree the project keeps its decision records in. It decides two
+      // things and nothing else: which review findings are record findings, and
+      // which diffs are read through the record lens (ADR-0007, ADR-0026).
+      // Neither the reconciliation judge nor the write seat's containment check
+      // reads it. Discovery still decides which records get rewritten and where
+      // the seat may write.
+      recordPaths: [...DEFAULT_RECORD_PATHS],
       routesRoot: 'apps/storefront/src/routes',
       componentsRoot: 'apps/storefront/src/lib/components',
     },
@@ -106,6 +132,9 @@ export function defaultProjectConfig() {
     // is what makes `allowlist-findings-window` countable. Absent, no capture
     // stamps an addition, so that window holds none and the reading is not
     // eligible — quiet rather than a standing zero (ADR-0010).
+    // `reconcileRounds` is how many corrective record rewrites one pass may
+    // spend; absent is DEFAULT_RECONCILE_ROUNDS, and the code repair cap is a
+    // different number (ADR-0007).
     gates: { tier1: [] },
     // one convention per line; prompt assembly consumes these
     conventions: [],
@@ -241,6 +270,11 @@ function validateRepo(repo, err) {
   }
   validateStringList(repo.testPaths, 'repo.testPaths', err);
   validateStringList(repo.uiPaths, 'repo.uiPaths', err);
+  // Optional and defaulted: a project that declares nothing gets
+  // DEFAULT_RECORD_PATHS, and a project whose records sit elsewhere names the
+  // tree here. An empty list turns the path rule off, and the reconciliation
+  // cycle still raises record findings, because that rule reads the phase.
+  validateStringList(repo.recordPaths, 'repo.recordPaths', err);
   // The two roots a spec claim about the tree resolves under. They are
   // validated by one rule because they are one kind of value: a plain
   // repo-relative directory the lint reads the tree under, or null to turn
@@ -367,6 +401,15 @@ function validateGates(gates, commands, err, launch = false) {
   // (ADR-0069).
   if (gates.proofDebt !== undefined && typeof gates.proofDebt !== 'boolean') {
     err('gates.proofDebt', 'must be a boolean');
+  }
+  // How many corrective record rewrites one pass may spend (ADR-0007). It is
+  // the reconciliation's own cap and it neither shares nor moves the code
+  // repair cap: the two work products have different seats and different
+  // costs. Optional and defaulted, so no project owes a line for it.
+  if (gates.reconcileRounds !== undefined) {
+    if (!Number.isInteger(gates.reconcileRounds) || gates.reconcileRounds < 1) {
+      err('gates.reconcileRounds', 'must be a positive integer count of corrective record rounds');
+    }
   }
   if (gates.tier1 !== undefined && !Array.isArray(gates.tier1)) {
     err('gates.tier1', 'must be an array of layers');

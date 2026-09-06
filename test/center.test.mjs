@@ -251,8 +251,9 @@ test('snapshot reads registry and frontier from the clone, no fetch', async (t) 
   const s = await buildSnapshot(paths, { now: NOW });
   const health = s.health.byProject[0];
   assert.equal(health.tripwires.registryRead, true);
-  // The two the project wrote, plus the two counters the harness arms on every
-  // project: the levers an operator can pull on any run (ADR-0061, ADR-0062).
+  // The two the project wrote, plus the four counters the harness arms on every
+  // project: the levers an operator can pull on any run (ADR-0061, ADR-0062),
+  // and the two readings of the record rule (ADR-0007, ADR-0026).
   assert.deepEqual(
     health.tripwires.wires.map((w) => [w.id, w.state]),
     [
@@ -260,6 +261,8 @@ test('snapshot reads registry and frontier from the clone, no fetch', async (t) 
       ['ci-critical-path-p50', 'breach'],
       ['gate-acks', 'armed'],
       ['run-reconfigures', 'armed'],
+      ['record-refuted-share', 'armed'],
+      ['reconcile-fallbacks', 'armed'],
     ],
   );
   // s-3 open, s-4 open, s-5 blocked by unshipped s-3 → width counts

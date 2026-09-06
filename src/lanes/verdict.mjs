@@ -12,6 +12,16 @@
 // the verdict record. The response ladder acts on the rendered verdict:
 // repair rounds (progress-gated, cap 3), suite-defect re-freeze, env/harness
 // operational fixes, one fresh pass per run, and the second-stall escalation.
+//
+// A red over the reconciliation commit takes an arm of its own. The findings
+// there are about decision records, and the seat that answers them is the seat
+// that wrote them: `repair-dev` implemented the code, and the implementing
+// context never reconciles records against its own work (ADR-0026). So the arm
+// dispatches a corrective `reconcile-write` under its own cap
+// (`gates.reconcileRounds`), and a stall of those rounds takes one of two
+// fallbacks. The records ride with the open findings ticketed, or the tree goes
+// back to the certified sha and the whole rewrite is ticketed. Neither buys a
+// fresh pass: a pass discards certified code over a document.
 // Re-freeze steps and operational fixes never consume implementation budget.
 // An operational fix on a CI verdict whose open findings are all env-class
 // takes no cycle at all: it hands the run back to ship, where the CI re-run
@@ -27,6 +37,7 @@
 // state, so a daemon restart resumes mid-verdict without memory.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join } from 'node:path';
+import { DEFAULT_RECONCILE_ROUNDS } from '../config/project.mjs';
 import { reviewDiffPath, runReportPath } from '../daemon/home.mjs';
 import {
   carryPaths,
@@ -67,7 +78,7 @@ import {
 } from '../ledger/acks.mjs';
 import { cycleRepeat, openIdentities } from '../ledger/cycles.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
-import { assertDefectKind } from '../ledger/registry.mjs';
+import { assertDefectKind, RECORD_FINDINGS, RECORD_LAYER_RED } from '../ledger/registry.mjs';
 import { openEscapesStore } from '../telemetry/stores.mjs';
 import { readEscapeSet, recordEscape } from '../telemetry/escapes.mjs';
 import {
@@ -101,6 +112,12 @@ import { PARTS_ENV, partPlan, carryTally, confirmationTally } from './parts.mjs'
 import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview } from './review.mjs';
 import { panelLenses } from './lenses.mjs';
+import {
+  WRITE_SEAT,
+  correctiveRole,
+  reconcileWriteSchema,
+  writeChecks,
+} from './records.mjs';
 import { freezeAnchor } from './resume.mjs';
 import { parseIntentCard } from './card.mjs';
 import {
@@ -133,6 +150,7 @@ import {
   runEnv,
   runEvents,
   answeredPark,
+  sinceFreshPass,
   freezeExclusions,
   freezeOwnerPins,
   freezeSuiteFiles,
@@ -140,6 +158,7 @@ import {
   seatFailureAfter,
   readJson,
   reconcileCommit,
+  renderOverReconcile,
   parkDirective,
   GATE_FORMS,
   HARNESS_GATE_FORMS,
@@ -345,6 +364,13 @@ function verdictHandler(mode, nextStage) {
             (e.event === 'implementation-committed' ||
               e.event === 're-freeze' ||
               e.event === 'operational-fix' ||
+              // A reconciliation fallback. Neither one changed code and both
+              // moved the open set: the partial keeps the record commit and
+              // drops the residual findings out of it, the discard puts the
+              // tree back to the certified sha and drops all of them. So the
+              // tree that ships is judged again, and the render behind it is
+              // the certification the ship reads (ADR-0026).
+              (e.event === 'reconciliation-written' && reconcileFallbackStamp(e)) ||
               // The update stage merged the default branch into the tree and
               // handed it back. The render behind it judged a tree that no
               // longer exists, and the whole point of that update is that the
@@ -370,6 +396,16 @@ function verdictHandler(mode, nextStage) {
       if (directive) return directive;
     }
   };
+}
+
+/**
+ * Whether a `reconciliation-written` stamp is one of the two fallbacks the
+ * reconcile arm takes when its rounds are spent. The other stamps of that event
+ * say nothing about a rendered verdict and earn no cycle. Those are the first
+ * write, a corrective round, and the write nobody could make.
+ */
+export function reconcileFallbackStamp(e) {
+  return e.partial === true || (e.ok === false && e.cause === RECORD_LAYER_RED);
 }
 
 // -- what a stop left half done ----------------------------------------------
@@ -457,14 +493,32 @@ async function resumeInterrupted(ctx, base, mode) {
     return outcome.fail ?? null;
   }
   const pass = currentPass(events);
-  const rounds = events.filter((e) => e.event === 'repair-round' && e.pass === pass).length;
   const outcome = await repairRound(ctx, base, mode, {
     pass,
-    round: rounds + 1,
+    round: repairRounds(events, pass) + 1,
     open: code,
     record: readJson(last.record),
   });
   return outcome.fail ?? null;
+}
+
+/**
+ * The code repair rounds of one pass. A corrective record rewrite stamps the
+ * same event under `phase: 'reconcile'` and is counted apart: the two work
+ * products have different seats and different costs, and a story that spent two
+ * code rounds must not get one record round for it (ADR-0007).
+ */
+export function repairRounds(events, pass) {
+  return events.filter(
+    (e) => e.event === 'repair-round' && e.pass === pass && e.phase !== 'reconcile',
+  ).length;
+}
+
+/** The corrective record rewrites of one pass, under `gates.reconcileRounds`. */
+export function reconcileRounds(events, pass) {
+  return events.filter(
+    (e) => e.event === 'repair-round' && e.pass === pass && e.phase === 'reconcile',
+  ).length;
 }
 
 /**
@@ -475,7 +529,11 @@ async function resumeInterrupted(ctx, base, mode) {
  */
 function openSets(events, last, mode) {
   const index = findingIndex(events);
-  const open = last.open.map((id) => index.get(id)).filter(Boolean);
+  const dropped = droppedFindings(events);
+  const open = last.open
+    .filter((id) => !dropped.has(id))
+    .map((id) => index.get(id))
+    .filter(Boolean);
   const suiteDefects = mode === 'story' ? open.filter((f) => f.class === 'suite-defect') : [];
   return {
     open,
@@ -489,6 +547,28 @@ function openSets(events, last, mode) {
         (mode !== 'story' && f.class === 'suite-defect'),
     ),
   };
+}
+
+/**
+ * The findings a reconciliation fallback gave up on, by id.
+ *
+ * A fresh pass drops its findings by moving the pass number, and the derivation
+ * of prior open findings reads that. These fallbacks move no pass, so the drop
+ * is explicit: the discard reset the tree, so a finding about text that is no
+ * longer there would otherwise ride into the next cycle as a prior confirmed
+ * finding; the partial let the records ship and put the residual on a ticket,
+ * so the run has already said what happens to them (ADR-0026).
+ * @param {object[]} events the run's ledger, in order
+ * @returns {Set<string>}
+ */
+export function droppedFindings(events) {
+  const ids = new Set();
+  for (const e of events) {
+    if (e.event !== 'reconciliation-written') continue;
+    for (const id of e.discarded ?? []) ids.add(id);
+    for (const id of e.residual ?? []) ids.add(id);
+  }
+  return ids;
 }
 
 // -- one verdict cycle -------------------------------------------------------
@@ -533,8 +613,16 @@ async function runCycle(ctx, base, mode, { cycle }) {
   // change could have reached (ADR-0026). A later cycle of the same pass is
   // judging a repair round or a re-freeze and takes the ordinary set.
   const reconciled = judgedReconcile(startEvents, impl);
-  const recordDiff = reconciled
-    ? await changedInRange(base.worktree, reconciled.baseSha, reconciled.sha).catch(() => null)
+  // The cycle a partial fallback earns judges the same record commit again. It
+  // reviews nothing, because the tree did not move and the run has already said
+  // what happens to the findings it left open. It still plans on the same ground
+  // the reconciliation cycle planned on, because the claim behind that carry is the
+  // project's statement about what each layer reads and it has not changed. A
+  // targeted plan here would sweep the whole spectrum to certify a commit two
+  // layers judged (ADR-0026).
+  const recorded = reconciled ?? certifyingReconcile(startEvents, impl);
+  const recordDiff = recorded
+    ? await changedInRange(base.worktree, recorded.baseSha, recorded.sha).catch(() => null)
     : null;
   // What this cycle runs, and what it carries (ADR-0022) — then, inside each
   // layer it does run, which parts of it the diff since that layer's standing
@@ -577,9 +665,13 @@ async function runCycle(ctx, base, mode, { cycle }) {
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   const prevRender = renders[renders.length - 1];
   const index = findingIndex(events);
+  const givenUp = droppedFindings(events);
   const priorOpen =
     prevRender && prevRender.pass === pass
-      ? prevRender.open.map((id) => index.get(id)).filter(Boolean)
+      ? prevRender.open
+          .filter((id) => !givenUp.has(id))
+          .map((id) => index.get(id))
+          .filter(Boolean)
       : [];
   const triagePrior = priorOpen.filter((f) => f.source === 'triage');
 
@@ -622,33 +714,55 @@ async function runCycle(ctx, base, mode, { cycle }) {
     if (diff.truncated) diffTruncated = true;
     return diff;
   };
+  // Name-only, and so the whole file set: what a seat is shown and what decides
+  // which lenses read it are different questions (ADR-0066). It answers the
+  // record rule too: a review whose whole diff is record files raises record
+  // findings and nothing else (ADR-0026).
+  const readFiles = (from, to) => changedInRange(base.worktree, from, to).catch(() => []);
   if (newTree) {
     const diff = await readDiff(impl.baseSha, impl.sha);
-    // Name-only, and so the whole file set: what a panel seat is shown and what
-    // decides which seats sit are different questions (ADR-0066).
     const diffFiles = await changedInRange(base.worktree, impl.baseSha, impl.sha);
     const round =
       mode === 'story'
         ? await furyRound(ctx, base, { cycle, diff, diffFiles })
-        : await generalistReview(ctx, base, { cycle, diff, priorConfirmed: [] });
+        : await generalistReview(ctx, base, { cycle, diff, priorConfirmed: [], diffFiles });
     if (round.fail) return { directive: round.fail };
     reviewOpen = round.confirmed;
-  } else if (repaired) {
+  } else if (reconciled) {
+    // The reconciliation commit changed decision records and nothing else, and
+    // the code under it is the code the Fury round already judged. So the panel
+    // is the generalist seat over the record diff alone, through the record
+    // lens and no code lens: a security lens reading a markdown document raises
+    // findings, and every finding of this review blocks (ADR-0026).
+    //
+    // The review is a record review because the cycle judges a record commit,
+    // not because the paths say so. The write seat's own containment check
+    // refused any other file, so no path list can be wrong about this one.
+    //
+    // It is read before the repair round below, because a corrective record
+    // rewrite is a repair round: it stamps one, and the cycle behind it is the
+    // reconciliation cycle again (ADR-0007).
     const diff = await readDiff(impl.baseSha, impl.sha);
-    const round = await generalistReview(ctx, base, { cycle, diff, priorConfirmed });
+    const round = await generalistReview(ctx, base, {
+      cycle,
+      diff,
+      priorConfirmed,
+      diffFiles: recordDiff,
+      reconcile: true,
+    });
     if (round.fail) return { directive: round.fail };
     reviewOpen = [
       ...priorConfirmed.filter((f) => !round.resolved.includes(f.id)),
       ...round.confirmed,
     ];
-  } else if (reconciled) {
-    // The reconciliation commit changed decision records and nothing else, and
-    // the code under it is the code the Fury round already judged. So the
-    // panel is the generalist seat over the record diff alone: advisory
-    // findings recorded, HIGH findings put to the verifier, which is the
-    // review the repair lane runs over every fix (ADR-0026).
+  } else if (repaired) {
     const diff = await readDiff(impl.baseSha, impl.sha);
-    const round = await generalistReview(ctx, base, { cycle, diff, priorConfirmed });
+    const round = await generalistReview(ctx, base, {
+      cycle,
+      diff,
+      priorConfirmed,
+      diffFiles: await readFiles(impl.baseSha, impl.sha),
+    });
     if (round.fail) return { directive: round.fail };
     reviewOpen = [
       ...priorConfirmed.filter((f) => !round.resolved.includes(f.id)),
@@ -661,7 +775,12 @@ async function runCycle(ctx, base, mode, { cycle }) {
     // assertion that changed is a judgment. So the panel reads that amendment's
     // own diff — one seat, only where nobody was asked (ADR-0044).
     const diff = await readDiff(cardRuled.baseSha, cardRuled.sha);
-    const round = await generalistReview(ctx, base, { cycle, diff, priorConfirmed });
+    const round = await generalistReview(ctx, base, {
+      cycle,
+      diff,
+      priorConfirmed,
+      diffFiles: await readFiles(cardRuled.baseSha, cardRuled.sha),
+    });
     if (round.fail) return { directive: round.fail };
     reviewOpen = [
       ...priorConfirmed.filter((f) => !round.resolved.includes(f.id)),
@@ -1751,13 +1870,26 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
     }
   }
 
+  // A red over the record commit is answered by the seat that wrote the
+  // records. The ladder does not call `repair-dev` there: that seat implemented
+  // the code, and the one rule about who writes a record is that the
+  // implementing context never reconciles records against its own work
+  // (ADR-0026). The round has its own cap, its own fallbacks, and it never buys
+  // a fresh pass, because a pass discards certified code over a document
+  // (ADR-0007).
+  if (code.length > 0 && renderOverReconcile(events)?.seq === last.seq) {
+    const outcome = await reconcileArm(ctx, base, { events, renders, last, open: code });
+    if (outcome.fail) return outcome.fail;
+    return null;
+  }
+
   // Code findings → repair rounds, progress-gated; a stall takes the one fresh
   // pass; a second stall parks. A confirmed approach finding is a code finding
   // like any other here: it rides the repair brief under its own heading, and
   // the round that closes nothing is what buys the pass (ADR-0007).
   if (code.length > 0 || suiteStalled) {
     const pass = currentPass(events);
-    const rounds = events.filter((e) => e.event === 'repair-round' && e.pass === pass).length;
+    const rounds = repairRounds(events, pass);
     const grants = answerCount(events, 'second-stall', 'repair-again');
     const noProgress = repairStalled(events, renders, last);
     const capExhausted = rounds >= REPAIR_CAP + grants;
@@ -2233,6 +2365,193 @@ function tally(identities) {
 }
 
 // -- ladder arms -------------------------------------------------------------
+
+/**
+ * The reconcile arm: a corrective record rewrite, or the fallback its stall
+ * takes.
+ *
+ * The cap is `gates.reconcileRounds` and the progress rule is the ladder's own
+ * again: a round that closed none of the findings the render before it left open
+ * is a stall, on finding identity, whatever the count. Neither ending buys a fresh
+ * pass: a pass throws away certified code, and what is wrong here is a
+ * document (ADR-0007).
+ */
+async function reconcileArm(ctx, base, { events, renders, last, open }) {
+  const pass = currentPass(events);
+  const cap = base.config?.gates?.reconcileRounds ?? DEFAULT_RECONCILE_ROUNDS;
+  const rounds = reconcileRounds(events, pass);
+  const noProgress = repairStalled(events, renders, last);
+  if (noProgress || rounds >= cap) {
+    if (!events.some((e) => e.event === 'stall' && e.seq > last.seq)) {
+      ctx.store.append('stall', {
+        actor: ACTOR,
+        pass,
+        phase: 'reconcile',
+        reason: noProgress ? 'no-progress' : 'cap-exhausted',
+        rounds,
+        open: last.open.length,
+      });
+    }
+    return reconcileFallbackArm(ctx, base, { events, last, open });
+  }
+  return reconcileCorrection(ctx, base, { pass, round: rounds + 1, open });
+}
+
+/**
+ * One corrective invocation of the record write seat, in the run worktree, with
+ * the confirmed findings as its brief.
+ *
+ * It is a repair round on the ladder and it stamps one, under
+ * `phase: 'reconcile'` and the seat that took it. The commit it leaves moves the
+ * record commit and is the cycle trigger it already was, so the cycle behind it
+ * is the reconciliation cycle again: the layers the record diff reaches, the
+ * record-lens review, and the verifier with a resolution-check on the findings
+ * this round was given.
+ *
+ * A work-product defect past its corrective invocation takes the fallback with
+ * nobody asked, exactly as the first write does: the code is certified, and the
+ * ticket is the route the harness took for every story before this round
+ * existed. A seat that never delivered a report is the other shape, and that
+ * one parks (ADR-0026).
+ */
+async function reconcileCorrection(ctx, base, { pass, round, open }) {
+  const events = runEvents(ctx);
+  const judged = sinceFreshPass(
+    events,
+    (e) => e.event === 'reconciliation-judged' && e.owed === true,
+  );
+  const records = judged?.records ?? [];
+  const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written' && e.ok);
+  const divergences = Array.isArray(written?.divergences) ? written.divergences : [];
+  // A seat that died mid-edit leaves whatever it had written, and the next
+  // dispatch must be the same dispatch as the first (ADR-0070).
+  const baseSha = await headSha(base.worktree);
+  await resetHard(base.worktree, baseSha);
+  const since = runEvents(ctx).length > 0 ? runEvents(ctx).at(-1).seq : 0;
+  const outcome = await seatWithChecks(ctx, {
+    seat: WRITE_SEAT,
+    schema: reconcileWriteSchema({ answered: true }),
+    cwd: base.worktree,
+    env: base.env,
+    constitution: base.constitution,
+    buildRole: (brief) =>
+      correctiveRole(base, judged ?? { records, reason: '(none recorded)' }, {
+        findings: open,
+        divergences,
+        brief,
+      }),
+    checks: (report) => writeChecks(base, records, report),
+  });
+  if (outcome.fail) {
+    const failure = seatFailureAfter(runEvents(ctx), WRITE_SEAT, since);
+    if (Array.isArray(failure?.defects)) {
+      return reconcileFallbackArm(ctx, base, {
+        events: runEvents(ctx),
+        last: lastRender(runEvents(ctx)),
+        open,
+      });
+    }
+    return { fail: outcome.fail };
+  }
+  const report = outcome.report;
+  const sha = await commitAll(base.worktree, `reconcile: ${ctx.runId}`);
+  ctx.store.append('reconciliation-written', {
+    actor: ACTOR,
+    ok: true,
+    corrective: true,
+    answered: report.answered,
+    rewritten: report.rewritten,
+    unchanged: report.unchanged.map((u) => u.record),
+    divergences: report.divergences,
+    ...(sha !== baseSha && { sha }),
+    gist: gist(`records corrected: ${(report.answered ?? []).join(', ')}`),
+  });
+  if (sha !== baseSha) {
+    ctx.store.append('implementation-committed', {
+      actor: ACTOR,
+      pass,
+      phase: 'reconcile',
+      baseSha,
+      sha,
+    });
+  }
+  ctx.store.append('repair-round', {
+    actor: ACTOR,
+    pass,
+    round,
+    phase: 'reconcile',
+    seat: WRITE_SEAT,
+    ...(sha !== baseSha && { sha }),
+    openBefore: open.map((f) => f.id),
+  });
+  return {};
+}
+
+/**
+ * The two fallbacks a spent reconcile arm takes. Which one runs depends on what
+ * stands open, and neither asks a person.
+ *
+ * Every layer green and only record findings open is the partial fallback: the
+ * record commit stays in the tree and ships. The judge found the old records
+ * owed, so discarding the rewrite ships those: more known drift, and a ticket
+ * that asks a whole run to do the whole rewrite again. Keeping it ships the
+ * corrected records with a short list of what is still wrong, and the run behind
+ * that list is small.
+ *
+ * A layer red on the record commit is the discard: a tree CI would refuse too.
+ * The worktree goes back to the sha the last green verdict certified, the run
+ * ships the code it earned, and the close writes the ticket for the judged
+ * records (ADR-0026).
+ */
+async function reconcileFallbackArm(ctx, base, { events, last, open }) {
+  const layerRed = (readJson(last?.record)?.spectrum ?? []).some((r) => r.status !== 'green');
+  if (!layerRed && open.length > 0 && open.every((f) => f.record === true)) {
+    const residual = open.map((f) => f.id);
+    ctx.store.append('reconciliation-written', {
+      actor: ACTOR,
+      ok: true,
+      partial: true,
+      cause: RECORD_FINDINGS,
+      residual,
+      gist: gist(`records ride with ${residual.length} finding(s) open: ${residual.join(', ')}`),
+    });
+    return {};
+  }
+  const certified = [...events]
+    .reverse()
+    .find((e) => e.event === 'verdict-rendered' && e.verdict === 'green');
+  try {
+    if (certified?.sha) await resetHard(base.worktree, certified.sha);
+  } catch (error) {
+    // The reset is what makes this ship the ship the verdict certified. A tree
+    // that will not move is a stage precondition the run cannot settle itself.
+    return {
+      fail: blocked(
+        ctx,
+        'reconcile-reset',
+        `The worktree could not be returned to the certified tree ${certified?.sha}: ` +
+          `${error.message}\nRepair the worktree, then answer.`,
+      ),
+    };
+  }
+  ctx.store.append('reconciliation-written', {
+    actor: ACTOR,
+    ok: false,
+    cause: RECORD_LAYER_RED,
+    ...(certified?.sha && { reset: certified.sha }),
+    discarded: [...(last?.open ?? [])],
+    gist: gist('the record rewrite could not clear a layer; the tree went back'),
+  });
+  return {};
+}
+
+/** The newest rendered verdict, or null. */
+function lastRender(events) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].event === 'verdict-rendered') return events[i];
+  }
+  return null;
+}
 
 async function repairRound(ctx, base, mode, { pass, round, open, record }) {
   const { recaptured } = recordedTakeBacks(runEvents(ctx));
@@ -3070,6 +3389,11 @@ async function verdictBase(ctx, mode) {
       env: runEnv(ctx, config),
       testPaths: config.repo.testPaths,
       uiPaths: config.repo.uiPaths ?? [],
+      // The decision-record tree. It decides which findings are record findings
+      // and which diffs the record lens reads; it narrows no seat and blocks
+      // nothing (ADR-0026).
+      recordPaths: config.repo.recordPaths ?? [],
+      defaultBranch: ctx.payload.defaultBranch ?? 'main',
       routesRoot: config.repo.routesRoot ?? null,
       componentsRoot: config.repo.componentsRoot ?? null,
       // The cross-cutting gate allowlists. They are read at the finding
@@ -3143,6 +3467,8 @@ async function verdictBase(ctx, mode) {
     env: runEnv(ctx, config),
     testPaths: config.repo.testPaths ?? [],
     uiPaths: config.repo.uiPaths ?? [],
+    recordPaths: config.repo.recordPaths ?? [],
+    defaultBranch: ctx.payload.defaultBranch ?? 'main',
     lenses: panelLenses(config),
     allowlistPaths: config.gates?.allowlistPaths ?? [],
     specRef: ticketPath,
@@ -3249,6 +3575,26 @@ function judgedReconcile(events, impl) {
   return lastRenderSeq(events) > commit.seq ? null : commit;
 }
 
+/**
+ * The record commit a cycle behind the partial fallback is certifying, or null.
+ *
+ * That cycle judges a tree nothing moved: the fallback kept the record commit
+ * and dropped the findings it could not close. It fires no judgment seat, and
+ * it plans on the same ground the reconciliation cycle planned on, because the
+ * commit is the same commit and the project's statement about what each layer
+ * reads has not changed. Planning it as a targeted cycle instead would run
+ * nothing, come out clean, and then sweep the whole spectrum to certify it.
+ */
+function certifyingReconcile(events, impl) {
+  const commit = reconcileCommit(events);
+  if (!commit || !impl || impl.seq !== commit.seq) return null;
+  const written = sinceFreshPass(
+    events,
+    (e) => e.event === 'reconciliation-written' && e.partial === true,
+  );
+  return written && written.seq > lastRenderSeq(events) ? commit : null;
+}
+
 function lastImplementation(events) {
   for (let i = events.length - 1; i >= 0; i--) {
     if (events[i].event === 'implementation-committed') return events[i];
@@ -3286,6 +3632,12 @@ function findingFromEvent(e) {
     ...(e.layers && { layers: e.layers }),
     ...(e.lens && { lens: e.lens }),
     ...(e.severity && { severity: e.severity }),
+    ...(e.file && { file: e.file }),
+    // The record word and the criterion travel with the finding, because the
+    // ladder reads them: they select the seat that repairs a record, and they
+    // are what the corrective brief and the residual ticket state (ADR-0007).
+    ...(e.record && { record: true }),
+    ...(e.criterion && { criterion: e.criterion }),
     summary: e.summary,
     evidence: e.evidence,
     ...(e.confirmed !== undefined && { confirmed: e.confirmed }),

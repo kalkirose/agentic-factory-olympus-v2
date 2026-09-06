@@ -8,7 +8,7 @@
 // panel, and the project-config validator reads it to refuse a lens name the
 // panel could not spawn. Neither module can import the other.
 
-/** Every lens the review implements, in panel order. */
+/** Every code lens the review implements, in panel order. */
 export const ALL_LENSES = Object.freeze([
   'spec',
   'architecture',
@@ -17,6 +17,42 @@ export const ALL_LENSES = Object.freeze([
   'security',
   'interface',
 ]);
+
+/**
+ * The lens a decision record is read through. It is not a panel choice: a
+ * project cannot name it in `review.lenses` and no seat spawns for it. The diff
+ * decides it. A review whose whole diff is record files carries this lens and
+ * no code lens, and a mixed diff carries it beside the panel's (ADR-0038).
+ */
+export const RECORD_LENS = 'record';
+
+/**
+ * What a decision record is held to, keyed. A record finding names the key it
+ * fails, the verifier is briefed with the key and the list, and a finding whose
+ * evidence does not reach its key is refuted. Data only, and closed like the
+ * lens vocabulary beside it: a criterion enters by a recorded decision.
+ *
+ * The list is the harness's own. A project rule about record text is that
+ * project's gate, not a criterion here.
+ */
+export const RECORD_CRITERIA = Object.freeze({
+  fact: 'fact: implemented parts read as standalone present-tense fact; the rationale and the fallback paths stay.',
+  truth: 'truth: every claim in the record is true against the tree as it stands.',
+  open: 'open: parts the tree does not implement stay as explicit open sections.',
+  divergence:
+    'divergence: a divergence between the tree and the record is named in the record, verbatim, never absorbed.',
+  reference:
+    'reference: every name, path and symbol the record cites exists in the tree it describes.',
+  whole: 'whole: the record reads as one document, not as a trail of amendments.',
+});
+
+/** The criterion keys, in the order the briefs and the schema state them. */
+export const RECORD_CRITERION_KEYS = Object.freeze(Object.keys(RECORD_CRITERIA));
+
+/** The criteria as a brief states them, one line each. */
+export function recordCriteriaLines() {
+  return RECORD_CRITERION_KEYS.map((key) => `- ${RECORD_CRITERIA[key]}`);
+}
 
 /**
  * The panel a project gets when it declares none. Architecture and minimality
@@ -85,6 +121,9 @@ export function panelLenses(config) {
  * Seat → the lenses it carries, over an active set. A seat whose every lens is
  * out of the set is absent from the panel: nothing assembles it, and no seat
  * spawns to report on nothing.
+ *
+ * The record lens has no entry here and never gets one: it rides the generalist
+ * seat, which is the seat every record diff is reviewed by.
  */
 export function furyPanel(lenses) {
   const active = new Set(lenses);

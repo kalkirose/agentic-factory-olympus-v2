@@ -116,6 +116,16 @@ export const LOUD_OWNERSHIP = {
       match: (item) => item.kind === 'reconciliation-lost',
       by: 'the human, from a console',
     },
+    // A record finding shipped as advice. The merge has happened and the
+    // finding is in the product's own documentation, so nothing a later stamp
+    // says brings it back: the rule that routes record findings to the verifier
+    // did not classify it, or the project's record paths name the wrong tree,
+    // and a person decides which (ADR-0007).
+    {
+      name: 'record-finding-shipped',
+      match: (item) => item.kind === 'record-finding-shipped',
+      by: 'the human, from a console',
+    },
   ],
   // A red merge stays loud while the defect is still in the product. The
   // repair run's close-out fixes the escapes it ticketed, and pairs the

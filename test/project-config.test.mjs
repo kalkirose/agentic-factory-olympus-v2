@@ -4,6 +4,7 @@ import {
   DEFAULT_CONSTITUTION_PATH,
   DEFAULT_DIFF_EXCLUSIONS,
   DEFAULT_EXCERPT_CHARS,
+  DEFAULT_RECONCILE_ROUNDS,
   validateProjectConfig,
   withProjectDefaults,
   parseProjectConfig,
@@ -43,6 +44,46 @@ function errorPaths(config) {
 
 test('a full config validates clean', () => {
   assert.deepEqual(validateProjectConfig(valid()), []);
+});
+
+// The tree a project keeps its decision records in. It decides which review
+// findings are record findings and which diffs the record lens reads, and
+// nothing else: neither the reconciliation judge nor the write seat's
+// containment check reads it (ADR-0026).
+test('repo.recordPaths is an optional path list, defaulted to the common record tree', () => {
+  assert.deepEqual(withProjectDefaults({ version: 1 }).repo.recordPaths, ['docs/adr']);
+  assert.deepEqual(
+    withProjectDefaults({ version: 1, repo: { recordPaths: ['decisions/**'] } }).repo.recordPaths,
+    ['decisions/**'],
+  );
+  const declared = valid();
+  declared.repo.recordPaths = ['docs/decisions', 'packages/*/docs/adr'];
+  assert.deepEqual(validateProjectConfig(declared), []);
+  // An empty list turns the path rule off. The reconciliation cycle still
+  // raises record findings: that rule reads the phase, not a path.
+  const none = valid();
+  none.repo.recordPaths = [];
+  assert.deepEqual(validateProjectConfig(none), []);
+  const wrong = valid();
+  wrong.repo.recordPaths = 'docs/adr';
+  assert.deepEqual(errorPaths(wrong), ['repo.recordPaths']);
+});
+
+// The reconciliation's own round cap. It is not the code repair cap and it
+// never moves it: the two work products have different seats and different
+// costs (ADR-0007).
+test('gates.reconcileRounds is an optional positive integer', () => {
+  // Five. A record round is one seat and the layers a record diff reaches; the
+  // route behind the cap is a whole repair run with a full spectrum.
+  assert.equal(DEFAULT_RECONCILE_ROUNDS, 5);
+  const declared = valid();
+  declared.gates.reconcileRounds = 2;
+  assert.deepEqual(validateProjectConfig(declared), []);
+  for (const value of [0, -1, 2.5, '5']) {
+    const bad = valid();
+    bad.gates.reconcileRounds = value;
+    assert.deepEqual(errorPaths(bad), ['gates.reconcileRounds'], String(value));
+  }
 });
 
 test('repo.routesRoot is a plain repo-relative path, or null to turn the route rule off', () => {
@@ -334,6 +375,9 @@ test('defaults fill every missing section', () => {
   assert.deepEqual(filled.repo, {
     testPaths: [],
     uiPaths: [],
+    // A project that declares no record tree gets the common one, so the record
+    // rule runs with no config line at all (ADR-0026).
+    recordPaths: ['docs/adr'],
     routesRoot: 'apps/storefront/src/routes',
     componentsRoot: 'apps/storefront/src/lib/components',
   });

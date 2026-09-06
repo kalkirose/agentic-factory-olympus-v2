@@ -761,6 +761,13 @@ export const GATE_INTEGRITY_KINDS = new Set([
   // knew was owed, lost at the close with nothing behind it. Stamped at
   // close-out, where both routes have had their chance (ADR-0026).
   'reconciliation-lost',
+  // A run merged holding a review finding that was stamped advisory on a file
+  // the project calls a decision record. After the record rule the count is
+  // always zero: a finding on a record goes to the verifier at every grade and
+  // is never advisory (ADR-0007). A non-zero one says the rule stopped
+  // classifying, or that `repo.recordPaths` names a tree the reviews do not
+  // read. Stamped at close-out, in both lanes.
+  'record-finding-shipped',
 ]);
 
 // The kinds a step stamps on the record of the defect it just met. These
@@ -804,6 +811,20 @@ export const OBSERVED_DEFECT_KINDS = new Set([
 // named before a merge is recorded under that name when the merge carries it
 // into the product (ADR-0024).
 export const DEFECT_KINDS = new Set([...GATE_INTEGRITY_KINDS, ...OBSERVED_DEFECT_KINDS]);
+
+/**
+ * Why an in-run decision-record rewrite ended in a fallback. Closed, and the
+ * words live here rather than beside either reader: the verdict ladder stamps
+ * them and a tripwire counts them, and a count that reads a word one writer
+ * spells its own way is a count of nothing (ADR-0008).
+ *
+ * `record-findings` is the partial fallback: every layer was green, the records
+ * rode with confirmed findings still open, and the close ticketed them.
+ * `record-layer-red` is the discard: a layer stayed red on the record commit,
+ * the tree went back to the certified sha, and the whole rewrite is ticketed.
+ */
+export const RECORD_FINDINGS = 'record-findings';
+export const RECORD_LAYER_RED = 'record-layer-red';
 
 /** The kind, or a throw naming it. The only way a kind reaches a stamp. */
 export function assertDefectKind(kind) {
