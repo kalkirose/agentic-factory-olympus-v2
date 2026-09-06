@@ -49,36 +49,59 @@ review — gets these concrete shapes:
   corrective invocation, then the `seat-failure` park. A green spectrum
   resolves triage findings mechanically — their evidence is gone.
 - **Findings.** Every finding stamps a `finding` event with a run-scoped id
-  (`F<n>`). Sub-HIGH review findings stamp `advisory` and never block or
-  verify. HIGHs go to the verifier; a refuted HIGH stamps advisory, a
-  confirmed HIGH blocks. The open set travels in `verdict-rendered.open`;
-  the record file (`runs/<id>/verdict-<cycle>.json`) carries the spectrum,
-  the open and just-resolved findings, and the flake list — confirmed
-  findings only, advisory material stays in the ledger.
+  (`F<n>`). The split that decides what the verifier answers is severity **or**
+  record. A HIGH goes to the verifier; a refuted HIGH stamps `advisory`, and a
+  confirmed HIGH blocks. A sub-HIGH review finding that is not about a decision
+  record stamps `advisory` and is never verified or blocked on. A finding about
+  a decision record goes to the verifier at every grade. It carries
+  `record: true` and the `criterion` it cites, and it never carries `advisory`:
+  a confirmed one enters the open set and turns the verdict red exactly as a
+  confirmed HIGH does, and a refuted one blocks nothing and carries
+  `confirmed: false` beside the verifier's evidence. Which findings are record
+  findings is decided by the diff and by the project's `repo.recordPaths`, in
+  ADR-0026. The open set travels in `verdict-rendered.open`. The record file
+  (`runs/<id>/verdict-<cycle>.json`) carries the spectrum, the open and
+  just-resolved findings, and the flake list. It holds confirmed findings only;
+  advisory material and refuted record findings stay in the ledger.
 - **Review composition per cycle.** First cycle of an implementation pass:
   the Fury fan-out over the panel the project declares (`review.lenses`),
-  fully parallel, then the verifier on that round's HIGHs. The default panel
+  fully parallel, then the verifier on that round's items. The default panel
   is spec, operational and interface, with the security lens riding the
   operational seat and the interface seat conditional on a diff under
   `repo.uiPaths` (ADR-0038). Repair cycles: the generalist review seat over
-  the repair diff plus a verifier resolution-check on prior confirmed HIGHs;
-  new HIGHs go through confirm-to-block. Cycles after only a re-freeze or an
-  operational fix fire no judgment seats — the tree did not change. No
-  re-fan-out over a judged tree, in either lane. The repair lane uses the
-  generalist seat from cycle one and never the fan-out.
+  the repair diff plus a verifier resolution-check on prior confirmed
+  findings; new items go through confirm-to-block. Cycles after only a
+  re-freeze or an operational fix fire no judgment seats, because the tree did
+  not change. No re-fan-out over a judged tree, in either lane. The repair lane
+  uses the generalist seat from cycle one and never the fan-out. A round whose
+  whole diff is decision records is the generalist seat too, under the record
+  lens alone (ADR-0038).
 - **Response ladder.** Order per red verdict: intent conflicts park
   (`intent-conflict`); env/harness findings get one `operational-fix` stamp
   each, and a finding that persists past its fix climbs the substrate ladder
   and parks `provisioning-gate` only when the waiting is spent (ADR-0069);
   suite defects re-freeze; code-defect and confirmed review findings take a
-  repair round. A batch may combine routes; every route re-enters through a
-  fresh cycle.
+  repair round. A red rendered over a run's reconciliation commit takes the
+  reconcile arm below instead of the repair round. A batch may combine routes;
+  every route re-enters through a fresh cycle.
 - **Repair rounds.** The repair-dev seat fixes the candidate tree in place
   with the verdict and open findings as brief. Progress rule: a round is a
   stall (`no-progress`) when it closed none of the findings the render before
   it left open, measured on finding identity (ADR-0022). Cap 3 rounds per
   implementation; open findings past the cap stall (`cap-exhausted`).
   State-based, never wall-clock.
+- **The reconcile arm.** A red rendered over the reconciliation commit is
+  answered by the seat that wrote the records. The ladder dispatches a
+  corrective `reconcile-write` in the run worktree, briefed with the open
+  findings, each with its criterion, its evidence and the verifier's
+  confirmation. It stamps `repair-round` with `phase: 'reconcile'` and
+  `seat: 'reconcile-write'`, commits `implementation-committed` with
+  `phase: 'reconcile'`, and the cycle behind it is the reconciliation cycle
+  again. The cap is `gates.reconcileRounds`, default 5, counted over the
+  `repair-round` stamps of the pass that carry `phase: 'reconcile'`. It neither
+  shares nor moves the code repair cap of three. The progress rule is the
+  ladder's own. A stall of these rounds, by no progress or by the cap, takes one
+  of the two fallbacks in ADR-0026 and never the fresh pass.
 - **A finding about the shape rides the repair brief.** A confirmed finding
   that names the implementation structure as wrong against the spec
   (`approach: true`) is a code finding like any other on the ladder. It rides
@@ -118,7 +141,12 @@ review — gets these concrete shapes:
   events; no default answers.
 - **Gate integrity.** A harness-class triage finding also stamps
   `gate-integrity` (loud, streamed). When the finding leaves the open set,
-  the daemon appends the paired `resolved` line.
+  the daemon appends the paired `resolved` line. At the close of a merged run,
+  in both lanes, the harness counts the findings that carry `advisory: true` on
+  a file under `repo.recordPaths`. The count is always zero. A count above zero
+  stamps `gate-integrity` under the `record-finding-shipped` kind: loud, and
+  owned by a person. It says the split above stopped classifying, or that the
+  project's record paths name a tree its reviews do not read.
 - **Test-edit boundary, both directions.** Story-lane dev seats carry the
   deny rules and the evaluation path restores the test paths from the
   frozen sha before every commit and every spectrum run. The repair-lane
@@ -126,6 +154,52 @@ review — gets these concrete shapes:
 - **Parallel seats.** The engine tracks a run's in-flight seats as a set:
   the liveness invariant, kill, and stop cover every child of a parallel
   fan-out.
+
+## Why a finding on a decision record is never advisory
+
+The severity ladder was written for code. A small remark about a diff is worth
+less than the round it would cost, so a sub-HIGH finding lands in the ledger and
+nobody must act on it. Applied to a decision record the same rule says the
+opposite of what it is for. A record states how the product works and why. A
+sentence of it that the tree does not do is a false statement in the product's
+own documentation, and the ledger holds twelve such sentences across two
+reconciliation runs. Every one of them was stamped advisory, none was verified,
+and both runs were free to ship.
+
+The verifier still answers them, and it answers all of them. It is the one seat
+that reads the code and says whether a claim about the code is true, and a
+record finding is exactly that kind of claim: the record says X, the tree does Y.
+It is also the one guard against a wrong block. One of those twelve findings
+said a record's budget line was wrong, and the record explains that exact
+inversion in the paragraph below the line the finding quoted. A rule that
+blocked on every sentence a review seat wrote would have blocked a ship on a
+finding the record itself refutes.
+
+The cost of asking is one seat. The verifier is one invocation per cycle over
+every item, so twelve record findings cost one invocation and not twelve.
+
+A refutation is not advice. A second seat read the tree and wrote down, with
+evidence, why the record is right, under the finding's own id. The tripwires in
+ADR-0010 read that: a window in which most record findings are refuted says the
+review seat is noisy about documents, and the answer is the criteria and the
+brief.
+
+## Why the record round has its own cap and never buys a fresh pass
+
+A record round is one seat and the layers a record diff reaches. On a project
+whose layers declare their grounds that is one layer, which takes seconds. The
+route behind the cap is a whole repair run with a full spectrum. So five rounds
+cost less than one fallback, and the progress rule stops a round that is going
+nowhere at once.
+
+The code repair cap is a different number for a different thing. A story that
+spent two code rounds would get one record round under a shared cap, and the two
+work products have different seats and different costs.
+
+The fresh pass is never the answer here. It resets the tree to the commit the
+pass was born on, which throws away an implementation a verdict already
+certified, over a document. Both endings of the reconcile arm keep the certified
+code.
 
 ## Why an approach finding buys a repair round and not the pass
 
@@ -176,6 +250,18 @@ A spent ladder is provisioning work, and the provisioning rule stands — report
 and wait, never self-clear.
 
 ## Fallback paths
+
+If the record split proves to block ships on remarks, return record findings to
+the severity ladder: the split reads severity alone, and a sub-HIGH record
+finding stamps `advisory` again. Trigger: `record-refuted-share` breaching over
+a window whose criteria and brief were already tightened once. Reversal cost:
+low, one condition in the split, and the `record` word stays on the finding
+either way.
+
+If the reconcile arm proves too expensive for the story that pays it, set
+`gates.reconcileRounds` to 1: one corrective round, then the fallback and the
+ticket. Trigger: an owner who wants the shorter arm. Reversal cost: one config
+value.
 
 If the repair round proves unable to answer structural findings — rounds that
 close every finding but the approach one, cycle after cycle — the immediate

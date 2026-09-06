@@ -14,6 +14,23 @@ is smaller than the vocabulary.
   the review machinery builds the panel from it and the project-config
   validator refuses a lens name against it, and neither module imports the
   other.
+- **The record lens sits beside the code lenses and outside the panel.** The
+  same registry holds `record` and its criteria, `RECORD_CRITERIA`: a keyed list
+  of six, data only. A record is held to standalone present-tense fact for the
+  implemented parts, to truth against the tree as it stands, to explicit open
+  sections for what the tree does not implement, to a divergence named in the
+  record and never absorbed, to every name and path and symbol it cites existing
+  in the tree, and to reading as one document rather than a trail of amendments.
+  The list is the harness's own and holds no project rule.
+- **The record lens is not a panel choice.** It is outside `ALL_LENSES`, so
+  `review.lenses` cannot name it and the project-config validator refuses it
+  there. It has no entry in the seat table, so `furyPanel` never seats it: it
+  rides the generalist seat, which is the seat every record diff is reviewed by.
+  What puts it on a review is the diff. A review whose whole diff is decision
+  records carries the lens set `['record']` and no code lens, and a Fury round
+  over such a diff is that one seat rather than the fan-out. A mixed diff
+  carries the panel's lenses plus `record`, and the brief names the record files
+  in the diff (ADR-0026).
 - **The panel is `review.lenses`.** An absent entry takes the default panel. A
   declared entry replaces it — that is the whole flip. A name outside the
   vocabulary, a duplicate, or an empty list fails the launch; nothing is
@@ -93,6 +110,24 @@ the story's own surface along the same four dimensions, and the map is checked
 before the write commits (ADR-0072). The wave stays the measure of whether the
 map is the surface, and it is never shown the map.
 
+## Why the record lens is not on the panel
+
+The panel is what a project judges its code with, and a project restores a cut
+lens by naming it. The record lens is neither of those. It judges a document
+against the tree the document describes, and which reviews carry it is not a
+project's decision: it follows from the diff, and one of the diffs that carries
+it is a commit the harness makes itself.
+
+It seats nowhere of its own for the reason security does not. A seat spawned to
+read a markdown tree through six criteria costs a seat, and the generalist seat
+is already the seat that reads a record diff. A record finding it raises takes
+the same route to a block that any other finding takes, minus the seat.
+
+Keeping it out of `ALL_LENSES` also keeps two readings honest. The lens-yield
+metric zero-fills every lens in that list and counts confirmations, and a lens
+that is always excluded from the count would read as a permanent cut candidate.
+Record findings have their own reading (ADR-0010).
+
 ## Why config and not a code deletion
 
 A cut with no way back is a bet that ten ships of evidence generalize. They may
@@ -116,6 +151,19 @@ one entry in the lens registry's seat table, one line in the prompt seat sets.
 Trigger: a confirmed security HIGH found by the adversary waves or after a ship,
 that the operational seat saw the diff for and did not raise. Reversal cost:
 low, and the panel config does not change.
+
+If the record criteria prove too narrow, and real record defects fall outside all
+six, a criterion joins `RECORD_CRITERIA` with its line. The key is what the
+verifier judges against, so a defect nobody can key is a defect nobody can
+confirm. Trigger: refutations for want of evidence on findings a reader agrees
+with. Reversal cost: one entry in the registry; the schema enum and both briefs
+read the list.
+
+If the record lens on a mixed diff proves to crowd the code lenses on the same
+seat, give the record files their own generalist invocation: the diff is already
+split by path at the brief, and the two reviews settle into one finding set.
+Trigger: a mixed diff whose code findings fall while its record findings rise.
+Reversal cost: moderate, one more seat invocation per mixed cycle.
 
 If the security dimensions crowd the adversary's spec-behavior probing instead
 of adding to it — kill rates fall while survivors cluster on security wrongness
