@@ -86,6 +86,20 @@ test('a kind a step stamps on its own record owes the gate-integrity table nothi
   }
 });
 
+// A record finding that shipped as advice is a defect of the mechanism, in a
+// run that has merged. Nothing a later stamp says brings it back, so the rule
+// names a person and no ledger event owns it (ADR-0007).
+test('a record finding that shipped as advice is owned by a person', () => {
+  const rule = LOUD_OWNERSHIP['gate-integrity'].find((r) =>
+    r.match?.({ kind: 'record-finding-shipped' }),
+  );
+  assert.equal(rule.name, 'record-finding-shipped');
+  assert.equal(rule.owner, undefined);
+  assert.match(rule.by, /human/);
+  const shipped = line('gate-integrity', { kind: 'record-finding-shipped', pr: 7 });
+  assert.deepEqual(ownedResolutions([shipped, line('merged', { pr: 7 })]), []);
+});
+
 test('a take-back is owned by what the record holds, not by the word for it', () => {
   // The kind rides the loud take-back record. The re-freeze still owns it: a
   // record answers to the event that settles what it reports, and the word is
