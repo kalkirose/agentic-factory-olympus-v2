@@ -17,11 +17,28 @@ is smaller than the vocabulary.
 - **The record lens sits beside the code lenses and outside the panel.** The
   same registry holds `record` and its criteria, `RECORD_CRITERIA`: a keyed list
   of six, data only. A record is held to standalone present-tense fact for the
-  implemented parts, to truth against the tree as it stands, to explicit open
-  sections for what the tree does not implement, to a divergence named in the
-  record and never absorbed, to every name and path and symbol it cites existing
-  in the tree, and to reading as one document rather than a trail of amendments.
-  The list is the harness's own and holds no project rule.
+  implemented parts, to truth against the tree as it stands for every
+  present-tense claim in it, to a plain statement that a part is not implemented
+  where the tree does not implement it, to a divergence named in the record and
+  never absorbed, to every name and path and symbol it cites existing in the
+  tree, and to reading as one document rather than a trail of amendments. The
+  list is the harness's own and holds no project rule.
+- **The criteria carry the rule they serve.** `RECORD_RULE` sits above the six
+  wherever they are stated: a record never conflicts with the code, everything
+  it states is either true of the tree now or marked as not yet built, and there
+  is no third kind of sentence. The two criteria that share the boundary say
+  which side each case falls on. A claim the tree contradicts fails `truth`,
+  whether or not the sentence changed in the diff under review. A part the tree
+  does not implement satisfies `open` when the record says it is not
+  implemented, and a part not yet built that is written as present fact fails
+  `truth` rather than `open`.
+- **One definition of the criteria, four readers.** The record-only review
+  brief, the record lens on a mixed diff, the verifier's brief for a record item
+  and the record write seat's brief all state the list from the registry. The
+  write seat is a reader because it is judged against it: a paraphrase in the
+  brief that writes the records and the list in the brief that reviews them are
+  two statements of one rule, and the writer would meet a criterion at the
+  review that its own brief never named.
 - **The record lens is not a panel choice.** It is outside `ALL_LENSES`, so
   `review.lenses` cannot name it and the project-config validator refuses it
   there. It has no entry in the seat table, so `furyPanel` never seats it: it
@@ -156,8 +173,8 @@ If the record criteria prove too narrow, and real record defects fall outside al
 six, a criterion joins `RECORD_CRITERIA` with its line. The key is what the
 verifier judges against, so a defect nobody can key is a defect nobody can
 confirm. Trigger: refutations for want of evidence on findings a reader agrees
-with. Reversal cost: one entry in the registry; the schema enum and both briefs
-read the list.
+with. Reversal cost: one entry in the registry; the schema enum and all four
+briefs read the list.
 
 If the record lens on a mixed diff proves to crowd the code lenses on the same
 seat, give the record files their own generalist invocation: the diff is already

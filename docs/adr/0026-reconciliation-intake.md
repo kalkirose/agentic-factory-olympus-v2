@@ -25,11 +25,11 @@ request. The default branch moves once per shipped story.
   cause: an unjudged ship is a recorded miss, never a silent skip. No outcome
   blocks the ship.
 - **Owed writes the records on the run branch.** The `reconcile-write` seat
-  runs in the run worktree, in fresh context, and rewrites the judged records:
-  implemented parts become standalone present-tense fact, the rationale and
-  the fallback paths stay, unimplemented parts stay explicit open sections, a
-  divergence between the diff and a recorded decision is named verbatim and
-  never absorbed, and nothing outside the record tree is edited. The seat
+  runs in the run worktree, in fresh context, and rewrites the judged records.
+  Its brief states the record criteria from the registry, verbatim, because
+  those are the criteria the review reads its work against (ADR-0038); beside
+  them it states that the divergence goes in the report as well as in the
+  record, and that nothing outside the record tree is edited. The seat
   reports the records it rewrote, the records it left alone with the reason for
   each, and one divergence entry per judged record. Its checks, on the lane
   contract loop: every changed file sits under the directory of a judged record,
@@ -61,24 +61,37 @@ request. The default branch moves once per shipped story.
   it (ADR-0007).
 - **A record diff is reviewed through the record lens and nothing else.** The
   review of the reconciliation cycle carries the lens set `['record']` and no
-  code lens. Its brief lists the six record criteria, its schema requires the
-  `file` and the `criterion` on every finding, and it is briefed with the
-  divergence declaration the write seat made. Every finding of that review is a
-  record finding, whatever any path list says: the write seat's own containment
-  check refused any file outside the record tree.
-- **`repo.recordPaths` names the record tree for the reviews.** It is an
-  optional list of path entries in the project config, in the vocabulary of
-  `repo.testPaths` and `repo.uiPaths`, and it defaults to `['docs/adr']`. It
-  decides two things and no more: which review findings are record findings, and
-  which diffs the record lens reads. Neither the reconciliation judge nor the
-  write seat's containment check reads it, so discovery still decides which
-  records get rewritten and where the seat may write. Three rules answer
-  "is this a record finding", in order. A review of a reconciliation cycle
-  raises record findings and nothing else. A review whose diff touches at least
-  one file and no file outside `repo.recordPaths` does the same. On a mixed diff
-  the finding's own `file` field decides, the brief names the record files in
-  the diff, and a finding that leaves the path out is graded on severity as any
-  other finding is.
+  code lens. Its brief states the record rule and the six criteria under it, its
+  schema requires the `file` and the `criterion` on every finding, and it is
+  briefed with the divergence declaration the write seat made. Every finding of
+  that review is a record finding, whatever any path list says: the write seat's
+  own containment check refused any file outside the record tree.
+- **A record in the diff is judged whole.** Every review that carries the record
+  lens is given the repo-relative path of each record the diff moved, and it
+  reads each of those files whole from the working tree before it writes a
+  finding. It judges every claim in each record, changed in the diff or not; the
+  diff states what moved and is context, not the boundary of the review; and a
+  finding may cite any sentence of the record. The record-only brief says this
+  of the whole diff. On a mixed diff the code lenses keep "judge the diff only,
+  do not widen into unchanged code", and the sentence names the code files as
+  what it is about, because a record is judged as a document and a code diff is
+  not. The verifier is given the same scope: the paths of the records its items
+  are about, the duty to read each of them whole, and the rule that a finding
+  about a sentence the diff did not change is as confirmable as a finding about
+  one it did.
+- **`repo.recordPaths` names the record tree for the reviews and the cap.** It
+  is an optional list of path entries in the project config, in the vocabulary
+  of `repo.testPaths` and `repo.uiPaths`, and it defaults to `['docs/adr']`. It
+  decides three things and no more: which review findings are record findings,
+  which diffs the record lens reads, and which cap a repair round counts against
+  (ADR-0007). Neither the reconciliation judge nor the write seat's containment
+  check reads it, so discovery still decides which records get rewritten and
+  where the seat may write. Three rules answer "is this a record finding", in
+  order. A review of a reconciliation cycle raises record findings and nothing
+  else. A review whose diff touches at least one file and no file outside
+  `repo.recordPaths` does the same. On a mixed diff the finding's own `file`
+  field decides, the brief names the record files in the diff, and a finding
+  that leaves the path out is graded on severity as any other finding is.
 - **A confirmed record finding buys a corrective rewrite.** The ladder does not
   call `repair-dev` on this cycle: that seat implemented the code, and the
   context that implemented the work never reconciles the records against it. The
@@ -144,8 +157,10 @@ request. The default branch moves once per shipped story.
   the story pass down, stays owed, and the next sweep launches it.
 - **The ticketed rewrite is a repair-lane run.** The ticket is the spec; the
   lane's gates and generalist review run in full and the rewrite ships through
-  its own pull request. A launched-and-failed reconciliation is not owed
-  again: like a spent repair, it is a console decision.
+  its own pull request. Its diff is decision records and nothing else, so its
+  review is the record review above and its repair rounds count under the record
+  cap (ADR-0007). A launched-and-failed reconciliation is not owed again: like a
+  spent repair, it is a console decision.
 - **A fresh pass owes the round again.** A fresh pass resets the tree to the
   commit the pass is born on, so the judgment, the write and the record commit
   are all statements about a tree that is gone. Every one of them is read as
@@ -187,13 +202,16 @@ While those findings were advisory they were noise in the ledger. Once every
 record finding blocks a ship they are a source of wrong blocks.
 
 The answer is not a better instruction to the same lenses. It is to stop asking
-them. The record lens carries six criteria and they are the whole of what a
-record is held to: the implemented parts read as standalone fact, every claim is
-true against the tree, unimplemented parts stay open sections, a divergence is
-named and never absorbed, every name and path and symbol the record cites
-exists, and the record reads as one document rather than a trail of amendments.
-A seat that is not asked to read a record for failure paths does not report
-them.
+them. The record lens carries one rule and six criteria under it, and together
+they are the whole of what a record is held to. The rule is that a record never
+conflicts with the code: everything it states is either true of the tree now, or
+marked as not yet built, and there is no third kind of sentence. The criteria
+divide that rule into what a seat can judge: the implemented parts read as
+standalone fact, every present-tense claim is true against the tree, a part the
+tree does not implement is stated as not implemented, a divergence is named and
+never absorbed, every name and path and symbol the record cites exists, and the
+record reads as one document rather than a trail of amendments. A seat that is
+not asked to read a record for failure paths does not report them.
 
 The criterion is load-bearing for the same reason. The verifier is briefed with
 the criterion the finding cites and with the list it comes from, and it refutes a
@@ -204,6 +222,39 @@ evidence. Taste is not a criterion.
 The lens is not project config and no seat spawns for it. A project cannot name
 it in `review.lenses`, and the diff is what puts it on a review: the whole diff
 is records, or the finding's own file is one.
+
+## Why the review reads the record and not the hunks
+
+A decision record is a set of claims about the code, and a claim it makes is
+true or false whether or not this change touched the sentence that makes it. A
+seat handed the diff alone does what it is handed: it reads the changed hunks,
+opens the code they name, and reports what it finds there. Nothing in that brief
+reaches a stale claim three paragraphs above the change.
+
+The ledger holds the cost of that. One reconciliation of four records spent four
+review cycles on two of them. Cycle one raised four confirmed findings, cycle
+two raised five, cycle three raised four of which two were errors the previous
+rewrite had introduced, and cycle four raised two more. Every round closed
+everything it was given, so the progress rule never fired, and what ended the
+pass was the round cap. The pass that replaced it then rewrote all four records
+with the fifteen findings in its brief, which is close to the read the first
+review should have made.
+
+Each cycle found the layer the round before it had just moved, because the diff
+it was given was the previous round's change. That is the shape of a review
+whose scope is the last edit rather than the document. Widening the diff does
+not answer it: the whole record was never in any diff. So the file is the scope,
+the diff says what moved, and one cycle raises the batch that four cycles used
+to raise one layer at a time.
+
+The code lenses keep the opposite rule, and keep it for the same reason. A code
+diff is the work, and a seat that widens into the repository around it reports
+on decisions nobody made this time. A record is not the work: it is a statement
+about the work, and the statement is judged whole.
+
+The verifier reads the record too. It is the seat that answers whether a record
+and a tree disagree, and a finding it refuted for citing a sentence outside the
+diff would refuse exactly the work this scope exists to buy.
 
 ## Why half the divergence rule is mechanical and half is not
 
@@ -302,3 +353,11 @@ If the ground-keyed carry proves wrong, give the reconciliation cycle the
 confirmation sweep every targeted cycle takes. Trigger: a defect that reaches
 the default branch through a layer the reconciliation cycle carried.
 Reversal cost: low, one condition, and it costs the full spectrum.
+
+If the whole-record scope proves noisy rather than complete, return the record
+review to the diff: the three briefs drop the file list and the duty to read the
+file, and the criteria stay as they are. Trigger: `record-refuted-share`
+breaching over a window whose reviews all read whole records, which says the
+seat is finding sentences to write about rather than claims the tree
+contradicts. Reversal cost: low, one block of lines in each of the three
+briefs.
