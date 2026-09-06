@@ -242,6 +242,30 @@ export const TRIPWIRE_METRICS = {
     defaultWindow: 5,
     defaultTriggers: ['verdict-rendered'],
   },
+  // The share of record findings the verifier refuted, across the runs holding
+  // the last N verdicts that carried one. Every finding on a decision record
+  // goes to the verifier and a confirmed one blocks the ship (ADR-0007), so a
+  // review seat that is noisy about documents now costs rounds. This is the
+  // reading that says so on the day it happens, and the answer is the record
+  // criteria and the brief, which is a prompt-only change.
+  //
+  // A window with no record finding in it is not eligible: a project whose
+  // stories touch no record says nothing about how the seat reads one.
+  'record-refuted-share': {
+    unit: 'verdicts',
+    defaultWindow: 10,
+    defaultTriggers: ['verdict-rendered'],
+  },
+  // Ships whose in-run record rewrite ended in a fallback, over the last N
+  // ships that were judged owed. A fallback is the rewrite giving up: the
+  // partial ships the records with findings open, the discard puts the tree
+  // back. Either way the ticket carries the work, which is the load this
+  // mechanism moved off the sweep in the first place (ADR-0026).
+  'reconcile-fallbacks-window': {
+    unit: 'ships',
+    defaultWindow: 10,
+    defaultTriggers: ['reconciliation-written', 'merged'],
+  },
 };
 
 export const BREACH_OPS = new Set(['>', '>=', '<', '<=']);
@@ -424,6 +448,34 @@ export function standingTripwires() {
         'read the reason each reconfigure carried: a pin replaced twice in ten ' +
         'runs says the launch is pinning a config its own runs cannot use',
     },
+    // The two readings of the record rule. One watches the review seat, the
+    // other watches whether the in-run rewrite can finish what the review
+    // raises. Half the findings refuted is a seat reading documents the way it
+    // reads code; the answer is the criteria and the brief.
+    {
+      id: 'record-refuted-share',
+      metric: 'record-refuted-share',
+      window: 10,
+      breach: { op: '>', value: 0.5 },
+      answer:
+        'tighten the record criteria and the review brief: more than half the ' +
+        'record findings were refuted against the tree, so the seat is noisy ' +
+        'about documents and every one of them costs a verifier item',
+    },
+    // Two fallbacks in ten owed ships. One is a story whose records were hard.
+    // Two says the in-run rewrite cannot finish what the reviews raise, and the
+    // tickets are carrying the load the rewrite was meant to take off them.
+    // This is also the trigger that returns the rewrite to the sweep.
+    {
+      id: 'reconcile-fallbacks',
+      metric: 'reconcile-fallbacks-window',
+      window: 10,
+      breach: { op: '>=', value: 2 },
+      answer:
+        'return the record rewrite to the sweep: the judgment stays where it ' +
+        'is, an owed judgment writes the ticket at the close, and the ' +
+        'repair-lane run behind the ticket does the rewrite',
+    },
   ];
 }
 
@@ -441,6 +493,12 @@ const FAST_PATH_METRICS = ['fast-path-escapes', 'fast-path-takes'];
 // run can be repinned. A counter that had to be opted into would be absent from
 // exactly the projects nobody is watching (ADR-0061, ADR-0062).
 const LEVER_METRICS = ['gate-acks-window', 'run-reconfigures-window'];
+
+// The two readings of the record rule. They are armed on every project for the
+// reason the lever counters are: the rule is on every project, it needs no
+// config line to run, and a counter that had to be opted into would be absent
+// from exactly the projects nobody is watching (ADR-0007, ADR-0026).
+const RECORD_METRICS = ['record-refuted-share', 'reconcile-fallbacks-window'];
 
 /**
  * The tripwires one project runs under: the registry it wrote, plus the
@@ -466,7 +524,7 @@ const LEVER_METRICS = ['gate-acks-window', 'run-reconfigures-window'];
  */
 export function armedTripwires(config) {
   const own = config?.tripwires ?? [];
-  const wanted = [...LEVER_METRICS];
+  const wanted = [...LEVER_METRICS, ...RECORD_METRICS];
   if (config?.gates?.fastPathShip === true) wanted.unshift(...FAST_PATH_METRICS);
   const missing = wanted.filter((metric) => !own.some((entry) => entry.metric === metric));
   if (missing.length === 0) return own;

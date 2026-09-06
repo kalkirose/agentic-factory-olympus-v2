@@ -20,6 +20,7 @@ import {
 } from '../telemetry/escapes.mjs';
 import { computeFrontier } from '../frontier/graph.mjs';
 import { ALL_LENSES } from '../lanes/lenses.mjs';
+import { RECORD_LAYER_RED } from '../ledger/registry.mjs';
 
 // Mirrors the check watcher's green set; a red duration never measures the
 // green critical path.
@@ -369,6 +370,12 @@ const IMPLEMENTATIONS = {
   'allowlist-findings-window': async ({ paths, project, window }) =>
     allowlistFindingsReading(paths, project, { window }),
 
+  'record-refuted-share': async ({ paths, project, window }) =>
+    recordRefutedReading(paths, project, { window }),
+
+  'reconcile-fallbacks-window': async ({ paths, project, window }) =>
+    reconcileFallbacksReading(paths, project, { window }),
+
   'frontier-width': async ({ paths, project, params, readSource }) => {
     const source = await readSource(project);
     if (!source) return { value: null, eligible: false, detail: {} };
@@ -577,6 +584,105 @@ export function allowlistFindingsReading(paths, project, { window = 5, runs } = 
       findings: found.length,
       allowlists: [...touched].sort(),
       runs: [...new Set(found.map((f) => f.runId))],
+    },
+  };
+}
+
+/**
+ * The share of record findings the verifier refuted, across the runs holding
+ * the last `window` verdicts that carried a record finding.
+ *
+ * Every finding on a decision record reaches the verifier, at every grade, and
+ * a confirmed one blocks the ship (ADR-0007). The guard that keeps a wrong
+ * remark from blocking is the verifier itself, and this is the reading of how
+ * often it has to use it. Above a half the review seat is reading documents the
+ * way it reads code, and the answer is the record criteria and the brief.
+ *
+ * The window is the verdicts that hold a record finding, not every verdict: a
+ * project whose stories touch no record says nothing about how its seat reads
+ * one, and a share over nothing is not a reading about anything.
+ */
+export function recordRefutedReading(paths, project, { window = 10, runs } = {}) {
+  const all = runs ?? projectRuns(paths, project);
+  const carrying = [];
+  for (const { runId, events } of all) {
+    for (const e of events) {
+      if (e.event !== 'verdict-rendered') continue;
+      const records = events.filter(
+        (f) => f.event === 'finding' && f.record === true && f.cycle === e.cycle,
+      );
+      if (records.length > 0) carrying.push({ ts: e.ts, runId, cycle: e.cycle });
+    }
+  }
+  carrying.sort(byTs);
+  const inWindow = carrying.slice(-window);
+  const keys = new Set(inWindow.map((v) => `${v.runId}#${v.cycle}`));
+  let raised = 0;
+  let refuted = 0;
+  const runIds = new Set();
+  for (const { runId, events } of all) {
+    for (const e of events) {
+      if (e.event !== 'finding' || e.record !== true) continue;
+      if (!keys.has(`${runId}#${e.cycle}`)) continue;
+      raised += 1;
+      if (e.confirmed !== true) refuted += 1;
+      runIds.add(runId);
+    }
+  }
+  return {
+    value: raised > 0 ? round(refuted / raised) : null,
+    eligible: raised > 0,
+    detail: {
+      verdicts: inWindow.length,
+      findings: raised,
+      refuted,
+      confirmed: raised - refuted,
+      runs: [...runIds],
+    },
+  };
+}
+
+/**
+ * Ships whose in-run record rewrite ended in a fallback, over the last `window`
+ * ships of the project that were judged owed.
+ *
+ * Both fallbacks count and they count the same. The partial ships the records
+ * with confirmed findings still open and leaves a ticket for them; the discard
+ * puts the tree back to the certified sha and leaves a ticket for the whole
+ * rewrite. Either way the work went to a ticket, which is the load the in-run
+ * rewrite was built to take off the sweep (ADR-0026).
+ *
+ * The window is the owed ships. A ship whose records were not owed asked the
+ * rewrite nothing, and counting it would read a quiet quarter as a healthy one.
+ */
+export function reconcileFallbacksReading(paths, project, { window = 10, runs } = {}) {
+  const owed = [];
+  for (const { runId, events } of runs ?? projectRuns(paths, project)) {
+    const merged = events.find((e) => e.event === 'merged');
+    if (!merged) continue;
+    const judged = events.find(
+      (e) => e.event === 'reconciliation-judged' && e.ok === true && e.owed === true,
+    );
+    if (!judged) continue;
+    const fallback = events.find(
+      (e) =>
+        e.event === 'reconciliation-written' &&
+        (e.partial === true || (e.ok === false && e.cause === RECORD_LAYER_RED)),
+    );
+    owed.push({ runId, ts: merged.ts, fallback: fallback?.partial === true ? 'partial' : fallback ? 'discard' : null });
+  }
+  owed.sort(byTs);
+  const inWindow = owed.slice(-window);
+  const fell = inWindow.filter((s) => s.fallback !== null);
+  return {
+    value: inWindow.length > 0 ? fell.length : null,
+    eligible: inWindow.length > 0,
+    detail: {
+      ships: inWindow.length,
+      fallbacks: fell.length,
+      partial: fell.filter((s) => s.fallback === 'partial').length,
+      discarded: fell.filter((s) => s.fallback === 'discard').length,
+      runs: fell.map((s) => s.runId),
     },
   };
 }
@@ -925,14 +1031,25 @@ function verdictWindow(runs, window) {
   };
 }
 
-/** Confirmed findings per lens across the runs holding the last N verdicts. */
+/**
+ * Confirmed findings per lens across the runs holding the last N verdicts.
+ *
+ * Record findings are excluded. The reading behind them asks whether a lens
+ * pays for the seat it rides, and it answers with confirmations; a finding on a
+ * decision record is a different population and the record rule makes it
+ * numerous, because every grade of it is verified (ADR-0007). Counted together,
+ * documentation findings could argue a cut lens back onto the panel. They have
+ * their own reading in `record-refuted-share`.
+ */
 function collectYield(paths, project, window) {
   const runs = listRunEvents(paths, { project });
   const { verdicts, runIds } = verdictWindow(runs, window);
   const byLens = Object.fromEntries(ALL_LENSES.map((lens) => [lens, 0]));
   for (const { runId, events } of runs) {
     if (!runIds.has(runId)) continue;
-    for (const f of events.filter((e) => e.event === 'finding' && e.confirmed === true)) {
+    for (const f of events.filter(
+      (e) => e.event === 'finding' && e.confirmed === true && e.record !== true,
+    )) {
       byLens[f.lens] = (byLens[f.lens] ?? 0) + 1;
     }
   }
