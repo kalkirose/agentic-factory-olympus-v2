@@ -10,7 +10,9 @@
 // per implementation pass; generalist review on repair diffs) → the
 // confirmation sweep, when the cycle came out clean on a targeted spectrum →
 // the verdict record. The response ladder acts on the rendered verdict:
-// repair rounds (progress-gated, cap 3), suite-defect re-freeze, env/harness
+// repair rounds (progress-gated, capped by the class of the diff the render
+// judged: the code cap of 3, or `gates.reconcileRounds` where the diff is
+// decision records and nothing else), suite-defect re-freeze, env/harness
 // operational fixes, one fresh pass per run, and the second-stall escalation.
 //
 // A red over the reconciliation commit takes an arm of its own. The findings
@@ -110,7 +112,7 @@ import { askProbe } from './probes.mjs';
 import { configuredGroups } from './schedule.mjs';
 import { PARTS_ENV, partPlan, carryTally, confirmationTally } from './parts.mjs';
 import { substrateGate } from './substrate.mjs';
-import { furyRound, generalistReview } from './review.mjs';
+import { furyRound, generalistReview, recordScope } from './review.mjs';
 import { panelLenses } from './lenses.mjs';
 import {
   WRITE_SEAT,
@@ -176,6 +178,32 @@ import {
 
 const REPAIR_CAP = 3;
 const TRIAGE_CLASSES = ['code-defect', 'suite-defect', 'env', 'harness'];
+
+/**
+ * The cap the repair arm counts a pass's rounds under, by the class of the diff
+ * the render judged.
+ *
+ * A repair whose diff is decision records and nothing else is the work the
+ * record cap was written for. It is one seat and the layers a record diff
+ * reaches, a document takes several rounds to settle, and the route behind the
+ * cap is a fresh pass over code a verdict already certified. Every
+ * reconciliation of a story that shipped before the in-run rewrite comes back
+ * as a repair-lane ticket, so the code cap of three was the cap on exactly the
+ * runs that clean the oldest records. So the arm asks the derivation the review
+ * asks: is every file of this diff under `repo.recordPaths`. Where it is, the
+ * cap is `gates.reconcileRounds`; a mixed diff keeps the code cap (ADR-0007).
+ *
+ * The diff is the last implementation's own, which is the diff the review of
+ * this render read. A range git cannot answer takes the code cap: the narrower
+ * of the two is where a doubt belongs.
+ */
+async function repairCap(base, events) {
+  const impl = lastImplementation(events);
+  if (!impl?.baseSha || !impl?.sha) return REPAIR_CAP;
+  const files = await changedInRange(base.worktree, impl.baseSha, impl.sha).catch(() => null);
+  if (files === null || !recordScope(base, { diffFiles: files }).only) return REPAIR_CAP;
+  return base.config?.gates?.reconcileRounds ?? DEFAULT_RECONCILE_ROUNDS;
+}
 
 // The closed name a harness defect met at a provisioning gate is counted
 // under. It is the finding's class, deliberately: the triage seat classes the
@@ -498,6 +526,7 @@ async function resumeInterrupted(ctx, base, mode) {
     round: repairRounds(events, pass) + 1,
     open: code,
     record: readJson(last.record),
+    cap: await repairCap(base, events),
   });
   return outcome.fail ?? null;
 }
@@ -1889,10 +1918,11 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
   // the round that closes nothing is what buys the pass (ADR-0007).
   if (code.length > 0 || suiteStalled) {
     const pass = currentPass(events);
+    const cap = await repairCap(base, events);
     const rounds = repairRounds(events, pass);
     const grants = answerCount(events, 'second-stall', 'repair-again');
     const noProgress = repairStalled(events, renders, last);
-    const capExhausted = rounds >= REPAIR_CAP + grants;
+    const capExhausted = rounds >= cap + grants;
     if (noProgress || capExhausted || suiteStalled) {
       const reason = noProgress
         ? 'no-progress'
@@ -1944,6 +1974,7 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
         round: rounds + 1,
         open: code,
         record: readJson(last.record),
+        cap,
       });
       if (outcome.fail) return outcome.fail;
       return null;
@@ -1953,6 +1984,7 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
       round: rounds + 1,
       open: code,
       record: readJson(last.record),
+      cap,
     });
     if (outcome.fail) return outcome.fail;
     acted = true;
@@ -2394,7 +2426,7 @@ async function reconcileArm(ctx, base, { events, renders, last, open }) {
     }
     return reconcileFallbackArm(ctx, base, { events, last, open });
   }
-  return reconcileCorrection(ctx, base, { pass, round: rounds + 1, open });
+  return reconcileCorrection(ctx, base, { pass, round: rounds + 1, open, cap });
 }
 
 /**
@@ -2414,7 +2446,7 @@ async function reconcileArm(ctx, base, { events, renders, last, open }) {
  * existed. A seat that never delivered a report is the other shape, and that
  * one parks (ADR-0026).
  */
-async function reconcileCorrection(ctx, base, { pass, round, open }) {
+async function reconcileCorrection(ctx, base, { pass, round, open, cap }) {
   const events = runEvents(ctx);
   const judged = sinceFreshPass(
     events,
@@ -2481,6 +2513,9 @@ async function reconcileCorrection(ctx, base, { pass, round, open }) {
     round,
     phase: 'reconcile',
     seat: WRITE_SEAT,
+    // The record cap, on the round it bounds, for the reason every other round
+    // carries the number it counts against.
+    cap,
     ...(sha !== baseSha && { sha }),
     openBefore: open.map((f) => f.id),
   });
@@ -2553,7 +2588,7 @@ function lastRender(events) {
   return null;
 }
 
-async function repairRound(ctx, base, mode, { pass, round, open, record }) {
+async function repairRound(ctx, base, mode, { pass, round, open, record, cap = REPAIR_CAP }) {
   const { recaptured } = recordedTakeBacks(runEvents(ctx));
   const result = await runDevSeat(ctx, base, mode, {
     seat: 'repair-dev',
@@ -2564,6 +2599,11 @@ async function repairRound(ctx, base, mode, { pass, round, open, record }) {
     actor: ACTOR,
     pass,
     round,
+    // The cap this round counts against. Two of them are in force in this lane
+    // and the diff decides which, so a reader of the ledger who asks why a run
+    // stalled at four rounds or at six reads the answer off the round itself
+    // rather than re-deriving a diff class the run no longer holds (ADR-0007).
+    cap,
     sha: result.sha,
     openBefore: open.map((f) => f.id),
   });

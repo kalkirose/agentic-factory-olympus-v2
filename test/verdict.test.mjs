@@ -3463,10 +3463,153 @@ test('a confirmed record finding in the repair lane takes an ordinary repair rou
   assert.equal(renders.at(-1).verdict, 'green');
 
   // The whole diff is records, so the seat read the record criteria and no code
-  // criterion at all.
+  // criterion at all, and it was told to read each record whole.
   const brief = fx.calls.find((c) => c.seat === 'generalist-review').prompt;
   assert.ok(brief.includes('Every file in the diff below is a decision record.'), brief);
+  assert.ok(brief.includes(`- ${ADR}`), brief);
+  assert.ok(brief.includes('Read every one of those files whole, from the working tree'), brief);
   assert.ok(!brief.includes('- operational:'), brief);
+  // One round of five, and the round says which cap it counted against.
+  assert.equal(rounds[0].cap, 5);
+});
+
+// -- the cap a repair round counts against (ADR-0007) -------------------------
+//
+// Every reconciliation of a story that shipped before the in-run rewrite comes
+// back as a repair-lane ticket, so a record-only repair used to count against
+// the code cap of three. A record is settled by reading a document and
+// rewriting it, and three rounds ended those runs on the cap rather than on a
+// clean record. So the arm asks the derivation the review asks, and a diff of
+// decision records and nothing else takes `gates.reconcileRounds`.
+
+const CAP_ADR = 'docs/adr/0001-doubling.md';
+const CAP_ADR_TEXT = '# ADR-0001: Doubling\n\nStatus: accepted\n\nf(x) doubles x.\n';
+
+// One fresh finding per cycle, each worded differently. The progress rule keys
+// on finding identity, and that identity normalizes numerals away: a round that
+// closed "claim 1" while the review raised "claim 2" would read as a round that
+// closed nothing, and the stall would be the progress rule and not the cap.
+const CAP_CLAIMS = ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta'];
+
+/**
+ * The seats of a repair-lane run whose review raises one confirmed record
+ * finding per cycle until `claims` runs out, and whose every commit rewrites
+ * the same record. `alsoCode` puts a source file beside the record in every
+ * commit, which is what makes the diff mixed.
+ */
+function capRepairSeats({ claims, alsoCode = false }) {
+  let writes = 0;
+  let reviews = 0;
+  const files = () => {
+    writes += 1;
+    return {
+      [CAP_ADR]: `${CAP_ADR_TEXT}\nrewrite ${writes}\n`,
+      ...(alsoCode && { 'src/base.mjs': `export const base = ${writes + 1};\n` }),
+    };
+  };
+  return {
+    dev: () => ({ files: files(), report: { summary: 'the records, rewritten' } }),
+    'repair-dev': () => ({ files: files(), report: { summary: 'the finding, answered' } }),
+    'generalist-review': () => {
+      const claim = claims[reviews];
+      reviews += 1;
+      return {
+        report: {
+          findings: claim
+            ? [
+                {
+                  lens: 'record',
+                  severity: 'MED',
+                  finding: `the record states a ${claim} the tree does not implement`,
+                  evidence: `src/base.mjs, on the ${claim} claim`,
+                  file: CAP_ADR,
+                  criterion: 'truth',
+                },
+              ]
+            : [],
+          summary: 'the record, against the tree',
+        },
+      };
+    },
+    'fury-verifier': verifierSeat(({ mode }) => ({
+      verdict: mode === 'confirm' ? 'confirmed' : 'resolved',
+    })),
+  };
+}
+
+function capFixture(t, { claims, alsoCode = false }) {
+  return verdictFixture(t, {
+    seats: capRepairSeats({ claims, alsoCode }),
+    gates: [{ name: 'lint', command: 'lint' }],
+    commands: { lint: GREEN_CMD },
+    // A repair-lane scenario: the project declares no story lane, so the only
+    // red this run can render is the one the review raises.
+    laneConfig: {},
+    originFiles: {
+      [CAP_ADR]: CAP_ADR_TEXT,
+      'tickets/t1.md': '## Defect\n\nThe decision records do not state what the tree does.\n',
+    },
+  });
+}
+
+test('a record-only repair stalls on the sixth round, under the record cap', async (t) => {
+  const fx = capFixture(t, { claims: CAP_CLAIMS });
+  const { runId } = await fx.launchFromConsole({ lane: 'repair', ticket: 'tickets/t1.md' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+
+  // Five rounds, each one carrying the cap it counted against, and the sixth
+  // render is the stall.
+  const rounds = events.filter((e) => e.event === 'repair-round');
+  assert.deepEqual(
+    rounds.map((e) => [e.round, e.cap]),
+    [
+      [1, 5],
+      [2, 5],
+      [3, 5],
+      [4, 5],
+      [5, 5],
+    ],
+  );
+  const stall = events.find((e) => e.event === 'stall');
+  assert.equal(stall.reason, 'cap-exhausted');
+  assert.equal(stall.pass, 1);
+  const reds = events.filter((e) => e.event === 'verdict-rendered' && e.verdict === 'red');
+  assert.equal(reds.length, 6);
+  // The seat does not change with the cap: the fix seat of this lane wrote the
+  // records, so the reconciliation write seat is not dispatched here.
+  assert.ok(!fx.calls.some((c) => c.seat === 'reconcile-write'));
+  assert.equal(events.filter((e) => e.event === 'repair-round' && e.phase === 'reconcile').length, 0);
+  const fresh = events.find((e) => e.event === 'fresh-pass');
+  assert.equal(fresh.trigger, 'cap-exhausted');
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').at(-1).verdict, 'green');
+});
+
+test('a mixed repair diff stalls on the fourth round, under the code cap', async (t) => {
+  const fx = capFixture(t, { claims: CAP_CLAIMS.slice(0, 4), alsoCode: true });
+  const { runId } = await fx.launchFromConsole({ lane: 'repair', ticket: 'tickets/t1.md' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+
+  const rounds = events.filter((e) => e.event === 'repair-round');
+  assert.deepEqual(
+    rounds.map((e) => [e.round, e.cap]),
+    [
+      [1, 3],
+      [2, 3],
+      [3, 3],
+    ],
+  );
+  const stall = events.find((e) => e.event === 'stall');
+  assert.equal(stall.reason, 'cap-exhausted');
+  const reds = events.filter((e) => e.event === 'verdict-rendered' && e.verdict === 'red');
+  assert.equal(reds.length, 4);
+  // The diff holds a source file, so the code lenses read it and the record
+  // lens rides beside them.
+  const brief = fx.calls.find((c) => c.seat === 'generalist-review').prompt;
+  assert.ok(brief.includes('- record: the decision records this diff changes'), brief);
+  assert.ok(brief.includes('That rule is about the code files'), brief);
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').at(-1).verdict, 'green');
 });
 
 // -- the diff-policy gate at candidate capture -------------------------------
