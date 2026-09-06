@@ -101,6 +101,7 @@ test('the vocabulary says which record carries each kind, and the two sets are d
       'deterministic-red',
       'pr-label-missing',
       'reconciliation-lost',
+      'record-finding-shipped',
       'resource-exhaustion',
       'triage-log-missing',
     ],
