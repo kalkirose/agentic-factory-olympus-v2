@@ -299,6 +299,12 @@ export const RUN_EVENTS = new Set([
   // more cycle is the cheapest way to find out — but never silent, because a
   // cycle the harness granted itself is a cycle somebody paid for (ADR-0022).
   'cycle-retry',
+  // One round of the repair arm. `cap` is the number that round counted
+  // against: the code cap, or `gates.reconcileRounds` where the diff the render
+  // judged is decision records and nothing else. Two caps are in force in this
+  // lane and the diff decides which, so a reader who asks why a run stalled at
+  // four rounds or at six reads the answer off the round rather than re-derives
+  // a diff class the run no longer holds (ADR-0007).
   'repair-round',
   // The run stopped moving on its own findings, and the reason says how: a
   // repair round that closed none of them (`no-progress`), a suite defect that

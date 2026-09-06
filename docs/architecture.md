@@ -616,7 +616,8 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   answered; the stamp the loop leaves before its park tells them apart.
   Every bought invocation carries the failure evidence in its brief.
 - **Response ladder.** Code-defect → repair round on the candidate tree
-  (progress-gated; cap 3). Stall → one fresh pass per run,
+  (progress-gated; cap 3, or `gates.reconcileRounds` where the diff is decision
+  records and nothing else). Stall → one fresh pass per run,
   briefed by born spec + frozen suite + stall brief, never the prior tree; a
   second stall escalates. Suite-defect → re-freeze step by the suite seat at
   a new SHA. Env/harness → operational fix by an orchestrator job; a CI

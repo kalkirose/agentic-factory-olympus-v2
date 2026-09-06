@@ -71,13 +71,16 @@ export const DEFAULT_EXCERPT_CHARS = 12_000;
 export const DEFAULT_RECORD_PATHS = Object.freeze(['docs/adr']);
 
 /**
- * How many corrective record rewrites one implementation pass may spend.
+ * How many rounds a repair over decision records may spend: the corrective
+ * record rewrites of one implementation pass, and the repair rounds of a run
+ * whose diff is decision records and nothing else.
  *
  * Five, and it is not the code repair cap. A record round is one seat and the
  * layers the record diff reaches, which on a project with declared grounds is
- * one layer; the route behind the cap is a whole repair run with a full
- * spectrum. So five rounds cost less than one fallback, and the progress rule
- * stops a round that closes nothing at once (ADR-0007).
+ * one layer; what stands behind the cap is a whole repair run with a full
+ * spectrum, or a fresh pass over certified code. So five rounds cost less than
+ * one of those endings, and the progress rule stops a round that closes nothing
+ * at once (ADR-0007).
  */
 export const DEFAULT_RECONCILE_ROUNDS = 5;
 
@@ -95,9 +98,10 @@ export function defaultProjectConfig() {
     repo: {
       testPaths: [],
       uiPaths: [],
-      // The tree the project keeps its decision records in. It decides two
-      // things and nothing else: which review findings are record findings, and
-      // which diffs are read through the record lens (ADR-0007, ADR-0026).
+      // The tree the project keeps its decision records in. It decides three
+      // things and nothing else: which review findings are record findings,
+      // which diffs are read through the record lens, and which cap a repair
+      // round counts against (ADR-0007, ADR-0026).
       // Neither the reconciliation judge nor the write seat's containment check
       // reads it. Discovery still decides which records get rewritten and where
       // the seat may write.
@@ -132,9 +136,10 @@ export function defaultProjectConfig() {
     // is what makes `allowlist-findings-window` countable. Absent, no capture
     // stamps an addition, so that window holds none and the reading is not
     // eligible — quiet rather than a standing zero (ADR-0010).
-    // `reconcileRounds` is how many corrective record rewrites one pass may
-    // spend; absent is DEFAULT_RECONCILE_ROUNDS, and the code repair cap is a
-    // different number (ADR-0007).
+    // `reconcileRounds` is the cap on a round over decision records: the
+    // corrective record rewrites one pass may spend, and the repair rounds of a
+    // record-only diff. Absent is DEFAULT_RECONCILE_ROUNDS, and the code repair
+    // cap is a different number (ADR-0007).
     gates: { tier1: [] },
     // one convention per line; prompt assembly consumes these
     conventions: [],
@@ -402,10 +407,11 @@ function validateGates(gates, commands, err, launch = false) {
   if (gates.proofDebt !== undefined && typeof gates.proofDebt !== 'boolean') {
     err('gates.proofDebt', 'must be a boolean');
   }
-  // How many corrective record rewrites one pass may spend (ADR-0007). It is
-  // the reconciliation's own cap and it neither shares nor moves the code
-  // repair cap: the two work products have different seats and different
-  // costs. Optional and defaulted, so no project owes a line for it.
+  // The cap on a round over decision records (ADR-0007): the corrective record
+  // rewrites one pass may spend, and the repair rounds of a diff that holds
+  // records and nothing else. It neither shares nor moves the code repair cap:
+  // the two work products have different seats and different costs. Optional
+  // and defaulted, so no project owes a line for it.
   if (gates.reconcileRounds !== undefined) {
     if (!Number.isInteger(gates.reconcileRounds) || gates.reconcileRounds < 1) {
       err('gates.reconcileRounds', 'must be a positive integer count of corrective record rounds');

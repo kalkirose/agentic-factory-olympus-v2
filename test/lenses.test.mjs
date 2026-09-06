@@ -7,6 +7,7 @@ import {
   RECORD_CRITERIA,
   RECORD_CRITERION_KEYS,
   RECORD_LENS,
+  RECORD_RULE,
   SECURITY_DIMENSIONS,
   furyPanel,
   panelLenses,
@@ -75,7 +76,31 @@ test('the record criteria are six keyed lines, and each line opens with its key'
   for (const key of RECORD_CRITERION_KEYS) {
     assert.ok(RECORD_CRITERIA[key].startsWith(`${key}: `), key);
   }
+  // The rule opens the table and the six keyed lines follow it.
   const lines = recordCriteriaLines();
-  assert.equal(lines.length, RECORD_CRITERION_KEYS.length);
-  for (const line of lines) assert.ok(line.startsWith('- '), line);
+  assert.equal(lines[0], RECORD_RULE);
+  assert.equal(lines.length, RECORD_CRITERION_KEYS.length + 1);
+  for (const line of lines.slice(1)) assert.ok(line.startsWith('- '), line);
+});
+
+// The rule the criteria serve. A seat given six keys and no rule grades each
+// sentence against the nearest key; the rule is what says a sentence about work
+// nobody has done yet is legal, and that the same sentence as present fact is
+// not (ADR-0038).
+test('the criteria open with the rule that a record never conflicts with the code', () => {
+  assert.ok(RECORD_RULE.includes('A record never conflicts with the code.'));
+  assert.ok(RECORD_RULE.includes('true of the tree now, or marked as not yet built'));
+  assert.ok(RECORD_RULE.includes('There is no third kind of sentence.'));
+  // `truth` is about the present tense, and it holds over the whole record: an
+  // unchanged sentence the tree contradicts fails it exactly as a changed one
+  // does (ADR-0026).
+  assert.ok(RECORD_CRITERIA.truth.includes('every present-tense claim'));
+  assert.ok(
+    RECORD_CRITERIA.truth.includes('whether the sentence changed in this diff or not'),
+    RECORD_CRITERIA.truth,
+  );
+  // And `open` is the other half of the rule: a future part is stated as one,
+  // and a future part written as present fact is a `truth` defect.
+  assert.ok(RECORD_CRITERIA.open.includes('stated as not implemented'));
+  assert.ok(RECORD_CRITERIA.open.includes('fails truth, not open'), RECORD_CRITERIA.open);
 });

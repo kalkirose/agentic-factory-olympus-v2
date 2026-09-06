@@ -25,6 +25,7 @@ import {
   LENS_CRITERIA,
   RECORD_CRITERIA,
   RECORD_CRITERION_KEYS,
+  RECORD_RULE,
 } from '../src/lanes/lenses.mjs';
 import { scaffoldHome, reviewDiffPath, runLedgerPath } from '../src/daemon/home.mjs';
 import { openRunStore } from '../src/telemetry/stores.mjs';
@@ -725,6 +726,203 @@ test('the verifier is told the criterion a record finding cites and the list it 
   }
   assert.ok(brief.includes('refuted for want of evidence'), brief);
   assert.ok(brief.includes('Taste is not a criterion.'), brief);
+});
+
+// -- a record review reads the whole record -----------------------------------
+//
+// A record is a set of claims about the code, and it is judged as a document.
+// A seat handed the changed hunks alone reads the hunks and never sees a stale
+// claim three paragraphs above them. One live reconciliation spent four review
+// cycles that way: every cycle raised four or five confirmed findings on the
+// layer the round before it had just moved, every round closed everything it
+// was given, and what ended the pass was the round cap. So the brief names each
+// record, says to read it whole from the working tree, and says the diff is
+// context and not the boundary (ADR-0026).
+
+const OTHER_RECORD = 'docs/adr/0002-other.md';
+const READ_WHOLE = 'Read every one of those files whole, from the working tree, before you write a finding.';
+const JUDGE_EVERY = 'Judge every claim in each record, changed in this diff or not.';
+const DIFF_ONLY = 'Judge the diff only. Do not fix anything; do not widen into unchanged code.';
+
+test('the record-only brief names each record, says to read it whole, and calls the diff context', async (t) => {
+  const fx = seatsFixture(t, () => ({ findings: [], summary: 'the records stand' }));
+
+  await generalistReview(fx.ctx, RECORD_BASE, {
+    cycle: 1,
+    diff: excerpted(),
+    priorConfirmed: [],
+    diffFiles: [RECORD_FILE, OTHER_RECORD],
+  });
+
+  const brief = fx.ctx.briefs.find((b) => b.seat === 'generalist-review').roleBlock;
+  assert.ok(brief.includes('The decision records this change moved:'), brief);
+  assert.ok(brief.includes(`- ${RECORD_FILE}`), brief);
+  assert.ok(brief.includes(`- ${OTHER_RECORD}`), brief);
+  assert.ok(brief.includes(READ_WHOLE), brief);
+  assert.ok(brief.includes(JUDGE_EVERY), brief);
+  assert.ok(brief.includes('It is context, and it is not the boundary of the review'), brief);
+  assert.ok(brief.includes('a finding may cite any'), brief);
+  // The rule the six criteria serve opens the table.
+  assert.ok(brief.includes(RECORD_RULE), brief);
+  // And what the record rule already asked for stays asked for.
+  assert.ok(brief.includes('Cite the sentence of the record your finding is about'), brief);
+});
+
+// The reconciliation cycle knows its records from its own diff. The write seat's
+// containment check refused every other file, so a project whose record paths
+// name another tree still gets its records named to the seat.
+test('a reconciliation review names the records its own diff moved, whatever the path list says', async (t) => {
+  const fx = seatsFixture(t, () => ({ findings: [], summary: 'clean' }));
+
+  await generalistReview(
+    fx.ctx,
+    { ...RECORD_BASE, recordPaths: ['somewhere/else'] },
+    {
+      cycle: 1,
+      diff: excerpted(),
+      priorConfirmed: [],
+      diffFiles: ['docs/records/0001-doubling.md'],
+      reconcile: true,
+    },
+  );
+
+  const brief = fx.ctx.briefs.find((b) => b.seat === 'generalist-review').roleBlock;
+  assert.ok(brief.includes('- docs/records/0001-doubling.md'), brief);
+  assert.ok(brief.includes(READ_WHOLE), brief);
+});
+
+// A cycle whose diff read failed knows no path. The duty is stated against the
+// diff instead, because a brief that named no file and asked for none would
+// leave the seat with the hunks again.
+test('a record review that knows no path still asks for the whole record', async (t) => {
+  const fx = seatsFixture(t, () => ({ findings: [], summary: 'clean' }));
+
+  await generalistReview(fx.ctx, RECORD_BASE, {
+    cycle: 1,
+    diff: excerpted(),
+    priorConfirmed: [],
+    diffFiles: null,
+    reconcile: true,
+  });
+
+  const brief = fx.ctx.briefs.find((b) => b.seat === 'generalist-review').roleBlock;
+  assert.ok(!brief.includes('The decision records this change moved:'), brief);
+  assert.ok(
+    brief.includes(
+      'Read every decision record in the diff whole, from the working tree, before you write a finding.',
+    ),
+    brief,
+  );
+  assert.ok(brief.includes(JUDGE_EVERY), brief);
+});
+
+// The mixed diff. "Do not widen into unchanged code" is right for a code lens
+// and wrong for a record, so the sentence stays and says which files it is
+// about.
+test('a mixed brief reads the records whole and keeps "judge the diff only" for the code', async (t) => {
+  const fx = seatsFixture(t, () => ({ findings: [], summary: 'clean' }));
+
+  await generalistReview(fx.ctx, RECORD_BASE, {
+    cycle: 1,
+    diff: excerpted(),
+    priorConfirmed: [],
+    diffFiles: [RECORD_FILE, 'src/pay.mjs'],
+  });
+
+  const brief = fx.ctx.briefs.find((b) => b.seat === 'generalist-review').roleBlock;
+  assert.ok(brief.includes(DIFF_ONLY), brief);
+  assert.ok(
+    brief.includes(
+      `${DIFF_ONLY} That rule is about the code files: a decision record in this diff is read ` +
+        'whole, from the working tree, and judged whole.',
+    ),
+    brief,
+  );
+  assert.ok(brief.includes(READ_WHOLE), brief);
+  assert.ok(brief.includes(JUDGE_EVERY), brief);
+  assert.ok(brief.includes(`- ${RECORD_FILE}`), brief);
+});
+
+// A diff with no record in it is judged exactly as it was: the qualification
+// rides the record files and nothing else.
+test('a code-only brief keeps the plain scope line and asks for no record', async (t) => {
+  const fx = seatsFixture(t, () => ({ findings: [], summary: 'clean' }));
+
+  await generalistReview(fx.ctx, RECORD_BASE, {
+    cycle: 1,
+    diff: excerpted(),
+    priorConfirmed: [],
+    diffFiles: ['src/pay.mjs'],
+  });
+
+  const brief = fx.ctx.briefs.find((b) => b.seat === 'generalist-review').roleBlock;
+  assert.ok(brief.includes(DIFF_ONLY), brief);
+  assert.ok(!brief.includes('That rule is about the code files'), brief);
+  assert.ok(!brief.includes(READ_WHOLE), brief);
+});
+
+// Every Fury seat of a mixed round carries the record lens, so every one of
+// them takes the same qualification.
+test('every Fury lens seat on a mixed diff is told to read the record whole', async (t) => {
+  const fx = seatsFixture(t, () => ({ findings: [], summary: 'clean' }));
+
+  await furyRound(fx.ctx, RECORD_BASE, {
+    cycle: 1,
+    diff: excerpted(),
+    diffFiles: [RECORD_FILE, 'src/pay.mjs'],
+  });
+
+  const lensSeats = fx.ctx.briefs.filter(
+    (b) => b.seat.startsWith('fury-') && b.seat !== 'fury-verifier',
+  );
+  assert.ok(lensSeats.length > 0, 'the panel seated nobody');
+  for (const { seat, roleBlock } of lensSeats) {
+    assert.ok(roleBlock.includes('That rule is about the code files'), seat);
+    assert.ok(roleBlock.includes(READ_WHOLE), seat);
+    assert.ok(roleBlock.includes(`- ${RECORD_FILE}`), seat);
+  }
+});
+
+// The verifier is given the scope the review had. A finding about a sentence
+// the diff never moved is an ordinary finding, and a seat that refuted it for
+// sitting outside the diff would refuse the work the review exists to do.
+test('the verifier is given the record path and told to read the record whole', async (t) => {
+  const review = {
+    findings: [
+      {
+        lens: 'record',
+        severity: 'LOW',
+        finding: 'the record names a fallback path the tree removed',
+        evidence: 'src/image.mjs',
+        file: RECORD_FILE,
+        criterion: 'truth',
+      },
+    ],
+    summary: 'one, on a sentence this diff never touched',
+  };
+  const fx = seatsFixture(t, ({ seat, roleBlock }) =>
+    seat === 'fury-verifier' ? verdicts({ 'new-1': 'confirmed' })({ roleBlock }) : review,
+  );
+
+  await generalistReview(fx.ctx, RECORD_BASE, {
+    cycle: 1,
+    diff: excerpted(),
+    priorConfirmed: [],
+    diffFiles: [RECORD_FILE],
+  });
+
+  const brief = fx.ctx.briefs.find((b) => b.seat === 'fury-verifier').roleBlock;
+  assert.ok(brief.includes('The records those items are about:'), brief);
+  assert.ok(brief.includes(`- ${RECORD_FILE}`), brief);
+  assert.ok(
+    brief.includes(
+      'Read each of those records whole, from the working tree, before you confirm or refute',
+    ),
+    brief,
+  );
+  assert.ok(brief.includes('is as confirmable as a finding about'), brief);
+  // The item line carries the record beside the criterion it cites.
+  assert.ok(brief.includes(`[record: ${RECORD_FILE}] [criterion: truth]`), brief);
 });
 
 // The Fury fan-out is the panel over code. A pass whose whole diff is records

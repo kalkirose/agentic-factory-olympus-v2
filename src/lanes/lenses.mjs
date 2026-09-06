@@ -32,13 +32,24 @@ export const RECORD_LENS = 'record';
  * evidence does not reach its key is refuted. Data only, and closed like the
  * lens vocabulary beside it: a criterion enters by a recorded decision.
  *
+ * Four briefs state it: the record-only review, the record lens on a mixed
+ * diff, the verifier over a record item, and the seat that writes the records.
+ * The writer is a reader because it is judged against this list, and a
+ * paraphrase in its brief would drift from the list the review holds it to
+ * (ADR-0038).
+ *
  * The list is the harness's own. A project rule about record text is that
  * project's gate, not a criterion here.
  */
 export const RECORD_CRITERIA = Object.freeze({
   fact: 'fact: implemented parts read as standalone present-tense fact; the rationale and the fallback paths stay.',
-  truth: 'truth: every claim in the record is true against the tree as it stands.',
-  open: 'open: parts the tree does not implement stay as explicit open sections.',
+  truth:
+    'truth: every present-tense claim in the record is true against the tree as it stands: what ' +
+    'the code does, where it lives, what it is called. A claim the tree contradicts fails, ' +
+    'whether the sentence changed in this diff or not.',
+  open:
+    'open: a part the tree does not implement is stated as not implemented, in an open section ' +
+    'or a sentence that says so. A future part written as present fact fails truth, not open.',
   divergence:
     'divergence: a divergence between the tree and the record is named in the record, verbatim, never absorbed.',
   reference:
@@ -49,9 +60,23 @@ export const RECORD_CRITERIA = Object.freeze({
 /** The criterion keys, in the order the briefs and the schema state them. */
 export const RECORD_CRITERION_KEYS = Object.freeze(Object.keys(RECORD_CRITERIA));
 
-/** The criteria as a brief states them, one line each. */
+/**
+ * The rule the six criteria serve, stated above them wherever they are stated.
+ *
+ * A seat that is given a list of criteria and no rule behind them grades each
+ * sentence against the nearest key and stops. The rule is what tells it that a
+ * sentence about work nobody has done yet is legal, and that the same sentence
+ * written as present fact is not: a record either describes the tree as it
+ * stands, or says the part is not built. There is no third kind of sentence,
+ * and a record that holds one conflicts with the code.
+ */
+export const RECORD_RULE =
+  'A record never conflicts with the code. Everything it states is either true of the tree now, ' +
+  'or marked as not yet built. There is no third kind of sentence.';
+
+/** The criteria as a brief states them: the rule, then one line per criterion. */
 export function recordCriteriaLines() {
-  return RECORD_CRITERION_KEYS.map((key) => `- ${RECORD_CRITERIA[key]}`);
+  return [RECORD_RULE, ...RECORD_CRITERION_KEYS.map((key) => `- ${RECORD_CRITERIA[key]}`)];
 }
 
 /**
