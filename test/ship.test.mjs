@@ -43,6 +43,7 @@ import { standingTripwires, withTripwireDefaults } from '../src/tripwires/regist
 import { owedRepairs } from '../src/frontier/repairs.mjs';
 import { owedReconciliations, reconciliationLaunch } from '../src/frontier/reconciliations.mjs';
 import { reconcileCommit, sinceFreshPass } from '../src/lanes/shared.mjs';
+import { divergenceDefects } from '../src/lanes/records.mjs';
 import {
   tempDir,
   removeDir,
@@ -1264,6 +1265,141 @@ test('a layer red past the stall discards the rewrite and ships the certified tr
   assert.equal(ticketed.cause, 'record-layer-red');
   assert.equal(ticketed.residual, undefined);
   assert.deepEqual(owedReconciliations(fx.paths, 'proj').map((o) => o.runId), [runId]);
+});
+
+// -- the divergence declaration (ADR-0026) ------------------------------------
+//
+// "A divergence is never absorbed silently" was carried in two briefs and
+// enforced nowhere. The half a check can see is whether the sentence the seat
+// says it wrote is in the record. The half it cannot see is whether a
+// divergence exists that nobody wrote a sentence about, and that is the review
+// seat's work under the `divergence` criterion.
+
+test('a named divergence is proved against the file, across a line wrap', (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const record = 'docs/adr/0001-doubling.md';
+  const statement =
+    'The shipped helper applies no transform, and this record previously ' +
+    'claimed a webp conversion it never made.';
+  mkdirSync(join(root, 'docs/adr'), { recursive: true });
+  // Written as the record tree writes it: wrapped at 80 columns.
+  writeFileSync(
+    join(root, record),
+    '# ADR-0001\n\nThe shipped helper applies no transform, and this record\n' +
+      'previously claimed a webp conversion it never made.\n',
+  );
+  const base = { worktree: root };
+  const entry = (over) => ({ record, state: 'named', statement, ...over });
+
+  // A statement the file holds passes, whatever the wrapping did to it.
+  assert.deepEqual(divergenceDefects(base, [record], { divergences: [entry()] }), []);
+  // A statement the file does not hold is the defect this check exists for.
+  const absent = divergenceDefects(base, [record], {
+    divergences: [entry({ statement: 'The helper converts to webp on every request.' })],
+  });
+  assert.equal(absent.length, 1);
+  assert.match(absent[0], /the sentence is not in the file/);
+  // `none` states a reason and is not compared against anything.
+  assert.deepEqual(
+    divergenceDefects(base, [record], {
+      divergences: [{ record, state: 'none', statement: 'the record and the tree agree' }],
+    }),
+    [],
+  );
+  // Every judged record is accounted for exactly once, and no entry names a
+  // record nobody judged.
+  assert.match(divergenceDefects(base, [record], { divergences: [] })[0], /accounts for it nowhere/);
+  assert.match(
+    divergenceDefects(base, [record], { divergences: [entry(), entry()] })[0],
+    /2 entries in "divergences"/,
+  );
+  assert.match(
+    divergenceDefects(base, [record], {
+      divergences: [entry(), { record: 'docs/adr/0002-other.md', state: 'none', statement: 'x' }],
+    })[0],
+    /which was not judged owed/,
+  );
+});
+
+test('a divergence the record does not hold buys the corrective round', async (t) => {
+  let attempt = 0;
+  const fx = reconcileFixture(t, {
+    seats: reconcileSeats(() => {
+      attempt += 1;
+      return {
+        files: { [ADR_FILE]: ADR_REWRITTEN },
+        report: {
+          rewritten: [ADR_FILE],
+          unchanged: [],
+          divergences: [
+            {
+              record: ADR_FILE,
+              state: 'named',
+              statement:
+                attempt === 1
+                  ? 'The tree rounds the result, and this record does not say so.'
+                  : 'f(x) returns 2*x.',
+            },
+          ],
+          summary: 'rewrote the record',
+        },
+      };
+    }),
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const calls = fx.calls.filter((c) => c.seat === 'reconcile-write');
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].prompt, /the sentence is not in the file/);
+  // The declaration rides the stamp, so the review and any corrective round
+  // read what the seat said it found.
+  const written = events.find((e) => e.event === 'reconciliation-written');
+  assert.equal(written.ok, true);
+  assert.deepEqual(written.divergences, [
+    { record: ADR_FILE, state: 'named', statement: 'f(x) returns 2*x.' },
+  ]);
+});
+
+// The one reading that says the rule regressed. After the record rule no
+// finding on a record path carries the advisory word, so the count is always
+// zero; a ledger that holds one is a defect of the mechanism, and a person
+// decides what it cost (ADR-0007).
+test('a ledger holding an advisory finding on a record path is loud at the close', async (t) => {
+  const fx = shipFixture(t, {
+    files: { [ADR_FILE]: ADR_TEXT },
+    seedExtra: async (ctx) => {
+      ctx.store.append('finding', {
+        actor: 'daemon',
+        cycle: 1,
+        id: 'F9',
+        source: 'generalist-review',
+        lens: 'operational',
+        severity: 'MED',
+        summary: 'the record says nothing about retries',
+        evidence: `${ADR_FILE}:5`,
+        file: ADR_FILE,
+        advisory: true,
+      });
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const loud = events.find(
+    (e) => e.event === 'gate-integrity' && e.kind === 'record-finding-shipped',
+  );
+  assert.equal(loud.pr, opened.pr);
+  assert.deepEqual(loud.findings, ['F9']);
+  assert.deepEqual(loud.records, [ADR_FILE]);
+  assert.ok(openLoud(fx.paths).some((item) => item.seq === loud.seq));
 });
 
 test('a not-owed judgment stamps its reason and derives nothing', async (t) => {
