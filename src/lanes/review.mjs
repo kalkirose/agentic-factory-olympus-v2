@@ -14,6 +14,12 @@
 // record-only diff raises record findings and nothing else, and a mixed diff
 // answers per finding from the path the seat named (ADR-0026).
 //
+// A record in the diff is judged whole. The seat is given the path of every
+// record the change moved and reads each file from the working tree, and a
+// finding may cite any sentence of it. The diff says what moved; it is not the
+// boundary of the review, and the verifier is given the same scope. Only the
+// code lenses keep "do not widen into unchanged code" (ADR-0026).
+//
 // The panel is the project's `review.lenses`, resolved at the lane base; the
 // seat a lens rides and the default set live in the lens registry (ADR-0038).
 //
@@ -61,10 +67,13 @@ import {
  *
  * A reconciliation cycle judges a record commit whose own containment check
  * refused any other file, so every finding of that review is a record finding
- * whatever any path list says. A review whose diff touches at least one file
- * and no file outside the project's record paths is the same case reached from
- * the diff, which is what covers the repair lane's reconciliation run. A mixed
- * diff is answered per finding, from the path the seat named (ADR-0026).
+ * whatever any path list says. Its files are the diff's own for the same
+ * reason: the brief names each record the seat must read whole, and a path list
+ * that missed the tree would name none of them. A review whose diff touches at
+ * least one file and no file outside the project's record paths is the same
+ * case reached from the diff, which is what covers the repair lane's
+ * reconciliation run. A mixed diff is answered per finding, from the path the
+ * seat named (ADR-0026).
  *
  * @param {{recordPaths?: string[]}} base the lane base
  * @param {{diffFiles?: string[]|null, reconcile?: boolean}} [opts]
@@ -73,8 +82,8 @@ import {
 export function recordScope(base, { diffFiles = null, reconcile = false } = {}) {
   const paths = base?.recordPaths ?? [];
   const files = Array.isArray(diffFiles) ? diffFiles : [];
+  if (reconcile) return { only: true, paths, files };
   const records = files.filter((f) => underAny(f, paths));
-  if (reconcile) return { only: true, paths, files: records };
   const only = files.length > 0 && records.length === files.length;
   return { only, paths, files: records };
 }
@@ -527,7 +536,7 @@ function furyRole(lenses, base, diff, supersedes = [], records = NO_RECORDS) {
     ...lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
     ...recordLensLines(records),
     `The spec: ${base.specRef}`,
-    'Judge the diff only. Do not fix anything; do not widen into unchanged code.',
+    judgeScopeLine(records),
     'Severity HIGH means the finding must block the ship. Cite evidence (file and line, or spec section) for every finding.',
     'Set "approach": true only when the finding names the implementation structure as wrong against the spec.',
     'Put the repo-relative path of the one file a finding is about in "file"; leave it out for a finding about no single file.',
@@ -537,13 +546,13 @@ function furyRole(lenses, base, diff, supersedes = [], records = NO_RECORDS) {
 }
 
 function generalistRole(base, diff, supersedes = [], records = NO_RECORDS) {
-  if (records.only) return recordRole(base, diff);
+  if (records.only) return recordRole(base, diff, records);
   return [
     'Review the diff below through these lenses, and label every finding with its lens:',
     ...base.lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
     ...recordLensLines(records),
     `The spec: ${base.specRef}`,
-    'Judge the diff only. Do not fix anything; do not widen into unchanged code.',
+    judgeScopeLine(records),
     'Severity HIGH means the finding must block the ship. Cite evidence (file and line, or spec section) for every finding.',
     'Set "approach": true only when the finding names the implementation structure as wrong against the spec.',
     'Put the repo-relative path of the one file a finding is about in "file"; leave it out for a finding about no single file.',
@@ -554,39 +563,90 @@ function generalistRole(base, diff, supersedes = [], records = NO_RECORDS) {
 
 /**
  * The record lens on a mixed diff: the criteria, the record files the diff
- * holds, and the two fields a finding about one of them carries.
+ * holds, the duty to read each of them whole, and the two fields a finding
+ * about one of them carries.
  *
- * The files are named because the path decides the route here. A finding about
- * a record file that carries no path is graded on severity like any other
- * finding, and the seat is the only reader that knows which file it meant.
+ * The files are named because the path decides the route here, and because the
+ * file is the unit of the review. A finding about a record file that carries no
+ * path is graded on severity like any other finding, and the seat is the only
+ * reader that knows which file it meant.
  */
 function recordLensLines(records) {
   if (records.only || records.files.length === 0) return [];
   return [
     `- ${RECORD_LENS}: the decision records this diff changes, against these criteria:`,
     ...recordCriteriaLines().map((line) => `  ${line}`),
-    'The decision records in this diff:',
-    ...records.files.map((file) => `- ${file}`),
+    ...wholeRecordLines(records.files),
     `A finding about one of those files carries "lens": "${RECORD_LENS}", its "file", and the ` +
       '"criterion" it fails.',
   ];
 }
 
 /**
- * The whole brief of a record-only review: the six criteria and nothing from
- * the code lenses.
+ * The scope of a record review: the records by path, and the duty to read each
+ * of them whole.
+ *
+ * A record is a set of claims about the code, and it is judged as a document.
+ * A seat handed the changed hunks alone reads the hunks, opens the code they
+ * name, and reports what it finds there; a stale claim three paragraphs above
+ * the change is invisible to it until a later round happens to move that
+ * paragraph. One live reconciliation spent four review cycles that way, each
+ * one raising four or five confirmed findings on the layer the round before it
+ * had just touched, and the pass ended on the round cap rather than on a clean
+ * record. So the diff says what moved and the file is what is judged.
+ *
+ * The paths are named where the caller knows them. A reconciliation cycle whose
+ * diff read failed knows none, and the duty is stated against the diff instead:
+ * a brief that named no file and asked for none would leave the seat with the
+ * hunks again.
+ */
+function wholeRecordLines(files) {
+  const named = files.length > 0;
+  return [
+    ...(named ? ['The decision records this change moved:', ...files.map((f) => `- ${f}`)] : []),
+    named
+      ? 'Read every one of those files whole, from the working tree, before you write a finding.'
+      : 'Read every decision record in the diff whole, from the working tree, before you write a finding.',
+    'Judge every claim in each record, changed in this diff or not. The diff below shows what this',
+    'change moved. It is context, and it is not the boundary of the review: a finding may cite any',
+    'sentence of the record.',
+  ];
+}
+
+/**
+ * The line every code lens takes about its scope, and the qualification a
+ * record file in the same diff earns.
+ *
+ * "Do not widen into unchanged code" is right for a code lens: the diff is the
+ * work, and a seat that reviews the repository around it reports on decisions
+ * nobody made this time. It is wrong for a record. So the sentence stays and
+ * says which files it is about (ADR-0026).
+ */
+function judgeScopeLine(records) {
+  const line = 'Judge the diff only. Do not fix anything; do not widen into unchanged code.';
+  if (records.only || records.files.length === 0) return line;
+  return (
+    `${line} That rule is about the code files: a decision record in this diff is read whole, ` +
+    'from the working tree, and judged whole.'
+  );
+}
+
+/**
+ * The whole brief of a record-only review: the six criteria, the records to
+ * read whole, and nothing from the code lenses.
  *
  * A code lens reading a markdown document raises findings about failure paths
  * and input trust, and after the record rule those findings block a ship. A
  * seat that is not asked to read a record that way does not report it, which is
  * the whole answer to that noise (ADR-0038).
  */
-function recordRole(base, diff) {
+function recordRole(base, diff, records = NO_RECORDS) {
   return [
     'Every file in the diff below is a decision record. Review the records against these',
     'criteria, and label every finding with the criterion it fails:',
     ...recordCriteriaLines(),
     `The spec: ${base.specRef}`,
+    ...wholeRecordLines(records.files),
     'Judge the records against the tree they describe. Read the code before you write a finding.',
     'Do not fix anything. Do not judge the code: the code is judged elsewhere.',
     `Every finding carries "lens": "${RECORD_LENS}", the repo-relative path of the one record it ` +
@@ -677,11 +737,24 @@ function verifierRole(base, items, brief, probe = null) {
 function verifierItemLine(item) {
   const f = item.finding;
   const grade = [f.lens ?? f.source ?? '', f.severity ?? ''].filter(Boolean).join(' ');
+  const where = f.record ? ` [record: ${recordPathOf(f) ?? '(none cited)'}]` : '';
   const criterion = f.record ? ` [criterion: ${f.criterion ?? '(none cited)'}]` : '';
   return (
-    `[${item.id}] (${item.mode}) ${grade}${criterion}: ` +
+    `[${item.id}] (${item.mode}) ${grade}${where}${criterion}: ` +
     `${f.finding ?? f.summary} (evidence: ${f.evidence})`
   );
+}
+
+/**
+ * The record a finding is about, as the repository names it.
+ *
+ * A finding reaches this seat by two roads. A finding of this cycle carries the
+ * path under `place`, assigned at the stamp against the run worktree; a prior
+ * confirmed finding was rebuilt from the ledger and carries it flat. Both are
+ * the same path, and a brief that read one road would name half the records.
+ */
+function recordPathOf(finding) {
+  return finding?.place?.file ?? finding?.file ?? null;
 }
 
 /**
@@ -692,12 +765,34 @@ function verifierItemLine(item) {
  * given because the criterion is load-bearing: a finding that cites the wrong
  * one is refused here, and a refusal for want of evidence is what stops a
  * remark about taste from blocking a ship (ADR-0007).
+ *
+ * The records themselves are named, and read whole. This seat is given the same
+ * scope the review that raised the finding had: the review judges every claim
+ * of a record and not the changed hunks alone, so a finding about a sentence
+ * this diff never moved is an ordinary finding, and a verifier that refuted it
+ * for sitting outside the diff would refuse the work the review exists to do
+ * (ADR-0026).
  */
 function recordVerifierLines(items) {
-  if (!items.some((item) => item.finding.record)) return [];
+  const records = items.filter((item) => item.finding.record);
+  if (records.length === 0) return [];
+  const paths = [...new Set(records.map((item) => recordPathOf(item.finding)).filter(Boolean))];
   return [
     'Some items below are about a decision record. A record states how the product works, so the',
     'question is whether the record and the tree disagree as the finding states.',
+    ...(paths.length > 0
+      ? [
+          'The records those items are about:',
+          ...paths.map((path) => `- ${path}`),
+          'Read each of those records whole, from the working tree, before you confirm or refute',
+          'one of them.',
+        ]
+      : [
+          'Read the record an item is about whole, from the working tree, before you confirm or',
+          'refute that item.',
+        ]),
+    'A finding about a sentence this diff did not change is as confirmable as a finding about a',
+    'sentence it did: the record is judged whole.',
     'The criteria a record is held to:',
     ...recordCriteriaLines(),
     'A record item is "confirmed" when the record and the tree disagree as the finding states, or',

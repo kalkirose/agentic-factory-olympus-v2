@@ -43,7 +43,8 @@ import { standingTripwires, withTripwireDefaults } from '../src/tripwires/regist
 import { owedRepairs } from '../src/frontier/repairs.mjs';
 import { owedReconciliations, reconciliationLaunch } from '../src/frontier/reconciliations.mjs';
 import { reconcileCommit, sinceFreshPass } from '../src/lanes/shared.mjs';
-import { divergenceDefects } from '../src/lanes/records.mjs';
+import { correctiveRole, divergenceDefects, writeRole } from '../src/lanes/records.mjs';
+import { RECORD_CRITERIA, RECORD_CRITERION_KEYS, RECORD_RULE } from '../src/lanes/lenses.mjs';
 import {
   tempDir,
   removeDir,
@@ -1265,6 +1266,38 @@ test('a layer red past the stall discards the rewrite and ships the certified tr
   assert.equal(ticketed.cause, 'record-layer-red');
   assert.equal(ticketed.residual, undefined);
   assert.deepEqual(owedReconciliations(fx.paths, 'proj').map((o) => o.runId), [runId]);
+});
+
+// The seat that writes the records is judged against the same list the review
+// reads them against, so its brief states that list from the registry rather
+// than a paraphrase of it (ADR-0038).
+test('the record write briefs state the criteria the review holds the records to', () => {
+  const base = { defaultBranch: 'main' };
+  const judged = { records: ['docs/adr/0001-doubling.md'], reason: 'the diff implements it' };
+  const briefs = [
+    writeRole(base, judged, null),
+    correctiveRole(base, judged, {
+      findings: [
+        {
+          id: 'F1',
+          criterion: 'truth',
+          file: 'docs/adr/0001-doubling.md',
+          summary: 'the record states a doubling the tree does not implement',
+          evidence: 'src/feature.mjs:1',
+        },
+      ],
+      divergences: [],
+      brief: null,
+    }),
+  ];
+  for (const brief of briefs) {
+    assert.ok(brief.includes(RECORD_RULE), brief);
+    for (const key of RECORD_CRITERION_KEYS) {
+      assert.ok(brief.includes(`- ${RECORD_CRITERIA[key]}`), key);
+    }
+    // The containment rule stays: this run rewrites records and nothing else.
+    assert.ok(brief.includes('Edit only the decision-record tree.'), brief);
+  }
 });
 
 // -- the divergence declaration (ADR-0026) ------------------------------------

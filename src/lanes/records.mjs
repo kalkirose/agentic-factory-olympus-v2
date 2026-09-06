@@ -25,6 +25,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { changedFiles } from '../isolation/tree.mjs';
+import { recordCriteriaLines } from './lenses.mjs';
 import { underAny, briefLines } from './shared.mjs';
 
 /** The seat that rewrites the records, in both of the lanes that dispatch it. */
@@ -159,13 +160,21 @@ function findingLine(f) {
   return `[${f.id}]${criterion}${where} ${f.summary} (evidence: ${f.evidence})`;
 }
 
-/** The rules the record tree binds its editors to, in both briefs. */
+/**
+ * The rules the record tree binds its editors to, in both briefs.
+ *
+ * The first of them is the criteria list itself, verbatim, because it is the
+ * list the review that reads this seat's work judges it against (ADR-0038). A
+ * paraphrase beside the list is a second statement of one rule, and the two
+ * drift: the writer then meets a criterion at the review that its own brief
+ * never stated.
+ */
 const WRITE_RULES = [
-  '- Rewrite the implemented parts of each record as standalone',
-  '  present-tense fact. Keep the rationale and the fallback paths.',
-  '- Parts the diff did not implement stay as explicit open sections.',
-  '- A divergence between the diff and a recorded decision is never absorbed',
-  '  silently: name it in the record and in your report, verbatim.',
+  '- Every record you leave meets these criteria, which are the criteria the',
+  '  review reads it against:',
+  ...recordCriteriaLines().map((line) => `  ${line}`),
+  '- A divergence between the diff and a recorded decision is named in your',
+  '  report as well as in the record, verbatim.',
   '- Edit only the decision-record tree. No source, test, or config change',
   '  rides this run.',
   '- A record the diff turns out not to affect goes in unchanged with the',
