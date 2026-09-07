@@ -469,6 +469,7 @@ test('defaults fill every missing section', () => {
     // And it keeps the lifecycle every project had before the key existed.
     recordLifecycle: 'rewrite',
     routesRoot: 'apps/storefront/src/routes',
+    styleFiles: [],
     componentsRoot: 'apps/storefront/src/lib/components',
   });
   assert.deepEqual(filled.commands, {});
