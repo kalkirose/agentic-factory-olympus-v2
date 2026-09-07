@@ -717,9 +717,7 @@ function recordsAnswer(incoming, { neighbourhood = [], own = [] }) {
   // a link or a mode flip is still that record moving.
   for (const file of [...incoming.files, ...incoming.unclassifiable]) {
     if (mine.has(file)) named.push(file);
-    else if (neighbourhood.some((entry) => file === entry || underEntry(file, entry))) {
-      neighbours.push(file);
-    }
+    else if (neighbourhood.some((entry) => underEntry(file, entry))) neighbours.push(file);
   }
   if (named.length > 0) {
     return {
