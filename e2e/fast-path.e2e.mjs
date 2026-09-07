@@ -321,6 +321,14 @@ test('a ship over a disjoint merge keeps the certification it earned', async (t)
     () => escapeEvents(fx).filter((e) => e.event === 'escape-recorded').length === 2,
     { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
   );
+  // The handler appends the record, writes the ticket file, then appends the
+  // ticket stamp. A read between the two appends sees a record with no ticket,
+  // so the wait keys on the second stamp as well.
+  await pollFor(
+    'both escape tickets',
+    () => escapeEvents(fx).filter((e) => e.event === 'escape-ticketed').length === 2,
+    { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
+  );
   for (const recorded of escapeEvents(fx).filter((e) => e.event === 'escape-recorded')) {
     assert.equal(recorded.kind, 'fast-path-escape');
     assert.equal(recorded.attribution, runId);
