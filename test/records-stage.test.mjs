@@ -187,8 +187,8 @@ function seatFixture(seats) {
       prompt: opts.prompt,
       denyTools: opts.denyTools,
     });
-    // A slot suffix is not a seat: `record-review:1` is answered by the table
-    // entry for `record-review` where the table names no slot of its own.
+    // A slot suffix is not a seat. The table entry for `record-review` answers
+    // `record-review:1` where the table names no slot of its own.
     const behavior = seats[seat] ?? seats[seat.split(':')[0]];
     if (!behavior) throw new Error(`no fixture behavior for seat ${seat}`);
     const out = behavior({ seat, prompt: opts.prompt, attempt: opts.attempt }) ?? {};
@@ -243,8 +243,9 @@ function laneFixture(t, { seats, files = {}, config = {}, realReconcile = false 
   const post = postFreeze({ afterVerdict: done });
   const repair = repairLane({ afterVerdict: done });
   const seam = async () => ({ next: 'done' });
-  // The reconcile stage is a seam here for the reason the verdict is: nothing in
-  // this file is about a reconciliation, and that stage has a suite of its own.
+  // The reconcile stage is a seam here, for the reason the verdict is. That
+  // stage has a suite of its own. One scenario runs the real stage over the
+  // record set a birth leaves, and it asks for it by `realReconcile`.
   const records = recordsLane({ afterRecords: done });
   const lanes = {
     story: storyLane({
