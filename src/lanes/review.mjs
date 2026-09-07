@@ -67,6 +67,8 @@ import {
   seatFail,
   seatWithChecks,
   underAny,
+  againstClause,
+  secondRecordOf,
   briefLines,
   gist,
 } from './shared.mjs';
@@ -1130,10 +1132,7 @@ function verifierItemLine(item) {
   const where = f.record ? ` [record: ${recordPathOf(f) ?? '(none cited)'}]` : '';
   const unit = f.unit ? ` [unit: ${f.unit}${f.head ? ` "${f.head}"` : ''}]` : '';
   const criterion = f.record ? ` [criterion: ${f.criterion ?? '(none cited)'}]` : '';
-  const second = secondRecordOf(f);
-  const against = second
-    ? ` [against: ${second}${f.unit2 ? ` ${f.unit2}` : ''}${f.head2 ? ` "${f.head2}"` : ''}]`
-    : '';
+  const against = againstClause(f);
   return (
     `[${item.id}] (${item.mode}) ${grade}${where}${unit}${criterion}${against}: ` +
     `${f.finding ?? f.summary} (evidence: ${f.evidence})`
@@ -1150,11 +1149,6 @@ function verifierItemLine(item) {
  */
 function recordPathOf(finding) {
   return finding?.place?.file ?? finding?.file ?? null;
-}
-
-/** The other record of a `consistent` finding, by the same two roads. */
-function secondRecordOf(finding) {
-  return finding?.place?.file2 ?? finding?.file2 ?? null;
 }
 
 /**

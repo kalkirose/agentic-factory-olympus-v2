@@ -24,6 +24,7 @@ import {
   writeChecks,
   writeRole,
 } from '../src/lanes/records.mjs';
+import { findingLine as codeFindingLine } from '../src/lanes/verdict.mjs';
 
 const RECORD = 'docs/adr/adr-900-the-helper.md';
 const RECORD_TEXT = `# ADR-900: The helper doubles its input
@@ -697,6 +698,42 @@ test('all three briefs carry the criteria, the unit duty, the neighbourhood and 
     assert.ok(brief.includes('"divergences" takes exactly one entry per judged record (1)'));
     assert.ok(brief.includes('"evidence": the repo-relative path'));
   }
+});
+
+test('a consistent finding names the second record on the records line as well', () => {
+  const consistent = {
+    id: 'F2',
+    criterion: 'consistent',
+    file: 'docs/adr/adr-001-first.md',
+    unit: 'U7',
+    head: 'The public surface is exactly two routes',
+    file2: 'docs/adr/adr-002-second.md',
+    unit2: 'U3',
+    head2: 'The public surface is one route',
+    summary: 'the two records decide the surface two ways',
+    evidence: 'src/routes.mjs:1',
+  };
+  const against = '[against: docs/adr/adr-002-second.md U3 "The public surface is one route"]';
+  assert.equal(
+    findingLine(consistent),
+    '[F2] [consistent] (docs/adr/adr-001-first.md) U7 "The public surface is exactly two routes" ' +
+      `${against} the two records decide the surface two ways (evidence: src/routes.mjs:1)`,
+  );
+  // One clause, three briefs: the code seat's line says the same about the
+  // second place as the record writer's does.
+  assert.ok(
+    codeFindingLine({ ...consistent, source: 'review', lens: 'record', severity: 'HIGH' })
+      .includes(against),
+  );
+  // The corrective brief carries the line the writer answers from.
+  const corrective = correctiveRole({ worktree: '/tmp/run', defaultBranch: 'main' }, JUDGED, {
+    findings: [consistent],
+    divergences: [],
+    brief: null,
+  });
+  assert.ok(corrective.includes(against), corrective);
+  // A finding about one record names one place.
+  assert.ok(!findingLine(FINDING).includes('[against:'));
 });
 
 test('the supersede rule stands in every brief the lifecycle binds', () => {

@@ -781,3 +781,30 @@ export function gist(text) {
   if (typeof text !== 'string') return '';
   return text.length > GIST_MAX ? text.slice(0, GIST_MAX - 1) + '…' : text;
 }
+
+/**
+ * The other record of a `consistent` finding, by the two roads a finding
+ * reaches a brief on. A finding of this cycle carries the path under `place`,
+ * brought to the form the repository names it in at the stamp; a prior
+ * confirmed finding was rebuilt from the ledger and carries it flat. Both are
+ * the same path, and a brief that read one road would name half the records.
+ */
+export function secondRecordOf(finding) {
+  return finding?.place?.file2 ?? finding?.file2 ?? null;
+}
+
+/**
+ * The second place of a finding as a brief states it, or the empty string.
+ *
+ * A `consistent` finding is the claim that two records decide one unbuilt part
+ * two ways, so a line that names one record states half the claim (ADR-0073).
+ * Three briefs carry a finding line — the record writer's corrective brief, the
+ * code seat's, and the verifier's item list — and one clause is what makes the
+ * three say the same thing about one finding. The unit and its head ride the
+ * clause where the finding holds them, because the claim is about a sentence.
+ */
+export function againstClause(f) {
+  const second = secondRecordOf(f);
+  if (!second) return '';
+  return ` [against: ${second}${f.unit2 ? ` ${f.unit2}` : ''}${f.head2 ? ` "${f.head2}"` : ''}]`;
+}

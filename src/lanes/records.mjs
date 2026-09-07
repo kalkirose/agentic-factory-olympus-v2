@@ -41,7 +41,7 @@ import {
   statusOf,
   supersedesOf,
 } from './units.mjs';
-import { underAny, briefLines } from './shared.mjs';
+import { againstClause, underAny, briefLines } from './shared.mjs';
 
 /** The seat that rewrites the records at a reconciliation and at a correction. */
 export const WRITE_SEAT = 'reconcile-write';
@@ -288,12 +288,17 @@ export function correctiveRole(base, judged, { findings, divergences, brief }) {
  * One confirmed finding, as a brief states it. The unit and its head ride the
  * line, because a finding that names a file names a record and a finding that
  * names a unit names the sentence.
+ *
+ * A `consistent` finding names the second record as well, in the clause every
+ * other brief names it in: the claim is that two records decide one unbuilt
+ * part two ways, and the seat that answers it edits one of the two.
  */
 export function findingLine(f) {
   const where = f.file ? ` (${f.file})` : '';
   const unit = f.unit ? ` ${f.unit}${f.head ? ` "${f.head}"` : ''}` : '';
   const criterion = f.criterion ? ` [${f.criterion}]` : '';
-  return `[${f.id}]${criterion}${where}${unit} ${f.summary} (evidence: ${f.evidence})`;
+  const against = againstClause(f);
+  return `[${f.id}]${criterion}${where}${unit}${against} ${f.summary} (evidence: ${f.evidence})`;
 }
 
 /**

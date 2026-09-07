@@ -170,6 +170,7 @@ import {
   commandError,
   seatWithChecks,
   underAny,
+  againstClause,
   briefLines,
   gist,
 } from './shared.mjs';
@@ -3231,10 +3232,7 @@ function openFindingLine(f) {
 export function findingLine(f) {
   const grade = f.source === 'triage' ? `[${f.class}]` : `[${f.lens} ${f.severity}]`;
   const unit = f.unit ? ` [unit: ${f.unit}${f.head ? ` "${f.head}"` : ''}]` : '';
-  const against = f.file2
-    ? ` [against: ${f.file2}${f.unit2 ? ` ${f.unit2}` : ''}${f.head2 ? ` "${f.head2}"` : ''}]`
-    : '';
-  return `${grade}${unit}${against} ${f.summary} (evidence: ${f.evidence})`;
+  return `${grade}${unit}${againstClause(f)} ${f.summary} (evidence: ${f.evidence})`;
 }
 
 // -- shared derivations ------------------------------------------------------
