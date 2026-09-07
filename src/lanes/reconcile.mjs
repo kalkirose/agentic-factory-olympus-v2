@@ -397,6 +397,13 @@ async function writeStep(ctx, base) {
   ) {
     return fallbackStep(ctx, base, { cause: OPERATOR });
   }
+  // What a recheck asked this write for, where the write is a recheck's. The
+  // units the repair's delta touched are the sentences to re-answer; every other
+  // unit of the record keeps the answer it already has (ADR-0075).
+  const recheck = sinceFreshPass(
+    runEvents(ctx),
+    (e) => e.event === 'reconcile-recheck' && e.seq < judged.seq,
+  );
   const outcome = await writeRound(ctx, base, {
     records,
     since: judged.seq,
@@ -404,7 +411,7 @@ async function writeStep(ctx, base) {
       writeRole(
         base,
         { ...judged, records: [record], ...recordContext(base, record, records) },
-        brief,
+        recheckBrief(recheck, record, brief),
       ),
   });
   if (outcome.fail) return outcome.fail;
@@ -412,6 +419,25 @@ async function writeStep(ctx, base) {
   if (outcome.fallback) return fallbackStep(ctx, base, { cause: outcome.fallback });
   await stampWritten(ctx, base, { entries: outcome.entries, reports: outcome.reports });
   return null;
+}
+
+/**
+ * The units a recheck asks one record's writer to answer again, or the brief it
+ * was given. A repair moved the evidence some claims rest on, and those claims
+ * are the work; the rest of the record keeps what it already answered.
+ */
+function recheckBrief(recheck, record, brief) {
+  const ids = (recheck?.units ?? [])
+    .filter((unit) => unit.startsWith(`${record}#`))
+    .map((unit) => unit.split('#')[1]);
+  if (ids.length === 0) return brief;
+  const lines = [
+    'A repair round moved the code these units of this record rest on. Read the change and',
+    'answer them again against the tree as it now stands:',
+    ...ids.map((id) => `- ${id}`),
+    'Every other unit keeps the answer it already has, and you report all of them.',
+  ];
+  return brief ? [lines.join('\n'), ...(Array.isArray(brief) ? brief : [brief])] : lines.join('\n');
 }
 
 /**
@@ -971,7 +997,6 @@ async function recheckStep(ctx, base) {
     delta: delta ? `${delta.from}..${delta.to}` : null,
     units: units.map((u) => `${u.record}#${u.id}`),
     judge: judge.reason ?? 'no judgment',
-    round: repaired.round ?? null,
   };
   if (units.length === 0 && owed.length === 0) {
     // The recheck that found nothing is stamped too: it is the evidence that the
