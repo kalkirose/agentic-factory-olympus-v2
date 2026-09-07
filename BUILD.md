@@ -698,3 +698,18 @@ never carries a project's specifics.
   the plan found the finding line, the lane lists, the reconciliation guard,
   one ship route and the token release reason short of the tree; each is
   fixed and pinned in the same build.
+- 2026-09-07 — the harness reads the bytes CI reads. `gitArgv` carries
+  `core.autocrlf=false` and `core.eol=lf` on every platform, before the win32
+  `core.longPaths` entry; `gitPlain` keeps its bypass, because a check of the
+  host must not answer itself. `ensureBareClone` writes the same two keys into
+  the clone on every call, so a seat's own git and every gate command a project
+  runs read them too, and a clone made earlier heals at its next launch.
+  `commitAll` and `concludeMerge` read `git ls-files --eol` over the paths they
+  committed. A path whose index bytes and working-tree bytes differ is replaced
+  with the index bytes, and a `w/crlf` answer after that is a harness fault with
+  the path named. Pathspecs are literal and batched, for the route directories
+  that hold brackets and the command line that has a ceiling.
+  `refuseUnnormalisedRepo` is a fifth door refusal: a
+  project whose default branch gives `*` no `eol=lf` attribute does not launch,
+  and `launch-rejected` carries the sentence and the path. Every fixture
+  repository the suites build carries the rule. ADR-0076 is new.
