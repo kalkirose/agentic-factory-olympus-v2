@@ -64,7 +64,7 @@ import {
   runReportPath,
 } from '../daemon/home.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
-import { DEFAULT_PROJECT_CONFIG_PATH } from '../config/project.mjs';
+import { DEFAULT_PROJECT_CONFIG_PATH, recordPathIncludes } from '../config/project.mjs';
 import { assertDefectKind } from '../ledger/registry.mjs';
 import { budgetOpen, ciFlakes, deterministicRed, FLAKE_LIMIT } from '../ledger/cycles.mjs';
 import { instanceParkForms } from '../ledger/parks.mjs';
@@ -1556,7 +1556,7 @@ async function ciTriage(ctx, base, opened, sha, redChecks, waited = null) {
  * corrective round is the repair. One failed check that is not a record layer is
  * a code check the lane has no seat for, so it parks with the names.
  */
-function recordsLaneCiRed(ctx, base, opened, sha, redChecks) {
+export function recordsLaneCiRed(ctx, base, opened, sha, redChecks) {
   const events = runEvents(ctx);
   const names = redChecks.map((r) => r.name);
   const layers = new Set(base.recordLayers ?? []);
@@ -2784,7 +2784,9 @@ function recordFindingsShipped(ctx, base, merged) {
       e.event === 'finding' &&
       e.advisory === true &&
       typeof e.file === 'string' &&
-      underAny(e.file, paths),
+      // The record tree's own membership test: an `!` entry names a file that
+      // is not a record, and a plain prefix match cannot see one (ADR-0073).
+      recordPathIncludes(e.file, paths),
   );
   if (shipped.length === 0) return;
   gateIntegrity(ctx, {

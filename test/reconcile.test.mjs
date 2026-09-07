@@ -1182,3 +1182,50 @@ test('a repair whose delta touches an evidence path re-answers that unit alone',
   assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 1);
 });
 
+
+// -- what the stage took out of the verdict (ADR-0075) -----------------------
+//
+// The coupling between the two certifications was a set of readers, and a
+// reader that stays is a coupling that stays. Each name below is asserted
+// absent from the module that held it, because the removal is only kept by
+// nothing reading them again.
+
+test('every reader of the old coupling is gone from its module', () => {
+  const source = (path) => readFileSync(join(import.meta.dirname, '..', path), 'utf8');
+  const verdict = source('src/lanes/verdict.mjs');
+  for (const name of [
+    'droppedFindings',
+    'reconcileFallbackStamp',
+    'reconcileCorrection',
+    'reconcileFallbackArm',
+    'reconcileArm',
+    'reconcileRounds(',
+    'judgedReconcile',
+    'certifyingReconcile',
+    'RECORD_LAYER_RED',
+    'RECORD_FINDINGS',
+    'renderOverReconcile',
+    'reconcileCommit',
+  ]) {
+    assert.ok(!verdict.includes(name), `verdict.mjs still holds ${name}`);
+  }
+  // The verdict reads no record stamp at all.
+  assert.ok(!verdict.includes('reconciliation-written'), 'the verdict reads a record stamp');
+  assert.ok(!verdict.includes('reconcile-rendered'), 'the verdict reads the stage render');
+
+  const shared = source('src/lanes/shared.mjs');
+  assert.ok(!shared.includes('reconcileCommit'), 'shared.mjs still holds reconcileCommit');
+  assert.ok(!shared.includes('renderOverReconcile'), 'shared.mjs still holds renderOverReconcile');
+
+  // The ship judges no record and writes none: the round moved to the stage.
+  const ship = source('src/lanes/ship.mjs');
+  for (const name of ['reconcileStep', 'reconcileJudge', 'reconcileRound', 'certifiedTree(']) {
+    assert.ok(!ship.includes(name), `ship.mjs still holds ${name}`);
+  }
+
+  // The reconciliation sweep left the plan with the round that named it.
+  assert.ok(!source('src/lanes/spectrum.mjs').includes('sweep: ' + "'reconcile'"));
+
+  // And the retired cause is gone from the registry.
+  assert.ok(!source('src/ledger/registry.mjs').includes('RECORD_FINDINGS'));
+});

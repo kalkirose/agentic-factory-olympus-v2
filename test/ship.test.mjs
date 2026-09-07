@@ -552,6 +552,23 @@ function waitEvent(paths, runId, predicate, label, attempts = 600) {
     label,
     attempts,
     intervalMs: 100,
+  }).catch((error) => {
+    // The tail of what the run did reach. A wait that ends with no event is a
+    // route nobody can read from the label alone.
+    const tail = readEvents(runLedgerPath(paths, runId))
+      .filter((e) => e.event !== 'stage-heartbeat')
+      .slice(-20)
+      .map((e) =>
+        [
+          e.seq,
+          e.event,
+          e.seat ?? e.stage ?? '',
+          e.verdict ?? e.reason ?? e.cause ?? '',
+          (e.question ?? e.detail ?? '').toString().slice(0, 200),
+        ].join(' '),
+      );
+    error.message += `\nledger tail:\n${tail.join('\n')}`;
+    throw error;
   });
 }
 
@@ -1945,6 +1962,49 @@ test('textual conflicts take the merge round; test hunks go to the suite seat', 
   const conflictCall = fx.calls.find((c) => c.seat === 'dev' && c.prompt.includes('textual conflicts'));
   assert.ok(conflictCall);
   assert.ok(!conflictCall.prompt.includes('tests/feature.test.mjs'));
+  // The dev seat runs under the deny rules in both lanes, and the record tree is
+  // denied it wherever it runs (ADR-0074).
+  assert.ok(
+    conflictCall.denyTools.some((rule) => rule.includes('docs/adr')),
+    'the merge-conflict dev seat could reach the record tree',
+  );
+});
+
+// A conflict on a record file is the record writer's work. The dev seat may not
+// touch a record in any lane, so a route that sent this one there would leave
+// the markers in the file and stall the merge (ADR-0074).
+test('a record conflict takes the record writer, and no dev seat sees it', async (t) => {
+  const fx = shipFixture(t, {
+    files: { [ADR_FILE]: ADR_TEXT },
+    seats: {
+      ...reconcileSeats(),
+      // The merge-conflict dispatch resolves the markers and reports a summary,
+      // which is the dev seat's shape: this is a merge, not a reconciliation.
+      'reconcile-write': ({ prompt }) =>
+        prompt.includes('conflicts in decision records')
+          ? { files: { [ADR_FILE]: ADR_REWRITTEN }, report: { summary: 'the record is merged' } }
+          : writeClean(),
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  // Main moves the same record the run rewrote: the merge conflicts on it.
+  commitTree(fx.origin, { [ADR_FILE]: `${ADR_TEXT}\nMain states it its own way.\n` }, 'records: main');
+  const round = await waitEvent(fx.paths, runId, (e) => e.event === 'merge-round', 'merge-round');
+  assert.equal(round.resolved, true);
+  assert.deepEqual(round.conflicts, [ADR_FILE]);
+  fx.forge.setChecks(round.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The seat that resolved it is the record writer, under its own slot, and no
+  // dev seat was dispatched for the conflict at all.
+  const merge = fx.calls.find((c) => c.prompt.includes('conflicts in decision records'));
+  assert.equal(merge.seat, 'reconcile-write');
+  assert.match(merge.named, /^reconcile-write:\d+$/);
+  assert.ok(!fx.calls.some((c) => c.seat === 'dev' && c.prompt.includes('textual conflicts')));
+  // The brief states the one rule the merge cannot break.
+  assert.match(merge.prompt, /An accepted record is never edited away/);
 });
 
 test('an admin merge over red checks is a breach: ticket, stamp, enqueue', async (t) => {
