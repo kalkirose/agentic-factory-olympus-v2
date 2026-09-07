@@ -512,7 +512,8 @@ export function unjudgedRecords(events, base = {}) {
 export const UNJUDGED_RECORDS_QUESTION =
   'This run holds no record certification. The records lane writes decision records and ' +
   'nothing else. A tree with no `reconcile-rendered` behind it is a tree no record review ' +
-  'read. Answer "retry" to re-enter the stage, or "abandon" to close the run.';
+  'read. A retry re-enters this stage and asks the same question, because nothing here ' +
+  'clears the null. Answer "abandon" to close the run.';
 
 /**
  * The seam between a moved default branch and the request: one merge, two
