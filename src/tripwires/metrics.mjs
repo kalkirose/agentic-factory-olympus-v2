@@ -20,7 +20,7 @@ import {
 } from '../telemetry/escapes.mjs';
 import { computeFrontier } from '../frontier/graph.mjs';
 import { ALL_LENSES } from '../lanes/lenses.mjs';
-import { RECORD_LAYER_RED } from '../ledger/registry.mjs';
+import { harnessPinTs, recordRenders } from '../ledger/cycles.mjs';
 
 // Mirrors the check watcher's green set; a red duration never measures the
 // green critical path.
@@ -36,11 +36,21 @@ const GREEN_CHECKS = new Set(['success', 'neutral', 'skipped']);
  */
 const MOVED_BASE_FLOOR = 3;
 
+// The seat that writes one record inside the reconcile stage. The write wall
+// clock is the span this seat opens, so the reading names it.
+const RECORD_WRITE_SEAT = 'reconcile-write';
+
 /**
  * Evaluates one metric.
+ *
+ * `pinTs` is derived here, once per evaluation, rather than by each metric that
+ * reads a record render: it is one read of the instance ledger and the answer
+ * is the same for every run of every project. A caller may state it, which is
+ * how a test pins a ledger that straddles the harness pin.
  * @param {string} metric name from the closed set
  * @param {{paths: object, project: string, window?: number, params?: object,
- *   now?: number, readSource?: (project: string) => Promise<object|null>}} input
+ *   now?: number, pinTs?: string|null,
+ *   readSource?: (project: string) => Promise<object|null>}} input
  *   `now` is the clock the one duration-valued metric reads; it defaults to
  *   the wall clock and exists so a test can state an age.
  * @returns {Promise<{value: number|null, eligible: boolean, detail: object}>}
@@ -48,7 +58,11 @@ const MOVED_BASE_FLOOR = 3;
 export async function evaluateMetric(metric, input) {
   const impl = IMPLEMENTATIONS[metric];
   if (!impl) throw new Error(`unknown tripwire metric: ${metric}`);
-  return impl(input);
+  const pinTs =
+    input.pinTs !== undefined
+      ? input.pinTs
+      : harnessPinTs(readEvents(input.paths?.instanceLedger));
+  return impl({ ...input, pinTs });
 }
 
 const IMPLEMENTATIONS = {
@@ -181,8 +195,8 @@ const IMPLEMENTATIONS = {
     };
   },
 
-  'verdict-cycles': async ({ paths, project, window }) => {
-    const runs = judgedRuns(paths, project).slice(-window);
+  'verdict-cycles': async ({ paths, project, window, pinTs }) => {
+    const runs = judgedRuns(paths, project, pinTs).slice(-window);
     // The worst run in the window, not the average of it: a run that was
     // re-judged ten times is the thing worth reading, and four quick ships
     // beside it do not make it less so.
@@ -370,11 +384,17 @@ const IMPLEMENTATIONS = {
   'allowlist-findings-window': async ({ paths, project, window }) =>
     allowlistFindingsReading(paths, project, { window }),
 
-  'record-refuted-share': async ({ paths, project, window }) =>
-    recordRefutedReading(paths, project, { window }),
+  'record-refuted-share': async ({ paths, project, window, pinTs }) =>
+    recordRefutedReading(paths, project, { window, pinTs }),
 
   'reconcile-fallbacks-window': async ({ paths, project, window }) =>
     reconcileFallbacksReading(paths, project, { window }),
+
+  'record-cycles': async ({ paths, project, window, pinTs }) =>
+    recordCyclesReading(paths, project, { window, pinTs }),
+
+  'record-write-time': async ({ paths, project, window }) =>
+    recordWriteTimeReading(paths, project, { window }),
 
   'frontier-width': async ({ paths, project, params, readSource }) => {
     const source = await readSource(project);
@@ -590,7 +610,7 @@ export function allowlistFindingsReading(paths, project, { window = 5, runs } = 
 
 /**
  * The share of record findings the verifier refuted, across the runs holding
- * the last `window` verdicts that carried a record finding.
+ * the last `window` record renders that carried a record finding.
  *
  * Every finding on a decision record reaches the verifier, at every grade, and
  * a confirmed one blocks the ship (ADR-0007). The guard that keeps a wrong
@@ -598,32 +618,41 @@ export function allowlistFindingsReading(paths, project, { window = 5, runs } = 
  * often it has to use it. Above a half the review seat is reading documents the
  * way it reads code, and the answer is the record criteria and the brief.
  *
- * The window is the verdicts that hold a record finding, not every verdict: a
- * project whose stories touch no record says nothing about how its seat reads
- * one, and a share over nothing is not a reading about anything.
+ * The window is the record renders that hold a record finding, not every
+ * render: a project whose stories touch no record says nothing about how its
+ * seat reads one, and a share over nothing is not a reading about anything.
+ * Both render shapes count, so the reading does not change under the ledger it
+ * is measured over.
  */
-export function recordRefutedReading(paths, project, { window = 10, runs } = {}) {
+export function recordRefutedReading(paths, project, { window = 10, runs, pinTs = null } = {}) {
   const all = runs ?? projectRuns(paths, project);
   const carrying = [];
+  // The key holds the event as well as the cycle. A record finding of stage
+  // cycle 2 and a code verdict of cycle 2 are two different judgments about two
+  // different trees, and a key of run and cycle alone would join the first to
+  // the second in any ledger where the two counters ever met (ADR-0075).
+  const key = (runId, render) => `${runId}#${render.event}#${render.cycle}`;
+  const rendered = new Map();
   for (const { runId, events } of all) {
-    for (const e of events) {
-      if (e.event !== 'verdict-rendered') continue;
-      const records = events.filter(
-        (f) => f.event === 'finding' && f.record === true && f.cycle === e.cycle,
-      );
-      if (records.length > 0) carrying.push({ ts: e.ts, runId, cycle: e.cycle });
+    const findings = events.filter((f) => f.event === 'finding' && f.record === true);
+    for (const render of recordRenders(events, pinTs)) {
+      rendered.set(`${runId}#${render.cycle}`, render);
+      if (findings.some((f) => f.cycle === render.cycle)) {
+        carrying.push({ ts: render.ts, runId, key: key(runId, render) });
+      }
     }
   }
   carrying.sort(byTs);
   const inWindow = carrying.slice(-window);
-  const keys = new Set(inWindow.map((v) => `${v.runId}#${v.cycle}`));
+  const keys = new Set(inWindow.map((v) => v.key));
   let raised = 0;
   let refuted = 0;
   const runIds = new Set();
   for (const { runId, events } of all) {
     for (const e of events) {
       if (e.event !== 'finding' || e.record !== true) continue;
-      if (!keys.has(`${runId}#${e.cycle}`)) continue;
+      const render = rendered.get(`${runId}#${e.cycle}`);
+      if (!render || !keys.has(key(runId, render))) continue;
       raised += 1;
       if (e.confirmed !== true) refuted += 1;
       runIds.add(runId);
@@ -643,17 +672,18 @@ export function recordRefutedReading(paths, project, { window = 10, runs } = {})
 }
 
 /**
- * Ships whose in-run record rewrite ended in a fallback, over the last `window`
+ * Ships whose in-run record write ended in a fallback, over the last `window`
  * ships of the project that were judged owed.
  *
- * Both fallbacks count and they count the same. The partial ships the records
- * with confirmed findings still open and leaves a ticket for them; the discard
- * puts the tree back to the certified sha and leaves a ticket for the whole
- * rewrite. Either way the work went to a ticket, which is the load the in-run
- * rewrite was built to take off the sweep (ADR-0026).
+ * Every fallback counts and they count the same, whatever the cause. A cap
+ * stall ships the records with findings open, an operator ended the write, a
+ * work-product defect survived its attempts: each ends with the work on a
+ * ticket, which is the load the in-run write was built to take off the sweep
+ * (ADR-0026). A metric that named the causes it counts would go quiet on the
+ * day a new one landed, which is exactly when it is worth reading.
  *
  * The window is the owed ships. A ship whose records were not owed asked the
- * rewrite nothing, and counting it would read a quiet quarter as a healthy one.
+ * write nothing, and counting it would read a quiet quarter as a healthy one.
  */
 export function reconcileFallbacksReading(paths, project, { window = 10, runs } = {}) {
   const owed = [];
@@ -665,26 +695,157 @@ export function reconcileFallbacksReading(paths, project, { window = 10, runs } 
     );
     if (!judged) continue;
     const fallback = events.find(
-      (e) =>
-        e.event === 'reconciliation-written' &&
-        (e.partial === true || (e.ok === false && e.cause === RECORD_LAYER_RED)),
+      (e) => e.event === 'reconciliation-written' && (e.partial === true || e.ok === false),
     );
-    owed.push({ runId, ts: merged.ts, fallback: fallback?.partial === true ? 'partial' : fallback ? 'discard' : null });
+    owed.push({
+      runId,
+      ts: merged.ts,
+      fallback: fallback ? (fallback.cause ?? 'unstated') : null,
+      partial: fallback?.partial === true,
+    });
   }
   owed.sort(byTs);
   const inWindow = owed.slice(-window);
   const fell = inWindow.filter((s) => s.fallback !== null);
+  const causes = {};
+  for (const s of fell) causes[s.fallback] = (causes[s.fallback] ?? 0) + 1;
   return {
     value: inWindow.length > 0 ? fell.length : null,
     eligible: inWindow.length > 0,
     detail: {
       ships: inWindow.length,
       fallbacks: fell.length,
-      partial: fell.filter((s) => s.fallback === 'partial').length,
-      discarded: fell.filter((s) => s.fallback === 'discard').length,
+      // The causes behind the number. Each word names a different repair, so a
+      // reader of a breach needs the histogram and not the count alone. The
+      // partial count is beside it because that shape is the one that ships the
+      // records and tickets the rest, which is a different loss.
+      causes,
+      partial: fell.filter((s) => s.partial).length,
       runs: fell.map((s) => s.runId),
     },
   };
+}
+
+/**
+ * The mean record cycles per reconciliation, over the last `window` stage runs
+ * of the project.
+ *
+ * A stage run is bounded by its own `stage-entered`: a re-run after a moved
+ * base and a recheck after a repair each enter the stage again and each opens a
+ * count of its own (ADR-0075). The value is what the stage costs when it is
+ * asked one question, and the number that says the mechanism works is a green
+ * inside two cycles.
+ *
+ * The mean and not the worst, which is where this reading differs from
+ * `verdict-cycles` beside it. A code verdict is one question asked again until
+ * it closes, so the worst run is the condition. A reconciliation is asked once
+ * per stage run and there are several of them in a ship, so the reading that
+ * says whether the stage converges is the average of them; the worst rides in
+ * the detail for the reader who wants the tail.
+ */
+export function recordCyclesReading(paths, project, { window = 5, runs, pinTs = null } = {}) {
+  const stageRuns = [];
+  for (const { runId, events } of runs ?? projectRuns(paths, project)) {
+    const renders = recordRenders(events, pinTs);
+    if (renders.length === 0) continue;
+    // The entries the stage made, oldest first. A render belongs to the last
+    // entry before it; a render with no entry behind it belongs to the first,
+    // which is the shape of every ledger written before the stage existed.
+    const entries = events
+      .filter((e) => e.event === 'stage-entered' && e.stage === 'reconcile' && !e.resumed)
+      .map((e) => e.seq);
+    const counts = new Map();
+    for (const render of renders) {
+      const opened = entries.filter((seq) => seq < render.seq).at(-1) ?? 0;
+      counts.set(opened, {
+        cycles: (counts.get(opened)?.cycles ?? 0) + 1,
+        ts: render.ts,
+        runId,
+      });
+    }
+    stageRuns.push(...counts.values());
+  }
+  stageRuns.sort(byTs);
+  const counted = stageRuns.slice(-window);
+  const worst = counted.reduce((a, b) => (b.cycles > a.cycles ? b : a), { cycles: -Infinity });
+  const mean =
+    counted.length > 0 ? counted.reduce((sum, s) => sum + s.cycles, 0) / counted.length : null;
+  return {
+    value: mean === null ? null : round(mean),
+    eligible: counted.length > 0,
+    detail:
+      counted.length > 0
+        ? { reconciliations: counted.length, worst: worst.cycles, run: worst.runId }
+        : { reconciliations: 0 },
+  };
+}
+
+/**
+ * The mean wall clock of the record write, in minutes, over the last `window`
+ * stage runs of the project that wrote anything.
+ *
+ * The writers run one record at a time, in one worktree, each with its own seat
+ * identity and its own commit (ADR-0073). That is the owner's decision and this
+ * is the reading that says when it stops paying: the span from the first write
+ * seat of a stage run to the last `reconciliation-written` of it. A mean over
+ * the band says the answer is to review whether the writers should run in
+ * parallel.
+ *
+ * Wall clock and not work: what the reading is about is how long a person or a
+ * queued run waits for the records, and a wait inside the span is part of that.
+ */
+export function recordWriteTimeReading(paths, project, { window = 5, runs } = {}) {
+  const spans = [];
+  for (const { runId, events } of runs ?? projectRuns(paths, project)) {
+    let span = null;
+    const close = () => {
+      if (span?.first != null && span.last != null) {
+        const minutes = (Date.parse(span.last) - Date.parse(span.first)) / 60000;
+        // An out-of-order pair is recording data and not a duration.
+        if (Number.isFinite(minutes) && minutes >= 0) {
+          spans.push({ runId, ts: span.first, minutes });
+        }
+      }
+      span = null;
+    };
+    for (const e of events) {
+      if (e.event === 'stage-entered') {
+        // A resumed entry ends nothing: the daemon restarted and the stage run
+        // is the one the writers were already in.
+        if (e.stage !== 'reconcile') close();
+        else if (!e.resumed) close();
+        if (e.stage === 'reconcile') span ??= { first: null, last: null };
+        continue;
+      }
+      if (span === null) continue;
+      if (e.event === 'seat-spawned' && writeSeat(e.seat)) span.first ??= e.ts;
+      else if (e.event === 'reconciliation-written') span.last = e.ts;
+    }
+    close();
+  }
+  spans.sort(byTs);
+  const counted = spans.slice(-window);
+  const longest = counted.reduce((a, b) => (b.minutes > a.minutes ? b : a), { minutes: -Infinity });
+  const mean =
+    counted.length > 0 ? counted.reduce((sum, s) => sum + s.minutes, 0) / counted.length : null;
+  return {
+    value: mean === null ? null : round(mean),
+    eligible: counted.length > 0,
+    detail:
+      counted.length > 0
+        ? { writes: counted.length, longest: round(longest.minutes), run: longest.runId }
+        : { writes: 0 },
+  };
+}
+
+/**
+ * Whether a seat name is a record writer's. A write is dispatched once per
+ * record, so the name a spawn stamps carries a slot suffix and the seat behind
+ * it is the name before the colon (ADR-0073). The name is read here and never
+ * written, the way the repair ladder reads its own dev seat's name.
+ */
+function writeSeat(seat) {
+  return typeof seat === 'string' && seat.split(':')[0] === RECORD_WRITE_SEAT;
 }
 
 /**
@@ -897,15 +1058,23 @@ function runsByLaunch(paths, project) {
 }
 
 /**
- * Runs of one project that rendered a verdict, in the order their last render
- * landed, each with the number of cycles it spent. A cycle is one rendered
- * verdict, and a run's count is what the eval seat reads as re-judgment: the
- * same tree, judged again, because the last judgment did not close.
+ * Runs of one project that rendered a code verdict, in the order their last
+ * render landed, each with the number of cycles it spent. A cycle is one
+ * rendered verdict, and a run's count is what the eval seat reads as
+ * re-judgment: the same tree, judged again, because the last judgment did not
+ * close.
+ *
+ * The record renders are taken out, by set and not by subtraction. Before the
+ * reconcile stage a record render WAS a `verdict-rendered`, so a run that spent
+ * three code cycles and two record cycles reads five here and always has; after
+ * it the record renders are their own event and the count never held them. Both
+ * shapes answer three, which is what the band judges.
  */
-function judgedRuns(paths, project) {
+function judgedRuns(paths, project, pinTs) {
   const runs = [];
   for (const { runId, events } of listRunEvents(paths, { project })) {
-    const renders = events.filter((e) => e.event === 'verdict-rendered');
+    const records = new Set(recordRenders(events, pinTs).map((r) => r.seq));
+    const renders = events.filter((e) => e.event === 'verdict-rendered' && !records.has(e.seq));
     if (renders.length === 0) continue;
     runs.push({ runId, ts: renders.at(-1).ts, cycles: renders.length });
   }

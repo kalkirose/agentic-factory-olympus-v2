@@ -256,15 +256,38 @@ export const TRIPWIRE_METRICS = {
     defaultWindow: 10,
     defaultTriggers: ['verdict-rendered'],
   },
-  // Ships whose in-run record rewrite ended in a fallback, over the last N
-  // ships that were judged owed. A fallback is the rewrite giving up: the
-  // partial ships the records with findings open, the discard puts the tree
-  // back. Either way the ticket carries the work, which is the load this
+  // Ships whose in-run record write ended in a fallback, over the last N ships
+  // that were judged owed. A fallback is the write giving up, whatever the
+  // cause, and the ticket carries the work either way, which is the load this
   // mechanism moved off the sweep in the first place (ADR-0026).
   'reconcile-fallbacks-window': {
     unit: 'ships',
     defaultWindow: 10,
     defaultTriggers: ['reconciliation-written', 'merged'],
+  },
+  // The mean cycles a reconciliation spent, over the last N stage runs. A
+  // stage run is one entry into the reconcile stage, so a re-run over a moved
+  // base and a recheck after a repair each count as one of their own
+  // (ADR-0075).
+  //
+  // The mean, where `verdict-cycles` beside it reads the worst. A code verdict
+  // is one question asked again until it closes, so the run that kept asking is
+  // the reading. A reconciliation is one question per stage run and a ship
+  // holds several, so what says whether the stage converges is the average of
+  // them; the worst rides in the detail.
+  'record-cycles': {
+    unit: 'reconciliations',
+    defaultWindow: 5,
+    defaultTriggers: ['reconcile-rendered'],
+  },
+  // The mean wall clock of the record write, in minutes, over the last N stage
+  // runs that wrote anything. The writers run one record at a time by the
+  // owner's decision (ADR-0073); this is the reading that says when the
+  // decision stops paying, and its answer is the review of it.
+  'record-write-time': {
+    unit: 'reconciliations',
+    defaultWindow: 5,
+    defaultTriggers: ['reconciliation-written'],
   },
 };
 
@@ -476,6 +499,30 @@ export function standingTripwires() {
         'is, an owed judgment writes the ticket at the close, and the ' +
         'repair-lane run behind the ticket does the rewrite',
     },
+    // The two readings of the record stage. One says whether it converges, the
+    // other what it costs on the clock. Both are owner numbers: two cycles is
+    // what the mechanism was built to reach, and twenty minutes is where the
+    // sequential writers stop paying.
+    {
+      id: 'record-cycles',
+      metric: 'record-cycles',
+      window: 5,
+      breach: { op: '>', value: 2 },
+      answer:
+        'read the findings of the second and third cycles: a reconciliation ' +
+        'that needs more than two is a record brief or a unit check that is ' +
+        'not asking for what the review then finds',
+    },
+    {
+      id: 'record-write-time',
+      metric: 'record-write-time',
+      window: 5,
+      breach: { op: '>', value: 20 },
+      answer:
+        'review whether the record writers should run in parallel in ' +
+        'disposable worktrees: the sequential write is the owner\'s decision ' +
+        'and this window is what it costs',
+    },
   ];
 }
 
@@ -494,11 +541,22 @@ const FAST_PATH_METRICS = ['fast-path-escapes', 'fast-path-takes'];
 // exactly the projects nobody is watching (ADR-0061, ADR-0062).
 const LEVER_METRICS = ['gate-acks-window', 'run-reconfigures-window'];
 
-// The two readings of the record rule. They are armed on every project for the
-// reason the lever counters are: the rule is on every project, it needs no
+// The four readings of the record rule. They are armed on every project for
+// the reason the lever counters are: the rule is on every project, it needs no
 // config line to run, and a counter that had to be opted into would be absent
 // from exactly the projects nobody is watching (ADR-0007, ADR-0026).
-const RECORD_METRICS = ['record-refuted-share', 'reconcile-fallbacks-window'];
+//
+// The two record-stage bands are here and in no project config, and that is the
+// whole of the decision. A config entry naming a metric the daemon does not
+// implement yet refuses every launch of that project, so a band that landed
+// ahead of its harness would take the project dark; and a band a project has to
+// opt into is absent from the projects that need it (ADR-0075).
+const RECORD_METRICS = [
+  'record-refuted-share',
+  'reconcile-fallbacks-window',
+  'record-cycles',
+  'record-write-time',
+];
 
 /**
  * The tripwires one project runs under: the registry it wrote, plus the
