@@ -61,7 +61,9 @@ carries both: the born paths, and nothing late.
 Every records-lane run pays a record cycle. That is one review seat per record,
 the verifier and the record layers. A story or repair run with born records and
 nothing owed pays the same cycle. ADR-0075 states that cost for a written
-reconciliation, and the born set now pays it too.
+reconciliation, and the born set now pays it too. A resumed story run pays it as
+well. `src/lanes/story.mjs` stamps the inherited records `decided: true`, so the
+run reads records it did not write.
 
 A red render over a born anchor buys a corrective round under
 `gates.reconcileRounds`. The round writes the born paths and stamps a write.
