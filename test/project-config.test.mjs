@@ -5,10 +5,13 @@ import {
   DEFAULT_DIFF_EXCLUSIONS,
   DEFAULT_EXCERPT_CHARS,
   DEFAULT_RECONCILE_ROUNDS,
+  DEFAULT_RECORD_LIFECYCLE,
+  RECORD_LIFECYCLES,
   validateProjectConfig,
   withProjectDefaults,
   parseProjectConfig,
   isGlobEntry,
+  recordPathIncludes,
   underEntry,
 } from '../src/config/project.mjs';
 
@@ -67,6 +70,78 @@ test('repo.recordPaths is an optional path list, defaulted to the common record 
   const wrong = valid();
   wrong.repo.recordPaths = 'docs/adr';
   assert.deepEqual(errorPaths(wrong), ['repo.recordPaths']);
+});
+
+// The one path list that carries exclusions. A record tree holds a file that is
+// not a record, and the template is that file: it is out of the enumeration,
+// out of the neighbourhood and out of the scope by one entry (ADR-0026).
+test('a repo.recordPaths entry may exclude a file with !', () => {
+  const declared = valid();
+  declared.repo.recordPaths = ['docs/adr', '!docs/adr/TEMPLATE.md'];
+  assert.deepEqual(validateProjectConfig(declared), []);
+  assert.equal(recordPathIncludes('docs/adr/adr-001-first.md', declared.repo.recordPaths), true);
+  assert.equal(recordPathIncludes('docs/adr/TEMPLATE.md', declared.repo.recordPaths), false);
+  // An exclusion wins over every entry that includes the file, in any order.
+  assert.equal(recordPathIncludes('docs/adr/TEMPLATE.md', ['!docs/adr/TEMPLATE.md', 'docs/adr']), false);
+  assert.equal(recordPathIncludes('docs/adr/adr-001.md', ['!docs/adr/**']), false);
+  // A file no entry names is not a record.
+  assert.equal(recordPathIncludes('src/feature.mjs', ['docs/adr']), false);
+  assert.equal(recordPathIncludes('docs/adr/adr-001.md', []), false);
+  // A glob entry includes and excludes under the same path vocabulary.
+  assert.equal(
+    recordPathIncludes('packages/ui/docs/adr/adr-001.md', ['packages/*/docs/adr/**']),
+    true,
+  );
+  assert.equal(
+    recordPathIncludes('packages/ui/docs/adr/TEMPLATE.md', [
+      'packages/*/docs/adr/**',
+      '!packages/*/docs/adr/TEMPLATE.md',
+    ]),
+    false,
+  );
+  // `!` alone excludes nothing and reads like an exclusion, so it is refused.
+  const bare = valid();
+  bare.repo.recordPaths = ['docs/adr', '!'];
+  assert.deepEqual(errorPaths(bare), ['repo.recordPaths[1]']);
+});
+
+// How a change to an accepted record is made. Two words, and a third value is
+// refused rather than read as `rewrite`: a project that asked for `supersede`
+// and misspelled it would keep the lifecycle it asked to leave (ADR-0026).
+test('repo.recordLifecycle is rewrite or supersede, and defaults to rewrite', () => {
+  assert.deepEqual(RECORD_LIFECYCLES, ['rewrite', 'supersede']);
+  assert.equal(DEFAULT_RECORD_LIFECYCLE, 'rewrite');
+  assert.equal(withProjectDefaults({ version: 1 }).repo.recordLifecycle, 'rewrite');
+  for (const word of RECORD_LIFECYCLES) {
+    const config = valid();
+    config.repo.recordLifecycle = word;
+    assert.deepEqual(validateProjectConfig(config), [], word);
+    assert.equal(withProjectDefaults(config).repo.recordLifecycle, word);
+  }
+  for (const value of ['Supersede', 'immutable', '', 1, null]) {
+    const bad = valid();
+    bad.repo.recordLifecycle = value;
+    assert.deepEqual(errorPaths(bad), ['repo.recordLifecycle'], String(value));
+  }
+});
+
+// The Tier-1 layers a changed record path is attributed to. A typo turns record
+// attribution into no layers at all, and a record-only render then greens with
+// nothing run, so the name is validated against the layer list (ADR-0026).
+test('gates.recordLayers names gates.tier1 layers, and defaults to none', () => {
+  assert.deepEqual(withProjectDefaults({ version: 1 }).gates.recordLayers, []);
+  const declared = valid();
+  declared.gates.recordLayers = ['lint'];
+  assert.deepEqual(validateProjectConfig(declared), []);
+  const two = valid();
+  two.gates.recordLayers = ['lint', 'test'];
+  assert.deepEqual(validateProjectConfig(two), []);
+  const unknown = valid();
+  unknown.gates.recordLayers = ['adr-form'];
+  assert.deepEqual(errorPaths(unknown), ['gates.recordLayers[0]']);
+  const wrong = valid();
+  wrong.gates.recordLayers = 'lint';
+  assert.deepEqual(errorPaths(wrong), ['gates.recordLayers']);
 });
 
 // The reconciliation's own round cap. It is not the code repair cap and it
@@ -378,11 +453,13 @@ test('defaults fill every missing section', () => {
     // A project that declares no record tree gets the common one, so the record
     // rule runs with no config line at all (ADR-0026).
     recordPaths: ['docs/adr'],
+    // And it keeps the lifecycle every project had before the key existed.
+    recordLifecycle: 'rewrite',
     routesRoot: 'apps/storefront/src/routes',
     componentsRoot: 'apps/storefront/src/lib/components',
   });
   assert.deepEqual(filled.commands, {});
-  assert.deepEqual(filled.gates, { tier1: [] });
+  assert.deepEqual(filled.gates, { tier1: [], recordLayers: [] });
   assert.deepEqual(filled.conventions, []);
   assert.deepEqual(filled.review, {
     lenses: ['spec', 'operational', 'security', 'interface'],
