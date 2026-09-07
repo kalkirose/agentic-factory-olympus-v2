@@ -3,12 +3,13 @@
 // suite onto a tree that moved under it, evidence diffs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   carryPaths,
   changedFiles,
   commitAll,
+  concludeMerge,
   headSha,
   restorePaths,
   evidenceDiff,
@@ -38,6 +39,42 @@ test('changedFiles sees edits and new files; commitAll commits them', async (t) 
   assert.deepEqual(await changedFiles(repo), []);
   // A clean tree commits nothing and returns the current head.
   assert.equal(await commitAll(repo, 'noop'), sha);
+});
+
+/** What git says the index and the working tree hold for one path. */
+function eolOf(repo, path) {
+  return gitSync(['ls-files', '--eol', '--', `:(literal)${path}`], repo).trim();
+}
+
+// ADR-0076. The gates of a verdict read the working tree, and CI reads the
+// commit. The two must hold the same bytes. A seat writes what its tools
+// produce; the commit holds what the project's attributes normalise it to.
+test('a file a seat wrote with carriage returns leaves an LF tree', async (t) => {
+  const repo = repoFixture(t);
+  writeFileSync(join(repo, 'src', 'seat.mjs'), 'export const f = 1;\r\nexport const g = 2;\r\n');
+  await commitAll(repo, 'work');
+  assert.equal(
+    readFileSync(join(repo, 'src', 'seat.mjs'), 'utf8'),
+    'export const f = 1;\nexport const g = 2;\n',
+  );
+  assert.match(eolOf(repo, 'src/seat.mjs'), /^i\/lf\s+w\/lf\b/);
+  // Nothing is left uncommitted by the checkout the commit performs.
+  assert.deepEqual(await changedFiles(repo), []);
+});
+
+test('concludeMerge leaves the tree holding the bytes it committed', async (t) => {
+  const repo = repoFixture(t);
+  gitSync(['checkout', '-q', '-b', 'side'], repo);
+  commitTree(repo, { 'src/a.mjs': 'side\n' }, 'side');
+  gitSync(['checkout', '-q', 'main'], repo);
+  commitTree(repo, { 'src/a.mjs': 'main\n' }, 'main');
+  assert.throws(() => gitSync(['merge', 'side'], repo), 'the merge did not conflict');
+  // The resolution is written the way a seat's own tools write one.
+  writeFileSync(join(repo, 'src', 'a.mjs'), 'resolved\r\n');
+  await concludeMerge(repo, 'merge: resolved');
+  assert.equal(readFileSync(join(repo, 'src', 'a.mjs'), 'utf8'), 'resolved\n');
+  assert.match(eolOf(repo, 'src/a.mjs'), /^i\/lf\s+w\/lf\b/);
+  assert.deepEqual(await changedFiles(repo), []);
 });
 
 test('restorePaths reverts edits, deletions, and junk under the prefixes only', async (t) => {
