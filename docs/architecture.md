@@ -796,7 +796,10 @@ suite authoring (seat) → adversary → freeze (process).
   sha. Ten steps, each derived from the stage's own stamps, so a restart at any
   boundary resumes that step. Nothing in it stamps a `verdict-rendered` and
   nothing in it reads one: the code verdict and the reconciliation are two
-  certifications over two trees at two shas.
+  certifications over two trees at two shas. The cycle stands on the record set
+  the pass holds. That set comes from its `reconciliation-written` stamp, or
+  from its `records-committed` stamp where it wrote none. So a born record is
+  judged even where the judge owes nothing (ADR-0076).
 - **The update stage** (ADR-0033) sits between the reconciliation and the ship.
   The run takes the project's ship token, and its first act under the token is
   the branch update against the default branch as it stands after the previous

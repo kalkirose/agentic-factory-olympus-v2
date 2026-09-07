@@ -717,3 +717,19 @@ never carries a project's specifics.
   `readBranchFiles` reads the config and the attributes in one clone pass, so
   the refusal costs no fetch of its own. Every fixture repository the suites
   build carries the rule. ADR-0076 is new.
+- 2026-09-07 — a born record is judged before it ships. A records-lane run wrote
+  two records and opened its request. No record layer, no review seat, no
+  verifier and no render stood behind them. The reconcile stage opened its cycle
+  on a `reconciliation-written` stamp alone. The judge leaves out a born record
+  that still stands. `cycleAnchor` now answers with the write stamp of the
+  pass. Where the pass wrote none, it answers with the pass's `records-committed`
+  stamp. An `owed: false` judgment over a born set therefore buys the whole cycle. That
+  is the layers, one review seat per record, the verifier and a render. `admitted` refuses a
+  records-lane tree whose record certification is null. The update stage parks
+  it `stage-blocked` with the render named. The birth stamp names every
+  record path the commit changed, and marks the ones the seat did not report. A
+  cycle cannot read a path the stamp does not name. `writerMissRate` counts a
+  writer's holds only where a review answered the same unit. An `owed: false`
+  judgment carries its born and late lists, so the late share reads a
+  records-lane run at all. A records-lane request is titled `records: <runId>`.
+  ADR-0076 is new and supersedes ADR-0075 in part.
