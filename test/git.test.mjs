@@ -2,23 +2,34 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { git, gitArgv } from '../src/isolation/git.mjs';
+import { git, gitArgv, gitPlain } from '../src/isolation/git.mjs';
 import { scaffoldHome } from '../src/daemon/home.mjs';
 import { ensureBareClone } from '../src/isolation/clones.mjs';
 import { addRunWorktree, removeRunWorktrees, workspaceRoot } from '../src/isolation/worktrees.mjs';
-import { tempDir, removeDir, initOriginRepo } from './helpers.mjs';
+import { tempDir, removeDir, gitSync, initOriginRepo } from './helpers.mjs';
 
 const ON_WINDOWS = process.platform === 'win32';
 const WINDOWS_ONLY = ON_WINDOWS ? false : 'runs on Windows only';
 
-test('off Windows git runs the argv the caller wrote, unchanged', () => {
+test('off Windows git runs the caller\'s argv behind the line-ending settings', () => {
   for (const platform of ['linux', 'darwin']) {
-    assert.deepEqual(gitArgv(['worktree', 'prune'], platform), ['worktree', 'prune']);
+    assert.deepEqual(gitArgv(['worktree', 'prune'], platform), [
+      '-c',
+      'core.autocrlf=false',
+      '-c',
+      'core.eol=lf',
+      'worktree',
+      'prune',
+    ]);
   }
 });
 
 test('on Windows every git invocation carries long-path support of its own', () => {
   assert.deepEqual(gitArgv(['worktree', 'remove', '--force', 'C:\\x'], 'win32'), [
+    '-c',
+    'core.autocrlf=false',
+    '-c',
+    'core.eol=lf',
     '-c',
     'core.longPaths=true',
     'worktree',
@@ -26,6 +37,30 @@ test('on Windows every git invocation carries long-path support of its own', () 
     '--force',
     'C:\\x',
   ]);
+});
+
+// The harness writes LF alone, on every host (ADR-0076). The long-path
+// setting is Windows's own; these two are not. A development machine that
+// holds `core.autocrlf=true` is the case the rule exists for.
+test('the line-ending settings ride every platform, before the command', () => {
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    const argv = gitArgv(['status', '--porcelain'], platform);
+    assert.ok(argv.includes('core.autocrlf=false'), `${platform} drops core.autocrlf`);
+    assert.ok(argv.includes('core.eol=lf'), `${platform} drops core.eol`);
+    assert.deepEqual(argv.slice(-2), ['status', '--porcelain']);
+  }
+});
+
+// ADR-0030: the plain runner answers with the host's own settings. A check
+// that asks what the host holds is never answered by an argument the harness
+// supplied itself. The line-ending settings change nothing about that.
+test('the plain runner carries none of the harness settings', async (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  gitSync(['init', '-b', 'main', '.'], dir);
+  gitSync(['config', 'core.autocrlf', 'input'], dir);
+  const value = await gitPlain(['config', '--get', 'core.autocrlf'], { cwd: dir });
+  assert.equal(value.trim(), 'input');
 });
 
 test('a failure names the command the caller asked for, not the one built', async (t) => {

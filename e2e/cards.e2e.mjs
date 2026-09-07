@@ -20,6 +20,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
+  LF_ATTRIBUTES,
   PROJECT,
   REPO_ROOT,
   REPO_URL,
@@ -170,6 +171,9 @@ console.log(\`card lint: \${checked} card(s)\`);
 
 function projectTree() {
   return {
+    // The door refuses a project whose default branch declares no LF rule
+    // (ADR-0076).
+    '.gitattributes': LF_ATTRIBUTES,
     '.olympus/project.json': JSON.stringify(PROJECT_CONFIG, null, 2) + '\n',
     '.olympus/constitution.md': CONSTITUTION,
     [ALPHA_CARD_PATH]: ALPHA_CARD,

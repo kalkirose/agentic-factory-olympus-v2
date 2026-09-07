@@ -2,13 +2,15 @@
 // arrives, and a launch the daemon refuses leaves nothing behind — no slot, no
 // clone worktree, no stack, no run ledger, no leftover to sweep (ADR-0068).
 //
-// Four refusals through the assembled binaries: a launch that names no card, a
-// card the default branch does not hold, a card the parser cannot read, and a
-// credential whose probe answers no. Nothing here waits on a run, because the
-// point is that no run is ever created.
+// Five refusals through the assembled binaries. A launch that names no card, a
+// card the default branch does not hold, a card the parser cannot read. Then a
+// credential whose probe answers no, and a project that declares no line-ending
+// rule. Nothing here waits on a run, because the point is that no run is ever
+// created.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homePaths } from '../src/daemon/home.mjs';
 import { openWorkspaceLeftovers } from '../src/telemetry/readers.mjs';
@@ -64,6 +66,18 @@ async function refuse(fx, args, nth) {
   });
 }
 
+function git(args, cwd) {
+  return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
+}
+
+/** One commit on the default branch of the fixture origin. */
+function pushToBranch(fx, path, content, message) {
+  writeFileSync(join(fx.seed, path), content);
+  git(['add', '-A'], fx.seed);
+  git(['-c', 'commit.gpgsign=false', 'commit', '-m', message], fx.seed);
+  git(['push', '--quiet', fx.origin, 'main'], fx.seed);
+}
+
 test('the door refuses every input it can read, and leaves nothing behind', async (t) => {
   const fx = buildFixture({
     prefix: 'olympus-e2e-door-',
@@ -113,7 +127,21 @@ test('the door refuses every input it can read, and leaves nothing behind', asyn
     [['launch', false, 'fixture']],
   );
 
-  // Nothing was provisioned by any of the four: no run, no workspace, no
+  // 5. A project whose default branch declares no line-ending rule (ADR-0076).
+  // The rule leaves main, and the launch that follows is refused before the
+  // credential probe runs a second time.
+  pushToBranch(fx, '.gitattributes', '* text=auto\n', 'attributes: drop the lf rule');
+  const unruled = await refuse(fx, ['--card', CARD_PATH], 5);
+  assert.match(unruled.reason, new RegExp(`the project ${PROJECT} declares no line-ending rule`));
+  assert.match(unruled.reason, /holds no line that gives \* the attribute eol=lf/);
+  assert.equal(unruled.detail.path, '.gitattributes');
+  assert.equal(
+    instanceEvents(fx).filter((e) => e.event === 'credential-probe').length,
+    1,
+    'the line-ending refusal reached the credential probe',
+  );
+
+  // Nothing was provisioned by any of the five: no run, no workspace, no
   // leftover for a sweep to find.
   const paths = homePaths(fx.home);
   assert.deepEqual(instanceEvents(fx).filter((e) => e.event === 'launch'), []);

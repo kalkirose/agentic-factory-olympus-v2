@@ -298,9 +298,16 @@ for (const name of readdirSync('.olympus/cards')) {
 console.log(\`card lint: \${checked} card(s)\`);
 `;
 
+/**
+ * The line-ending rule every fixture repository carries. The door refuses a
+ * project whose default branch declares none (ADR-0076).
+ */
+export const LF_ATTRIBUTES = '* text=auto eol=lf\n';
+
 /** The tree the fixture origin holds on its default branch. */
 export function fixtureTree() {
   return {
+    '.gitattributes': LF_ATTRIBUTES,
     '.olympus/project.json': JSON.stringify(PROJECT_CONFIG, null, 2) + '\n',
     '.olympus/constitution.md': CONSTITUTION,
     '.olympus/cards/alpha-1.md': CARD,

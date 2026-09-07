@@ -43,15 +43,130 @@ export async function changedFiles(tree) {
 
 /**
  * Commits every working-tree change. Returns the new sha, or the current
- * HEAD when the tree is clean.
+ * HEAD when the tree is clean. The tree holds the committed bytes afterwards.
  */
 export async function commitAll(tree, message) {
   const changed = await changedFiles(tree);
   if (changed.length > 0) {
     await git(['add', '-A'], { cwd: tree });
-    await git([...IDENTITY, 'commit', '-m', message], { cwd: tree });
+    // A change git reports and then stages nothing for. A seat rewrote a file
+    // with carriage returns and changed nothing else. `status` lists the path
+    // because the bytes moved; `add` normalises them back to the blob the
+    // index already holds. `commit` on an empty index exits non-zero. The
+    // commit is therefore asked for only when the index has something in it.
+    // The tree is put right either way, which is the point of that path.
+    const staged = await git(['diff', '--cached', '--name-only'], { cwd: tree });
+    if (staged.trim().length > 0) {
+      await git([...IDENTITY, 'commit', '-m', message], { cwd: tree });
+    }
+    await takeIndexBytes(tree, changed);
   }
   return headSha(tree);
+}
+
+/**
+ * The longest pathspec batch one git invocation carries. Windows caps a
+ * command line near 32000 characters, and a commit may touch more paths than
+ * that fits. The batch keeps every call well under the cap.
+ */
+const PATHSPEC_BATCH_CHARS = 6000;
+
+/** The paths, in batches no git command line is too long for. */
+function pathspecBatches(paths) {
+  const batches = [];
+  let batch = [];
+  let chars = 0;
+  for (const path of paths) {
+    const spec = `:(literal)${path}`;
+    if (batch.length > 0 && chars + spec.length > PATHSPEC_BATCH_CHARS) {
+      batches.push(batch);
+      batch = [];
+      chars = 0;
+    }
+    batch.push(spec);
+    chars += spec.length + 1;
+  }
+  if (batch.length > 0) batches.push(batch);
+  return batches;
+}
+
+/**
+ * What `git ls-files --eol` says about each tracked path among those given.
+ * The answer is the line endings of the index blob, and those of the file
+ * beside it. A path the index does not hold is absent. The caller commits
+ * deletions too, and a deleted path has no bytes to compare.
+ *
+ * The record is `i/<eol> w/<eol> attr/<attrs>`, one tab, then the path. `-z`
+ * keeps a path with a space or a quote in it whole.
+ */
+async function eolReport(tree, paths) {
+  const rows = [];
+  for (const batch of pathspecBatches(paths)) {
+    const out = await git(['ls-files', '--eol', '-z', '--', ...batch], { cwd: tree });
+    for (const record of out.split('\0')) {
+      if (record.length === 0) continue;
+      const tab = record.indexOf('\t');
+      if (tab === -1) continue;
+      const fields = /^i\/(\S*)\s+w\/(\S*)/.exec(record.slice(0, tab));
+      if (!fields) continue;
+      rows.push({ index: fields[1], worktree: fields[2], path: record.slice(tab + 1) });
+    }
+  }
+  return rows;
+}
+
+/**
+ * Puts the committed bytes into the working tree, and proves that it did.
+ *
+ * The gates of a verdict read the working tree, and CI reads the commit. A
+ * seat writes a file with whatever bytes its tools produce. The commit holds
+ * what the project's `.gitattributes` normalise those bytes to. Without this
+ * the run judges bytes CI never sees (ADR-0076).
+ *
+ * A path whose index answer and working-tree answer differ is the whole of the
+ * work. Git will not overwrite a file its own stat cache calls current. After
+ * `git add` that cache holds the seat's file, so a plain checkout of the path
+ * returns and writes nothing. The file goes first, and the
+ * checkout writes the index bytes in its place. Nothing else in the tree is
+ * touched, so a build cache keeps every file the commit agreed with.
+ *
+ * The second read is the proof. A `w/crlf` answer after it names a path whose
+ * attributes exempt it from LF. The harness expects LF, so that is a harness
+ * fault with the path named, never a silent pass.
+ *
+ * Every pathspec is literal. A repository path may hold `[` and `]`, as a
+ * route directory does. A bare pathspec is wildmatched, so only the literal
+ * form holds each command to the path it names.
+ */
+async function takeIndexBytes(tree, paths) {
+  const differing = (await eolReport(tree, paths))
+    .filter((row) => row.worktree.length > 0 && row.worktree !== row.index)
+    .map((row) => row.path);
+  if (differing.length === 0) return;
+  // The house form for a delete on Windows. The path goes in the
+  // extended-length form. The retry ladder answers a virus scanner or an
+  // indexer that holds the file. Node reads the two retry options only under
+  // `recursive`, as `src/isolation/removal.mjs` passes them.
+  for (const path of differing) {
+    rmSync(longPath(join(tree, path)), {
+      force: true,
+      recursive: true,
+      maxRetries: 3,
+      retryDelay: 50,
+    });
+  }
+  for (const batch of pathspecBatches(differing)) {
+    await git(['checkout', '--', ...batch], { cwd: tree });
+  }
+  const crlf = (await eolReport(tree, differing))
+    .filter((row) => row.worktree === 'crlf')
+    .map((row) => row.path);
+  if (crlf.length === 0) return;
+  throw new Error(
+    'the working tree holds carriage returns after the commit put the index bytes in it: ' +
+      `${crlf.join(', ')}. A gate reads these bytes and CI reads the commit's own. ` +
+      'Give the paths an attribute that normalises them, or mark them binary.',
+  );
 }
 
 export async function headSha(tree) {
@@ -472,10 +587,16 @@ export async function conflictedFiles(tree) {
     .filter((line) => line.length > 0);
 }
 
-/** Concludes an in-progress merge: stage everything, commit. */
+/**
+ * Concludes an in-progress merge: stage everything, commit. The tree holds the
+ * committed bytes afterwards, as it does after every other commit the harness
+ * makes (ADR-0076).
+ */
 export async function concludeMerge(tree, message) {
+  const changed = await changedFiles(tree);
   await git(['add', '-A'], { cwd: tree });
   await git([...IDENTITY, 'commit', '-m', message], { cwd: tree });
+  await takeIndexBytes(tree, changed);
   return headSha(tree);
 }
 

@@ -17,19 +17,34 @@ import { execFile } from 'node:child_process';
 export const MAX_DIFF_BYTES = 256 * 1024 * 1024;
 
 /**
- * The argv git is actually invoked with. On Windows every invocation carries
- * long-path support of its own: a run worktree nests a run id under the daemon
- * home and a workspace path under that, which clears 260 characters on an
- * ordinary tree, and git without `core.longPaths` fails those checkouts and
- * removals with "Filename too long". The setting is not taken from the user's
- * global config — the daemon's git runs under whatever account the service
- * manager gives it, which is not reliably the account that config belongs to.
+ * The line-ending settings every harness git invocation carries.
+ *
+ * The harness writes LF alone. It is tested in Linux CI and deployed to a
+ * Linux host. A development machine that holds `core.autocrlf=true` globally
+ * would otherwise hand the harness a checkout with carriage returns. The gates
+ * of a verdict read the working tree, and CI reads the commit. These two
+ * settings state the rule on every host, so no answer depends on the machine
+ * (ADR-0076).
+ */
+const LINE_ENDINGS = ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf'];
+
+/**
+ * The argv git is actually invoked with. Every invocation carries the harness's
+ * line-ending settings. On Windows it also carries long-path support of its
+ * own. A run worktree nests a run id under the daemon home, and a workspace
+ * path under that. Such a path clears 260 characters on an ordinary tree. Git
+ * without `core.longPaths` fails those checkouts and removals with "Filename
+ * too long". Neither setting is taken from the user's global config. The
+ * daemon's git runs under whatever account the service manager gives it. That
+ * is not reliably the account the config belongs to.
  * @param {string[]} args
  * @param {string} [platform]
  * @returns {string[]}
  */
 export function gitArgv(args, platform = process.platform) {
-  return platform === 'win32' ? ['-c', 'core.longPaths=true', ...args] : [...args];
+  return platform === 'win32'
+    ? [...LINE_ENDINGS, '-c', 'core.longPaths=true', ...args]
+    : [...LINE_ENDINGS, ...args];
 }
 
 /**
