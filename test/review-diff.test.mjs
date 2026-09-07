@@ -642,30 +642,34 @@ function claimFinding(overrides = {}) {
 }
 
 test('a record review is one seat per record, and each seat holds one record', async (t) => {
-  const worktree = recordTree(t);
+  const more = {
+    'docs/adr/0004-cache.md': RECORD_TEXT.replace('ADR-0001', 'ADR-0004'),
+    'docs/adr/0005-retry.md': RECORD_TEXT.replace('ADR-0001', 'ADR-0005'),
+  };
+  const worktree = recordTree(t, more);
+  const records = [RECORD_FILE, OTHER_RECORD, ...Object.keys(more)];
   const fx = seatsFixture(t, ({ seat }) =>
-    recordReport(worktree, seat === 'record-review:1' ? RECORD_FILE : OTHER_RECORD),
+    recordReport(worktree, records[Number(seat.split(':')[1]) - 1]),
   );
 
-  const outcome = await recordReviewRound(fx.ctx, recordBase(worktree), {
-    records: [RECORD_FILE, OTHER_RECORD],
-    cycle: 1,
-  });
+  const outcome = await recordReviewRound(fx.ctx, recordBase(worktree), { records, cycle: 1 });
 
   assert.equal(outcome.fail, undefined);
+  // Four records is four seats, each with its own slot, so each holds its own
+  // attempt budget, its own cost line and its own failure record.
   assert.deepEqual(
     fx.ctx.briefs.map((b) => b.seat).sort(),
-    ['record-review:1', 'record-review:2'],
+    ['record-review:1', 'record-review:2', 'record-review:3', 'record-review:4'],
   );
   const first = fx.ctx.briefs.find((b) => b.seat === 'record-review:1').roleBlock;
   const second = fx.ctx.briefs.find((b) => b.seat === 'record-review:2').roleBlock;
   assert.ok(first.includes(`Review one decision record: ${RECORD_FILE}`), first);
   assert.ok(second.includes(`Review one decision record: ${OTHER_RECORD}`), second);
-  // One record per seat: the other one reaches the first seat as a neighbour to
-  // read against, and never as a record to judge.
-  for (const brief of [first, second]) {
-    assert.equal((brief.match(/^Review one decision record:/gm) ?? []).length, 1, brief);
-    assert.equal((brief.match(/^The units of /gm) ?? []).length, 1, brief);
+  // One record per seat: another record reaches a seat as a neighbour to read
+  // against, and never as a record to judge.
+  for (const { roleBlock } of fx.ctx.briefs) {
+    assert.equal((roleBlock.match(/^Review one decision record:/gm) ?? []).length, 1, roleBlock);
+    assert.equal((roleBlock.match(/^The units of /gm) ?? []).length, 1, roleBlock);
   }
   assert.ok(first.includes(`The units of ${RECORD_FILE},`), first);
   assert.ok(second.includes(`The units of ${OTHER_RECORD},`), second);

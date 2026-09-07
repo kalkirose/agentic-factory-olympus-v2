@@ -657,8 +657,15 @@ async function settleFindings(
   };
 }
 
-/** The unit a finding is about, and the second place a `consistent` one names. */
-function recordFields(f) {
+/**
+ * The unit a finding is about, and the second place a `consistent` one names.
+ *
+ * One definition, three readers: the place assigned at the stamp, the stamp
+ * itself, and the ladder's rebuild of a finding from the ledger. A finding
+ * rebuilt without them names a file and no sentence, and the corrective brief
+ * and the verifier's item line both state the sentence (ADR-0073).
+ */
+export function recordFields(f) {
   return {
     ...(f.unit && { unit: f.unit }),
     ...(f.head && { head: f.head }),
