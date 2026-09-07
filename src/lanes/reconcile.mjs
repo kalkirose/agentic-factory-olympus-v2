@@ -171,8 +171,10 @@ async function takeStep(ctx, base, { step, next }) {
  * the two answers to a red render, and `recheck` is what a repair round past a
  * green render owes (ADR-0075).
  *
- * `done` is every ending: nothing owed, a spent fallback, or a green render
- * with no repair behind it. The stage then hands the run to the update.
+ * `done` is every ending. A judge that could not answer is one. A spent
+ * fallback is one. A pass that holds no record set is one. So is a green
+ * render with no repair behind it. The stage then hands the run to the
+ * update.
  * @param {object[]} events the run's ledger, in order
  * @param {{cap?: number}} [opts] the record cap, `gates.reconcileRounds`
  * @returns {'judge'|'write'|'spectrum'|'review'|'verify'|'render'|'correct'|
@@ -181,12 +183,17 @@ async function takeStep(ctx, base, { step, next }) {
 export function reconcileStep(events, { cap = DEFAULT_RECONCILE_ROUNDS } = {}) {
   const judged = judgment(events);
   if (!judged) return 'judge';
-  if (judged.ok !== true || judged.owed !== true) return 'done';
+  if (judged.ok !== true) return 'done';
   const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written');
-  if (!written || written.seq < judged.seq) return 'write';
+  // The write is owed for a judgment that names records and holds no write of
+  // its own. Nothing else here asks what the judge owed. A pass that owes no
+  // write still owes the cycle over the set it holds (ADR-0076).
+  if (judged.owed === true && (!written || written.seq < judged.seq)) return 'write';
+  const anchor = cycleAnchor(events);
+  if (!anchor) return 'done';
   // A fallback is the stage's last word: the records are owed, the run said so,
   // and nothing here writes them a second time.
-  if (written.ok !== true) return 'done';
+  if (anchor.ok !== true) return 'done';
   const rendered = lastRendered(events);
   // A record re-run: the update stage merged a default branch whose incoming
   // work touched a record in this run's neighbourhood, so the reconciliation is
@@ -195,8 +202,8 @@ export function reconcileStep(events, { cap = DEFAULT_RECONCILE_ROUNDS } = {}) {
     events,
     (e) => e.event === 'pre-verdict-update' && e.records?.answer === 'rerun',
   );
-  if (!rendered || rendered.seq < written.seq || (rerun && rerun.seq > rendered.seq)) {
-    return cycleStepOf(events, written);
+  if (!rendered || rendered.seq < anchor.seq || (rerun && rerun.seq > rendered.seq)) {
+    return cycleStepOf(events, anchor);
   }
   if (rendered.verdict === 'green') {
     return recheckOwed(events, rendered) ? 'recheck' : 'done';
@@ -207,11 +214,11 @@ export function reconcileStep(events, { cap = DEFAULT_RECONCILE_ROUNDS } = {}) {
   return rounds >= cap || stalled ? 'stall' : 'correct';
 }
 
-/** How much of the cycle over the newest write the ledger already holds. */
-function cycleStepOf(events, written) {
+/** How much of the cycle over the anchor the ledger already holds. */
+function cycleStepOf(events, anchor) {
   const cycle = nextCycle(events);
   if (!events.some((e) => e.event === 'layer-result' && e.cycle === cycle)) return 'spectrum';
-  const records = reviewedRecords(written);
+  const records = reviewedRecords(anchor);
   const stamped = new Set(
     events.filter((e) => e.event === 'record-units' && e.cycle === cycle).map((e) => e.record),
   );
@@ -229,15 +236,42 @@ function cycleStepOf(events, written) {
 }
 
 /**
- * The records a cycle reviews, from the write that earned it. It is the widest
- * of the two lists the write holds: the records it rewrote, and the records it
- * was given and left alone. A record the round did not change is still a record
- * the pass touched, and the review reads every one of them on every cycle
- * (ADR-0075).
+ * The records a cycle reviews, from the anchor that earned it. It is the widest
+ * of the lists the anchor holds. Those are the records it rewrote, the records
+ * it left alone, and the paths a born stamp names. A record the round did
+ * not change is still a record the pass touched, and the review reads every one
+ * of them on every cycle (ADR-0075, ADR-0076).
  */
-function reviewedRecords(written) {
-  const entries = Array.isArray(written?.records) ? written.records.map((r) => r.record) : [];
-  return [...new Set([...(written?.rewritten ?? []), ...entries])];
+function reviewedRecords(anchor) {
+  const entries = Array.isArray(anchor?.records) ? anchor.records.map((r) => r.record) : [];
+  return [...new Set([...(anchor?.rewritten ?? []), ...entries, ...(anchor?.paths ?? [])])];
+}
+
+/**
+ * The stamp the pass's record cycle stands on: the write where the pass wrote
+ * records, and the birth where it wrote none.
+ *
+ * The stage used to open its cycle on a write alone. The judge leaves out a
+ * born record that still stands. On the records lane the whole diff is that
+ * birth write, so the judge answers nothing owed. The born records then
+ * shipped with no layer, no review seat and no render.
+ *
+ * A born set is a record set the pass holds. It takes the cycle a written set
+ * takes (ADR-0076).
+ *
+ * The born stamp takes the write stamp's shape, so every reader behind this
+ * one reads one thing.
+ * @param {object[]} events the run's ledger, in order
+ */
+export function cycleAnchor(events) {
+  const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written');
+  if (written) return written;
+  const born = sinceFreshPass(
+    events,
+    (e) => e.event === 'records-committed' && e.decided === true,
+  );
+  if (!born) return null;
+  return { seq: born.seq, ok: true, born: true, paths: born.paths ?? [] };
 }
 
 /** The stage's own judgment of this pass, never the close-out's ticket line. */
@@ -335,11 +369,22 @@ async function judgeStep(ctx, base) {
     return null;
   }
   const { owed, records, reason } = result.report;
+  const born = recordsCommitted(runEvents(ctx))?.paths ?? [];
   if (!owed) {
-    ctx.store.append('reconciliation-judged', { actor: ACTOR, ok: true, owed: false, reason });
+    // The born and late lists ride the stamp either way. A pass that owes
+    // nothing still holds the records its own birth wrote. A late share that
+    // read no such stamp reported nothing over a records-lane run (ADR-0076).
+    ctx.store.append('reconciliation-judged', {
+      actor: ACTOR,
+      ok: true,
+      owed: false,
+      reason,
+      born,
+      late: [],
+    });
     return null;
   }
-  const bornPaths = new Set(recordsCommitted(runEvents(ctx))?.paths ?? []);
+  const bornPaths = new Set(born);
   ctx.store.append('reconciliation-judged', {
     actor: ACTOR,
     ok: true,
@@ -747,10 +792,10 @@ function closedRecords(base) {
  */
 async function cycleStep(ctx, base) {
   const events = runEvents(ctx);
-  const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written');
+  const anchor = cycleAnchor(events);
   const cycle = nextCycle(events);
   const sha = await headSha(base.worktree);
-  const changed = reviewedRecords(written);
+  const changed = reviewedRecords(anchor);
   const spectrum = await runRecordLayers(ctx, base, { cycle, sha, changed });
   if (spectrum.error) {
     return commandError(
@@ -906,13 +951,13 @@ async function correctStep(ctx, base, next) {
   const events = runEvents(ctx);
   const judged = judgment(events);
   const rendered = lastRendered(events);
-  const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written');
+  const anchor = cycleAnchor(events);
   const index = findingIndex(events);
   const open = (rendered?.open ?? []).map((id) => index.get(id)).filter(Boolean);
   const layers = (rendered?.open ?? []).filter((id) => !index.has(id));
-  const records = reviewedRecords(written);
+  const records = reviewedRecords(anchor);
   const round = roundsSince(events, judged.seq) + 1;
-  const divergences = Array.isArray(written?.divergences) ? written.divergences : [];
+  const divergences = Array.isArray(anchor?.divergences) ? anchor.divergences : [];
   const outcome = await writeRound(ctx, base, {
     records,
     since: rendered.seq,
