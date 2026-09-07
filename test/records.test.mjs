@@ -134,6 +134,14 @@ test('the write schema carries the units, the divergence evidence and the siblin
   );
 });
 
+test('the write shape is the function alone: no dispatch takes a pre-built one', () => {
+  // Both dispatches build their own shape from what their brief asked for, so a
+  // constant beside the function is a second shape nothing reads. A reader that
+  // took it would send a seat a shape its brief never matched.
+  const source = readFileSync(join(import.meta.dirname, '..', 'src/lanes/records.mjs'), 'utf8');
+  assert.ok(!source.includes('RECONCILE_WRITE_SCHEMA'), 'records.mjs still holds the constant');
+});
+
 // -- the eight refusals (point 2) ---------------------------------------------
 
 test('unit check 1 refuses a report that leaves a unit unanswered', (t) => {

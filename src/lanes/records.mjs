@@ -166,12 +166,6 @@ export function reconcileWriteSchema({ answered = false, siblings = false, units
 }
 
 /**
- * The shape the first write of a run answers in. A dispatch whose brief carries
- * the unit duty builds its own with `{units: true}`.
- */
-export const RECONCILE_WRITE_SCHEMA = reconcileWriteSchema();
-
-/**
  * The birth brief: the records a validated spec or a ticket decides, written
  * before the code exists by a seat that will never write that code.
  *
