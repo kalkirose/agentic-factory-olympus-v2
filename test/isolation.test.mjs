@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { homePaths, scaffoldHome } from '../src/daemon/home.mjs';
 import { cloneDir, ensureBareClone, fetchClone, branchSha, readBlobFromBranch } from '../src/isolation/clones.mjs';
+import { gitPlain } from '../src/isolation/git.mjs';
 import {
   addRunWorktree,
   addDisposableWorktree,
@@ -56,6 +57,39 @@ test('fetch discipline: a change on main applies only after fetch', async (t) =>
   assert.deepEqual(JSON.parse(fresh.text).conventions, ['v2']);
   // Idempotent: a second ensure returns the same clone untouched.
   assert.equal(await ensureBareClone(paths, 'alpha', origin, 'main'), clone);
+});
+
+// ADR-0076. A seat's own git and every gate command the project runs read the
+// clone's config. Neither takes an argument from the harness. The clone is
+// where the line-ending rule has to stand for them.
+test('a clone carries the line-ending settings, and one made without them heals', async (t) => {
+  const { origin, paths } = fixture(t);
+  // A git that reads no config file of its own holds the setting nowhere
+  // else. This machine's own `core.autocrlf` cannot decide the answer. The
+  // read is plain for the same reason (ADR-0030): a harness invocation would
+  // answer with the argument it supplied itself.
+  const absent = join(paths.home, 'absent.gitconfig');
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: absent,
+    GIT_CONFIG_SYSTEM: absent,
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  const local = async (dir, key) =>
+    (await gitPlain(['config', '--local', '--get', key], { cwd: dir, env })).trim();
+
+  const clone = await ensureBareClone(paths, 'alpha', origin, 'main');
+  assert.equal(await local(clone, 'core.autocrlf'), 'false');
+  assert.equal(await local(clone, 'core.eol'), 'lf');
+
+  // A clone made before this rule holds neither key. The next launch writes
+  // both, so nothing has to be re-cloned.
+  gitSync(['config', '--unset', 'core.autocrlf'], clone);
+  gitSync(['config', '--unset', 'core.eol'], clone);
+  await assert.rejects(() => local(clone, 'core.eol'));
+  await ensureBareClone(paths, 'alpha', origin, 'main');
+  assert.equal(await local(clone, 'core.autocrlf'), 'false');
+  assert.equal(await local(clone, 'core.eol'), 'lf');
 });
 
 test('fetch with prune never deletes a live run branch', async (t) => {

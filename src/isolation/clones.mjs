@@ -18,6 +18,14 @@ export function cloneDir(paths, project) {
  * Clones the project bare on first use and pins the fetch refspec to the
  * default branch. The refspec is re-pinned on every call, so a clone made
  * under an older (wider) refspec heals itself.
+ *
+ * The line-ending settings are written on every call for the same reason. A
+ * seat's own git and every gate command the project runs read the clone's
+ * config, and neither takes an argument from the harness. A clone that
+ * inherited `core.autocrlf=true` from the machine hands them carriage returns
+ * the harness never writes (ADR-0076). A clone made before this rule heals at
+ * its next launch. `src/daemon/environment.mjs` states the same class for
+ * `core.longPaths`.
  */
 export async function ensureBareClone(paths, project, repoUrl, defaultBranch) {
   if (typeof defaultBranch !== 'string' || defaultBranch.length === 0) {
@@ -30,6 +38,8 @@ export async function ensureBareClone(paths, project, repoUrl, defaultBranch) {
   }
   const refspec = `+refs/heads/${defaultBranch}:refs/heads/${defaultBranch}`;
   await git(['config', 'remote.origin.fetch', refspec], { cwd: dir });
+  await git(['config', 'core.autocrlf', 'false'], { cwd: dir });
+  await git(['config', 'core.eol', 'lf'], { cwd: dir });
   return dir;
 }
 
