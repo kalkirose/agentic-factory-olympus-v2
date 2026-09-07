@@ -57,9 +57,11 @@ sequential, and `record-write-time` says when that stops paying.
 `reconcile-rendered.open` mixes finding ids and layer names, so a reader filters
 by the finding index.
 
-The token release for a record re-run is not yet implemented. `src/lanes/ship.mjs`
-calls `releaseShipToken(ctx, 're-reconcile')`. `SHIP_TOKEN_RELEASE_REASONS` in
-`src/ship/token.mjs` holds `re-verdict` and `park` alone, so that call throws.
+A record re-run gives the ship token back under its own reason.
+`src/lanes/ship.mjs` calls `releaseShipToken(ctx, 're-reconcile')`, and
+`SHIP_TOKEN_RELEASE_REASONS` in `src/ship/token.mjs` holds that reason beside
+`re-verdict` and `park`. `releasedForVerdict` reads the reason back and sends a
+restart in the crash window to the reconcile stage.
 
 This record is superseded when `record-cycles` breaches over a window whose
 briefs were already tightened once.

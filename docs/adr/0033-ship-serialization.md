@@ -65,10 +65,9 @@ work before the request that keeps the token, for the reason stated under the
 conflict route below. The release stamps `ship-token` (released) with a reason
 out of a closed set, because a machine cycle and a wait on a person are different
 costs and a count that mixes them is a count of nothing.
-`SHIP_TOKEN_RELEASE_REASONS` in `src/ship/token.mjs` holds `re-verdict` and
-`park`. The record re-run's own reason, `re-reconcile`, is not yet implemented:
-the update stage names it at the release and the closed set refuses it, so that
-release throws.
+`SHIP_TOKEN_RELEASE_REASONS` in `src/ship/token.mjs` holds `re-verdict`,
+`re-reconcile` and `park`. The update stage names the record re-run's own reason
+at its release, and `assertReleaseReason` passes it.
 
 **A released run queues again at the back.** The release clears the run's
 `queuedAt` as well as its hold, so its next wait stamp is a new position. The run
