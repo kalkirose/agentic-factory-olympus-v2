@@ -103,13 +103,21 @@ export function commitTree(dir, files, message) {
   return gitSync(['rev-parse', 'HEAD'], dir).trim();
 }
 
+/**
+ * The line-ending rule every fixture repository carries. The door refuses a
+ * project whose default branch declares none (ADR-0076). The rule also keeps a
+ * fixture's own bytes LF on a host whose git holds `core.autocrlf=true`. A
+ * caller that states its own `.gitattributes` replaces it.
+ */
+export const LF_ATTRIBUTES = '* text=auto eol=lf\n';
+
 /** Creates a fixture origin repo with an initial commit on main. */
 export function initOriginRepo(dir, files) {
   mkdirSync(dir, { recursive: true });
   gitSync(['init', '-b', 'main', '.'], dir);
   gitSync(['config', 'user.email', 'harness@test.invalid'], dir);
   gitSync(['config', 'user.name', 'Harness Test'], dir);
-  commitTree(dir, files, 'init');
+  commitTree(dir, { '.gitattributes': LF_ATTRIBUTES, ...files }, 'init');
   return dir;
 }
 
