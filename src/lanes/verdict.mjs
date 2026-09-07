@@ -3217,9 +3217,24 @@ function openFindingLine(f) {
   return `[${f.id}] [${cls}${depth}] ${grade} — ${f.summary} (evidence: ${f.evidence})`;
 }
 
-function findingLine(f) {
-  const head = f.source === 'triage' ? `[${f.class}]` : `[${f.lens} ${f.severity}]`;
-  return `${head} ${f.summary} (evidence: ${f.evidence})`;
+/**
+ * One finding as a code brief states it: the class or the lens with its
+ * severity, the place, and the sentence.
+ *
+ * A record finding rides the unit it is about and that unit's head, and a
+ * `consistent` one the second record with its unit as well. The claim is about
+ * one sentence of one document, so a brief that names the file alone leaves the
+ * seat to look for the sentence again (ADR-0073). The fields come off the
+ * ledger through `findingFromEvent`, and a finding that carries none prints
+ * exactly what a code finding always printed.
+ */
+export function findingLine(f) {
+  const grade = f.source === 'triage' ? `[${f.class}]` : `[${f.lens} ${f.severity}]`;
+  const unit = f.unit ? ` [unit: ${f.unit}${f.head ? ` "${f.head}"` : ''}]` : '';
+  const against = f.file2
+    ? ` [against: ${f.file2}${f.unit2 ? ` ${f.unit2}` : ''}${f.head2 ? ` "${f.head2}"` : ''}]`
+    : '';
+  return `${grade}${unit}${against} ${f.summary} (evidence: ${f.evidence})`;
 }
 
 // -- shared derivations ------------------------------------------------------

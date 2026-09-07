@@ -10,6 +10,8 @@ import { basename, dirname, join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
 import {
+  findingIndex,
+  findingLine,
   interruptedStep,
   postFreeze,
   repairLane,
@@ -4818,4 +4820,79 @@ test('the re-freeze carries the map brief and its check, and stamps its own map'
   // The stamp lands on the write the checks passed, before the commit.
   const committed = events.find((e) => e.event === 'suite-committed');
   assert.ok(stamps[0].seq < committed.seq);
+});
+
+// -- the finding line a code brief carries (ADR-0073) ------------------------
+//
+// Six briefs of this module state a finding through one line: the repair
+// round, the stall park, the triage prior-open list, the suite amendment, the
+// spec amendment and the fresh-pass brief. A record finding reaches them
+// rebuilt from the ledger, and the unit it is about is what the seat needs.
+
+test('a record finding prints its unit and the second place; a code finding is unchanged', () => {
+  // The code line, byte for byte as every one of those briefs carried it.
+  assert.equal(
+    findingLine({
+      source: 'review',
+      lens: 'correctness',
+      severity: 'HIGH',
+      summary: 'the guard is missing',
+      evidence: 'src/feature.mjs:12',
+    }),
+    '[correctness HIGH] the guard is missing (evidence: src/feature.mjs:12)',
+  );
+  // A triage finding carries its class in the same place.
+  assert.equal(
+    findingLine({
+      source: 'triage',
+      class: 'code-defect',
+      summary: 'the acceptance layer is red',
+      evidence: 'boom',
+    }),
+    '[code-defect] the acceptance layer is red (evidence: boom)',
+  );
+  // A record finding is about one sentence of one document. The unit and its
+  // head ride the line, and a `consistent` finding names the second place as
+  // well. The fields survive the rebuild from the ledger.
+  const index = findingIndex([
+    {
+      seq: 1,
+      event: 'finding',
+      id: 'F1',
+      source: 'review',
+      lens: 'record',
+      severity: 'HIGH',
+      record: true,
+      criterion: 'consistent',
+      file: 'docs/adr/adr-001-first.md',
+      unit: 'U7',
+      head: 'The public surface is exactly two routes',
+      file2: 'docs/adr/adr-002-second.md',
+      unit2: 'U3',
+      head2: 'The public surface is one route',
+      summary: 'the two records decide the surface two ways',
+      evidence: 'src/routes.mjs:1',
+    },
+  ]);
+  assert.equal(
+    findingLine(index.get('F1')),
+    '[record HIGH] [unit: U7 "The public surface is exactly two routes"] ' +
+      '[against: docs/adr/adr-002-second.md U3 "The public surface is one route"] ' +
+      'the two records decide the surface two ways (evidence: src/routes.mjs:1)',
+  );
+  // A record finding about one record names one place.
+  assert.equal(
+    findingLine({
+      source: 'review',
+      lens: 'record',
+      severity: 'MEDIUM',
+      record: true,
+      unit: 'U2',
+      head: 'The helper doubles its input',
+      summary: 'the record states a rule the tree does not hold',
+      evidence: 'src/feature.mjs:1',
+    }),
+    '[record MEDIUM] [unit: U2 "The helper doubles its input"] ' +
+      'the record states a rule the tree does not hold (evidence: src/feature.mjs:1)',
+  );
 });
