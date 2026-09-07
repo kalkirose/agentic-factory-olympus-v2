@@ -1,6 +1,6 @@
 # ADR-0010: Tripwire watcher shapes
 
-Status: accepted (2026-08-10)
+Status: accepted (2026-08-10, the record readings 2026-09-07)
 
 ## Decision
 
@@ -93,7 +93,9 @@ proposals get these concrete shapes:
   - `verdict-cycles`: the most rendered verdicts any one run spent, over the
     last N runs of the project that rendered any. The worst run rather than
     the mean: a run re-judged ten times is the reading, and four quick ships
-    beside it do not make it less so.
+    beside it do not make it less so. The record renders are subtracted by set,
+    so a ledger written before the reconcile stage reads the same number as one
+    written after it.
   - `ship-token-wait`: the longest ship-token queue wait of the last N runs
     that queued, in minutes. A run still waiting is measured up to the read,
     because a queue nobody has cleared is what the metric exists for. It is
@@ -158,29 +160,56 @@ proposals get these concrete shapes:
     all about whether anybody reads them, and a floor that breached on it would
     breach on every quiet window of every project from the day it armed.
   - `record-refuted-share`: refuted record findings over all record findings,
-    across the runs holding the last N verdicts that carried one, keyed on
-    `verdict-rendered`. Every finding on a decision record reaches the verifier
+    across the last N record renders that carried one, keyed on
+    `verdict-rendered`. A finding joins a render by the run, the render's own
+    event name and the cycle: a record cycle 2 and a code cycle 2 are two
+    judgments about two trees, and a key of run and cycle alone would join the
+    first to the second (ADR-0075). Every finding on a decision record reaches the verifier
     and a confirmed one blocks the ship (ADR-0007), so the verifier is the one
     place a wrong remark can die and this is the reading of how often it has to
     kill one. Above a half the review seat is reading documents the way it reads
     code, and the answer is the record criteria and the brief, which is a
-    prompt-only change. The window is the verdicts that hold a record finding
-    and not every verdict: a project whose stories touch no record says nothing
+    prompt-only change. The window is the renders that hold a record finding
+    and not every render: a project whose stories touch no record says nothing
     about how its seat reads one, so a window with none in it is not eligible.
   - `reconcile-fallbacks-window`: ships whose in-run record rewrite ended in a
     fallback, over the last N ships of the project that were judged owed, keyed
-    on `reconciliation-written` and `merged`. Both fallbacks count and they
-    count the same: the partial ships the records with confirmed findings open
-    and tickets them, the discard puts the tree back and tickets the whole
-    rewrite, and either way the work went to a ticket. Two in ten is the band,
-    and the breach is the trigger that returns the rewrite to the sweep
-    (ADR-0026). A ship nobody judged owed asked the rewrite nothing and is not
-    in the window at all.
-- **The two record readings are armed on every project.** The record rule runs
+    on `reconciliation-written` and `merged`. Every `ok: false` counts, whatever
+    its cause, because the work went to a ticket either way; the detail carries
+    a histogram of the causes, so a cause that lands later is counted the day it
+    lands. Two in ten is the band, and the breach is the trigger that returns the
+    rewrite to the sweep (ADR-0026). A ship nobody judged owed asked the rewrite
+    nothing and is not in the window at all.
+  - `record-cycles`: the mean record cycles per reconciliation, over the last N
+    stage runs of the project, keyed on `reconcile-rendered`. A stage run is one
+    entry into the reconcile stage, so a re-run over a moved base and a recheck
+    after a repair each open a count of their own (ADR-0075). Two is the band,
+    and the number that says the mechanism works is a green inside two cycles.
+    The mean rather than the worst, which is where this reading differs from
+    `verdict-cycles`: a code verdict is one question asked again until it closes,
+    and a reconciliation is one question per stage run with several in a ship. The
+    worst rides in the detail.
+  - `record-write-time`: the mean wall clock of the record write, in minutes,
+    over the last N stage runs that wrote anything, keyed on
+    `reconciliation-written`. The span is the first write seat of a stage run to
+    the last `reconciliation-written` of it. The writers run one record at a time
+    by decision, and twenty minutes is the band; the answer is a review of
+    whether they should run in parallel in disposable worktrees. Wall clock and
+    not work: what waits for the records is a queued run or a person, and a wait
+    inside the span is part of that.
+- **The four record readings are armed on every project.** The record rule runs
   on every project with no config line, so the counters that watch it are armed
   the way the operator-lever counters are: a counter that had to be opted into
   would be absent from exactly the projects nobody is watching. A project that
-  writes its own band for either metric keeps it.
+  writes its own band for any of them keeps it.
+- **Two ledger shapes, one series.** An archived ledger holds a record render as
+  a `verdict-rendered` behind an `implementation-committed` with `phase:
+  'reconcile'`. `recordRenders(events, pinTs)` in `src/ledger/cycles.mjs` returns
+  the two shapes as one series, old before `pinTs` and `reconcile-rendered`
+  after. `pinTs` is the `ts` of the instance ledger's first `daemon-started` that
+  carries a `harnessSha`, and a ledger older than the field reads every render as
+  old shape. Every record reading calls it, so a window that straddles the pin
+  reads one number.
 - **Baseline proposals.** At the 5th freeze the watcher stamps a kill-rate
   proposal (observed kills, waves, per-freeze rates, and the observed floor
   as the suggested band); at the 5th verdict a per-lens yield proposal,
@@ -320,11 +349,17 @@ findings that were about something else. Trigger: allowlist additions the
 window shows and findings the metric does not. Reversal cost: one function in
 `review.mjs`; the metric and the field are unchanged.
 
-If the two record readings prove to be noise on projects that hold no decision
+If the four record readings prove to be noise on projects that hold no decision
 records, drop them from the armed set and leave them in the metric table for a
-project to name. Both are ineligible on such a project today, so the reading is
-quiet rather than wrong. Trigger: a project whose board carries two permanent
+project to name. All four are ineligible on such a project today, so the reading
+is quiet rather than wrong. Trigger: a project whose board carries four permanent
 em-dashes nobody reads past. Reversal cost: one list in the registry.
+
+If `record-cycles` proves to hide a run inside its mean, the entry moves to the
+worst stage run of the window, which the detail already carries. Trigger: a
+window whose mean sits under the band while one reconciliation spent five cycles.
+Reversal cost: one line in the reading; the stage bounds and the window do not
+change.
 
 If `tripwires-armed` proves to be noise, the status page returns to the metric
 defaults and prints the window beside each reading so nothing is implied.

@@ -37,6 +37,17 @@
 // launch rule makes that refusal unreachable for a project that turned the
 // flag on.
 //
+// A run carries two certifications and each has a ground of its own. The code
+// verdict's ground is what the suites declare. The reconciliation's ground is
+// the run's own records and their neighbourhood, which the caller computes at
+// the merge. So the incoming work is listed once and asked two questions, and
+// each answer is kept or redone on its own: a moved code file re-judges the
+// code and leaves the records standing, and a moved record of the
+// neighbourhood re-runs the reconciliation and leaves the code standing. A
+// lane with one certification is asked one question. A record the run itself
+// wrote is a re-run of the reconciliation and never a refusal, because the
+// stage that owns it answers a conflict on it.
+//
 // Every refusal costs the run the re-verdict it would have taken anyway. The
 // fast path can only remove work, so a defect in this module makes a ship
 // slow and can never make one wrong.
@@ -51,7 +62,7 @@ import {
   underEntry,
 } from '../config/project.mjs';
 import { MAX_DIFF_BYTES, git } from '../isolation/git.mjs';
-import { layerGround, partGround } from './parts.mjs';
+import { layerGround, partGround, recordMatch } from './parts.mjs';
 import { priorStatus } from './spectrum.mjs';
 
 /**
@@ -99,6 +110,11 @@ export const FAST_PATH_REFUSALS = new Set([
   'ground-intersects',
   // The default branch moved on ground no claim in this project reaches.
   'unclaimed-ground',
+  // The default branch moved a record the run's reconciliation rests on: one
+  // of the run's own records, or a record of their neighbourhood. The code
+  // certification may still stand, and the answer says so; the run goes to the
+  // reconciliation rather than to the request.
+  'records-rerun',
   // Anything thrown inside the check itself.
   'internal-error',
 ]);
@@ -222,13 +238,24 @@ function readableModes(srcMode, dstMode) {
  *
  * A layer with no standing green and a certification carrying a deferred proof
  * each refuse with a word of their own.
+ *
+ * The standing green is read per layer, from the last cycle that RAN that
+ * layer, and never from the last cycle alone. A cycle runs the layers its own
+ * plan named and carries or skips the rest, so a layer a record-only cycle
+ * left out keeps the green it earned, and the record it earned it on is the
+ * one holding its declaration (`priorStatus` in spectrum.mjs).
  * @param {Array<{name: string, ground?: string[]}>} layers the project's
  *   Tier-1 layers
  * @param {Map<string, object>} prior each layer's standing `layer-result`
- * @param {{deferred?: object[], breadth?: string[]}} [options] `breadth` is
- *   `gates.breadthGround`, which belongs to every layer's ground
+ * @param {{deferred?: object[], breadth?: string[], recordPaths?: string[]}}
+ *   [options] `breadth` is `gates.breadthGround`, which belongs to every
+ *   layer's ground; `recordPaths` keeps a record out of that shared list
  */
-export function declaredGround(layers, prior, { deferred = [], breadth = [] } = {}) {
+export function declaredGround(
+  layers,
+  prior,
+  { deferred = [], breadth = [], recordPaths = [] } = {},
+) {
   // A deferred part is a proof the ship went out without. Whatever the
   // declarations say about the ground it rests on, the certification does not
   // hold for it, so there is nothing here to carry over a moved base.
@@ -254,7 +281,7 @@ export function declaredGround(layers, prior, { deferred = [], breadth = [] } = 
     if (!record || record.status !== 'green') {
       return refusal('no-standing-green', `no green result stands for layer ${layer.name}`);
     }
-    const ground = layerGround(layer, record, breadth);
+    const ground = layerGround(layer, record, breadth, recordPaths);
     // The part refusal comes first, because it is the narrower diagnosis: a
     // layer that declares most of itself and holds one silent part is repaired
     // in a different place from a layer nobody described at all.
@@ -572,45 +599,85 @@ function looksLikeRepoPath(word) {
 }
 
 /**
- * The ground half of the answer: null when every file the default branch gained
- * is ground the project declared inert, a refusal otherwise.
+ * The ground half of the answer, for each certification the lane holds: what
+ * the incoming work did to the code verdict, and what it did to the
+ * reconciliation. One list of files, two questions, two answers.
  *
- * Two refusals live here and they are opposites. A file a claim reaches is
- * ground the certification rests on, and the certification was never earned
- * over it. A file NO claim reaches is ground nobody described, and the part
- * machinery's rule for that is the one this follows: doubt re-runs.
- * The project config the run pinned is one of the sets, because the config now
- * carries the ground of every layer. A run judges against the blob it pinned
- * at its launch; if the default branch has since widened a layer's ground, the
- * decision was made under a claim the merge target no longer makes.
- * @param {{mainChanged: {files: string[], unclassifiable: string[]},
- *   storyChanged: string[], entries: string[], testPaths: string[],
- *   breadth: string[], sources: string[], inert: string[],
- *   configPath: string}} input
+ * The code answer is `kept` when every file the default branch gained is
+ * ground the project declared inert, and `rejudge` otherwise. Two reasons live
+ * there and they are opposites. A file a claim reaches is ground the
+ * certification rests on, and the certification was never earned over it. A
+ * file NO claim reaches is ground nobody described, and the part machinery's
+ * rule for that is the one this follows: doubt re-runs. The project config the
+ * run pinned is one of the sets, because the config carries the ground of
+ * every layer. A run judges against the blob it pinned at its launch; if the
+ * default branch has since widened a layer's ground, the decision was made
+ * under a claim the merge target no longer makes.
+ *
+ * A record leaves every one of those sets. The project states which layers
+ * read a record, no suite is one of them, and a record the branch moved is the
+ * second question's alone: reading it against the code sets would re-judge the
+ * code for a file the code cannot see.
+ *
+ * The records answer is `rerun` when an incoming file is one of the run's own
+ * records or a record of their neighbourhood, and `kept` otherwise. A record
+ * outside the neighbourhood is a decision this run's records do not touch and
+ * do not cite. A record the run itself wrote is a re-run and never a refusal:
+ * the stage that owns it resolves the conflict and reviews it again over the
+ * merged tree.
+ *
+ * @param {{files: string[], unclassifiable: string[]}} incoming what the
+ *   default branch gained since the run last met it
+ * @param {{code: {storyChanged: string[], entries: string[],
+ *   testPaths: string[], breadth: string[], sources?: string[],
+ *   inert?: string[], configPath?: string}|null,
+ *   records: {neighbourhood?: string[], own?: string[],
+ *   recordPaths?: string[]}|null}} questions the ground of each certification
+ *   the lane holds; null for a certification it does not hold
+ * @returns {{code: {answer: 'kept'|'rejudge', reason?: string,
+ *   detail?: string, files: string[]}|null,
+ *   records: {answer: 'kept'|'rerun', reason?: string, detail?: string,
+ *   files: string[]}|null}}
  */
-export function groundVerdict({
-  mainChanged,
-  storyChanged,
-  entries,
-  testPaths,
-  breadth,
-  sources = [],
-  inert = [],
-  configPath = DEFAULT_PROJECT_CONFIG_PATH,
-}) {
-  if (mainChanged.unclassifiable.length > 0) {
-    return refusal(
+export function groundVerdict(incoming, { code = null, records = null } = {}) {
+  return {
+    code: code === null ? null : codeAnswer(incoming, code, records),
+    records: records === null ? null : recordsAnswer(incoming, records),
+  };
+}
+
+/** The code verdict's answer over the incoming files that are not records. */
+function codeAnswer(
+  incoming,
+  {
+    storyChanged,
+    entries,
+    testPaths,
+    breadth,
+    sources = [],
+    inert = [],
+    configPath = DEFAULT_PROJECT_CONFIG_PATH,
+  },
+  records,
+) {
+  const isRecord = (records === null ? null : recordMatch(records.recordPaths ?? [])) ?? never;
+  // A change this module cannot read is never a record: the second question
+  // reads a path and this one reads a file, and a name neither can classify
+  // belongs to the question that refuses on doubt.
+  if (incoming.unclassifiable.length > 0) {
+    return rejudge(
       'unclassifiable-change',
-      `the default branch changed ground this check cannot read: ${list(mainChanged.unclassifiable)}`,
+      `the default branch changed ground this check cannot read: ${list(incoming.unclassifiable)}`,
+      incoming.unclassifiable,
     );
   }
   const story = new Set(storyChanged);
-  // The order decides which claim the refusal names, and nothing else: one hit
-  // in any set refuses. The specific claims come first. A layer's ground is the
-  // union of the config's claim, the commands' claims and the breadth list, so
-  // `a declared suite input` reaches every file the three sets before it reach,
-  // and a record that named it first would stop naming the list that actually
-  // claimed the file.
+  // The order decides which claim the answer names, and nothing else: one hit
+  // in any set re-judges. The specific claims come first. A layer's ground is
+  // the union of the config's claim, the commands' claims and the breadth
+  // list, so `a declared suite input` reaches every file the three sets before
+  // it reach, and a record that named it first would stop naming the list that
+  // actually claimed the file.
   const sets = [
     ['the story\'s own diff', (file) => story.has(file)],
     ['a declaration source', (file) => sources.some((entry) => underEntry(file, entry))],
@@ -623,20 +690,63 @@ export function groundVerdict({
     ['a declared suite input', (file) => entries.some((entry) => underEntry(file, entry))],
   ];
   const unclaimed = [];
-  for (const file of mainChanged.files) {
+  for (const file of incoming.files) {
+    if (isRecord(file)) continue;
     for (const [name, hit] of sets) {
-      if (hit(file)) return refusal('ground-intersects', `${file} is ${name}`);
+      if (hit(file)) return rejudge('ground-intersects', `${file} is ${name}`, [file]);
     }
     if (!inert.some((entry) => underEntry(file, entry))) unclaimed.push(file);
   }
   if (unclaimed.length > 0) {
-    return refusal(
+    return rejudge(
       'unclaimed-ground',
       `the default branch changed ground no claim in this project reaches: ${list(unclaimed)}`,
+      unclaimed,
     );
   }
-  return null;
+  return { answer: 'kept', files: [] };
 }
+
+/** The reconciliation's answer over the run's records and their neighbours. */
+function recordsAnswer(incoming, { neighbourhood = [], own = [] }) {
+  const mine = new Set(own);
+  const named = [];
+  const neighbours = [];
+  // A path this module cannot read as a file is asked the same question: the
+  // name is what the neighbourhood is stated in, and a record reached through
+  // a link or a mode flip is still that record moving.
+  for (const file of [...incoming.files, ...incoming.unclassifiable]) {
+    if (mine.has(file)) named.push(file);
+    else if (neighbourhood.some((entry) => underEntry(file, entry))) neighbours.push(file);
+  }
+  if (named.length > 0) {
+    return {
+      answer: 'rerun',
+      reason: 'own-record',
+      detail: `the default branch moved a record this run wrote: ${list(named)}`,
+      files: [...named, ...neighbours],
+    };
+  }
+  if (neighbours.length > 0) {
+    return {
+      answer: 'rerun',
+      reason: 'neighbourhood',
+      detail: `the default branch moved a record of the run's neighbourhood: ${list(neighbours)}`,
+      files: neighbours,
+    };
+  }
+  // A record outside the neighbourhood is no answer at all, and it must not
+  // read as one: the reconciliation never rested on it.
+  return { answer: 'kept', files: [] };
+}
+
+/** One code answer that says the verdict must judge the tree again. */
+function rejudge(reason, detail, files) {
+  return { answer: 'rejudge', reason: assertFastPathRefusal(reason), detail, files };
+}
+
+/** The matcher a lane with no record tree behind it stands on. */
+const never = () => false;
 
 /**
  * The version of the declarations this decision was checked against. It moves
@@ -670,7 +780,20 @@ export function declarationDigest({
 /**
  * The whole decision, from facts alone. Pure: every git read is the caller's,
  * so the routes are testable without a repository.
+ *
+ * The lane says which certifications it holds. `certification` is the code
+ * verdict's, or null for a lane that renders no code verdict; `records` is the
+ * reconciliation's ground, or null for a lane that reconciles nothing. Every
+ * check that answers for the code certification runs only where that
+ * certification exists: a records lane has no declared suite ground, no lens
+ * findings and no suite files to ask about, and asking anyway would refuse
+ * every ship it takes.
+ *
+ * Both answers ride every ending, refusals included, so the caller reads two
+ * answers whatever happened. A refusal is a certification this check could not
+ * carry, and the answer under it says the same thing in the caller's words.
  * @param {{certification: object|null,
+ *   records: {neighbourhood?: string[], recordPaths?: string[]}|null,
  *   layers: Array<{name: string, ground?: string[]}>,
  *   prior: Map<string, object>, commands: object, testPaths: string[],
  *   breadth: string[], inert: string[], lensFindings: string[],
@@ -679,10 +802,12 @@ export function declarationDigest({
  *   mainChanged: {files: string[], unclassifiable: string[]},
  *   storyChanged: string[]}} input
  * @returns {{taken: boolean, refusal?: string, detail?: string,
+ *   code?: object|null, records?: object|null,
  *   declaration?: object, certification?: object}}
  */
 export function fastPathVerdict({
   certification,
+  records = null,
   layers,
   prior,
   commands,
@@ -698,97 +823,170 @@ export function fastPathVerdict({
   mainChanged,
   storyChanged,
 }) {
-  if (!certification) {
+  const scope = { code: Boolean(certification), records: records !== null };
+  if (!scope.code && !scope.records) {
     return refusal('no-certification', 'no green verdict stands for this tree');
   }
-  // Question one. The cheapest of the two, and the one that holds whatever the
-  // declarations claim: a tree that is not the branch plus the story's own
-  // patch was never certified, by anybody, in any shape.
+  // Question one. The cheapest of them, and the one that holds whatever any
+  // declaration claims: a tree that is not the branch plus the run's own patch
+  // was never certified, by anybody, in any shape.
   if (storyDiffBefore !== storyDiffAfter) {
-    return refusal('diff-changed', 'the update changed the story\'s own diff');
+    return answered(refusal('diff-changed', 'the update changed the story\'s own diff'), scope);
   }
-  // The breadth list is what keeps the ground question from being answered by
-  // the declarations alone. A project that declares none has not made the
-  // claim this path stands on, so nothing here can fire (ADR-0056).
-  if (breadth.length === 0) {
-    return refusal('no-breadth-ground', 'the project declares no shared breadth ground');
-  }
-  // The suite files are one of the six sets the ground question asks. A
-  // project that names none is answering a sixth of that question with an
-  // empty list while the record reads like a whole answer.
-  if (testPaths.length === 0) {
-    return refusal('no-suite-ground', 'the project names no suite files of its own');
-  }
-  // The certification is a deterministic gate result AND a review panel's
-  // reading of the tree (ADR-0022). A lens declares no inputs and reads the
-  // whole repository around the diff, so no claim in this project can say the
-  // branch did not move ground a lens finding rests on. Where the panel raised
-  // nothing, the certification rests on declared ground alone and the two
-  // questions below cover it.
-  if (lensFindings.length > 0) {
-    return refusal(
-      'lens-ground',
-      `the certification carries review-lens findings whose ground nothing declares: ${list(lensFindings)}`,
+  let code = null;
+  let declared = null;
+  let sources = { ok: true, entries: [] };
+  if (scope.code) {
+    // The breadth list is what keeps the ground question from being answered
+    // by the declarations alone. A project that declares none has not made the
+    // claim this path stands on, so nothing here can fire (ADR-0056).
+    if (breadth.length === 0) {
+      return answered(
+        refusal('no-breadth-ground', 'the project declares no shared breadth ground'),
+        scope,
+      );
+    }
+    // The suite files are one of the six sets the code question asks. A
+    // project that names none is answering a sixth of that question with an
+    // empty list while the record reads like a whole answer.
+    if (testPaths.length === 0) {
+      return answered(
+        refusal('no-suite-ground', 'the project names no suite files of its own'),
+        scope,
+      );
+    }
+    // The certification is a deterministic gate result AND a review panel's
+    // reading of the tree (ADR-0022). A lens declares no inputs and reads the
+    // whole repository around the diff, so no claim in this project can say
+    // the branch did not move ground a lens finding rests on. Where the panel
+    // raised nothing, the certification rests on declared ground alone and the
+    // questions below cover it.
+    if (lensFindings.length > 0) {
+      return answered(
+        refusal(
+          'lens-ground',
+          `the certification carries review-lens findings whose ground nothing declares: ${list(lensFindings)}`,
+        ),
+        scope,
+      );
+    }
+    declared = declaredGround(layers, prior, {
+      deferred: deferredOf(certification.record),
+      breadth,
+      recordPaths: records?.recordPaths ?? [],
+    });
+    if (declared.ok !== true) return answered(declared, scope);
+    // The self-declaring layers alone. A layer whose ground is config-only is
+    // produced in no tree, so a story cannot narrow it and there is nothing
+    // here to bound (ADR-0056).
+    sources = declarationSources(declared.selfDeclaring, commands, readSource, isLinkPath);
+    if (sources.ok !== true) return answered(sources, scope);
+    // The declarations decide this skip and they came off the run's own tree.
+    // A story that moved the ground they are produced from would be judged
+    // against its own narrowing, so it is refused before the ground question
+    // is asked.
+    const moved = storyChanged.filter((file) =>
+      sources.entries.some((entry) => underEntry(file, entry)),
     );
+    if (moved.length > 0) {
+      return answered(
+        refusal(
+          'self-declared-ground',
+          `the story's own diff moves the declarations that decide this skip: ${list(moved)}`,
+        ),
+        scope,
+      );
+    }
+    code = {
+      storyChanged,
+      entries: declared.entries,
+      testPaths,
+      breadth,
+      sources: sources.entries,
+      inert,
+      configPath,
+    };
   }
-  const declared = declaredGround(layers, prior, {
-    deferred: deferredOf(certification.record),
-    breadth,
+  // Question two, once, for both certifications.
+  const answers = groundVerdict(mainChanged, {
+    code,
+    records:
+      records === null
+        ? null
+        : {
+            neighbourhood: records.neighbourhood ?? [],
+            recordPaths: records.recordPaths ?? [],
+            // The run's own records, off its own diff. They are a re-run of
+            // the reconciliation and never a refusal: the stage that wrote
+            // them answers a conflict on them.
+            own: ownRecords(storyChanged, records.recordPaths ?? []),
+          },
   });
-  if (declared.ok !== true) return declared;
-  // The self-declaring layers alone. A layer whose ground is config-only is
-  // produced in no tree, so a story cannot narrow it and there is nothing here
-  // to bound (ADR-0056).
-  const sources = declarationSources(declared.selfDeclaring, commands, readSource, isLinkPath);
-  if (sources.ok !== true) return sources;
-  // The declarations decide this skip and they came off the run's own tree. A
-  // story that moved the ground they are produced from would be judged against
-  // its own narrowing, so it is refused before the ground question is asked.
-  const moved = storyChanged.filter((file) =>
-    sources.entries.some((entry) => underEntry(file, entry)),
-  );
-  if (moved.length > 0) {
-    return refusal(
-      'self-declared-ground',
-      `the story's own diff moves the declarations that decide this skip: ${list(moved)}`,
-    );
+  const kept = answers.code?.answer !== 'rejudge' && answers.records?.answer !== 'rerun';
+  if (!kept) {
+    const refused =
+      answers.code?.answer === 'rejudge'
+        ? { refusal: answers.code.reason, detail: answers.code.detail }
+        : { refusal: 'records-rerun', detail: answers.records.detail };
+    return {
+      taken: false,
+      refusal: assertFastPathRefusal(refused.refusal),
+      detail: refused.detail,
+      ...answers,
+    };
   }
-  // Question two.
-  const ground = groundVerdict({
-    mainChanged,
-    storyChanged,
-    entries: declared.entries,
-    testPaths,
-    breadth,
-    sources: sources.entries,
-    inert,
-    configPath,
-  });
-  if (ground) return ground;
   return {
     taken: true,
-    declaration: {
-      // The tree the suites declared these inputs at: the certified verdict's
-      // own sha, because that is the execution the declarations came out of.
-      sha: certification.sha,
-      digest: declarationDigest({
+    ...answers,
+    ...(declared !== null && {
+      declaration: {
+        // The tree the suites declared these inputs at: the certified
+        // verdict's own sha, because that is the execution the declarations
+        // came out of.
+        sha: certification.sha,
+        digest: declarationDigest({
+          suites: declared.suites,
+          entries: declared.entries,
+          testPaths,
+          breadth,
+          inert,
+          sources: sources.entries,
+          ground: declared.ground,
+        }),
         suites: declared.suites,
-        entries: declared.entries,
-        testPaths,
-        breadth,
-        inert,
-        sources: sources.entries,
-        ground: declared.ground,
-      }),
-      suites: declared.suites,
-      entries: declared.entries.length,
-      // How many Tier-1 layers each source answered for. A layer both answered
-      // counts in both. A project whose reading moves from `{declared: 8,
-      // config: 40}` to `{declared: 7, config: 40}` has a runner that stopped
-      // printing its markers, and nothing else in the record says so.
-      ground: declared.counts,
-    },
-    certification,
+        entries: declared.entries.length,
+        // How many Tier-1 layers each source answered for. A layer both
+        // answered counts in both. A project whose reading moves from
+        // `{declared: 8, config: 40}` to `{declared: 7, config: 40}` has a
+        // runner that stopped printing its markers, and nothing else in the
+        // record says so.
+        ground: declared.counts,
+      },
+      certification,
+    }),
+  };
+}
+
+/** The run's own records, out of its own diff. */
+function ownRecords(storyChanged, recordPaths) {
+  const isRecord = recordMatch(recordPaths);
+  return isRecord === null ? [] : storyChanged.filter(isRecord);
+}
+
+/**
+ * One refusal with the answer it is for each certification in scope. A refusal
+ * is a certification this check could not carry over the moved tree, so every
+ * answer under it says the caller must earn that certification again.
+ */
+function answered(out, scope) {
+  return {
+    ...out,
+    code: scope.code
+      ? { answer: 'rejudge', reason: out.refusal, detail: out.detail, files: [] }
+      : null,
+    records: scope.records
+      ? { answer: 'rerun', reason: out.refusal, detail: out.detail, files: [] }
+      : null,
   };
 }
 
@@ -874,30 +1072,99 @@ export function lensFindingsOf(path) {
 }
 
 /**
+ * The certification the code question is asked about, from the lane's own
+ * statement of what it certified and the ledger's record of it.
+ *
+ * A lane that says nothing takes the last green render, which is what every
+ * caller took before a run held two certifications. A lane that names the code
+ * tree it certified is answered from the render at that sha: the render
+ * carries the cycle whose execution the declarations came out of, and the
+ * record file the deferred proofs and the lens findings are read from.
+ *
+ * @param {object[]} events the run ledger
+ * @param {{ok: boolean, sha: string}|null|undefined} certified
+ *   `certifiedTrees.code`; undefined for a caller that names no lane
+ * @returns {{cycle: number, sha: string, record: string}|null}
+ */
+export function codeCertification(events, certified) {
+  const back = [...events].reverse();
+  if (certified === undefined) {
+    const last = back.find((e) => e.event === 'verdict-rendered');
+    return last?.verdict === 'green' ? carried(last) : null;
+  }
+  if (certified === null || certified.ok !== true) return null;
+  const render = back.find(
+    (e) => e.event === 'verdict-rendered' && e.verdict === 'green' && e.sha === certified.sha,
+  );
+  return render ? carried(render) : null;
+}
+
+/** One render, as the check reads a certification off it. */
+function carried(render) {
+  return { cycle: render.cycle, sha: render.sha, record: render.record };
+}
+
+/**
  * The decision for one run, ready to stamp. Reads the run's own ledger for the
  * certification it would carry, the project config for the ground it is judged
  * against, and the worktree for the text.
+ *
+ * `certification` is the lane's `certifiedTrees`: the code tree it certified
+ * and the record tree it certified, either of which may be absent, because a
+ * records lane renders no code verdict and a lane with no records reconciles
+ * nothing. `no-certification` is refused for a certification the lane HAS and
+ * cannot show, and never for one it does not have. A caller that names neither
+ * is a caller from before this, and it takes the last green render as it
+ * always did.
  * @param {object} base the ship base (config, worktree, testPaths)
  * @param {object[]} events the run ledger
  * @param {{fromSha: string, toSha: string, mainSha: string}} shas
+ * @param {{certification?: {code?: object|null, records?: object|null},
+ *   records?: {neighbourhood?: string[], recordPaths?: string[]}}} [lane]
+ *   `records.neighbourhood` is the run's own records and the records they
+ *   name, by path, computed at the merge
  */
-export async function fastPathDecision(base, events, { fromSha, toSha, mainSha }) {
-  const render = [...events].reverse().find((e) => e.event === 'verdict-rendered');
-  const certification =
-    render && render.verdict === 'green'
-      ? { cycle: render.cycle, sha: render.sha, record: render.record }
-      : null;
-  if (!certification) {
-    return refusal('no-certification', 'no green verdict stands for this tree');
+export async function fastPathDecision(
+  base,
+  events,
+  { fromSha, toSha, mainSha },
+  { certification: certified = null, records: neighbourhood = null } = {},
+) {
+  const certification = codeCertification(events, certified?.code);
+  const reconciled = certified?.records ?? null;
+  const scope = { code: certified?.code !== null, records: reconciled !== null };
+  if (!scope.code && !scope.records) {
+    return refusal('no-certification', 'the lane certifies nothing');
   }
+  // The lane holds this certification and cannot show a green for it. That is
+  // the defensive route it always was, and it is now asked once per
+  // certification instead of once for the run.
+  if (scope.code && !certification) {
+    return answered(refusal('no-certification', 'no green verdict stands for this tree'), scope);
+  }
+  if (scope.records && reconciled.ok !== true) {
+    return answered(
+      refusal('no-certification', 'no green reconciliation stands for this tree'),
+      scope,
+    );
+  }
+  const records =
+    reconciled === null
+      ? null
+      : {
+          neighbourhood: neighbourhood?.neighbourhood ?? [],
+          recordPaths: neighbourhood?.recordPaths ?? base.config?.repo?.recordPaths ?? [],
+        };
   const facts = await fastPathFacts(base.worktree, { fromSha, toSha, mainSha });
   const verdict = fastPathVerdict({
     certification,
+    records,
     layers: base.config.gates.tier1 ?? [],
-    // The certified cycle's own results included: a green a later cycle carried
-    // keeps the stamp of the cycle that earned it, and that stamp is the one
-    // holding the declaration.
-    prior: priorStatus(events, certification.cycle + 1),
+    // The certified cycle's own results included, and every earlier cycle's
+    // last word on a layer that cycle did not run: a green a later cycle
+    // carried or skipped keeps the stamp of the cycle that earned it, and that
+    // stamp is the one holding the declaration.
+    prior: certification ? priorStatus(events, certification.cycle + 1) : new Map(),
     commands: base.config.commands ?? {},
     testPaths: base.testPaths ?? [],
     breadth: base.config.gates.breadthGround ?? [],
@@ -913,8 +1180,9 @@ export async function fastPathDecision(base, events, { fromSha, toSha, mainSha }
     // run's claims under a version the merge target no longer states.
     configPath: base.configPath ?? DEFAULT_PROJECT_CONFIG_PATH,
     // A record this cannot read throws, and a throw is the internal-error
-    // route, which is the full re-verdict.
-    lensFindings: lensFindingsOf(certification.record),
+    // route, which is the full re-verdict. A lane with no code certification
+    // has no verdict record to read and no lens to answer for.
+    lensFindings: certification ? lensFindingsOf(certification.record) : [],
     // The declaration surface is walked in the run's own worktree, which is
     // where the layer commands run and where the modules they import live.
     readSource: worktreeReader(base.worktree),

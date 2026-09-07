@@ -35,7 +35,7 @@ import {
   filesMentioning,
   treeFiles,
 } from '../isolation/tree.mjs';
-import { testEditDenyRules } from '../seats/boundary.mjs';
+import { editDenyRules } from '../seats/boundary.mjs';
 import { laneDiffPolicy, parseTouchedBlock } from '../seats/diffpolicy.mjs';
 import { noCriteriaMessage, parseIntentCard } from './card.mjs';
 import { SECURITY_DIMENSIONS } from './lenses.mjs';
@@ -56,6 +56,7 @@ import {
   surfaceMapDefects,
   surfaceMapLines,
 } from './surfacemap.mjs';
+import { recordBase, recordsStageHandler } from './records-stage.mjs';
 import { readInheritance } from './resume.mjs';
 import {
   SUPERSEDE_BRIEF_LINES,
@@ -106,7 +107,18 @@ import {
 // (ADR-0006).
 const DEFAULT_ADVERSARY_WAVES = 1;
 
-export const PRE_FREEZE_STAGES = ['readiness', 'spec-birth', 'spec-gate', 'suite', 'adversary', 'freeze'];
+export const PRE_FREEZE_STAGES = [
+  'readiness',
+  'spec-birth',
+  'spec-gate',
+  // The records the spec decides, written by a seat that will never write the
+  // code and committed before the suite seat runs, so the frozen sha carries
+  // them and the dev seat reads them as it reads the tests (ADR-0074).
+  'records',
+  'suite',
+  'adversary',
+  'freeze',
+];
 
 /**
  * Builds the story lane. `afterFreeze` is the post-freeze continuation
@@ -134,6 +146,7 @@ export function storyLane({ afterFreeze, forgeFor = null }) {
         readiness: readinessHandler(postFreeze, forgeFor),
         'spec-birth': specBirth,
         'spec-gate': specGate,
+        records: recordsStageHandler('story'),
         suite: suiteStage,
         adversary,
         freeze: freezeHandler(postFreeze),
@@ -510,6 +523,16 @@ async function inheritFreeze(ctx, nextStage, forgeFor) {
     if (!directive.sha) return directive; // a refusal: park or the abandon close
     sha = directive.sha;
   }
+  // The inherited records, stamped before the inheritance they ride on: this
+  // run runs no pre-freeze seat, so without the stamp the records the tree
+  // holds are records no run says it wrote (ADR-0074).
+  ctx.store.append('records-committed', {
+    actor: ACTOR,
+    sha,
+    paths: prior.records?.paths ?? [],
+    decided: prior.records?.decided === true,
+    resumed: true,
+  });
   ctx.store.append('freeze-inherited', {
     actor: ACTOR,
     from: prior.runId,
@@ -880,7 +903,7 @@ async function specGate(ctx) {
       if (amend.fail) return amend.fail;
       continue;
     }
-    if (last?.verdict === 'pass') return { next: 'suite' };
+    if (last?.verdict === 'pass') return { next: 'records' };
     if (rounds.length === 0) {
       const r = await gateRound(ctx, base, { round: 1 });
       if (r.directive) return r.directive;
@@ -1311,7 +1334,7 @@ async function runWave(ctx, base, clone, { round, wave }) {
     schema: ADVERSARY_SCHEMA,
     cwd: tree,
     env: base.env,
-    denyTools: testEditDenyRules(base.testPaths),
+    denyTools: editDenyRules({ testPaths: base.testPaths, recordPaths: base.recordPaths }),
   });
   if (!result.ok) return seatFail(ctx, 'adversary', result);
   // Restore the suite from the sha before evaluation — a tampered test file
@@ -1907,7 +1930,10 @@ async function laneBase(ctx) {
   const cardPath = ctx.payload.card;
   const cardText = readFileSync(join(worktree, cardPath), 'utf8');
   const { card } = parseIntentCard(cardText);
-  return {
+  // The record fields ride every base of this lane: the adversary is denied the
+  // record tree as it is denied the suite, and the records stage writes under
+  // the project's lifecycle and style rules (ADR-0074).
+  return recordBase({
     config,
     story,
     worktree,
@@ -1944,5 +1970,5 @@ async function laneBase(ctx) {
     },
     env: runEnv(ctx, config),
     specPath: join(ctx.paths.runs, ctx.runId, 'spec.md'),
-  };
+  });
 }

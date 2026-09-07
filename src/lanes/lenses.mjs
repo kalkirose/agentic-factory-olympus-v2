@@ -32,9 +32,9 @@ export const RECORD_LENS = 'record';
  * evidence does not reach its key is refuted. Data only, and closed like the
  * lens vocabulary beside it: a criterion enters by a recorded decision.
  *
- * Four briefs state it: the record-only review, the record lens on a mixed
- * diff, the verifier over a record item, and the seat that writes the records.
- * The writer is a reader because it is judged against this list, and a
+ * Every record brief states it: the review seat that reads one record, the
+ * verifier over a record item, and the three briefs of the seat that writes the
+ * records. The writer is a reader because it is judged against this list, and a
  * paraphrase in its brief would drift from the list the review holds it to
  * (ADR-0038).
  *
@@ -55,24 +55,35 @@ export const RECORD_CRITERIA = Object.freeze({
   reference:
     'reference: every name, path and symbol the record cites exists in the tree it describes.',
   whole: 'whole: the record reads as one document, not as a trail of amendments.',
+  consistent:
+    'consistent: an open part of this record does not contradict an open part of any active ' +
+    'record in its neighbourhood. The tree settles what is built and settles nothing about ' +
+    'what is not, so two active records can decide one unbuilt part two ways.',
 });
 
 /** The criterion keys, in the order the briefs and the schema state them. */
 export const RECORD_CRITERION_KEYS = Object.freeze(Object.keys(RECORD_CRITERIA));
 
 /**
- * The rule the six criteria serve, stated above them wherever they are stated.
+ * The rule the seven criteria serve, stated above them wherever they are
+ * stated.
  *
  * A seat that is given a list of criteria and no rule behind them grades each
  * sentence against the nearest key and stops. The rule is what tells it that a
  * sentence about work nobody has done yet is legal, and that the same sentence
  * written as present fact is not: a record either describes the tree as it
- * stands, or says the part is not built. There is no third kind of sentence,
- * and a record that holds one conflicts with the code.
+ * stands, or says the part is not built. There is no third kind of claim, and a
+ * record that holds one conflicts with the code.
+ *
+ * The last sentence names the sentences that claim nothing. A record states why
+ * it decided, what it rejected and what would reverse it, and none of those is
+ * a claim about the tree. The unit schema calls them `rationale`, and the rule
+ * says so here, where the seat reads it, so the rule and the schema agree.
  */
 export const RECORD_RULE =
   'A record never conflicts with the code. Everything it states is either true of the tree now, ' +
-  'or marked as not yet built. There is no third kind of sentence.';
+  'or marked as not yet built. There is no third kind of claim. A sentence that states why, or ' +
+  'what was rejected, or what would trigger a reversal, is rationale and is neither.';
 
 /** The criteria as a brief states them: the rule, then one line per criterion. */
 export function recordCriteriaLines() {

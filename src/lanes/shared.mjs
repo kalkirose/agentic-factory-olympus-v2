@@ -23,6 +23,11 @@ import { RUN_CACHE_ENV, runCacheDir } from '../isolation/worktrees.mjs';
 export const ACTOR = 'daemon';
 export const GIST_MAX = 120;
 
+// The name a project's gate command reads the pass's opening sha from. It is
+// the harness's own name, and a command that also reads a CI variable keeps
+// that reading for CI.
+export const BASE_SHA_ENV = 'OLYMPUS_BASE_SHA';
+
 export async function loadProjectConfig(ctx) {
   const clone = cloneDir(ctx.paths, ctx.project);
   const text = await git(['cat-file', '-p', ctx.payload.configBlob], { cwd: clone });
@@ -63,11 +68,21 @@ export function readConstitution(worktree, config) {
  * the environment rather than `process.env`, so the seat strip still decides
  * which seats may hold them. A home that declares no store adds nothing here.
  *
- * Undefined when the project has no stack, turns the cache off and declares no
- * credential the store answers for, which is what every caller saw before any
- * of the three existed.
+ * The fourth is the pass's opening sha, `OLYMPUS_BASE_SHA`, exported where the
+ * `base` argument carries one. A gate command that judges a diff needs the two
+ * ends of it, and inside a run neither end is a branch a CI variable names: the
+ * harness holds the range and the command cannot derive it. A base with no
+ * range exports nothing, and the command falls back to whatever it read before.
+ *
+ * Undefined when the project has no stack, turns the cache off, declares no
+ * credential the store answers for and names no range, which is what every
+ * caller saw before any of the four existed.
+ *
+ * @param {object} ctx the run context
+ * @param {object} config the project config
+ * @param {{rangeFrom?: string}} [base] the lane base, or the range alone
  */
-export function runEnv(ctx, config) {
+export function runEnv(ctx, config, base = null) {
   const stack = config.stack
     ? stackEnv({ runId: ctx.runId, worktree: ctx.payload.worktree, extra: config.stack.env })
     : null;
@@ -76,8 +91,12 @@ export function runEnv(ctx, config) {
       ? { [RUN_CACHE_ENV]: runCacheDir(ctx.payload.worktree) }
       : null;
   const credentials = credentialEnv(ctx.paths, declaredNames(config));
-  if (!stack && !cache && Object.keys(credentials).length === 0) return undefined;
-  return { ...stack, ...cache, ...credentials };
+  const range =
+    typeof base?.rangeFrom === 'string' && base.rangeFrom.length > 0
+      ? { [BASE_SHA_ENV]: base.rangeFrom }
+      : null;
+  if (!stack && !cache && !range && Object.keys(credentials).length === 0) return undefined;
+  return { ...stack, ...cache, ...credentials, ...range };
 }
 
 /**
@@ -165,53 +184,6 @@ export function sinceFreshPass(events, match) {
     if (match(e)) found = e;
   }
   return found && found.seq > fresh ? found : null;
-}
-
-/**
- * The reconciliation commit the run's tree still holds, or null.
- *
- * The rewrite of the decision records is committed as an implementation of
- * this run, under `phase: 'reconcile'` (ADR-0026). Two things discard it. A
- * fresh pass resets the tree the commit built. And the discard fallback returns
- * the worktree to the sha the last green verdict certified, which is the tree
- * as it stood before the rewrite; it says so by stamping
- * `reconciliation-written` with `ok: false` behind the commit.
- *
- * Both readings are the same sentence: the tree no longer holds the rewrite, so
- * every reader of this sees no record commit and takes the route it took before
- * one existed. The readers are the update stage, the `merged` stamp, the close's
- * ticket, and the verdict cycle asking whether it judges a record diff.
- */
-export function reconcileCommit(events) {
-  const commit = sinceFreshPass(
-    events,
-    (e) => e.event === 'implementation-committed' && e.phase === 'reconcile',
-  );
-  if (!commit) return null;
-  const discarded = events.some(
-    (e) => e.event === 'reconciliation-written' && e.ok === false && e.seq > commit.seq,
-  );
-  return discarded ? null : commit;
-}
-
-/**
- * The last verdict rendered over the run's record commit, or null.
- *
- * Two lanes ask it and they ask one question in two words. The update stage
- * asks whether the record commit is certified, which is what lets the run queue
- * for the ship token. The verdict ladder's repair arm asks whether the red it is
- * answering stands over the records, which is what selects the seat that
- * repairs them: the context that implemented the code never reconciles the
- * records against its own work (ADR-0026).
- */
-export function renderOverReconcile(events) {
-  const commit = reconcileCommit(events);
-  if (!commit) return null;
-  let found = null;
-  for (const e of events) {
-    if (e.event === 'verdict-rendered' && e.sha === commit.sha && e.seq > commit.seq) found = e;
-  }
-  return found;
 }
 
 export function lastSeatReportEvent(events, seat) {
@@ -644,21 +616,28 @@ export function commandFail(ctx, run) {
 /**
  * Whether the next invocation of a seat is the retry a human bought at its
  * seat-failure park: the run's latest recovery park is that seat's, it is
- * answered, and nothing has spawned since the answer. The bought invocation
- * carries the failure evidence in its brief and never replays a stamped
- * report, whatever failed.
+ * answered, and that seat has not spawned since the answer. The bought
+ * invocation carries the failure evidence in its brief and never replays a
+ * stamped report, whatever failed.
+ *
+ * The seat is the whole seat name, slot suffix and all. A stage that dispatches
+ * one seat per record holds one budget per slot, so a peer slot that spawns
+ * after the answer spends nothing of this slot's (ADR-0073).
  */
 export function boughtRetry(events, seat) {
   const asked = lastRecoveryPark(events);
   if (!asked?.answer || asked.park.type !== 'seat-failure' || asked.park.detail?.seat !== seat) {
     return false;
   }
-  return !events.some((e) => e.event === 'seat-spawned' && e.seq > asked.answer.seq);
+  return !events.some(
+    (e) => e.event === 'seat-spawned' && e.seat === seat && e.seq > asked.answer.seq,
+  );
 }
 
 /**
  * The attempt budget of a lane contract loop: one corrective round on a
- * deterministic defect in the work product, so two attempts.
+ * deterministic defect in the work product, so two attempts. Two is the
+ * budget of every checked seat, and a seat that spends it parks.
  *
  * A bought retry is one fresh invocation, not a second corrective round, when
  * the corrective round already ran before the park that bought it. A crash
@@ -667,6 +646,9 @@ export function boughtRetry(events, seat) {
  * retry bought at that park still has one. The ledger tells the two apart by
  * the stamp the contract loop leaves before its park — a `seat-failure` that
  * carries the defect list — and a crash leaves no such stamp.
+ *
+ * The budget is keyed on the whole seat name, so two slots of one seat hold two
+ * budgets and neither spends the other's.
  */
 export function attemptLimit(events, seat) {
   if (!boughtRetry(events, seat)) return 2;
@@ -689,6 +671,12 @@ export function attemptLimit(events, seat) {
  * a second corrective round; a retry bought at a crash park keeps its
  * corrective round (`attemptLimit`). `defectReason` names the failure in the
  * ledger.
+ *
+ * `seat` is the seat identity, which a per-record dispatch suffixes with its
+ * slot. Every ledger key here is that whole name: the budget, the failure
+ * stamp, the invocation count and the park detail. The cost comes back beside
+ * the report, because a caller that stamps one entry per record needs what the
+ * dispatch spent and the ledger's own per-seat total cannot say which slot.
  */
 export async function seatWithChecks(
   ctx,
@@ -699,6 +687,7 @@ export async function seatWithChecks(
     cwd,
     env,
     constitution,
+    styleFiles,
     denyTools,
     buildRole,
     checks,
@@ -716,16 +705,17 @@ export async function seatWithChecks(
     const result = await ctx.runSeat({
       seat,
       roleBlock: buildRole(brief),
-      reportPath: runReportPath(ctx.paths, ctx.runId, label ?? `${seat}-${n}`),
+      reportPath: runReportPath(ctx.paths, ctx.runId, label ?? `${reportName(seat)}-${n}`),
       schema,
       cwd,
       env,
       constitution,
+      ...(styleFiles && { styleFiles }),
       ...(denyTools && { denyTools }),
     });
     if (!result.ok) return { fail: seatFail(ctx, seat, result, park) };
     const defects = await checks(result.report);
-    if (defects.length === 0) return { report: result.report };
+    if (defects.length === 0) return { report: result.report, cost: result.cost };
     if (attempt >= limit) {
       ctx.store.append('seat-failure', { actor: ACTOR, seat, reason: defectReason, defects });
       return { fail: seatFail(ctx, seat, { reason: defectReason }, park) };
@@ -734,7 +724,19 @@ export async function seatWithChecks(
   }
 }
 
-/** The failure evidence a bought retry carries into the seat's brief. */
+/**
+ * A seat identity as a file name. The slot suffix is a colon, which Windows
+ * reads as a stream separator inside a path, so the report file flattens it.
+ * The ledger keeps the identity whole; only the file name is flattened.
+ */
+function reportName(seat) {
+  return String(seat).replaceAll(':', '-');
+}
+
+/**
+ * The failure evidence a bought retry carries into the seat's brief, read on
+ * the whole seat name so a slot reads its own failure and no peer's.
+ */
 export function failureBrief(events, seat) {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
@@ -778,4 +780,31 @@ export function briefLines(brief) {
 export function gist(text) {
   if (typeof text !== 'string') return '';
   return text.length > GIST_MAX ? text.slice(0, GIST_MAX - 1) + '…' : text;
+}
+
+/**
+ * The other record of a `consistent` finding, by the two roads a finding
+ * reaches a brief on. A finding of this cycle carries the path under `place`,
+ * brought to the form the repository names it in at the stamp; a prior
+ * confirmed finding was rebuilt from the ledger and carries it flat. Both are
+ * the same path, and a brief that read one road would name half the records.
+ */
+export function secondRecordOf(finding) {
+  return finding?.place?.file2 ?? finding?.file2 ?? null;
+}
+
+/**
+ * The second place of a finding as a brief states it, or the empty string.
+ *
+ * A `consistent` finding is the claim that two records decide one unbuilt part
+ * two ways, so a line that names one record states half the claim (ADR-0073).
+ * Three briefs carry a finding line — the record writer's corrective brief, the
+ * code seat's, and the verifier's item list — and one clause is what makes the
+ * three say the same thing about one finding. The unit and its head ride the
+ * clause where the finding holds them, because the claim is about a sentence.
+ */
+export function againstClause(f) {
+  const second = secondRecordOf(f);
+  if (!second) return '';
+  return ` [against: ${second}${f.unit2 ? ` ${f.unit2}` : ''}${f.head2 ? ` "${f.head2}"` : ''}]`;
 }

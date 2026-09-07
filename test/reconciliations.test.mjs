@@ -10,7 +10,9 @@ import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, repairTicketPath, reconcileTicketPath } from '../src/daemon/home.mjs';
 import { openEscapesStore, openRunStore } from '../src/telemetry/stores.mjs';
 import { recordEscape, ticketEscape } from '../src/telemetry/escapes.mjs';
+import { readEvents } from '../src/ledger/ledger.mjs';
 import {
+  RECONCILIATION_LANE,
   owedReconciliations,
   reconciliationLaunch,
   launchedReconciliations,
@@ -41,10 +43,15 @@ function seedStoryRun(paths, { runId, project = 'alpha', judged = null, state = 
   store.close();
 }
 
-/** Seeds a reconciliation run's launch stamp the way the sweep leaves it. */
-function seedReconciliationRun(paths, { runId, reconcilesRunId, project = 'alpha' }) {
+/**
+ * Seeds a reconciliation run's launch stamp the way the sweep leaves it. The
+ * lane defaults to `records`, which is where a reconciliation runs now; one
+ * launched before that lane existed carries `repair`, and the owed set reads
+ * both.
+ */
+function seedReconciliationRun(paths, { runId, reconcilesRunId, project = 'alpha', lane = 'records' }) {
   const store = openRunStore(paths, runId);
-  store.append('run-launched', { actor: 'daemon', project, lane: 'repair', reconcilesRunId });
+  store.append('run-launched', { actor: 'daemon', project, lane, reconcilesRunId });
   store.close();
 }
 
@@ -90,16 +97,22 @@ test('the owed set is judged owed, shipped, unlaunched, and of this project', (t
   // A reconciliation run that exists answers its ship, open or closed.
   seedStoryRun(paths, { runId: 'r6', judged: owedJudgment(paths, 'r6') });
   seedReconciliationRun(paths, { runId: 'rr6', reconcilesRunId: 'r6' });
+  // A reconciliation from before the records lane ran on the repair lane, and
+  // it answers its ship exactly as one launched today does.
+  seedStoryRun(paths, { runId: 'r7', judged: owedJudgment(paths, 'r7') });
+  seedReconciliationRun(paths, { runId: 'rr7', reconcilesRunId: 'r7', lane: 'repair' });
 
-  assert.deepEqual(launchedReconciliations(paths), new Set(['r6']));
+  assert.deepEqual(launchedReconciliations(paths), new Set(['r6', 'r7']));
   const owed = owedReconciliations(paths, 'alpha');
   assert.deepEqual(
     owed.map((o) => o.runId),
     ['r1'],
   );
+  // The ticket names decision records and nothing else, so the reconciliation
+  // launches on the lane that holds no dev seat (ADR-0074).
   assert.deepEqual(reconciliationLaunch(owed[0]), {
     project: 'alpha',
-    lane: 'repair',
+    lane: 'records',
     ticket: reconcileTicketPath(paths, 'r1'),
     reconcilesRunId: 'r1',
   });
@@ -135,7 +148,7 @@ test('the sweep launches repairs, then reconciliations, then the story frontier'
   });
   const daemon = new Daemon(join(root, 'home'), {
     waitSleep: NO_WAIT,
-    lanes: { story: stub('story'), repair: stub('repair') },
+    lanes: { story: stub('story'), repair: stub('repair'), records: stub('records') },
     composeRunner: fakeComposeRunner(),
   });
   t.after(async () => {
@@ -147,8 +160,78 @@ test('the sweep launches repairs, then reconciliations, then the story frontier'
   seedStoryRun(paths, { runId: 'shipped-1', judged: owedJudgment(paths, 'shipped-1') });
   daemon.frontier.setArmed('alpha', true, 'human');
   await waitFor(() => launched.length === 3, { ...WAIT, label: 'repair, reconciliation, story' });
-  assert.deepEqual(launched, [`repair:${seq}`, 'repair:shipped-1', 'story:s1']);
+  assert.deepEqual(launched, [`repair:${seq}`, 'records:shipped-1', 'story:s1']);
   assert.deepEqual(owedReconciliations(paths, 'alpha'), []);
   // The launch stamp carries the ship it answers.
   assert.deepEqual(launchedReconciliations(paths), new Set(['shipped-1']));
+});
+
+// -- the pass guards on the lane its launch names (ADR-0074) -----------------
+
+/**
+ * A daemon over one project with a named lane set and no story graph, so the
+ * sweep's only pass with work to do is the reconciliation one.
+ */
+function passFixture(t, lanes) {
+  const root = tempDir();
+  const launched = [];
+  const origin = initOriginRepo(join(root, 'origin'), {
+    'compose.harness.yml': 'services: {}\n',
+    [CONFIG_PATH]: projectConfigJson(),
+  });
+  const paths = scaffoldHome(join(root, 'home'));
+  writeFileSync(
+    paths.instanceConfig,
+    JSON.stringify({ version: 1, projects: { alpha: { repoUrl: origin, slotCap: 1 } } }) + '\n',
+  );
+  const stub = {
+    stages: ['work'],
+    handlers: {
+      work: async (ctx) => {
+        launched.push(`${ctx.lane}:${ctx.payload.reconcilesRunId}`);
+        return { close: { state: 'shipped' } };
+      },
+    },
+  };
+  const daemon = new Daemon(join(root, 'home'), {
+    waitSleep: NO_WAIT,
+    lanes: Object.fromEntries(lanes.map((name) => [name, stub])),
+    composeRunner: fakeComposeRunner(),
+  });
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(root);
+  });
+  return { paths, daemon, launched };
+}
+
+test('a lane set without the records lane skips the pass; one with it runs the pass', async (t) => {
+  // The launch names the records lane, so the guard reads that lane and no
+  // other. An instance that runs the repair lane and not the records lane holds
+  // no lane for a reconciliation: the pass stands down, the owed set waits, and
+  // nothing is stamped rejected.
+  assert.equal(RECONCILIATION_LANE, 'records');
+  const without = passFixture(t, ['story', 'repair']);
+  await without.daemon.start();
+  seedStoryRun(without.paths, { runId: 'r1', judged: owedJudgment(without.paths, 'r1') });
+  without.daemon.frontier.setArmed('alpha', true, 'human');
+  assert.equal(await without.daemon.frontier.reconciliationPass('alpha'), 0);
+  assert.deepEqual(without.launched, []);
+  assert.deepEqual(
+    owedReconciliations(without.paths, 'alpha').map((o) => o.runId),
+    ['r1'],
+  );
+  assert.ok(
+    !readEvents(without.paths.instanceLedger).some((e) => e.event === 'launch-rejected'),
+    'the pass stamped a rejection',
+  );
+
+  // The same instance with the lane the launch names runs the pass.
+  const withLane = passFixture(t, ['story', 'repair', 'records']);
+  await withLane.daemon.start();
+  seedStoryRun(withLane.paths, { runId: 'r1', judged: owedJudgment(withLane.paths, 'r1') });
+  withLane.daemon.frontier.setArmed('alpha', true, 'human');
+  await waitFor(() => withLane.launched.length === 1, { ...WAIT, label: 'the reconciliation' });
+  assert.deepEqual(withLane.launched, ['records:r1']);
+  assert.deepEqual(owedReconciliations(withLane.paths, 'alpha'), []);
 });

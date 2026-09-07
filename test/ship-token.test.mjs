@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { scaffoldHome, homePaths } from '../src/daemon/home.mjs';
 import { openRunStore } from '../src/telemetry/stores.mjs';
 import {
+  SHIP_TOKEN_RELEASE_REASONS,
   releaseShipToken,
   shipTokenState,
   takeShipToken,
@@ -246,6 +247,26 @@ test('a release reason outside the closed set never reaches a stamp', (t) => {
   assert.equal(takeShipToken(a), true);
   assert.throws(() => releaseShipToken(a, 'because'), /unknown ship-token release reason/);
   assert.equal(shipTokenState(paths, 'proj').holder, 'run-a');
+  // The vocabulary itself. A reason enters it by a recorded decision.
+  assert.deepEqual([...SHIP_TOKEN_RELEASE_REASONS], ['re-verdict', 're-reconcile', 'park']);
+});
+
+test('a record re-run gives the token back under its own reason', (t) => {
+  const paths = fixtureHome(t);
+  const store = openRunStore(paths, 'run-a');
+  t.after(() => store.close());
+  store.append('run-launched', { actor: 'daemon', project: 'proj', lane: 'records' });
+  const a = { paths, project: 'proj', runId: 'run-a', store };
+  assert.equal(takeShipToken(a), true);
+  // The update stage sends the run back to the reconcile stage. That journey
+  // reads no default branch, so the run gives the token back, and the stamp
+  // carries the reason the resume rule reads the stage off.
+  assert.equal(releaseShipToken(a, 're-reconcile'), true);
+  assert.deepEqual(
+    store.events().filter((e) => e.event === 'ship-token').map((e) => [e.state, e.reason]),
+    [['acquired', undefined], ['released', 're-reconcile']],
+  );
+  assert.equal(shipTokenState(paths, 'proj').holder, null);
 });
 
 test('the front of the queue takes the free token, and nobody jumps it', (t) => {

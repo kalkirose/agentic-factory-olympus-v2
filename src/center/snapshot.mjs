@@ -14,8 +14,18 @@ import { readLock, pidAlive } from '../daemon/lock.mjs';
 import { openLoud, listRunEvents, storyRunsByKey } from '../telemetry/readers.mjs';
 import { escalationQueue, openCardParks } from '../telemetry/queue.mjs';
 import { readEscapeSet, escapesWindow } from '../telemetry/escapes.mjs';
-import { furyYieldBaseline, BASELINE_WINDOW } from '../tripwires/metrics.mjs';
-import { armedTripwires, withTripwireDefaults } from '../tripwires/registry.mjs';
+import { harnessPinTs, recordRenders } from '../ledger/cycles.mjs';
+import {
+  furyYieldBaseline,
+  recordCyclesReading,
+  recordWriteTimeReading,
+  BASELINE_WINDOW,
+} from '../tripwires/metrics.mjs';
+import {
+  armedTripwires,
+  withTripwireDefaults,
+  TRIPWIRE_METRICS,
+} from '../tripwires/registry.mjs';
 import { readInstanceConfig, armingState } from '../console/status.mjs';
 import { holdState, projectHeld } from '../daemon/hold.mjs';
 import { CRASH_RETRIES } from '../seats/runner.mjs';
@@ -24,6 +34,7 @@ import { readGraphSource } from '../frontier/source.mjs';
 import { cloneDir, readBlobFromBranch } from '../isolation/clones.mjs';
 import { parseProjectConfig } from '../config/project.mjs';
 import { PRE_FREEZE_STAGES } from '../lanes/story.mjs';
+import { RECORDS_LANE_STAGES } from '../lanes/records-stage.mjs';
 
 // The design-given target for one shipped story, in hours of active time —
 // the run's own hours, with the waiting on a human taken out (ADR-0036). The
@@ -31,11 +42,23 @@ import { PRE_FREEZE_STAGES } from '../lanes/story.mjs';
 export const TARGET_HOURS = 4;
 
 // Stage lists per lane, for the pipeline display. They mirror the lane
-// composition (storyLane → postFreeze → shipStep; repairLane → shipStep).
-// A run on an unknown lane falls back to its observed stages.
+// composition (storyLane → postFreeze → shipStep; repairLane → shipStep;
+// recordsLane → shipStep). A run on an unknown lane falls back to its observed
+// stages.
 export const LANE_STAGES = {
-  story: [...PRE_FREEZE_STAGES, 'implementation', 'verdict', 'update', 'ship', 'close-out'],
-  repair: ['fix', 'verdict', 'update', 'ship', 'close-out'],
+  story: [
+    ...PRE_FREEZE_STAGES,
+    'implementation',
+    'verdict',
+    'reconcile',
+    'update',
+    'ship',
+    'close-out',
+  ],
+  repair: ['fix', 'verdict', 'reconcile', 'update', 'ship', 'close-out'],
+  // The records lane: a record-only ticket is the whole work, so there is no
+  // fix seat, no suite and no code verdict (ADR-0074).
+  records: [...RECORDS_LANE_STAGES, 'reconcile', 'update', 'ship', 'close-out'],
 };
 
 const ENVELOPE_KEYS = new Set(['seq', 'ts', 'event', 'actor', 'stream', 'refs']);
@@ -96,7 +119,7 @@ export async function buildSnapshot(paths, { now = new Date() } = {}) {
         projectHealth(paths, name, ships, escapes, instanceEvents, sources.get(name)),
       ),
     },
-    stats: statsView(allRuns, ships),
+    stats: statsView(allRuns, ships, harnessPinTs(instanceEvents)),
     tail: tailView(paths, allRuns),
   };
 }
@@ -393,7 +416,7 @@ function shipList(allRuns) {
   return ships.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
 }
 
-function statsView(allRuns, ships) {
+function statsView(allRuns, ships, pinTs) {
   const last = ships.slice(-SHIPS_WINDOW);
   const prior = ships.slice(-2 * SHIPS_WINDOW, -SHIPS_WINDOW);
   const shipMinutes = last.map((s) => s.shipMinutes).filter((m) => m !== undefined);
@@ -407,7 +430,232 @@ function statsView(allRuns, ships) {
     greenShipP50Minutes: shipMinutes.length > 0 ? round(median(shipMinutes)) : null,
     ciCriticalPathP50Minutes: ciCriticalPath(allRuns),
     stageMedians: stageMedians(allRuns, last),
+    records: recordsView(allRuns, pinTs),
   };
+}
+
+// -- the record tree ----------------------------------------------------------
+//
+// The eight measures of the record stage, derived here because nothing else
+// derives them: the eval seat reads ledgers and reports proposals, the
+// close-out seat writes the story's own lesson, and a measure that lives in
+// neither is a measure somebody re-derives by hand every time (ADR-0075).
+//
+// One window for all eight: the last runs that hold a record stamp of any kind.
+// A run that touched no record says nothing about the stage, and a window of
+// them would read a quiet quarter as a healthy one.
+
+const RECORDS_WINDOW = 10;
+
+// A run is in the record window when it holds one of these.
+const RECORD_STAMPS = new Set([
+  'records-committed',
+  'record-units',
+  'reconcile-round',
+  'reconcile-rendered',
+  'reconcile-recheck',
+  'reconciliation-judged',
+  'reconciliation-written',
+]);
+
+// The record seat that reviews. Every other record seat writes, and the miss
+// rate is the writers' answers against the review's findings. A dispatch is
+// one seat per record, so the stamped name carries a slot suffix (ADR-0075).
+const RECORD_REVIEW_SEAT = 'record-review';
+
+function recordsView(allRuns, pinTs) {
+  const runs = allRuns
+    .filter((r) => r.events.some((e) => RECORD_STAMPS.has(e.event)))
+    .map((r) => ({ ...r, ts: r.events[0]?.ts ?? '' }))
+    .sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0))
+    .slice(-RECORDS_WINDOW);
+  // The two readings a band also judges are the band's own function, over the
+  // window the band reads by default, so the tile and the breach cannot drift.
+  // The runs are handed over, so neither opens a ledger of its own.
+  const cycles = recordCyclesReading(null, null, {
+    runs,
+    window: TRIPWIRE_METRICS['record-cycles'].defaultWindow,
+    pinTs,
+  });
+  const writeTime = recordWriteTimeReading(null, null, {
+    runs,
+    window: TRIPWIRE_METRICS['record-write-time'].defaultWindow,
+  });
+  return {
+    runs: runs.length,
+    // The number that says the change works: a reconciliation green inside two
+    // cycles.
+    cycles: {
+      mean: cycles.value,
+      reconciliations: cycles.detail.reconciliations,
+      ...(cycles.detail.worst !== undefined && { worst: cycles.detail.worst }),
+    },
+    writerMiss: writerMissRate(runs),
+    late: lateShare(runs),
+    movedTree: movedTreeCost(runs),
+    recheck: recheckYield(runs),
+    gateMinutes: recordGateTime(runs, pinTs),
+    writeMinutes: {
+      mean: writeTime.value,
+      writes: writeTime.detail.writes,
+      ...(writeTime.detail.longest !== undefined && { longest: writeTime.detail.longest }),
+    },
+    tree: treeSeries(runs),
+  };
+}
+
+/**
+ * The writer's miss rate: the units a write seat reported `holds` that the
+ * review then raised a finding on, over every unit a writer reported `holds`.
+ *
+ * It is the one reading that catches a seat which answered every unit without
+ * reading it. The evidence check catches a fabricated path and the kind test
+ * catches a claim filed as rationale; neither catches a lazy `holds`, and this
+ * does, per unit (ADR-0073).
+ *
+ * The join is the record and the unit id. Both seats read one enumeration of
+ * one file at one sha, so the ids are the same list; the head a finding carries
+ * beside its id is what matches a finding across a write, which is a different
+ * question.
+ */
+function writerMissRate(runs) {
+  let holds = 0;
+  let missed = 0;
+  const records = new Set();
+  for (const { runId, events } of runs) {
+    const answers = new Map();
+    for (const e of events) {
+      if (e.event !== 'record-units' || reviewSeat(e.seat)) continue;
+      for (const unit of e.units ?? []) answers.set(`${runId}|${e.record}|${unit.id}`, unit.verdict);
+    }
+    holds += [...answers.values()].filter((verdict) => verdict === 'holds').length;
+    for (const e of events) {
+      if (e.event !== 'finding' || e.record !== true || e.unit === undefined) continue;
+      if (answers.get(`${runId}|${e.file}|${e.unit}`) !== 'holds') continue;
+      missed += 1;
+      records.add(e.file);
+    }
+  }
+  return { holds, missed, rate: holds > 0 ? round(missed / holds) : null, records: [...records] };
+}
+
+/** Whether a stamped seat name is the record review's, slot suffix and all. */
+function reviewSeat(seat) {
+  return typeof seat === 'string' && seat.split(':')[0] === RECORD_REVIEW_SEAT;
+}
+
+/**
+ * The late share: the records the judge found owed after the freeze, over every
+ * record the run owed. A high share says the cards and the tickets do not state
+ * their decisions, so the birth seat has nothing to write from (ADR-0074).
+ */
+function lateShare(runs) {
+  let born = 0;
+  let late = 0;
+  for (const { events } of runs) {
+    for (const e of events) {
+      if (e.event !== 'reconciliation-judged') continue;
+      born += (e.born ?? []).length;
+      late += (e.late ?? []).length;
+    }
+  }
+  const total = born + late;
+  return { born, late, share: total > 0 ? round(late / total) : null };
+}
+
+/**
+ * What a moved default branch cost: per update whose tree moved, whether the
+ * code was re-judged, the records re-run, both or neither.
+ *
+ * Two certifications with two grounds answer one moved base separately
+ * (ADR-0075). A re-run share near the re-judgment share says the record
+ * neighbourhood is as wide as the whole suite ground, which is the reading that
+ * would send the ground back for review.
+ */
+function movedTreeCost(runs) {
+  let updates = 0;
+  let rejudged = 0;
+  let rerun = 0;
+  let both = 0;
+  for (const { events } of runs) {
+    for (const e of events) {
+      if (e.event !== 'pre-verdict-update' || e.ran !== true) continue;
+      updates += 1;
+      const code = e.code?.answer === 'rejudge';
+      const records = e.records?.answer === 'rerun';
+      if (code) rejudged += 1;
+      if (records) rerun += 1;
+      if (code && records) both += 1;
+    }
+  }
+  return { updates, rejudged, rerun, both, neither: updates - rejudged - rerun + both };
+}
+
+/**
+ * The recheck yield: the rechecks that re-answered anything, over every recheck
+ * a repair round owed. A yield near nought over many rechecks says the
+ * intersection rule may be widened; a moved unit a recheck missed says it must
+ * be narrowed, and that one is a finding rather than a number (ADR-0075).
+ */
+function recheckYield(runs) {
+  let rechecks = 0;
+  let answered = 0;
+  for (const { events } of runs) {
+    for (const e of events) {
+      if (e.event !== 'reconcile-recheck') continue;
+      rechecks += 1;
+      if (e.result !== 'kept') answered += 1;
+    }
+  }
+  return { rechecks, answered, yield: rechecks > 0 ? round(answered / rechecks) : null };
+}
+
+/**
+ * The record-diff gate time: what the layers of a record render spent, in
+ * minutes, per render. A record change runs the record layers and no code suite
+ * (ADR-0075), and this is the reading of what that costs on the clock.
+ */
+function recordGateTime(runs, pinTs) {
+  const totals = [];
+  for (const { events } of runs) {
+    const layers = events.filter(
+      (e) => e.event === 'layer-result' && typeof e.elapsedMs === 'number',
+    );
+    for (const render of recordRenders(events, pinTs)) {
+      const spent = layers.filter((e) => e.cycle === render.cycle);
+      if (spent.length > 0) {
+        totals.push(spent.reduce((sum, e) => sum + e.elapsedMs, 0) / 60_000);
+      }
+    }
+  }
+  return {
+    renders: totals.length,
+    mean: totals.length > 0 ? round(totals.reduce((sum, m) => sum + m, 0) / totals.length) : null,
+  };
+}
+
+/**
+ * The tree series: the active record count each write left, with the
+ * supersessions, splits and merges behind it. The record count grows under the
+ * supersede lifecycle, and this is the only thing that says by how much and how
+ * fast (ADR-0073).
+ */
+function treeSeries(runs) {
+  const series = [];
+  for (const { runId, events } of runs) {
+    for (const e of events) {
+      if (e.event !== 'reconciliation-written' || typeof e.active !== 'number') continue;
+      series.push({
+        runId,
+        ts: e.ts,
+        active: e.active,
+        superseded: e.supersededCount ?? 0,
+        split: e.split ?? 0,
+        merged: e.merged ?? 0,
+      });
+    }
+  }
+  return series;
 }
 
 // Median of the longest green required-check duration per merge, minutes,

@@ -196,6 +196,17 @@ export const RUN_EVENTS = new Set([
   // spec + suite
   'spec-born',
   'spec-gate-round',
+  // The decision records the run was born with, committed on its own branch
+  // before the suite seat runs: the commit `sha`, the record `paths`, and
+  // `decided`, which is false where the spec decided nothing new and no file
+  // was written. A record is born by a seat that did not write the code, so
+  // the frozen sha carries it and the dev seat reads it as it reads the tests
+  // (ADR-0074). `resumed: true` is the stamp a run that inherited a freeze
+  // writes for the records it inherited with it, and `carried: true` the one a
+  // fresh pass writes for the records it carried over its own reset: both say
+  // the records exist and this run did not write them, which is what the born
+  // and late counts read.
+  'records-committed',
   'suite-committed',
   'adversary-wave',
   'survivor-disposition',
@@ -242,6 +253,10 @@ export const RUN_EVENTS = new Set([
   // that fallback countable (ADR-0056). `narrowedTo` (parts, files) rides the
   // flake filter's re-run alone and says what that attempt was asked for, so a
   // re-run that answered a failure never reads as a re-run of the layer.
+  // `elapsedMs` is what the attempt took on the clock. A gate's cost was
+  // derivable only by pairing this stamp with its `layer-started`, which is a
+  // join every reader had to write for itself and which no reader wrote; the
+  // record-diff gate time is read off this field.
   'layer-result',
   // The attempt that ended without a verdict about the tree: the red the flake
   // filter's re-run replaced, a command that could not run, a child a signal
@@ -280,6 +295,15 @@ export const RUN_EVENTS = new Set([
   // `gates.allowlistPaths`, and never read back out of the seat's sentence:
   // an allowlist addition is judged by the spec lens alone, and a reading of
   // whether anybody is judging them has to be countable (ADR-0010).
+  //
+  // A finding on a decision record names the unit it is about: `unit` is the
+  // id the harness enumerated, `head` the first words of that unit and `line`
+  // its line. The head is what carries the finding across a write, because the
+  // ids are positional and a write moves them; a unit whose head changed is a
+  // moved unit and is answered again (ADR-0073). A `consistent` finding is
+  // about two records, so it carries `file2`, `unit2` and `head2` for the
+  // second place: without them the reader of the finding has one half of a
+  // contradiction.
   'finding',
   // The cycle boundary, and what the cycle did not have to buy. `partsRun`,
   // `partsCarried` and `carryShare` are the cycle's carry (ADR-0058);
@@ -299,12 +323,12 @@ export const RUN_EVENTS = new Set([
   // more cycle is the cheapest way to find out — but never silent, because a
   // cycle the harness granted itself is a cycle somebody paid for (ADR-0022).
   'cycle-retry',
-  // One round of the repair arm. `cap` is the number that round counted
-  // against: the code cap, or `gates.reconcileRounds` where the diff the render
-  // judged is decision records and nothing else. Two caps are in force in this
-  // lane and the diff decides which, so a reader who asks why a run stalled at
-  // four rounds or at six reads the answer off the round rather than re-derives
-  // a diff class the run no longer holds (ADR-0007).
+  // One round of the repair arm, with the `cap` that round counted against.
+  // The cap rides the round so a reader who asks why a run stalled at four
+  // rounds reads the answer off the round rather than re-derives it (ADR-0007).
+  // It is a round of the code repair alone: a decision record is corrected in
+  // the reconcile stage, under `reconcile-round`, and no seat that writes code
+  // may touch a record (ADR-0074).
   'repair-round',
   // The run stopped moving on its own findings, and the reason says how: a
   // repair round that closed none of them (`no-progress`), a suite defect that
@@ -351,6 +375,11 @@ export const RUN_EVENTS = new Set([
   // re-capturable. Quiet: the revert, the record and the downstream statement
   // are the same as any take-back, but the verdict's re-freeze already owns
   // the artifact, so an alert would report a handled case (ADR-0017).
+  // `class` says which frozen surface the write reached, out of the closed
+  // list in `RECAPTURE_CLASSES`. A dev seat that reaches a decision record and
+  // one that reaches a test are two different defects with two different
+  // repairs, and a count that read them as one would say nothing about either
+  // (ADR-0074).
   'diff-policy-recapture',
   // The generated artifacts a capture cleared from frozen paths before it read
   // what the tree changed: files the freeze does not hold, under a glob the
@@ -376,6 +405,15 @@ export const RUN_EVENTS = new Set([
   // that merges the default branch into its own tree on its own authority
   // says so either way — and `capped` is the pass that stopped chasing a
   // moving base and left the update to the ship stage (ADR-0033).
+  //
+  // A moved base meets two certifications with two grounds, so the stamp
+  // carries two answers and is written after both are known: `code` is
+  // `{answer: 'kept'|'rejudge', files}` and `records` is `{answer:
+  // 'kept'|'rerun', files}`, each with the incoming files that decided it. The
+  // code ground is what the suites declare; the reconciliation's is the run's
+  // own records and their neighbourhood. One answer never implies the other,
+  // and a reader who cannot see which ground the incoming work touched cannot
+  // tell a wide ground from a busy branch (ADR-0075).
   'pre-verdict-update',
   // The clean-rebase fast path's answer about one moved base: whether the
   // certification the run already earned stands over the tree the update
@@ -437,13 +475,72 @@ export const RUN_EVENTS = new Set([
   // set launches from and the `cause` that says why the run did not write them
   // itself. The ticket names the merge commit, which is why that line waits
   // for the close.
+  //
+  // `born` names the records this run wrote before its freeze and `late` the
+  // ones the judge found owed after it. The two are the reading of whether the
+  // birth seat is working: a decision the card and the spec stated is born, and
+  // a decision that only the diff shows is late (ADR-0074). A run whose records
+  // were all born stamps an empty `late`, which is the answer and not a gap.
   'reconciliation-judged',
   // What the reconciliation seat did with an owed judgment: the records it
   // rewrote, the records it left alone with the reason for each, and the sha
   // of the commit that carries them. `ok: false` with the cause is the
   // fallback: the seat could not deliver, the run ships the code it certified,
   // and the close writes the ticket the sweep launches from (ADR-0026).
+  //
+  // One writer runs per record, in sequence, each with its own seat identity
+  // (ADR-0075). So `records` carries one entry per record, `{record, seat,
+  // cost, attempts, unitsAnswered}`, and a reader prices one record.
+  // A divergence entry carries `evidence`, the path that shows the
+  // shift, so a later eval can ask how many recorded shifts were wrong without
+  // re-reading the run. `siblings` is what the write answered for every active
+  // record that cited a superseded one, and `superseded` the pairs it replaced.
+  // `active`, `supersededCount`, `split` and `merged` are the tree after the
+  // write: the record count grows under the supersede lifecycle, and the series
+  // is the only thing that says by how much (ADR-0073). A fallback carries
+  // `partial: true` and `residual`, the findings that went to the ticket.
   'reconciliation-written',
+  // reconciliation (the stage, ADR-0075)
+  // What one record seat answered, for one record, unit by unit: the `seat`
+  // that ran with its slot suffix, the `cycle` where the stage had one, the
+  // `record`, the `units` as `{id, kind, verdict, evidence}`, the `counts`
+  // behind them, the `neighbours` it read with the `neighboursDropped` above
+  // the cap, and the `cost`. The per-unit list is the fact the writer miss
+  // rate joins on: a review `fails` on a unit the writer called `not-built`
+  // and one on a unit the writer called `holds` are two different reports, and
+  // counts alone cannot tell them apart (ADR-0073).
+  'record-units',
+  // One corrective round of the reconcile stage: the `round`, the `records` it
+  // dispatched a writer for, and the `findings` it was answering. It counts
+  // against `gates.reconcileRounds` and against nothing else. The code repair
+  // ladder stamps `repair-round`, and the two caps never read each other's
+  // rounds.
+  'reconcile-round',
+  // One cycle of the reconcile stage, rendered: the `cycle`, which continues
+  // the run's own counter so `runId#cycle` stays unique across both renders,
+  // the `sha` of the record commit it judged, the `verdict`, what it left
+  // `open`, the `records` it read and the `layers` it ran. It is the record
+  // certification, and it is never a `verdict-rendered`: two certifications
+  // with two grounds and two shas cannot share one stamp, and the admission
+  // gate reads each against its own tree (ADR-0075).
+  'reconcile-rendered',
+  // The stage stopped at its cap with findings still open: the `rounds` it
+  // spent and what stayed `open`. Loud, because the run then takes the
+  // fallback on its own. The code ships and the records go to a ticket, or a
+  // records-lane run closes on the cap, and no park asks anybody first. The
+  // ticket is the answer, so the close-out `reconciliation-judged` that names
+  // one owns this record.
+  'reconcile-stall',
+  // The recheck a repair round owes a green reconciliation: the `delta` the
+  // round committed, the `units` whose evidence paths it touched, what the
+  // `judge` said about a record not already owed, and the `result`. A repair
+  // changes the diff a green reconciliation answered, and the intersection is
+  // what keeps that from costing a whole stage again (ADR-0075). `result` is
+  // `kept` where the delta touched no evidence path and implicated no record.
+  // That one is stamped too: a recheck that found nothing is the evidence that
+  // the rule is not too narrow, and the yield reads every other word as work
+  // the recheck did.
+  'reconcile-recheck',
   // The close-out learning artifact a project asks for in its config: `ok`
   // with the artifact paths the seat reported, or ok:false with the reason
   // (ADR-0031). Quiet either way — the story shipped, and nothing here can
@@ -481,8 +578,23 @@ export const RUN_EVENTS = new Set([
 ]);
 
 export const INSTANCE_EVENTS = new Set([
+  // One instance, started: the `pid`, the runs it resumed, and `harnessSha`,
+  // the head of the code directory this daemon runs from. The sha is what
+  // dates every ledger after it: a reader of an archived run has no other way
+  // to tell which harness wrote it, and a stamp shape that changed at a pin is
+  // readable only against the instant that pin started. It is absent where the
+  // code directory is no git checkout, and a ledger with no such stamp reads
+  // as one written before the field existed.
   'daemon-started',
   'daemon-stopped',
+  // The stage whose duration history stops here, and why. A band is a reading
+  // of what the same stage of the same lane did, so a stage whose work moved
+  // out of it carries a band that measures work it no longer does. The reset
+  // drops the samples before it and the band re-learns from the visits after
+  // it (ADR-0034). Instance-scoped, because it is a statement about every
+  // ledger and not about one run, and stamped once: the marker is the record
+  // itself, so a restart re-reads it and stamps nothing.
+  'duration-reset',
   // A start that found no clean stop behind it: the previous instance died
   // where the ledger goes silent, and the seq it carries is that point
   // (ADR-0016). Every ordinary exit path stamps `daemon-stopped`, so this
@@ -669,6 +781,7 @@ export const LOUD_EVENTS = new Set([
   'archive-failed',
   'workflow-red',
   'external-outage',
+  'reconcile-stall',
 ]);
 
 // The close-out backstop. A loud record resolves at the event that owns it
@@ -713,6 +826,10 @@ export const PARK_TYPES = new Set([
   // (ADR-0052).
   'card-decision',
   'provisioning-gate',
+  // A red pull-request check a records-lane run holds no seat for. That lane
+  // writes decision records and dispatches no dev seat, so a red on anything but
+  // a record layer is a code defect nobody in the run may repair (ADR-0075).
+  'ci-red',
   // Terminal-state discipline (ADR-0015): a recoverable failure parks with
   // `retry` / `abandon` instead of closing the run.
   'seat-failure', // a seat work product past its machine retry allowance
@@ -818,19 +935,51 @@ export const OBSERVED_DEFECT_KINDS = new Set([
 // into the product (ADR-0024).
 export const DEFECT_KINDS = new Set([...GATE_INTEGRITY_KINDS, ...OBSERVED_DEFECT_KINDS]);
 
+// The frozen surfaces a capture take-back can name. Closed for the reason the
+// kinds above are: a dev seat that reached a test and one that reached a
+// decision record are two defects with two repairs, and a word each writer
+// spells its own way counts as nothing (ADR-0074).
+export const RECAPTURE_CLASSES = new Set(['test', 'record']);
+
+/** The class, or a throw naming it. The only way one reaches a stamp. */
+export function assertRecaptureClass(cls) {
+  if (!RECAPTURE_CLASSES.has(cls)) throw new Error(`unknown recapture class: ${cls}`);
+  return cls;
+}
+
 /**
  * Why an in-run decision-record rewrite ended in a fallback. Closed, and the
- * words live here rather than beside either reader: the verdict ladder stamps
- * them and a tripwire counts them, and a count that reads a word one writer
- * spells its own way is a count of nothing (ADR-0008).
+ * words live here rather than beside either reader: the stage stamps them and a
+ * tripwire counts them, and a count that reads a word one writer spells its own
+ * way is a count of nothing (ADR-0008).
  *
- * `record-findings` is the partial fallback: every layer was green, the records
- * rode with confirmed findings still open, and the close ticketed them.
- * `record-layer-red` is the discard: a layer stayed red on the record commit,
- * the tree went back to the certified sha, and the whole rewrite is ticketed.
+ * `record-cap` is the stall: the stage spent its rounds with findings still
+ * open, so the records ride with `partial: true` and the `residual` goes to a
+ * ticket, or a records-lane run closes on the cap and the ticket names its
+ * branch. It is the only way records with open findings leave a run.
+ *
+ * `operator` is a person's answer at the write seat's failure park, and
+ * `work-product-defect` is a write that could not pass its own checks past its
+ * corrective attempt. Neither asks anybody twice: the code ships and the ticket
+ * carries the records.
+ *
+ * `record-layer-red` is retired: a red record layer is now a red render that a
+ * corrective round answers, and the whole-rewrite discard it named no longer
+ * happens. It stays declared so an archived ledger still reads.
  */
-export const RECORD_FINDINGS = 'record-findings';
+export const RECORD_CAP = 'record-cap';
+export const OPERATOR = 'operator';
+export const WORK_PRODUCT_DEFECT = 'work-product-defect';
 export const RECORD_LAYER_RED = 'record-layer-red';
+
+/** The closed causes a `reconciliation-written` fallback carries. */
+export const RECONCILE_CAUSES = new Set([RECORD_CAP, OPERATOR, WORK_PRODUCT_DEFECT]);
+
+/** The cause, or a throw naming it. The only way one reaches a stamp. */
+export function assertReconcileCause(cause) {
+  if (!RECONCILE_CAUSES.has(cause)) throw new Error(`unknown reconcile cause: ${cause}`);
+  return cause;
+}
 
 /** The kind, or a throw naming it. The only way a kind reaches a stamp. */
 export function assertDefectKind(kind) {

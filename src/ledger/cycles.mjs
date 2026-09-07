@@ -151,6 +151,81 @@ export function cycleRepeat(events, renders, last) {
   };
 }
 
+// -- the two shapes of a record render ----------------------------------------
+//
+// A reconciliation is a stage of its own and stamps `reconcile-rendered`
+// (ADR-0075). Every ledger written before that stage existed holds its record
+// renders as `verdict-rendered` over a record commit, and every metric about
+// records has to read both or read a window that changes shape under it.
+//
+// The old shape is found by the commit and never by a field on the render:
+// `verdict-rendered.record` is the path of the verdict record file, truthy on
+// every render of every kind, and reading it as the marker would count every
+// verdict ever rendered as a record render.
+
+/**
+ * The instant the harness stamp appeared, or null for an instance that has
+ * never started under it.
+ *
+ * `daemon-started.harnessSha` says which harness wrote what came after it. The
+ * first start that carries one is the boundary between the two shapes: a
+ * ledger with no such stamp is older than the field, so every render in it
+ * reads as the old shape, which is what those renders are.
+ * @param {object[]} instanceEvents the instance ledger, in order
+ * @returns {string|null} an ISO ts
+ */
+export function harnessPinTs(instanceEvents) {
+  for (const e of instanceEvents ?? []) {
+    if (e.event === 'daemon-started' && typeof e.harnessSha === 'string' && e.harnessSha !== '') {
+      return e.ts;
+    }
+  }
+  return null;
+}
+
+/**
+ * The record renders of one run ledger, both shapes, as one series in ledger
+ * order. Each entry carries the `event` it came from and its `shape`, so a
+ * reader that keys findings on a render keys them on the event as well as the
+ * cycle and never matches a verdict cycle of the same number.
+ *
+ * `findings` is what the render left open. It is the same field in both
+ * shapes, and it is the render's own statement rather than a re-derivation.
+ * @param {object[]} events one run ledger, in order
+ * @param {string|null} [pinTs] the boundary from `harnessPinTs`; absent or
+ *   null reads every render as the old shape
+ */
+export function recordRenders(events, pinTs = null) {
+  const commits = new Map();
+  const series = [];
+  for (const e of events) {
+    if (e.event === 'implementation-committed' && e.phase === 'reconcile') {
+      if (typeof e.sha === 'string') commits.set(e.sha, e.seq);
+      continue;
+    }
+    const old = pinTs === null || e.ts < pinTs;
+    if (e.event === 'verdict-rendered' && old && commits.get(e.sha) < e.seq) {
+      series.push(entry(e, 'old'));
+    } else if (e.event === 'reconcile-rendered' && !old) {
+      series.push(entry(e, 'new'));
+    }
+  }
+  return series;
+}
+
+function entry(render, shape) {
+  return {
+    seq: render.seq,
+    ts: render.ts,
+    event: render.event,
+    shape,
+    cycle: render.cycle,
+    sha: render.sha,
+    verdict: render.verdict,
+    findings: render.open ?? [],
+  };
+}
+
 /** The waits this run had taken by one render. */
 function waitCount(events, render) {
   let taken = 0;

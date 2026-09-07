@@ -11,6 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join, basename, isAbsolute } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   openEscapesStore,
   openInstanceStore,
@@ -49,6 +50,12 @@ import { parseProjectConfig } from '../config/project.mjs';
 import { diffPolicyViolations, laneDiffPolicy, parseTouchedBlock } from '../seats/diffpolicy.mjs';
 import { parseIntentCard } from '../lanes/card.mjs';
 import { credentialRefusal, probeCredentials } from '../lanes/probes.mjs';
+import {
+  TICKETED_LANES,
+  codeTicketRefusal,
+  recordLaneRefusal,
+  ticketPathClass,
+} from '../lanes/records-stage.mjs';
 import { readInheritance, closeState } from '../lanes/resume.mjs';
 import { FrontierLauncher } from '../frontier/autolaunch.mjs';
 import { launchEscape } from '../frontier/repairs.mjs';
@@ -104,6 +111,31 @@ const FAULT_MAX = 600; // a stamp carries the head of a stack, not the stack
 const CARD_ERRORS_NAMED = 3;
 const CONTROL_READS = 2;
 const CONTROL_REREAD_MS = 50;
+// The code this daemon runs from. Nothing else in the process names it: the
+// home, the working directory and the config all belong to the operator, and a
+// pin is a checkout somebody made somewhere else.
+const CODE_DIR = fileURLToPath(new URL('../../', import.meta.url));
+// The one stage whose duration history the reconcile stage invalidates.
+const DURATION_RESET = { stage: 'update', reason: 'plan-35' };
+
+/**
+ * The head of the code directory this daemon runs from, or null where that
+ * directory is no git checkout.
+ *
+ * It dates every ledger the instance writes. A reader of an archived run has no
+ * other way to tell which harness wrote it, and a stamp shape that changed at a
+ * pin is readable only against the instant that pin started. Null is a true
+ * answer and never a failure: a daemon can run from an unpacked copy, and its
+ * ledgers read as ledgers that cannot name their harness.
+ */
+async function readHarnessSha() {
+  try {
+    const sha = (await git(['rev-parse', 'HEAD'], { cwd: CODE_DIR })).trim();
+    return sha.length > 0 ? sha : null;
+  } catch {
+    return null;
+  }
+}
 
 export class Daemon {
   /**
@@ -425,11 +457,14 @@ export class Daemon {
       // stop is the only trace an unstamped death leaves.
       this.stampCrashIfUnstopped();
       const runsResumed = this.engine.resumeOpenRuns();
+      const harnessSha = await readHarnessSha();
       this.ledger.append('daemon-started', {
         actor: ACTOR,
         pid: process.pid,
         runsResumed,
+        ...(harnessSha !== null && { harnessSha }),
       });
+      this.stampDurationReset(harnessSha);
       await this.stampSeatEnvironment();
       await this.stampCredentialFingerprints();
       await this.sweepOrphanWorkspaces();
@@ -583,8 +618,9 @@ export class Daemon {
       }
       if (inherit) await this.requireFrozenTree(project, entry, inherit);
       if (lane === 'story') await this.refuseUnreadableCard(project, entry, payload.card);
-      if (lane === 'repair' && typeof payload.ticket === 'string') {
+      if (TICKETED_LANES.includes(lane) && typeof payload.ticket === 'string') {
         await this.refuseForbiddenTicket(project, entry, payload.ticket);
+        await this.refuseWrongLaneTicket(project, entry, lane, payload.ticket);
       }
       await this.refuseUnprovenCredentials(project, entry);
       const ws = await this.isolation.provision({
@@ -833,6 +869,29 @@ export class Daemon {
   }
 
   /**
+   * A ticket launched on the lane that cannot do its work is refused here,
+   * before a slot, a workspace or a seat is spent on it (ADR-0074). The
+   * touched-paths block is the declaration, as it is for the ground refusal
+   * above, and the record tree is what classifies it.
+   *
+   * A ticket whose block names decision records and nothing else is refused on
+   * the repair lane: that lane runs a dev seat, and no dev seat writes a
+   * record. A ticket that names code is refused on the records lane: that lane
+   * holds no dev seat and no code verdict. A ticket with no block is accepted
+   * on either, as a ticket with no block always was; the lane's own stage reads
+   * the ticket again from the tree the run holds.
+   */
+  async refuseWrongLaneTicket(project, entry, lane, ticket) {
+    const text = await this.readTicketText(project, entry, ticket);
+    const config = await this.readLaunchConfig(project, entry);
+    const { klass, code } = ticketPathClass(text, config?.repo?.recordPaths ?? []);
+    if (lane === 'repair' && klass === 'records') throw new Error(recordLaneRefusal(ticket));
+    if (lane === 'records' && (klass === 'mixed' || klass === 'code')) {
+      throw new Error(codeTicketRefusal(ticket, code));
+    }
+  }
+
+  /**
    * The ticket text, read from where the run would read it: an absolute path
    * from the daemon home, a repo-relative one from the default branch of the
    * clone after a fetch. Null when it cannot be read, which leaves that
@@ -892,9 +951,10 @@ export class Daemon {
    * A console launch: `{project, lane?, card?, ticket?, resumeFrom?}`. A
    * story launch reads the card from the clone for its key, so the frontier's
    * run history matches; an unreadable card launches anyway — readiness fails
-   * it with evidence. The repair lane's intake ticket is its spec, so lane and ticket
-   * must agree: the mismatch is refused here, before any provisioning, rather
-   * than at the fix seat of a run that already holds a slot and a workspace.
+   * it with evidence. The intake ticket is the spec of the repair lane and of
+   * the records lane, so lane and ticket must agree: the mismatch is refused
+   * here, before any provisioning, rather than at the fix seat of a run that
+   * already holds a slot and a workspace.
    * A resume names the run whose freeze it inherits. It belongs to the story
    * lane, and the prior run supplies the card, so both mismatches are refused
    * here as well.
@@ -916,14 +976,21 @@ export class Daemon {
       }
     }
     let carried = null;
-    if (lane === 'repair') {
+    if (TICKETED_LANES.includes(lane)) {
       if (typeof ticket !== 'string' || ticket.length === 0) {
-        throw new Error('a repair launch requires a ticket path');
+        throw new Error(`a ${lane} launch requires a ticket path`);
       }
-      carried = launchEscape(this.paths, { ticket, escape });
+      // The escape linkage is the repair lane's: a records run repairs a
+      // decision record, and no escape record names one.
+      if (lane === 'repair') carried = launchEscape(this.paths, { ticket, escape });
+      else if (escape !== undefined) {
+        throw new Error(`an escape applies to the repair lane only (lane: ${lane})`);
+      }
     } else {
       if (ticket !== undefined) {
-        throw new Error(`a ticket applies to the repair lane only (lane: ${lane})`);
+        throw new Error(
+          `a ticket applies to the ${TICKETED_LANES.join(' and ')} lanes only (lane: ${lane})`,
+        );
       }
       if (escape !== undefined) {
         throw new Error(`an escape applies to the repair lane only (lane: ${lane})`);
@@ -1823,6 +1890,28 @@ export class Daemon {
    * a clean stop. The seq it carries is the last thing the dead instance
    * managed to write — where a reader starts looking.
    */
+  /**
+   * The duration history of the `update` stage, ended at this start.
+   *
+   * The stage used to judge the decision records and write them; the reconcile
+   * stage does that now, so every completed `update` visit in the ledgers
+   * measures work the stage no longer does, and a band built on them would
+   * hold a run against a stage that is gone (ADR-0034, ADR-0075).
+   *
+   * Once, and the record is its own marker: the reset is a statement about the
+   * ledgers, so a second one at the next restart would say nothing new. A
+   * daemon whose code directory is no checkout stamps nothing: it cannot name
+   * its harness, so it cannot say that this is the start that moved.
+   */
+  stampDurationReset(harnessSha) {
+    if (harnessSha === null) return;
+    const events = readEvents(this.paths.instanceLedger);
+    if (events.some((e) => e.event === 'duration-reset' && e.stage === DURATION_RESET.stage)) {
+      return;
+    }
+    this.ledger.append('duration-reset', { actor: ACTOR, ...DURATION_RESET });
+  }
+
   stampCrashIfUnstopped() {
     const events = readEvents(this.paths.instanceLedger);
     const last = events.at(-1);

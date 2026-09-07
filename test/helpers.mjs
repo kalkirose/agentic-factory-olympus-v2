@@ -2,8 +2,10 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
 import { longPath, isRetryableRemoval } from '../src/isolation/removal.mjs';
 import { SECURITY_DIMENSIONS } from '../src/lanes/lenses.mjs';
+import { readEvents } from '../src/ledger/ledger.mjs';
 
 // The ladder a fixture teardown removes under, and the path form it removes
 // in. Both are the production ones (ADR-0004): a fixture tree is a checked-out
@@ -49,6 +51,34 @@ export async function waitFor(check, { attempts = 50, intervalMs = 100, label = 
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
   throw new Error(`timed out in test helper: ${label}`);
+}
+
+/**
+ * The events of one run, from the ledger the run has: the live one while it
+ * runs, the archived one once the close moves it.
+ *
+ * The close renames the run directory, so a reader of the live path alone
+ * answers with nothing from that moment on. A stamp the run made is a stamp the
+ * run made, and a poll that lands after the close still has to see it.
+ * @param {ReturnType<import('../src/daemon/home.mjs').homePaths>} paths
+ * @param {string} runId
+ */
+export function runEventsOf(paths, runId) {
+  const live = readEvents(runLedgerPath(paths, runId));
+  return live.length > 0 ? live : readEvents(archivedRunLedgerPath(paths, runId));
+}
+
+/**
+ * Waits until `select` finds what it wants in one run's events, and answers
+ * with it. Every wait on a run that closes on its own reads through here: a run
+ * that passed the stamp between two polls still made it.
+ * @param {ReturnType<import('../src/daemon/home.mjs').homePaths>} paths
+ * @param {string} runId
+ * @param {(events: object[]) => unknown} select
+ * @param {{label?: string, attempts?: number, intervalMs?: number}} [opts]
+ */
+export function waitRunEvents(paths, runId, select, opts = {}) {
+  return waitFor(() => select(runEventsOf(paths, runId)), { intervalMs: 100, ...opts });
 }
 
 // -- git fixtures ------------------------------------------------------------

@@ -91,15 +91,38 @@ export function activeMs(events, start, end) {
 /**
  * Completed durations of one stage in one run ledger, in milliseconds of work.
  * The open visit — the one the run is in — is not a sample of anything.
+ *
+ * A visit that ended before `resetTs` is not a sample either. The instance
+ * ledger stamps `duration-reset` where a stage's work moved somewhere else,
+ * and the visits before that stamp measure work the stage no longer does; a
+ * band that kept them would judge a run against a stage that is gone.
  * @param {object[]} events one run ledger
  * @param {string} stage
+ * @param {{resetTs?: string|null}} [opts] the ISO instant this stage's history
+ *   starts at; absent keeps every completed visit
  * @returns {number[]}
  */
-export function stageDurations(events, stage) {
+export function stageDurations(events, stage, { resetTs = null } = {}) {
   return stageVisits(events)
     .filter((v) => v.stage === stage && v.end !== null)
+    .filter((v) => resetTs === null || v.end >= resetTs)
     .map((v) => activeMs(events, v.start, v.end))
     .filter((ms) => Number.isFinite(ms) && ms >= 0);
+}
+
+/**
+ * The newest instant one stage's duration history was reset at, or null where
+ * nothing reset it. One read of the instance ledger answers for every run.
+ * @param {object[]} instanceEvents the instance ledger, in order
+ * @param {string} stage
+ * @returns {string|null} an ISO ts
+ */
+export function durationResetAt(instanceEvents, stage) {
+  let at = null;
+  for (const e of instanceEvents ?? []) {
+    if (e.event === 'duration-reset' && e.stage === stage) at = e.ts;
+  }
+  return at;
 }
 
 /**

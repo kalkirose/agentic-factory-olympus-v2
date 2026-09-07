@@ -670,6 +670,52 @@ function renderStats(s) {
     hbars(bars, st.stageMedians.map((m) => [stageLabel(m.stage), Math.round(m.minutes)]), " min");
     box.appendChild(bars);
   }
+
+  renderRecords(box, st.records);
+}
+
+/* ---------- the record tree ---------- */
+
+function fmtNum(value, digits) {
+  return value === null || value === undefined ? "—" : value.toFixed(digits ?? 2);
+}
+
+function fmtShare(value) {
+  return value === null || value === undefined ? "—" : Math.round(value * 100) + "%";
+}
+
+function renderRecords(box, r) {
+  if (!r || r.runs === 0) return;
+  box.appendChild(el("div", "subhead", "Record tree · last " + r.runs + " runs that touched a record"));
+  const tiles = el("div", "tiles");
+  tiles.appendChild(tile("Record cycles", fmtNum(r.cycles.mean, 1), null,
+    sub([r.cycles.reconciliations + " reconciliations · worst " + (r.cycles.worst ?? "—")]),
+    "Mean cycles per reconciliation. A re-run and a recheck each count as a stage run of their own."));
+  tiles.appendChild(tile("Writer miss rate", fmtShare(r.writerMiss.rate), null,
+    sub([r.writerMiss.missed + " of " + r.writerMiss.holds + " units answered holds"]),
+    "Units a write seat reported holds that the review then found false."));
+  tiles.appendChild(tile("Late records", fmtShare(r.late.share), null,
+    sub([r.late.born + " born · " + r.late.late + " late"]),
+    "Records the judge found owed after the freeze, over every record the runs owed."));
+  tiles.appendChild(tile("Moved-tree cost", r.movedTree.rejudged + " · " + r.movedTree.rerun, null,
+    sub([r.movedTree.updates + " moved bases · " + r.movedTree.both + " both · " + r.movedTree.neither + " neither"]),
+    "Code re-judgments and record re-runs, over the updates whose tree moved."));
+  tiles.appendChild(tile("Recheck yield", fmtShare(r.recheck.yield), null,
+    sub([r.recheck.answered + " of " + r.recheck.rechecks + " rechecks re-answered"]),
+    "Rechecks after a repair round that re-answered a unit."));
+  tiles.appendChild(tile("Record gate", fmtNum(r.gateMinutes.mean, 1), " min",
+    sub([r.gateMinutes.renders + " record renders"]),
+    "What a record render's layers spent on the clock."));
+  tiles.appendChild(tile("Write wall clock", fmtNum(r.writeMinutes.mean, 1), " min",
+    sub([r.writeMinutes.writes + " writes · longest " + fmtNum(r.writeMinutes.longest, 1) + " min"]),
+    "First write seat to the last write stamp of a stage run. The writers run one record at a time."));
+  const tree = r.tree.length > 0 ? r.tree[r.tree.length - 1] : null;
+  tiles.appendChild(tile("Active records", tree ? String(tree.active) : "—", null,
+    sub([r.tree.reduce((n, e) => n + e.superseded, 0) + " superseded · "
+      + r.tree.reduce((n, e) => n + e.split, 0) + " split · "
+      + r.tree.reduce((n, e) => n + e.merged, 0) + " merged"]),
+    "The tree each write left, with the supersessions, splits and merges behind it."));
+  box.appendChild(tiles);
 }
 
 /* ---------- ledger tail ---------- */

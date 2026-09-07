@@ -658,3 +658,43 @@ never carries a project's specifics.
   behind them stamps `gate-integrity` under the new `reconciliation-lost`
   kind, loud, owned by a person. ADR-0026 is rewritten around the new
   placement; ADR-0022 states the third sweep and why it sweeps nothing.
+- 2026-09-07 — the record tree gets one writer, one lifecycle, one stage and one
+  ground. A decision record is a list of claims, and every seat that touched one
+  checked the claims it happened to reach: one reconciliation spent three rounds,
+  and its sixth cycle read a record whole and passed over the sentence its
+  seventh cycle graded HIGH. Now `recordUnits` enumerates a record into ordered
+  units, `bin/olympus-units.mjs` prints the same list, and every record seat
+  answers every unit by id with a kind, a verdict and the evidence path;
+  `unitChecks` refuses eight numbered defects and buys the seat its one
+  corrective attempt. A record is born before the freeze by `record-author`, in
+  a `records` stage between the spec gate and the suite, so the frozen sha
+  carries the records and the dev seat reads them as it reads the tests. The
+  record tree is denied to every seat that writes code, in every lane and at the
+  merge-conflict site: a write that reaches the capture is reverted and stamped
+  `diff-policy-recapture` with `class: 'record'`. A third lane, `records`, runs a
+  ticket that names records alone, and the repair lane refuses one at the launch
+  door with that lane named. The reconciliation leaves the verdict's repair
+  ladder for a stage of its own, `reconcile`, between the verdict and the update:
+  ten steps derived from its own stamps, one `reconcile-write:<n>` per record in
+  sequence with its own reset, commit and budget, the layers of
+  `gates.recordLayers` over the record commit, one `record-review:<n>` per record
+  with no diff text at all, and `reconcile-rendered` at the record commit's own
+  sha. `certifiedTrees` gives the admission gate two certifications at two shas,
+  so a repair round after a green reconciliation no longer ships under a stale
+  one; `groundVerdict` asks two ground questions of one merge and
+  `pre-verdict-update` carries both answers; a repair past a green render buys a
+  recheck scoped to the units whose evidence the delta touched. A stall at
+  `gates.reconcileRounds` takes the fallback with no park: `reconcile-stall` is
+  loud, the story and repair lanes ship the code and ticket the residual, and the
+  records lane closes on the cap and tickets from its branch.
+  `repo.recordLifecycle: "supersede"` makes an accepted record immutable but for
+  its status line, and `RECORD_CRITERIA` gains a seventh key, `consistent`, over
+  a neighbourhood capped at twelve. Four record tripwires arm on every project,
+  the center gains a records section with eight measures, and `recordRenders`
+  reads the archived render shape and the new one as one series. ADR-0073,
+  ADR-0074 and ADR-0075 are new; ADR-0006, ADR-0007, ADR-0010, ADR-0017,
+  ADR-0022, ADR-0026, ADR-0033, ADR-0034, ADR-0038, ADR-0046, ADR-0056, ADR-0066
+  and ADR-0070 are rewritten around the stage. A read-only audit against
+  the plan found the finding line, the lane lists, the reconciliation guard,
+  one ship route and the token release reason short of the tree; each is
+  fixed and pinned in the same build.

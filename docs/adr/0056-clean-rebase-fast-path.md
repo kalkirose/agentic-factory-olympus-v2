@@ -1,7 +1,7 @@
 # ADR-0056: A ship over a provably disjoint merge keeps the certification it earned
 
 Status: accepted (2026-08-30, the two ground sources and the launch rule
-2026-09-05)
+2026-09-05, the second question 2026-09-07)
 
 ## The trade this makes, stated plainly
 
@@ -57,6 +57,22 @@ asked anything, and no answer is a judgment.
   change the harness cannot read as a file of this repository refuses.
 - **Both answers agree or the run takes the full re-verdict.** There is no
   third ending.
+- **The ground question is asked once and answered twice.** `groundVerdict` lists
+  the incoming files once and answers each certification the lane holds on its
+  own ground (ADR-0075). The code answer is the six sets above, with every record
+  path out of every one of them: the project states which layers read a record,
+  no suite is one of them, and a code re-judgment over a file no code layer sees
+  buys nothing. The record answer is the run's own records and the records their
+  neighbourhoods name, computed at the merge. An incoming record outside that
+  neighbourhood costs nothing; one inside it, or one the run itself wrote,
+  answers `rerun`. A record re-run is the record review over the merged tree and
+  never a refusal, because the stage that owns those records resolves the
+  conflict and judges them again.
+- **`declaredGround` reads a standing green per layer.** The green comes from the
+  last cycle that RAN that layer, never from the last cycle. A cycle runs the
+  layers its own plan named and skips the rest, so a layer a record-only cycle
+  left out keeps the green it earned and the record holding its declaration is
+  the record that earned it.
 
 A fast-path ship stamps `fast-path-ship` with `taken: true`, the default-branch
 commits it examined, the declaration version they were checked against, and the
@@ -324,6 +340,12 @@ not.
 They have different causes and different repairs, so a count that mixed them
 would be a count of nothing.
 
+One word is not a refusal of the code answer at all. `records-rerun` says the
+code certification stands and the record one does not, so the run goes to the
+reconcile stage rather than to the verdict. It rides the same closed set because
+`taken: false` needs a word, and a reader that counted it as a refused fast path
+would read a working path as a broken one.
+
 ## What a taken record does not settle
 
 A run can take the fast path over one moved base and still render the full
@@ -412,14 +434,17 @@ up to date" and a base that reads exactly like one which never moved. A route
 decided on that reading takes the run to the request over a tree nothing judged,
 and the last window turns a recorded refusal into a carried certification.
 
-So the route is decided on what the ledger PROVES about the tree the run holds,
-and there are exactly two proofs: a green verdict rendered at that sha, or a
-taken fast-path record for it. A stamp that merely carries a sha is not one; it
-says a tree was built, never that anything stood behind it. A tree with neither
-proof that this call's merge did not build goes to the full re-verdict and never
-to the fast path, because the shas the check reads went with the lost record,
-and a decision over shas the run cannot name is not the decision it would have
-made.
+So the route is decided on what the ledger PROVES about the trees the run holds.
+For the code tree there are exactly two proofs: a green verdict rendered at the
+last code commit's sha, or a taken fast-path record for it. For the record tree
+there is one: a green `reconcile-rendered` at the last record commit's sha, or the
+run's own spent cap fallback, which is the decision that the records ride with
+their residual ticketed (ADR-0075). A stamp that merely carries a sha is not a
+proof; it says a tree was built, never that anything stood behind it. A tree with
+no proof that this call's merge did not build goes to the full re-verdict and
+never to the fast path, because the shas the check reads went with the lost
+record, and a decision over shas the run cannot name is not the decision it would
+have made.
 
 ## Measuring both halves of the trade
 
@@ -561,3 +586,10 @@ A wider one, if declarations prove trustworthy and the residual never
 materialises: the same two questions could carry a certification across the
 ship-stage update as well, which today always re-runs CI without a re-verdict.
 That is deliberately not done here; one thinned guarantee at a time.
+
+If the record neighbourhood proves too wide, because a re-run fires as often as a
+code re-judgment and finds no `consistent` finding, the record ground narrows to
+the run's own records and drops the neighbours. Trigger: a re-run share near the
+re-judgment share over ten moved-base ships, with no `consistent` finding behind
+any of them. Reversal cost: low, one list at the call site; the question, the
+answers and the stamp do not change.

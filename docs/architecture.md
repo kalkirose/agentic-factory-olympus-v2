@@ -74,17 +74,25 @@ flowchart LR
 
 A story runs as one continuous run with these internal states:
 
-readiness → spec birth → spec gate → suite authoring → adversary → freeze →
-implementation → verdict (repair rounds as needed) → ship → close-out.
+readiness → spec birth → spec gate → records → suite authoring → adversary →
+freeze → implementation → verdict (repair rounds as needed) → reconcile →
+update → ship → close-out.
 
-Two lanes share the machinery:
+Three lanes share the machinery:
 
 - **Story lane** — the full chain above.
 - **Repair lane** — for defects and chores: no spec birth (the intake ticket
   is the spec), no adversary. Fix + regression test + full deterministic gates
-  + one generalist review round + one verdict + ship. Writes the run ledger
-  and the escapes-ledger entry at close. A ticket whose `touched-paths` block
-  names ground the lane's diff policy denies is refused at launch (ADR-0067).
+  + one generalist review round + one verdict + reconcile + ship. Writes the run
+  ledger and the escapes-ledger entry at close. A ticket whose `touched-paths`
+  block names ground the lane's diff policy denies is refused at launch
+  (ADR-0067). A ticket that names decision records and code dispatches the record
+  seat first, then the dev seat with the record paths frozen.
+- **Records lane** — for a ticket that names decision records and nothing else:
+  readiness → records → reconcile → update → ship → close-out. No fix seat, no
+  suite, no code verdict. A record-only ticket is refused on the repair lane at
+  the launch door with this lane named, and a ticket that names code is refused
+  here (ADR-0074).
 
 A story launch may **resume from a prior run's freeze**: it starts on the
 frozen commit, carries the born spec and the freeze record over, stamps
@@ -165,7 +173,13 @@ Two levels; the ownership test decides placement.
   `apps/storefront/src/lib/components`, `null` for a project whose specs name
   no components), the files that carry a cross-cutting gate's allowlist
   (`gates.allowlistPaths`, which is what makes a spec-lens finding on one
-  countable), this project's own wording
+  countable), where the decision records live and which files of that tree are
+  outside the rule (`repo.recordPaths`, default `["docs/adr"]`, an entry with an
+  `!` prefix being an exclusion), how the project changes an accepted record
+  (`repo.recordLifecycle`, `rewrite` or `supersede`, default `rewrite`), the
+  Tier-1 layers a changed record path is attributed to and to no other
+  (`gates.recordLayers`, validated against `gates.tier1`), the cap on corrective
+  record rounds (`gates.reconcileRounds`, default 5), this project's own wording
   for a cause outside the tree (`gates.transientPatterns`), whether the owner
   arms the deferred-proof trade (`gates.proofDebt`, off by default), and the
   hosts each declared credential's service answers on (`credentials[].hosts`,
@@ -207,7 +221,17 @@ Two levels; the ownership test decides placement.
   (`constitutionPath`, default `.olympus/constitution.md`). Its text rides as
   a third block between the core and the role block, for a closed set of
   seats; the judging seats also carry the authority order — constitution over
-  intent card over the run's spec (ADR-0018). No file, no third block.
+  intent card over the run's spec (ADR-0018). The four record seats
+  (`record-author`, `record-review`, `reconcile-judge`, `reconcile-write`) are in
+  that set, and `reconcile-judge` carries the authority order too: a project's
+  own record standard is written where the constitution is, and a seat that never
+  reads it cannot be held to it. A slot suffix on a seat name (`reconcile-write:2`)
+  is stripped before the lookup, so N dispatches of one seat read one policy and
+  keep N budgets. No file, no third block.
+- **Seat identity per dispatch.** A seat name may carry `:<n>`. The suffix keys
+  the attempt budget, the cost series and the failure record, so a round that
+  dispatches one seat per record keeps one budget, one cost line and one failure
+  record per record (ADR-0075). `seatDef` reads the name before the colon.
 - **One turn, one session.** Every command runs synchronously inside the
   seat's turn. No background work, no armed watcher, no wait on an outside
   event: the session ends when the seat stops and the machine kills the rest.
@@ -273,8 +297,8 @@ Two levels; the ownership test decides placement.
 
 ## Pre-freeze chain (story lane)
 
-readiness (process) → spec birth (seat) → spec gate (seat) → suite authoring
-(seat) → adversary → freeze (process).
+readiness (process) → spec birth (seat) → spec gate (seat) → records (seat) →
+suite authoring (seat) → adversary → freeze (process).
 
 - **Readiness** is mechanical: card on the graph frontier, open decisions
   empty (a foreseen-amendment note is not one, ADR-0052), references
@@ -340,6 +364,13 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   `spec-gate-stalled`, the one gate park, with both counts and the rounds they
   came from; `round` buys one amendment plus one re-check, `abandon` closes
   the run. The round stamp carries the identities.
+- **Records** (ADR-0074): one `record-author` seat writes the decision records
+  the validated spec decides, before the suite is written and by a seat that will
+  never write the code. It answers every unit of every record it writes
+  (ADR-0073), commits them as `records: <key>` and stamps `records-committed`
+  with the sha, the paths and whether the spec decided anything at all. The
+  frozen sha therefore carries the records, and the dev seat reads them as it
+  reads the tests. A project with no record tree spends no seat here.
 - **Suite writes and the surface map** (ADR-0072). Five writes answer the spec:
   the authoring round, an adversary amendment, a strengthening round, the
   red-state fix, and the re-freeze amendment after the freeze. Each one reports
@@ -412,7 +443,11 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   paths, and every later brief states the freeze and the re-freeze route.
   A take-back from a path the lane declared `recapturablePaths` — a baseline
   or fixture a re-freeze re-takes — stamps the quiet `diff-policy-recapture`
-  instead, and the hard tiers outrank the class. The class is decided once,
+  instead, and the hard tiers outrank the class. A write to a decision record
+  stamps the same quiet record with `class: 'record'`, in every lane and at the
+  merge-conflict site, because the record tree is frozen for every seat that
+  writes code (ADR-0074); the two classes are a closed list, so they count apart.
+  The class is decided once,
   here, and honored by every later step that meets the same paths. A frozen
   write under the lane's `sweptPaths` that the freeze anchor does not hold is
   a generated artifact rather than a take-back: it is swept before the record,
@@ -429,12 +464,11 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   and carries the remaining greens forward, marked `carried` in the record so
   no result reads as a fresh proof. A clean targeted cycle runs every layer it
   has not yet run, at that sha, before the verdict turns green; a red that
-  confirmation sweep turns up enters triage like any other. The cycle that
-  judges a reconciliation commit runs a third set: the layers whose declared
-  ground that commit reached, the layers with no standing green, and the
-  layers no source declared a ground for. It carries the rest on the
-  project's own statement of what each layer reads, and it sweeps nothing
-  (ADR-0026). A CI verdict whose
+  confirmation sweep turns up enters triage like any other. A cycle whose whole
+  diff is the record tree runs a third set: the layers of `gates.recordLayers`,
+  their dependents, and the prerequisites they need. Every other layer is skipped
+  rather than carried, and the reconcile stage is the caller that hands such a
+  diff over (ADR-0022, ADR-0075). A CI verdict whose
   open findings are all env or harness class runs no cycle at all: every one of
   those remedies lands outside the tree, so the operational fix stamps
   `sweep: 'skipped'` with the findings and the reason, the run goes back to
@@ -616,8 +650,9 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   answered; the stamp the loop leaves before its park tells them apart.
   Every bought invocation carries the failure evidence in its brief.
 - **Response ladder.** Code-defect → repair round on the candidate tree
-  (progress-gated; cap 3, or `gates.reconcileRounds` where the diff is decision
-  records and nothing else). Stall → one fresh pass per run,
+  (progress-gated; cap 3). No diff this ladder judges is a record diff: a record
+  is judged in the reconcile stage, which counts its own rounds against
+  `gates.reconcileRounds` (ADR-0075). Stall → one fresh pass per run,
   briefed by born spec + frozen suite + stall brief, never the prior tree; a
   second stall escalates. Suite-defect → re-freeze step by the suite seat at
   a new SHA. Env/harness → operational fix by an orchestrator job; a CI
@@ -750,23 +785,36 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
 
 - The run ends at close-out, not at the green verdict. In-loop ship, no
   batching.
-- **The update stage** (ADR-0033) sits between the verdict and the ship. A
-  story run runs the reconciliation round at the head of it, in front of the
-  token (ADR-0026). The run then takes the project's ship token, and its
-  first act under the token is the branch update against the default branch
-  as it stands after the previous holder's merge. An update that moved the
-  tree hands the run back to the verdict, so the tree that opens a request is
-  a tree a verdict certified; a base that did not move costs one fetch and a
-  stamp. A conflict surfaces
+- **The reconcile stage** (ADR-0075) sits between the verdict and the update, in
+  front of the ship token. It judges the decision records, writes them one seat
+  per record, runs the record layers over the record commit, reviews each record
+  with a seat of its own, and renders `reconcile-rendered` at the record commit's
+  sha. Ten steps, each derived from the stage's own stamps, so a restart at any
+  boundary resumes that step. Nothing in it stamps a `verdict-rendered` and
+  nothing in it reads one: the code verdict and the reconciliation are two
+  certifications over two trees at two shas.
+- **The update stage** (ADR-0033) sits between the reconciliation and the ship.
+  The run takes the project's ship token, and its first act under the token is
+  the branch update against the default branch as it stands after the previous
+  holder's merge. An update that moved the tree asks two questions of the
+  incoming work, one per certification, and routes on the answers: back to the
+  verdict where the code question re-opened, back to the reconciliation where the
+  record question did, and on to the ship where neither did. A base that did not
+  move costs one fetch and a stamp. A conflict surfaces
   here, before any request, and takes the merge round it always took.
-  `UPDATE_CAP` bounds the updates per implementation pass; past it the run
+  `UPDATE_CAP` bounds the updates per implementation pass, and a record re-run
+  spends it as a code re-judgment does; past it the run
   falls through to the ship-stage update. Every exit from this stage that is
   not the ship stage gives the token back first, with the reason on the stamp:
-  a refused fast path, a project with no fast path, a tree no verdict
-  certified, a merge conflict that buys a fresh pass, and a park. The
-  reconciliation round's own exits take that rule too. The stage reads its own
-  release on the way in, so a restart between the release and the transition
-  returns to the verdict rather than standing in the queue.
+  a refused fast path, a project with no fast path, a tree no certification
+  covers, a merge conflict that buys a fresh pass, and a park. The stage reads
+  its own release on the way in, so a restart between the release and the
+  transition returns to the stage it left for rather than standing in the queue.
+- **The admission gate reads two certifications** (ADR-0075). `certifiedTrees`
+  answers for the code tree at the run's last code commit and for the record tree
+  at its last record commit, and a request opens only where every certification
+  the lane holds is green at its own sha. A lane that owes no reconciliation
+  certifies no records, and a records-lane run renders no code verdict.
 - **The clean-rebase fast path** (ADR-0056), config-gated on
   `gates.fastPathShip` and off by default. With the flag on, a moved tree may
   keep the certification it already earned when two mechanical checks agree
@@ -972,17 +1020,21 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   never a loop. The stamp carries `pushAttempts` and, when a replay ran,
   `replay` with the head it replayed onto and what came of it.
 - **Reconciliation** (ADR-0026): a fresh-context seat judges whether the
-  run's own diff implements or contradicts any decision record, at the head
-  of the update stage and in front of the ship token. Owed sends a second
-  fresh seat to rewrite those records on the run branch, under checks that
-  hold every write inside the record tree; the commit stamps
-  `implementation-committed` with `phase: 'reconcile'`, a ground-keyed cycle
-  certifies code and records together, and one pull request carries both.
+  run's own diff implements or contradicts any decision record, in the
+  reconcile stage and in front of the ship token. Owed sends one fresh write
+  seat per judged record to rewrite them on the run branch, under checks that
+  hold every write inside the record tree and answer every unit of it; the record
+  layers then run over the record commit, one review seat per record judges it
+  against the criteria, and one pull request carries the code and the records.
   Not-owed and a failed judgment stamp too: an unjudged ship is a recorded
   miss, never a silent skip. A write nobody can make ships the certified sha
-  and leaves the ticket, and the close writes that ticket where no record
-  commit rode the merge, or stamps `reconciliation-lost` where it cannot.
-  The `merged` stamp carries `reconciled` where the records rode.
+  and leaves the ticket, and the close writes that ticket where the records did
+  not ride the merge whole, or stamps `reconciliation-lost` where it cannot.
+  The `merged` stamp carries `reconciled` where the records rode. A stall at
+  `gates.reconcileRounds` takes the fallback on its own and asks nobody:
+  `reconcile-stall` is loud, the story and repair lanes ship the code and ticket
+  the residual, and the records lane closes on the cap and tickets from its
+  branch.
 - **Learning artifact** (ADR-0031): optional, by project config
   (`closeout.learning`: an instructions file and a workspace directory, both
   absolute). A fresh-context seat writes a human-readable lesson about the
@@ -1051,7 +1103,9 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   competing merge the daemon merges main into the open branch (never
   force-push); full CI re-runs; auto-merge stays armed. A textual conflict
   gets one merge round (fresh dev seat, conflict brief, resolution only;
-  test-file hunks route to the suite seat); a failed round is a stall.
+  test-file hunks route to the suite seat, and decision-record hunks route to
+  the record write seat, because no dev seat writes a record); a failed round
+  is a stall.
 - **Merge order.** Ships are serial per project and everything before them is
   not: the ship token (ADR-0033) admits one run at a time from the update
   stage to its merge, and the queue order is derived from the ledgers. Launch
@@ -1163,9 +1217,11 @@ readiness (process) → spec birth (seat) → spec gate (seat) → suite authori
   authorises one (ADR-0009).
 - **Streams.** Queued: park events, tripwire breaches, stage overruns. Loud: liveness
   violation, gate-integrity defect, diff-policy violation, red-merge breach,
-  factory starvation, owed repairs, budget breach. Consoles render loud first,
+  factory starvation, owed repairs, budget breach, a reconciliation that spent
+  its rounds with findings open. Consoles render loud first,
   then queue depth, and a loud item leaves the strip as soon as the event that
-  owns it lands.
+  owns it lands. `reconcile-stall` is owned by the `reconciliation-judged` that
+  carries the ticket of the run behind it.
 - **Reading is pull; what waits on a human also pushes.** A park, a run close
   and every loud record go to the instance's notifier target when one is
   configured — a webhook, or an argv resolved like every other configured
@@ -1255,11 +1311,12 @@ else, and a console launch that names no open escape is refused before it
 takes a slot.
 
 Owed decision-record reconciliations launch second, after repairs and
-before stories (ADR-0026): shipped runs whose judgment carries a ticket,
-minus those a reconciliation run's launch stamp already names, derived from
+before stories (ADR-0026): shipped story runs whose judgment carries a ticket,
+minus those a ticketed lane's launch stamp already names, derived from
 the run ledgers at every sweep, stored nowhere, restart-idempotent. A story
 run rewrites its own records before it ships, so this set holds the ships
-where that rewrite could not be made.
+where that rewrite could not be made. The launch names the records lane, whose
+ticket is its spec and which runs no dev seat.
 
 Every input a run will be judged on is read at the launch door, before a slot,
 a workspace or a stack is spent (ADR-0067, ADR-0068).
@@ -1360,6 +1417,19 @@ floor, and it ships at nought, which no share can fall below: the honest floor
 is what a project actually carries when its declarations hold, and that is
 measured over ten narrowed cycles before the value is set.
 
+Four standing tripwires watch the decision records, and all four are armed on
+every project because the record rule runs on every project with no config line
+(ADR-0010). `record-cycles` reads the mean cycles a reconciliation spent over the
+last five stage runs, and breaches above two, which is the number that says the
+mechanism works. `record-write-time` reads the mean wall clock of the record
+write over the same window, and breaches above twenty minutes; its answer is a
+review of whether the writers should run in parallel. `record-refuted-share`
+reads how often the verifier has to kill a record finding, and
+`reconcile-fallbacks-window` reads how often the in-run rewrite ended in a
+fallback. Two ledger shapes feed the first, the third and the fourth: an archived
+ledger holds a record render as a `verdict-rendered` behind a `phase: 'reconcile'`
+commit, and `recordRenders` returns both shapes as one series.
+
 Two standing tripwires watch the operator rather than the machine, and both are
 armed on every project because the levers they count are on every project: gate
 acknowledgments over the last ten runs (ADR-0062), and runs that replaced the
@@ -1416,7 +1486,15 @@ One HTML page plus one small dependency-free read-only server, rooted at the
 daemon home, GET-only, path-guarded. The page fetches state on load, polls
 every 60 s (display cadence only), and has a manual refresh. Content: status
 chips, loud strip, run cards with stage pipeline, escalations, build health,
-run-time statistics, ledger tail. Dark command-center look.
+run-time statistics, the record section, ledger tail. Dark command-center look.
+
+The record section carries eight measures off the run ledgers alone: the cycles
+per reconciliation, the writer's miss rate (a review `fails` on a unit the writer
+reported `holds`, joined by record and unit id), the late share of the born
+records, what a moved default branch cost in re-judgments and re-runs, the
+recheck yield, the record-diff gate time, the write wall clock, and the tree
+series with its supersessions, splits and merges. Each carries its own
+denominator, so a quiet window reads as nothing rather than as zero.
 
 ## Proof
 
@@ -1428,7 +1506,8 @@ substituted runners in place of compose and the forge.
 
 `npm run test:e2e` is the binary proof under `e2e/`: `bin/olympusd.mjs`
 started as a child process and driven by `bin/olympusctl.mjs` through a whole
-story run and a whole repair run against a throwaway git project. Real control
+story run, a whole repair run and a whole records-lane run against a throwaway
+git project. Real control
 files, real ledgers, real worktrees, real gate commands; the seat CLI and the
 forge CLI are stubs behind their instance-config seams, and nothing else is
 substituted. What it does not reach — docker stacks, a live forge, model

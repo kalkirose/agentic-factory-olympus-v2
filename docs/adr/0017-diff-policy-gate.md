@@ -1,6 +1,6 @@
 # ADR-0017: The diff-policy gate at candidate capture
 
-Status: accepted (2026-08-15)
+Status: accepted (2026-08-15, the record class 2026-09-07)
 
 ## Decision
 
@@ -57,6 +57,16 @@ at all.
   event, no loud stream, no resolution owed. Both records carry
   `kind: 'capture-takeback'`, the closed word for the defect (ADR-0008), so a
   surface that keeps producing take-backs is a count and not a reading job.
+- **A quiet record names which tree it was taken from.** `diff-policy-recapture`
+  carries `class`, from the closed set `RECAPTURE_CLASSES` in
+  `src/ledger/registry.mjs`: `test` for a re-capturable frozen test artifact,
+  `record` for a decision record. The two are different defects with different
+  repairs, and a count that read them as one would say nothing about either. The
+  record class is not project config: the whole record tree is frozen for every
+  seat that writes code, in every lane, so a write to one is reverted to the
+  run's own last commit and the allowed set is committed around it (ADR-0074).
+  The restore is per file, so an `!` exclusion in `repo.recordPaths` is never
+  restored and never counted.
 - **A generated artifact is swept, not taken back.** A frozen write under the
   lane's `sweptPaths` that the freeze anchor does not hold is a file a test run
   produced, not work a seat authored. The restore removes it with every other
@@ -180,6 +190,20 @@ spending the run.
 The record is what the third incident actually needed. A stage reasoning from
 a tree nobody described is prevented by the record, and it never needed the
 park.
+
+## Why a record take-back is quiet and answers to nobody
+
+A record write by a dev seat is a boundary the harness closed rather than a
+surface anybody has to re-take. The seat has one legal move it will not find,
+because no seat that writes code may write a record in any lane, and the
+reconcile stage owns every change to one. So the revert is unconditional, the
+record is quiet, and the downstream statement says the route rather than the
+defect: the record seats own the tree.
+
+The deny rules sit in front of it and the capture sits behind. A deny rule
+refusal leaves no stamp, because the seat runtime reports no refused tool call.
+So "how often a dev seat tried" is not a fact the harness holds, and "how often
+one got through" is exactly this record.
 
 ## Why one class of take-back is quiet
 
@@ -354,6 +378,12 @@ into a directory the default does not name — the lane declares its own
 `sweptPaths` and the default stops applying. Trigger: swept records naming
 files the owner expected to be judged, or take-back records that keep naming
 one generated directory. Reversal cost: none in code, one config line.
+
+If the record class proves to hide a loss the owner needed to see, the class
+comes off the record write and the loud `diff-policy-violation` carries it with
+the other held take-backs. Trigger: one run whose seat lost work under a record
+path and whose only trace was a quiet record. Reversal cost: low, one branch in
+`captureDefects`; the revert and the downstream statement do not change.
 
 If reading the class back out of a finding's prose proves too loose — a
 sentence that mentions a re-capturable directory in passing quieting a defect

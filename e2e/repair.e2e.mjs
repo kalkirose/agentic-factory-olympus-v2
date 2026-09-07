@@ -189,9 +189,12 @@ test('the repair lane ships a ticketed fix through the assembled binaries', asyn
 
   const seats = seatCalls(fx);
   for (const call of seats) assertSeatArgv(assert, call);
+  // The reconcile stage stands between the verdict and the update in this lane
+  // too, and its judge is the one seat it spends where nothing is owed
+  // (ADR-0075).
   assert.deepEqual(
     seats.map((c) => c.seat),
-    ['dev', 'generalist-review'],
+    ['dev', 'generalist-review', 'reconcile-judge'],
     'the repair lane spawned seats it does not owe',
   );
   assert.ok(

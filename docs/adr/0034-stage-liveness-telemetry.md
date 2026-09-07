@@ -104,8 +104,10 @@ execution. Nothing in the engine reads a start, so a lost one costs a reader a
 line and costs the run nothing.
 
 **Every `layer-started` pairs with exactly one terminal stamp.** An attempt that
-judged the tree stamps `layer-result`, which now carries the attempt it belongs
-to. Every other ending stamps `layer-abandoned`: the reason from a closed
+judged the tree stamps `layer-result`, which carries the attempt it belongs to
+and `elapsedMs`, the span from the `layer-started` it closes. The elapsed is what
+lets a reader price one cycle's gates without walking two events per layer.
+Every other ending stamps `layer-abandoned`: the reason from a closed
 vocabulary, what the attempt had printed by then, and the seq of the start it
 closes. The vocabulary is six words — the red a re-run replaced, a command that
 could not spawn, a child a signal took, a throw in the runner, a path that
@@ -182,7 +184,15 @@ key, because two lanes that share a stage name do not share its work.
 **Cold start is silence.** Under five completed visits there is no band, and
 the watcher says nothing. A harness with four ships has no statement to make
 about the fifth, and a queued record built on a guess teaches an operator to
-ignore the record.
+ignore the record. A stage the harness has just built starts cold for the same
+reason: `reconcile` and `records` build their bands from their own first visits.
+
+**A stage whose work moved elsewhere forgets its history.** The instance ledger
+carries `duration-reset` with the stage and the reason, and `stageDurations`
+drops every visit that ended before it. The `update` stage carries one: the
+reconciliation left it for a stage of its own (ADR-0075), so the visits before
+that move measure work the stage no longer does. Without the reset the band
+would hold a stage to a history of a job it lost.
 
 **Detection only, by construction.** The watcher holds no run, opens no run
 store and returns no directive. It cannot kill a run, move it, or change what

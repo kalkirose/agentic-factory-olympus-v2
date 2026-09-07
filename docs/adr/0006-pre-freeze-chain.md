@@ -1,18 +1,17 @@
 # ADR-0006: Story-lane pre-freeze chain shapes
 
-Status: accepted (2026-08-10)
+Status: accepted (2026-08-10, the records stage 2026-09-07)
 Superseded in part by ADR-0015: a seat-failure parks the run instead of
 closing it, and every readiness refusal parks as well.
 
 ## Decision
 
-The pre-freeze chain — readiness, spec birth, spec gate, suite authoring,
-adversary, freeze — gets these concrete shapes:
+The pre-freeze chain is readiness, spec birth, spec gate, records, suite
+authoring, adversary, freeze. It gets these concrete shapes:
 
-- **Lane composition.** `storyLane({afterFreeze})` builds the lane: the six
-  pre-freeze stages plus a caller-supplied continuation. The freeze stage
-  hands over to the continuation's first stage. The post-freeze stages land
-  with their milestones; until then only tests compose the lane.
+- **Lane composition.** `storyLane({afterFreeze})` builds the lane: the seven
+  pre-freeze stages of `PRE_FREEZE_STAGES` plus a caller-supplied continuation.
+  The freeze stage hands over to the continuation's first stage.
 - **Ledger-derived position.** Every handler re-derives its position from
   the run ledger and the git state — no cross-stage memory. The adversary
   round number is `1 + strengthening commits`; judged waves are skipped by
@@ -46,6 +45,16 @@ adversary, freeze — gets these concrete shapes:
   `abandon` closes the run `failed` with the same reason. The park question
   carries both blocking counts with the rounds they came from, the note count,
   and the spec path, so the answer needs nothing else.
+- **The records stage stands between the gate and the suite.** The `spec-gate`
+  pass exit returns `{next: 'records'}`, and the stage dispatches one
+  `record-author` seat over the validated spec. The seat writes the decision
+  records the spec decides, answers every unit of each of them, and reports the
+  records it left alone. The files commit as `records: <key>` and stamp
+  `records-committed`; a spec that decides nothing stamps `decided: false` and
+  commits nothing. The commit stands before the suite seat runs, so the frozen
+  sha carries the records and the dev seat reads them as it reads the tests. The
+  stage derives its step from its own stamps, in four words: `dispatch`,
+  `redispatch`, `commit`, `done` (ADR-0074).
 - **Two finding channels at the gate.** Every gate finding carries a
   `severity`. `blocking` means the spec is wrong, a clause is not assertable,
   or the shape it states would force a defective implementation; it holds the
@@ -130,17 +139,19 @@ adversary, freeze — gets these concrete shapes:
   the frozen set is fixed and every later reader takes them off one document.
   The `freeze` event carries the sha and the counts. The valid record is
   the chain's completion signal.
-- **Test-edit boundary.** `testEditDenyRules(testPaths)` produces
-  `Edit`/`Write`/`NotebookEdit` deny rules over every test path;
-  `runSeat({denyTools})` carries them into the claude argv as disallowed
-  tools. A plain prefix entry covers its subtree (`prefix/**`); a glob
-  entry is already a complete pattern and passes through unsuffixed. The
-  adversary seat gets them now; the dev seats get the same rules when they
-  land. The restore-before-evaluate step backs the tool-level deny with a
-  structural guarantee on the evaluation path: the restore rides git
-  pathspecs (`:(glob)` magic for glob entries), and every other test-path
-  read (suite checks, conflict-hunk routing, the freeze file set) matches
-  entries with the same semantics.
+- **Test-edit boundary.** `editDenyRules({testPaths, recordPaths, except,
+  worktree})` produces `Edit`/`Write`/`NotebookEdit` deny rules over every test
+  path and every record path; `runSeat({denyTools})` carries them into the claude
+  argv as disallowed tools. A plain prefix entry covers its subtree (`prefix/**`);
+  a glob entry is already a complete pattern and passes through unsuffixed; an
+  `!` exclusion is skipped. `testEditDenyRules(testPaths, opts)` is the same
+  rules by the old positional call, for the sites that deny the test paths alone.
+  The adversary seat and the dev seats carry them. The restore-before-evaluate
+  step backs the tool-level deny with a structural guarantee on the evaluation
+  path: the restore rides git pathspecs (`:(glob)` magic for glob entries), and
+  every other test-path read (suite checks, conflict-hunk routing, the freeze
+  file set) matches entries with the same semantics. The record half has its own
+  structural backstop at the candidate capture (ADR-0017, ADR-0074).
 - **Command environment.** The lane command runner strips
   `NODE_TEST_CONTEXT` from the child environment: under an inherited test
   context a child `node --test` reports exit 0 for a red suite — a false
@@ -281,3 +292,9 @@ restore-before-evaluate step keeps the evaluation path safe either way.
 If restore-before-evaluate hides tamper attempts the eval seat should see,
 stamp a pre-restore diff of the test paths as a ledger event. Trigger: an
 eval review asks who tampers. Reversal cost: low — additive stamp.
+
+If the records stage costs more than the birth it buys, the stage leaves
+`PRE_FREEZE_STAGES` and the reconcile judge names every record late instead
+(ADR-0074). Trigger: a late share near one over ten ships, which says the cards
+state no decisions for the seat to write. Reversal cost: low, one entry in the
+stage list and one in the handler map.

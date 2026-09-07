@@ -1,0 +1,789 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { commitTree, gitSync, initOriginRepo, removeDir, tempDir, writeTree } from './helpers.mjs';
+import { checkReportSchema, validateReport } from '../src/seats/contract.mjs';
+import { RECORD_CRITERIA, RECORD_CRITERION_KEYS, RECORD_RULE } from '../src/lanes/lenses.mjs';
+import { NEIGHBOUR_CAP } from '../src/lanes/units.mjs';
+import {
+  AUTHOR_SEAT,
+  REVIEW_SEAT,
+  UNITS_BIN,
+  WRITE_SEAT,
+  birthRole,
+  correctiveRole,
+  findingLine,
+  kindTest,
+  parseRecordList,
+  reconcileWriteSchema,
+  recordScope,
+  siblingChecks,
+  supersedeChecks,
+  unitChecks,
+  writeChecks,
+  writeRole,
+} from '../src/lanes/records.mjs';
+import { findingLine as codeFindingLine } from '../src/lanes/verdict.mjs';
+
+const RECORD = 'docs/adr/adr-900-the-helper.md';
+const RECORD_TEXT = `# ADR-900: The helper doubles its input
+
+**Status:** Accepted
+
+## Decision
+
+The helper lives at \`src/feature.mjs\`.
+
+Why: the alternative cost a second module.
+`;
+
+/** A worktree with one record and the file that record cites. */
+function tree(t, files = {}) {
+  const dir = tempDir('olympus-records-');
+  t.after(() => removeDir(dir));
+  writeTree(dir, { [RECORD]: RECORD_TEXT, 'src/feature.mjs': 'export const f = (x) => x * 2;\n', ...files });
+  return dir;
+}
+
+/** A repository on a run branch, with the default branch behind it. */
+function repo(t, files) {
+  const dir = tempDir('olympus-records-git-');
+  t.after(() => removeDir(dir));
+  initOriginRepo(dir, files);
+  gitSync(['checkout', '-q', '-b', 'run'], dir);
+  return dir;
+}
+
+/** The four entries a complete report carries for the fixture record. */
+function completeUnits(over = {}) {
+  return [
+    { record: RECORD, id: 'U0', kind: 'title', verdict: 'holds', evidence: 'the title' },
+    { record: RECORD, id: 'U1', kind: 'status', verdict: 'holds', evidence: 'the status line' },
+    { record: RECORD, id: 'U2', kind: 'claim', verdict: 'holds', evidence: 'src/feature.mjs:1' },
+    { record: RECORD, id: 'U3', kind: 'rationale', verdict: 'holds', evidence: 'the reason' },
+  ].map((entry) => ({ ...entry, ...(over[entry.id] ?? {}) }));
+}
+
+function reportWith(units, over = {}) {
+  return {
+    rewritten: [RECORD],
+    unchanged: [],
+    units,
+    divergences: [],
+    summary: 'the record states what shipped',
+    ...over,
+  };
+}
+
+// -- the report shape (point 2) -----------------------------------------------
+
+test('the write schema carries the units, the divergence evidence and the siblings', () => {
+  const base = reconcileWriteSchema({ units: true });
+  assert.deepEqual(checkReportSchema(base), []);
+  assert.ok(base.required.includes('units'));
+  assert.ok(!base.required.includes('answered'));
+  assert.ok(!base.required.includes('siblings'));
+  // The three fields are asked for by the dispatch. A dispatch that asks for
+  // none takes the shape the write answered before this contract, and every
+  // field is still in the shape, so a seat that answers more is never refused.
+  const plain = reconcileWriteSchema();
+  assert.deepEqual(checkReportSchema(plain), []);
+  assert.ok(!plain.required.includes('units'));
+  assert.ok(plain.properties.units !== undefined);
+  assert.deepEqual(plain.properties.divergences.items.required, ['record', 'state', 'statement']);
+  assert.deepEqual(base.properties.units.items.required, [
+    'record',
+    'id',
+    'kind',
+    'verdict',
+    'evidence',
+  ]);
+  assert.deepEqual(base.properties.units.items.properties.kind.enum, [
+    'title',
+    'status',
+    'claim',
+    'open',
+    'rationale',
+  ]);
+  assert.deepEqual(base.properties.units.items.properties.verdict.enum, [
+    'holds',
+    'fails',
+    'not-built',
+  ]);
+  // A divergence carries the place in the tree that shows it, so an eval can
+  // ask how many recorded shifts were wrong without re-reading the run.
+  assert.deepEqual(base.properties.divergences.items.required, [
+    'record',
+    'state',
+    'statement',
+    'evidence',
+  ]);
+  const both = reconcileWriteSchema({ answered: true, siblings: true });
+  assert.deepEqual(checkReportSchema(both), []);
+  assert.ok(both.required.includes('answered'));
+  assert.ok(both.required.includes('siblings'));
+  assert.deepEqual(both.properties.siblings.items.properties.state.enum, [
+    'consistent',
+    'superseded',
+  ]);
+  assert.deepEqual(both.properties.siblings.items.required, ['record', 'state', 'reason']);
+  // The shape validates a report the seat could write.
+  assert.deepEqual(
+    validateReport(base, reportWith(completeUnits(), { divergences: [] })),
+    [],
+  );
+});
+
+test('the write shape is the function alone: no dispatch takes a pre-built one', () => {
+  // Both dispatches build their own shape from what their brief asked for, so a
+  // constant beside the function is a second shape nothing reads. A reader that
+  // took it would send a seat a shape its brief never matched.
+  const source = readFileSync(join(import.meta.dirname, '..', 'src/lanes/records.mjs'), 'utf8');
+  assert.ok(!source.includes('RECONCILE_WRITE_SCHEMA'), 'records.mjs still holds the constant');
+});
+
+// -- the eight refusals (point 2) ---------------------------------------------
+
+test('unit check 1 refuses a report that leaves a unit unanswered', (t) => {
+  const dir = tree(t);
+  const units = completeUnits().filter((entry) => entry.id !== 'U2');
+  const defects = unitChecks({ worktree: dir }, [RECORD], reportWith(units));
+  assert.equal(defects.length, 1);
+  assert.match(defects[0], /^unit check 1: /);
+  assert.match(defects[0], /U2 \(line 7, "The helper lives at `src\/feature\.mjs`\."\)/);
+  // A report with no units at all is the same refusal.
+  assert.match(
+    unitChecks({ worktree: dir }, [RECORD], { rewritten: [], unchanged: [] })[0],
+    /^unit check 1: your report carries no "units"/,
+  );
+});
+
+test('unit check 2 refuses an entry naming a unit the file does not hold', (t) => {
+  const dir = tree(t);
+  const units = [...completeUnits(), { record: RECORD, id: 'U9', kind: 'claim', verdict: 'holds', evidence: 'src/feature.mjs' }];
+  const defects = unitChecks({ worktree: dir }, [RECORD], reportWith(units));
+  assert.equal(defects.length, 1);
+  assert.match(defects[0], /^unit check 2: "units" names .*U9, which the file does not hold/);
+  assert.ok(defects[0].includes(UNITS_BIN));
+  // And an entry naming a record this dispatch does not hold.
+  const other = [...completeUnits(), { record: 'docs/adr/adr-901-other.md', id: 'U0', kind: 'title', verdict: 'holds', evidence: 'the title' }];
+  assert.match(
+    unitChecks({ worktree: dir }, [RECORD], reportWith(other))[0],
+    /^unit check 2: "units" names docs\/adr\/adr-901-other\.md, which is not a record of this dispatch/,
+  );
+});
+
+test('unit check 3 refuses two entries for one unit', (t) => {
+  const dir = tree(t);
+  const units = completeUnits();
+  const defects = unitChecks({ worktree: dir }, [RECORD], reportWith([...units, units[2]]));
+  assert.equal(defects.length, 1);
+  assert.match(defects[0], /^unit check 3: .*U2 has 2 entries in "units"/);
+});
+
+test('unit check 4 refuses a claim whose evidence names no path in the worktree', (t) => {
+  const dir = tree(t);
+  const missing = unitChecks(
+    { worktree: dir },
+    [RECORD],
+    reportWith(completeUnits({ U2: { evidence: 'src/absent.mjs:12' } })),
+  );
+  assert.equal(missing.length, 1);
+  assert.match(missing[0], /^unit check 4: .*U2 .*cites src\/absent\.mjs and the worktree holds no such path/);
+  const vague = unitChecks(
+    { worktree: dir },
+    [RECORD],
+    reportWith(completeUnits({ U2: { evidence: 'the code does it' } })),
+  );
+  assert.equal(vague.length, 1);
+  assert.match(vague[0], /^unit check 4: .*evidence names no path/);
+  // A path with a line, and a path without one, both answer.
+  for (const evidence of ['src/feature.mjs:1', 'src/feature.mjs', '`src/feature.mjs`']) {
+    assert.deepEqual(
+      unitChecks({ worktree: dir }, [RECORD], reportWith(completeUnits({ U2: { evidence } }))),
+      [],
+      evidence,
+    );
+  }
+});
+
+test('unit check 5 refuses a claim filed as rationale', (t) => {
+  const dir = tree(t);
+  const defects = unitChecks(
+    { worktree: dir },
+    [RECORD],
+    reportWith(completeUnits({ U2: { kind: 'rationale', evidence: 'the reason' } })),
+  );
+  assert.equal(defects.length, 1);
+  assert.match(defects[0], /^unit check 5: .*U2 is filed as rationale and its text reads as a claim/);
+});
+
+// The kind is not the seat's escape: a path, a symbol in backticks or one of
+// the closed verbs makes a sentence a claim about the tree.
+test('the kind test reads a path, a symbol and the closed verb list', () => {
+  assert.equal(kindTest('The seat reads the record whole.'), 'claim');
+  assert.equal(kindTest('The report is one file.'), 'claim');
+  assert.equal(kindTest('Two shas are two facts.'), 'claim');
+  assert.equal(kindTest('`recordScope` takes a range.'), 'claim');
+  assert.equal(kindTest('The check lives in src/lanes/records.mjs today.'), 'claim');
+  assert.equal(kindTest('The tree holds docs/style/anti-slop.md.'), 'claim');
+  assert.equal(kindTest('Why: the alternative cost a second module.'), null);
+  assert.equal(kindTest('Rejected: a per-combination enumeration, which blows up.'), null);
+  assert.equal(kindTest('Reversal trigger: a second consumer of the same table.'), null);
+  // A word with a slash is not a path.
+  assert.equal(kindTest('The trade holds either way, and/or costs nothing.'), null);
+});
+
+test('unit check 6 refuses a writer report that leaves a unit failing', (t) => {
+  const dir = tree(t);
+  const defects = unitChecks(
+    { worktree: dir },
+    [RECORD],
+    reportWith(completeUnits({ U2: { verdict: 'fails' } })),
+    { seat: 'writer' },
+  );
+  assert.equal(defects.length, 1);
+  assert.match(defects[0], /^unit check 6: .*U2 is reported "fails" and you wrote this record/);
+  // A part the tree does not hold is not a failure: it is stated as not built.
+  assert.deepEqual(
+    unitChecks({ worktree: dir }, [RECORD], reportWith(completeUnits({ U2: { verdict: 'not-built' } })), {
+      seat: 'writer',
+    }),
+    [],
+  );
+});
+
+test('unit checks 7 and 8 hold the review report and its findings together', (t) => {
+  const dir = tree(t);
+  const finding = { id: 'F1', file: RECORD, unit: 'U2', criterion: 'truth' };
+  // A unit that fails is a finding.
+  const silent = unitChecks(
+    { worktree: dir },
+    [RECORD],
+    reportWith(completeUnits({ U2: { verdict: 'fails' } })),
+    { seat: 'review', findings: [] },
+  );
+  assert.equal(silent.length, 1);
+  assert.match(silent[0], /^unit check 7: .*U2 is reported "fails" and no finding names it/);
+  // And a finding is a unit that fails.
+  const contradiction = unitChecks({ worktree: dir }, [RECORD], reportWith(completeUnits()), {
+    seat: 'review',
+    findings: [finding],
+  });
+  assert.equal(contradiction.length, 1);
+  assert.match(contradiction[0], /^unit check 8: finding F1 names .*U2 and you reported that unit "holds"/);
+  // The two together pass, and a review may report a failing unit.
+  assert.deepEqual(
+    unitChecks({ worktree: dir }, [RECORD], reportWith(completeUnits({ U2: { verdict: 'fails' } })), {
+      seat: 'review',
+      findings: [finding],
+    }),
+    [],
+  );
+  // Rule 6 binds the writer alone: a review may report a failure.
+  assert.deepEqual(
+    unitChecks({ worktree: dir }, [RECORD], reportWith(completeUnits({ U2: { verdict: 'fails' } })), {
+      seat: 'review',
+      findings: [finding],
+    }),
+    [],
+  );
+});
+
+// Rules 1 to 5 bind every record seat. A review that answers half the record
+// samples it exactly as a writer does.
+test('rules 1 to 5 refuse a review report as they refuse a writer report', (t) => {
+  const dir = tree(t);
+  const opts = { seat: 'review', findings: [] };
+  const short = unitChecks({ worktree: dir }, [RECORD], reportWith(completeUnits().slice(0, 3)), opts);
+  assert.match(short[0], /^unit check 1: /);
+  const invented = unitChecks(
+    { worktree: dir },
+    [RECORD],
+    reportWith([...completeUnits(), { record: RECORD, id: 'U9', kind: 'open', verdict: 'holds', evidence: 'none' }]),
+    opts,
+  );
+  assert.match(invented[0], /^unit check 2: /);
+  const twice = completeUnits();
+  const doubled = unitChecks({ worktree: dir }, [RECORD], reportWith([...twice, twice[0]]), opts);
+  assert.match(doubled[0], /^unit check 3: /);
+  const vague = unitChecks(
+    { worktree: dir },
+    [RECORD],
+    reportWith(completeUnits({ U2: { evidence: 'the tree says so' } })),
+    opts,
+  );
+  assert.match(vague[0], /^unit check 4: /);
+  const filed = unitChecks(
+    { worktree: dir },
+    [RECORD],
+    reportWith(completeUnits({ U2: { kind: 'rationale' } })),
+    opts,
+  );
+  assert.match(filed[0], /^unit check 5: /);
+});
+
+test('a complete report passes every rule, for both seats', (t) => {
+  const dir = tree(t);
+  assert.deepEqual(
+    unitChecks({ worktree: dir }, [RECORD], reportWith(completeUnits()), { seat: 'writer' }),
+    [],
+  );
+  assert.deepEqual(
+    unitChecks({ worktree: dir }, [RECORD], reportWith(completeUnits()), {
+      seat: 'review',
+      findings: [],
+    }),
+    [],
+  );
+});
+
+// The checks are one function for every seat, and `writeChecks` is what the
+// lanes call. A report that carries units is checked whether the caller named a
+// seat or not.
+test('writeChecks runs the unit checks over what the seat left', async (t) => {
+  const dir = repo(t, { [RECORD]: RECORD_TEXT, 'src/feature.mjs': 'export const f = (x) => x * 2;\n' });
+  const base = { worktree: dir, recordPaths: ['docs/adr'] };
+  // The seat rewrote the record it was given, and answered every unit.
+  writeFileSync(join(dir, RECORD), `${RECORD_TEXT}\nThe helper doubles.\n`);
+  const clean = reportWith(completeUnits(), {
+    units: [
+      ...completeUnits(),
+      { record: RECORD, id: 'U4', kind: 'claim', verdict: 'holds', evidence: 'src/feature.mjs:1' },
+    ],
+    divergences: [
+      { record: RECORD, state: 'none', statement: 'the record and the tree agree', evidence: 'src/feature.mjs:1' },
+    ],
+  });
+  assert.deepEqual(await writeChecks(base, [RECORD], clean, { seat: 'writer' }), []);
+  // A unit the report leaves out is refused through the same call.
+  const short = { ...clean, units: completeUnits() };
+  const defects = await writeChecks(base, [RECORD], short, { seat: 'writer' });
+  assert.equal(defects.length, 1);
+  assert.match(defects[0], /^unit check 1: /);
+  // The containment check still refuses a change outside the record tree.
+  writeFileSync(join(dir, 'src/feature.mjs'), 'export const f = (x) => x * 3;\n');
+  const outside = await writeChecks(base, [RECORD], clean, { seat: 'writer' });
+  assert.equal(outside.length, 1);
+  assert.match(outside[0], /^change outside the decision-record tree: src\/feature\.mjs/);
+});
+
+// -- the record set (point 5) -------------------------------------------------
+
+test('recordScope reads the pass range, not the last round diff', async (t) => {
+  const records = {};
+  for (const id of ['001', '002', '003', '004']) {
+    records[`docs/adr/adr-${id}-a.md`] = `# ADR-${id}: A record\n\n**Status:** Accepted\n\n## Decision\n\nOne sentence.\n`;
+  }
+  const dir = repo(t, { 'src/feature.mjs': 'export const f = (x) => x;\n', ...records });
+  const start = gitSync(['rev-parse', 'HEAD'], dir).trim();
+  // The pass touches four records.
+  const touched = {};
+  for (const path of Object.keys(records)) touched[path] = `${records[path]}\nThe pass rewrote it.\n`;
+  const pass = commitTree(dir, touched, 'records: the pass rewrites four');
+  // The round touches one.
+  const round = commitTree(
+    dir,
+    { 'docs/adr/adr-001-a.md': `${touched['docs/adr/adr-001-a.md']}\nThe round rewrote it.\n` },
+    'records: the round rewrites one',
+  );
+  const paths = ['docs/adr'];
+  assert.deepEqual((await recordScope(dir, start, round, paths)).files, Object.keys(records));
+  assert.deepEqual((await recordScope(dir, pass, round, paths)).files, ['docs/adr/adr-001-a.md']);
+  // `only` says whether the range holds anything but records.
+  assert.equal((await recordScope(dir, start, round, paths)).only, true);
+  const mixed = commitTree(dir, { 'src/feature.mjs': 'export const f = (x) => x + 1;\n' }, 'code');
+  assert.equal((await recordScope(dir, start, mixed, paths)).only, false);
+  assert.deepEqual((await recordScope(dir, start, mixed, paths)).files, Object.keys(records));
+  // Under the supersede lifecycle a closed record is out of every seat's scope.
+  commitTree(
+    dir,
+    {
+      'docs/adr/adr-002-a.md': `# ADR-002: A record\n\n**Status:** Superseded by ADR-004 (2026-09-07)\n\n## Decision\n\nOne sentence.\n`,
+    },
+    'records: adr-002 is superseded',
+  );
+  const closed = gitSync(['rev-parse', 'HEAD'], dir).trim();
+  assert.deepEqual((await recordScope(dir, start, closed, paths, { lifecycle: 'supersede' })).files, [
+    'docs/adr/adr-001-a.md',
+    'docs/adr/adr-003-a.md',
+    'docs/adr/adr-004-a.md',
+  ]);
+  assert.equal((await recordScope(dir, start, closed, paths)).files.length, 4);
+  // The template is not a record.
+  assert.deepEqual(
+    (await recordScope(dir, start, round, ['docs/adr', '!docs/adr/adr-001-a.md'])).files,
+    ['docs/adr/adr-002-a.md', 'docs/adr/adr-003-a.md', 'docs/adr/adr-004-a.md'],
+  );
+});
+
+// -- the supersede lifecycle (point 6) ----------------------------------------
+
+const ACCEPTED = (id, body = 'The decision stands.') =>
+  `# ADR-${id}: A record\n\n**Status:** Accepted\n\n## Decision\n\n${body}\n`;
+
+const SUPERSEDER = (id, parents, body = 'The decision stands now.') =>
+  `# ADR-${id}: A record\n\n**Status:** Accepted\n**Supersedes:** ${parents}\n\n## Decision\n\n${body}\n`;
+
+function superseded(id, list, body = 'The decision stands.') {
+  return ACCEPTED(id, body).replace('**Status:** Accepted', `**Status:** Superseded by ${list} (2026-09-07)`);
+}
+
+function lifecycleBase(dir) {
+  return {
+    worktree: dir,
+    defaultBranch: 'main',
+    recordLifecycle: 'supersede',
+    recordPaths: ['docs/adr', '!docs/adr/TEMPLATE.md'],
+  };
+}
+
+function acceptedTree(t) {
+  return repo(t, {
+    'docs/adr/adr-001-first.md': ACCEPTED('001'),
+    'docs/adr/adr-002-second.md': ACCEPTED('002', 'The second decision stands.'),
+    'docs/adr/TEMPLATE.md': '# ADR-<id>: <title>\n\n**Status:** Accepted\n',
+    'src/feature.mjs': 'export const f = (x) => x;\n',
+  });
+}
+
+const REPORT = { rewritten: [], unchanged: [], units: [], divergences: [], summary: 'done' };
+
+test('an accepted record takes no edit but its status line', async (t) => {
+  const dir = acceptedTree(t);
+  writeTree(dir, { 'docs/adr/adr-001-first.md': ACCEPTED('001', 'The decision changed.') });
+  const defects = await supersedeChecks(lifecycleBase(dir), [], REPORT);
+  assert.equal(defects.length, 1);
+  assert.match(defects[0], /is an accepted record and this diff changes more than its status line/);
+  // The body is kept verbatim, so a supersession that empties it is refused.
+  writeTree(dir, {
+    'docs/adr/adr-001-first.md': '# ADR-001: A record\n\n**Status:** Superseded by ADR-003 (2026-09-07)\n',
+    'docs/adr/adr-003-third.md': SUPERSEDER('003', 'ADR-001'),
+  });
+  const emptied = await supersedeChecks(lifecycleBase(dir), [], REPORT);
+  assert.equal(emptied.length, 1);
+  assert.match(emptied[0], /changes more than its status line/);
+  // And a deletion is refused by name.
+  gitSync(['checkout', '-q', '--', '.'], dir);
+  gitSync(['clean', '-qfd'], dir);
+  rmSync(join(dir, 'docs/adr/adr-001-first.md'));
+  const deleted = await supersedeChecks(lifecycleBase(dir), [], REPORT);
+  assert.equal(deleted.length, 1);
+  assert.match(deleted[0], /this diff deletes it/);
+});
+
+test('a supersession is written in both directions, one to one, split and merged', async (t) => {
+  const dir = acceptedTree(t);
+  // One to one.
+  writeTree(dir, {
+    'docs/adr/adr-001-first.md': superseded('001', 'ADR-003'),
+    'docs/adr/adr-003-third.md': SUPERSEDER('003', 'ADR-001'),
+  });
+  assert.deepEqual(await supersedeChecks(lifecycleBase(dir), [], REPORT), []);
+  // A split into three.
+  gitSync(['checkout', '--', '.'], dir);
+  rmSync(join(dir, 'docs/adr/adr-003-third.md'));
+  writeTree(dir, {
+    'docs/adr/adr-001-first.md': superseded('001', 'ADR-003, ADR-004 and ADR-005'),
+    'docs/adr/adr-003-third.md': SUPERSEDER('003', 'ADR-001'),
+    'docs/adr/adr-004-fourth.md': SUPERSEDER('004', 'ADR-001'),
+    'docs/adr/adr-005-fifth.md': SUPERSEDER('005', 'ADR-001'),
+  });
+  assert.deepEqual(await supersedeChecks(lifecycleBase(dir), [], REPORT), []);
+  // A merge of two.
+  gitSync(['checkout', '--', '.'], dir);
+  gitSync(['clean', '-qfd'], dir);
+  writeTree(dir, {
+    'docs/adr/adr-001-first.md': superseded('001', 'ADR-003'),
+    'docs/adr/adr-002-second.md': superseded('002', 'ADR-003', 'The second decision stands.'),
+    'docs/adr/adr-003-third.md': SUPERSEDER('003', 'ADR-001 and ADR-002'),
+  });
+  assert.deepEqual(await supersedeChecks(lifecycleBase(dir), [], REPORT), []);
+  // A retirement names no successor and needs none.
+  gitSync(['checkout', '--', '.'], dir);
+  gitSync(['clean', '-qfd'], dir);
+  writeTree(dir, {
+    'docs/adr/adr-001-first.md': ACCEPTED('001').replace(
+      '**Status:** Accepted',
+      '**Status:** Retired (2026-09-07): the gate this record named is gone.',
+    ),
+  });
+  assert.deepEqual(await supersedeChecks(lifecycleBase(dir), [], REPORT), []);
+});
+
+test('a supersession whose two directions disagree is refused', async (t) => {
+  const dir = acceptedTree(t);
+  // A list naming a record that is not in the diff.
+  writeTree(dir, { 'docs/adr/adr-001-first.md': superseded('001', 'ADR-003') });
+  const absent = await supersedeChecks(lifecycleBase(dir), [], REPORT);
+  assert.equal(absent.length, 1);
+  assert.match(absent[0], /superseded by ADR-3 and no such record is added in this diff/);
+  // A new record with no Supersedes line.
+  writeTree(dir, { 'docs/adr/adr-003-third.md': ACCEPTED('003', 'The decision stands now.') });
+  const silent = await supersedeChecks(lifecycleBase(dir), [], REPORT);
+  assert.equal(silent.length, 1);
+  assert.match(silent[0], /carries no "Supersedes: <list>" line/);
+  // A new record that names a parent whose status line is untouched.
+  gitSync(['checkout', '--', '.'], dir);
+  gitSync(['clean', '-qfd'], dir);
+  writeTree(dir, { 'docs/adr/adr-003-third.md': SUPERSEDER('003', 'ADR-002') });
+  const oneWay = await supersedeChecks(lifecycleBase(dir), [], REPORT);
+  assert.equal(oneWay.length, 1);
+  assert.match(oneWay[0], /leaves that record's status line unchanged/);
+  // A list in another form is refused, so a reader and a writer never disagree
+  // about where one id ends.
+  gitSync(['clean', '-qfd'], dir);
+  writeTree(dir, {
+    'docs/adr/adr-001-first.md': superseded('001', 'ADR-003, ADR-004'),
+    'docs/adr/adr-003-third.md': SUPERSEDER('003', 'ADR-001'),
+    'docs/adr/adr-004-fourth.md': SUPERSEDER('004', 'ADR-001'),
+  });
+  const form = await supersedeChecks(lifecycleBase(dir), [], REPORT);
+  assert.equal(form.length, 3);
+  assert.match(form[0], /names its successors as "ADR-003, ADR-004"/);
+  // The two new records read the same malformed list from the other side.
+  assert.ok(form.slice(1).every((defect) => /status line does not name it/.test(defect)), form[1]);
+  assert.deepEqual(parseRecordList('ADR-003, ADR-004 and ADR-005'), [3, 4, 5]);
+  assert.deepEqual(parseRecordList('ADR-003 and ADR-004'), [3, 4]);
+  assert.deepEqual(parseRecordList('ADR-0026'), [26]);
+  assert.equal(parseRecordList('ADR-003, ADR-004'), null);
+  assert.equal(parseRecordList('ADR-003 & ADR-004'), null);
+  assert.equal(parseRecordList('the first record'), null);
+});
+
+test('a record this run added is not accepted, and the template is not a record', async (t) => {
+  const dir = acceptedTree(t);
+  // The birth stage commits a record on the run branch. It is not on the
+  // default branch at the merge base, so a corrective round edits it in place.
+  commitTree(dir, { 'docs/adr/adr-006-born.md': ACCEPTED('006', 'The born decision stands.') }, 'records: born');
+  writeTree(dir, { 'docs/adr/adr-006-born.md': ACCEPTED('006', 'The born decision is corrected.') });
+  assert.deepEqual(await supersedeChecks(lifecycleBase(dir), [], REPORT), []);
+  // A record the default branch gained during the run is accepted, whatever the
+  // freeze sha holds: the merge base moves with the branch.
+  gitSync(['checkout', '-q', '--', '.'], dir);
+  gitSync(['checkout', '-q', 'main'], dir);
+  commitTree(dir, { 'docs/adr/adr-007-late.md': ACCEPTED('007', 'The late decision stands.') }, 'records: late');
+  gitSync(['checkout', '-q', 'run'], dir);
+  gitSync(['merge', '-q', '--no-edit', 'main'], dir);
+  writeTree(dir, { 'docs/adr/adr-007-late.md': ACCEPTED('007', 'The late decision is edited.') });
+  const defects = await supersedeChecks(lifecycleBase(dir), [], REPORT);
+  assert.equal(defects.length, 1);
+  assert.match(defects[0], /adr-007-late\.md is an accepted record/);
+  // The excluded template is not a record, so nothing here reads it.
+  gitSync(['checkout', '-q', '--', '.'], dir);
+  writeTree(dir, { 'docs/adr/TEMPLATE.md': '# ADR-<id>: <title>\n\n**Status:** Accepted\n\n## Decision\n' });
+  assert.deepEqual(await supersedeChecks(lifecycleBase(dir), [], REPORT), []);
+});
+
+// -- the siblings (point 7) ---------------------------------------------------
+
+test('every sibling of a supersession is answered, and a superseded one is replaced', async (t) => {
+  const dir = acceptedTree(t);
+  writeTree(dir, { 'docs/adr/adr-003-third.md': SUPERSEDER('003', 'ADR-001') });
+  const base = lifecycleBase(dir);
+  const siblings = ['docs/adr/adr-004-cites.md', 'docs/adr/adr-005-cites.md'];
+  const answered = {
+    siblings: [
+      { record: siblings[0], state: 'consistent', reason: 'it cites the id and not the decision' },
+      {
+        record: siblings[1],
+        state: 'superseded',
+        reason: 'it decided the same unbuilt part the older way',
+        replacement: 'docs/adr/adr-003-third.md',
+      },
+    ],
+  };
+  assert.deepEqual(await siblingChecks(base, siblings, answered), []);
+  // A sibling nobody answered is a record left citing a decision that no longer
+  // stands.
+  const short = { siblings: answered.siblings.slice(0, 1) };
+  const missing = await siblingChecks(base, siblings, short);
+  assert.equal(missing.length, 1);
+  assert.match(missing[0], /adr-005-cites\.md cites a record this write supersedes and "siblings" accounts for it nowhere/);
+  // A `superseded` answer with no record in the diff is refused.
+  const empty = {
+    siblings: [
+      answered.siblings[0],
+      { ...answered.siblings[1], replacement: 'docs/adr/adr-009-absent.md' },
+    ],
+  };
+  const unwritten = await siblingChecks(base, siblings, empty);
+  assert.equal(unwritten.length, 1);
+  assert.match(unwritten[0], /no record that replaces it is in this diff/);
+  // An entry for a record that is not a sibling is refused: a record in the
+  // run's own scope is answered as itself.
+  const extra = {
+    siblings: [
+      ...answered.siblings,
+      { record: 'docs/adr/adr-002-second.md', state: 'consistent', reason: 'this run writes it' },
+    ],
+  };
+  const wrong = await siblingChecks(base, siblings, extra);
+  assert.equal(wrong.length, 1);
+  assert.match(wrong[0], /which is not a sibling of this write/);
+  // Two entries for one sibling is the same refusal shape as a divergence.
+  const twice = { siblings: [answered.siblings[0], answered.siblings[0], answered.siblings[1]] };
+  const doubled = await siblingChecks(base, siblings, twice);
+  assert.equal(doubled.length, 1);
+  assert.match(doubled[0], /has 2 entries in "siblings"/);
+});
+
+// -- the three briefs (point 3) -----------------------------------------------
+
+const JUDGED = {
+  records: ['docs/adr/adr-001-first.md'],
+  reason: 'the diff implements it',
+  neighbours: { neighbours: ['docs/adr/adr-002-second.md'], dropped: 3 },
+};
+
+const FINDING = {
+  id: 'F1',
+  criterion: 'truth',
+  file: 'docs/adr/adr-001-first.md',
+  unit: 'U7',
+  head: 'The public surface is exactly two routes',
+  summary: 'the record states a surface the tree does not hold',
+  evidence: 'src/routes.mjs:1',
+};
+
+function briefs(base) {
+  return {
+    birth: birthRole(base, { key: 'alpha-1', path: 'specs/alpha-1.md', touchedPaths: ['src/feature.mjs'] }, JUDGED.neighbours, null),
+    write: writeRole(base, JUDGED, null),
+    corrective: correctiveRole(base, JUDGED, { findings: [FINDING], divergences: [], brief: null }),
+  };
+}
+
+test('all three briefs carry the criteria, the unit duty, the neighbourhood and the constitution', () => {
+  const base = { worktree: '/tmp/run', defaultBranch: 'main' };
+  for (const [name, brief] of Object.entries(briefs(base))) {
+    assert.ok(brief.includes(RECORD_RULE), name);
+    for (const key of RECORD_CRITERION_KEYS) {
+      assert.ok(brief.includes(`- ${RECORD_CRITERIA[key]}`), `${name} ${key}`);
+    }
+    assert.ok(brief.includes('Edit only the decision-record tree.'), name);
+    // The unit duty: the same enumeration the check counts, by absolute path.
+    assert.ok(brief.includes(`node ${UNITS_BIN} <record>`), name);
+    assert.ok(brief.includes('Every unit of every record you leave is yours.'), name);
+    assert.ok(brief.includes('A unit you report as "fails" is a unit you have not finished.'), name);
+    // The neighbourhood by path, with the count above the cap.
+    assert.ok(brief.includes('- docs/adr/adr-002-second.md'), name);
+    assert.ok(brief.includes(`capped at ${NEIGHBOUR_CAP} by rank`), name);
+    assert.ok(brief.includes('3 more active records'), name);
+    // The constitution.
+    assert.ok(brief.includes('binds every sentence you write into a record'), name);
+    // No lifecycle rule under `rewrite`.
+    assert.ok(!brief.includes('It never edits an accepted one.'), name);
+  }
+  // The corrective brief names the unit each finding is about.
+  const { corrective } = briefs(base);
+  assert.ok(corrective.includes('U7 "The public surface is exactly two routes"'), corrective);
+  assert.ok(corrective.includes('Every other unit of the record is yours as well.'));
+  assert.equal(
+    findingLine(FINDING),
+    '[F1] [truth] (docs/adr/adr-001-first.md) U7 "The public surface is exactly two routes" ' +
+      'the record states a surface the tree does not hold (evidence: src/routes.mjs:1)',
+  );
+  // The birth brief names the work and its touched paths, and asks for no
+  // divergence entry.
+  const { birth } = briefs(base);
+  assert.ok(birth.includes('Work: alpha-1'));
+  assert.ok(birth.includes('Specification: specs/alpha-1.md'));
+  assert.ok(birth.includes('- src/feature.mjs'));
+  assert.ok(birth.includes('"divergences" takes no entry'));
+  // The two reconciliation briefs carry the divergence duty and the diff.
+  for (const brief of [briefs(base).write, corrective]) {
+    assert.ok(brief.includes('git diff main...HEAD'));
+    assert.ok(brief.includes('"divergences" takes exactly one entry per judged record (1)'));
+    assert.ok(brief.includes('"evidence": the repo-relative path'));
+  }
+});
+
+test('a consistent finding names the second record on the records line as well', () => {
+  const consistent = {
+    id: 'F2',
+    criterion: 'consistent',
+    file: 'docs/adr/adr-001-first.md',
+    unit: 'U7',
+    head: 'The public surface is exactly two routes',
+    file2: 'docs/adr/adr-002-second.md',
+    unit2: 'U3',
+    head2: 'The public surface is one route',
+    summary: 'the two records decide the surface two ways',
+    evidence: 'src/routes.mjs:1',
+  };
+  const against = '[against: docs/adr/adr-002-second.md U3 "The public surface is one route"]';
+  assert.equal(
+    findingLine(consistent),
+    '[F2] [consistent] (docs/adr/adr-001-first.md) U7 "The public surface is exactly two routes" ' +
+      `${against} the two records decide the surface two ways (evidence: src/routes.mjs:1)`,
+  );
+  // One clause, three briefs: the code seat's line says the same about the
+  // second place as the record writer's does.
+  assert.ok(
+    codeFindingLine({ ...consistent, source: 'review', lens: 'record', severity: 'HIGH' })
+      .includes(against),
+  );
+  // The corrective brief carries the line the writer answers from.
+  const corrective = correctiveRole({ worktree: '/tmp/run', defaultBranch: 'main' }, JUDGED, {
+    findings: [consistent],
+    divergences: [],
+    brief: null,
+  });
+  assert.ok(corrective.includes(against), corrective);
+  // A finding about one record names one place.
+  assert.ok(!findingLine(FINDING).includes('[against:'));
+});
+
+test('the supersede rule stands in every brief the lifecycle binds', () => {
+  const base = { worktree: '/tmp/run', defaultBranch: 'main', recordLifecycle: 'supersede' };
+  // The siblings the harness computed ride the brief by path, so the seat reads
+  // each one before it answers it.
+  const withSiblings = writeRole(
+    base,
+    { ...JUDGED, siblings: ['docs/adr/adr-004-cites.md'] },
+    null,
+  );
+  assert.ok(withSiblings.includes('These active records cite a record you supersede.'));
+  assert.ok(withSiblings.includes('- docs/adr/adr-004-cites.md'));
+  assert.ok(!writeRole(base, JUDGED, null).includes('These active records cite'));
+  for (const [name, brief] of Object.entries(briefs(base))) {
+    assert.ok(brief.includes('Lifecycle: this project supersedes its records.'), name);
+    assert.ok(brief.includes('An accepted record is one that stands on main'), name);
+    assert.ok(brief.includes('"Supersedes: <list>" line'), name);
+    assert.ok(brief.includes('keeps its body, verbatim'), name);
+    assert.ok(brief.includes('"Superseded by <list> (YYYY-MM-DD)"'), name);
+    assert.ok(brief.includes('"Retired (YYYY-MM-DD): <one sentence>"'), name);
+    assert.ok(brief.includes('A record this run added is not accepted yet'), name);
+    assert.ok(brief.includes('resolve by recency'), name);
+  }
+});
+
+// The one corrective attempt is spent on the same miss when the seat has to
+// enumerate again. The retry brief carries the harness's own list.
+test('a retry brief carries the defects and the unit list beside them', (t) => {
+  const dir = tree(t);
+  const base = { worktree: dir, defaultBranch: 'main' };
+  const judged = { records: [RECORD], reason: 'the diff implements it' };
+  const defects = ['unit check 1: docs/adr/adr-900-the-helper.md U2 has no entry in "units".'];
+  const first = writeRole(base, judged, null);
+  assert.ok(!first.includes('as the harness counts them'));
+  const retry = writeRole(base, judged, defects);
+  assert.ok(retry.includes('Correction brief — fix these defects:'));
+  assert.ok(retry.includes(defects[0]));
+  assert.ok(retry.includes(`The units of ${RECORD}, as the harness counts them:`), retry);
+  assert.ok(retry.includes('- U0 (line 1, title): # ADR-900: The helper doubles its input'));
+  assert.ok(retry.includes('- U2 (line 7): The helper lives at `src/feature.mjs`.'));
+  // The corrective and birth briefs carry it on the same rule.
+  const corrective = correctiveRole(base, judged, { findings: [FINDING], divergences: [], brief: defects });
+  assert.ok(corrective.includes('as the harness counts them'));
+  const birth = birthRole(base, { key: 'alpha-1', records: [RECORD] }, [], defects);
+  assert.ok(birth.includes('as the harness counts them'));
+});
+
+test('the three seat names are the three keys of the budget and the cost series', () => {
+  assert.equal(WRITE_SEAT, 'reconcile-write');
+  assert.equal(AUTHOR_SEAT, 'record-author');
+  assert.equal(REVIEW_SEAT, 'record-review');
+});

@@ -17,7 +17,7 @@
 import { readEvents } from '../ledger/ledger.mjs';
 import { listRunEvents } from '../telemetry/readers.mjs';
 import { withTripwireDefaults } from './registry.mjs';
-import { activeMs, durationBand, stageDurations } from './duration.mjs';
+import { activeMs, durationBand, durationResetAt, stageDurations } from './duration.mjs';
 import {
   evaluateMetric,
   countFreezes,
@@ -262,11 +262,13 @@ export class TripwireWatcher {
     const self = runs.find((r) => r.runId === runId);
     if (!self) return;
     // A run never sets the band it is judged against, and a lane never judges
-    // another lane's stage of the same name.
+    // another lane's stage of the same name. A stage whose work moved carries
+    // no history from before the move (`duration-reset`).
+    const resetTs = durationResetAt(readEvents(this.paths.instanceLedger), line.stage);
     const samples = [];
     for (const run of runs) {
       if (run.runId === runId || run.lane !== self.lane) continue;
-      samples.push(...stageDurations(run.events, line.stage));
+      samples.push(...stageDurations(run.events, line.stage, { resetTs }));
     }
     const band = durationBand(samples);
     // Cold start: the history is too thin to hold a band, so there is nothing

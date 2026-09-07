@@ -10,11 +10,10 @@ import { basename, dirname, join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
 import {
-  droppedFindings,
+  findingIndex,
+  findingLine,
   interruptedStep,
   postFreeze,
-  reconcileFallbackStamp,
-  reconcileRounds,
   repairLane,
   repairRounds,
 } from '../src/lanes/verdict.mjs';
@@ -306,12 +305,19 @@ function verdictFixture(t, opts) {
   );
   const done = { stages: ['done'], handlers: { done: async () => ({ close: { state: 'shipped' } }) } };
   const post = postFreeze({ afterVerdict: done });
+  // The reconcile stage is a seam here. Nothing in this file is about a
+  // reconciliation: the records are judged in a stage of their own, and that
+  // stage has a suite of its own (ADR-0075).
+  const repair = repairLane({ afterVerdict: done });
   const lanes = {
     story: {
       stages: ['seed', ...post.stages],
       handlers: { seed: seedHandler(suiteFiles, seedExtra, specText, exclusions), ...post.handlers },
     },
-    repair: repairLane({ afterVerdict: done }),
+    repair: {
+      stages: repair.stages,
+      handlers: { ...repair.handlers, reconcile: async () => ({ next: 'done' }) },
+    },
   };
   let daemon = new Daemon(join(root, 'home'), { lanes, waitSleep: NO_WAIT });
   const fixture = seatFixture(seats);
@@ -374,7 +380,11 @@ async function waitClosed(paths, runId) {
     const tail = existsSync(live)
       ? readEvents(live)
           .slice(-12)
-          .map((e) => `${e.seq} ${e.event} ${e.stage ?? e.layer ?? e.seat ?? ''} ${e.status ?? e.result ?? e.reason ?? e.verdict ?? ''}`)
+          .map(
+            (e) =>
+              `${e.seq} ${e.event} ${e.stage ?? e.layer ?? e.seat ?? ''} ` +
+              `${e.status ?? e.result ?? e.reason ?? e.verdict ?? e.detail ?? ''}`,
+          )
       : ['no live ledger'];
     error.message += `\nledger tail:\n${tail.join('\n')}`;
     throw error;
@@ -2809,40 +2819,6 @@ function ledger(...events) {
   return events.map((e, i) => ({ seq: i + 1, ...e }));
 }
 
-// The two caps count two things, and a story that spent code rounds must not
-// find its record rounds gone (ADR-0007).
-test('the code repair cap and the reconcile cap count apart', () => {
-  const events = ledger(
-    { event: 'repair-round', pass: 1, round: 1 },
-    { event: 'repair-round', pass: 1, round: 2, phase: 'reconcile', seat: 'reconcile-write' },
-    { event: 'repair-round', pass: 1, round: 3, phase: 'reconcile', seat: 'reconcile-write' },
-    { event: 'repair-round', pass: 2, round: 1 },
-  );
-  assert.equal(repairRounds(events, 1), 1);
-  assert.equal(reconcileRounds(events, 1), 2);
-  assert.equal(repairRounds(events, 2), 1);
-  assert.equal(reconcileRounds(events, 2), 0);
-});
-
-// A fresh pass drops its findings by moving the pass number. These fallbacks
-// move no pass, so the drop is explicit and every derivation of the open set
-// reads it (ADR-0026).
-test('a fallback names the findings the run gave up on, and both derivations drop them', () => {
-  const events = ledger(
-    { event: 'reconciliation-written', ok: true, partial: true, residual: ['F2', 'F3'] },
-    { event: 'reconciliation-written', ok: false, cause: 'record-layer-red', discarded: ['F4'] },
-  );
-  assert.deepEqual([...droppedFindings(events)].sort(), ['F2', 'F3', 'F4']);
-  assert.deepEqual([...droppedFindings(ledger({ event: 'verdict-rendered' }))], []);
-  // Only a fallback earns a cycle. The first write, a corrective round and the
-  // write nobody could make say nothing about a rendered verdict.
-  assert.equal(reconcileFallbackStamp(events[0]), true);
-  assert.equal(reconcileFallbackStamp(events[1]), true);
-  assert.equal(reconcileFallbackStamp({ ok: true, rewritten: ['docs/adr/1.md'] }), false);
-  assert.equal(reconcileFallbackStamp({ ok: true, corrective: true, answered: ['F1'] }), false);
-  assert.equal(reconcileFallbackStamp({ ok: false, cause: 'work-product-defect' }), false);
-});
-
 test('the interrupted step is read off the ledger, and never off how it ended', () => {
   const render = { event: 'verdict-rendered', cycle: 1, pass: 1 };
   // A fresh pass whose stamp is the last thing the pass wrote: the tree was
@@ -3354,7 +3330,13 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
   assert.ok(dev.prompt.includes('regression test'));
   // The fix seat is judged by the same gates, so it is given them too.
   assert.ok(dev.prompt.includes('- unit: node --test tests/*.test.mjs'));
-  assert.equal(dev.denyTools, undefined);
+  // The record tree is denied in this lane too; the test paths are not, because
+  // this seat writes the regression test (ADR-0074).
+  assert.deepEqual(dev.denyTools, [
+    'Edit(docs/adr/**)',
+    'Write(docs/adr/**)',
+    'NotebookEdit(docs/adr/**)',
+  ]);
   // Generalist review replaces the Fury fan-out; the LOW stays advisory.
   assert.ok(!fx.calls.some((c) => c.seat.startsWith('fury-')));
   assert.equal(fx.calls.filter((c) => c.seat === 'generalist-review').length, 1);
@@ -3378,7 +3360,12 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
 // ladder answers it: the fix seat wrote the records, the ticket is its spec,
 // and nothing about that lane changes except which findings are open and which
 // lens reads the diff (ADR-0007).
-test('a confirmed record finding in the repair lane takes an ordinary repair round', async (t) => {
+// No seat that writes code writes a decision record, in this lane either, so
+// the record write of every pass is taken back at the capture and no record
+// reaches the code review's diff (ADR-0074). What blocks here is a code
+// finding, and the round that answers it is the ordinary one. The record
+// review and the record rounds live in the reconcile stage.
+test('a confirmed finding in the repair lane takes an ordinary repair round', async (t) => {
   const ADR = 'docs/adr/0001-doubling.md';
   const RECORD = '# ADR-0001: Doubling\n\nStatus: accepted\n\nf(x) will double x.\n';
   let fixes = 0;
@@ -3387,15 +3374,21 @@ test('a confirmed record finding in the repair lane takes an ordinary repair rou
     dev: () => {
       fixes += 1;
       return {
-        files: { [ADR]: `${RECORD}\nrewrite ${fixes}\n` },
+        files: {
+          [ADR]: `${RECORD}\nrewrite ${fixes}\n`,
+          'src/base.mjs': `export const base = ${fixes + 1};\n`,
+        },
         report: { summary: `record rewrite ${fixes}` },
       };
     },
     'repair-dev': () => {
       fixes += 1;
       return {
-        files: { [ADR]: `${RECORD}\nrewrite ${fixes}\n` },
-        report: { summary: `answered the finding in the record` },
+        files: {
+          [ADR]: `${RECORD}\nrewrite ${fixes}\n`,
+          'src/base.mjs': `export const base = ${fixes + 1};\n`,
+        },
+        report: { summary: `answered the finding in the code` },
       };
     },
     'generalist-review': () => {
@@ -3406,16 +3399,15 @@ test('a confirmed record finding in the repair lane takes an ordinary repair rou
             reviews === 1
               ? [
                   {
-                    lens: 'record',
-                    severity: 'MED',
-                    finding: 'the record states a doubling the tree does not implement',
+                    lens: 'operational',
+                    severity: 'HIGH',
+                    finding: 'the base value the record states is not the one the module holds',
                     evidence: 'src/base.mjs:1',
-                    file: ADR,
-                    criterion: 'truth',
+                    file: 'src/base.mjs',
                   },
                 ]
               : [],
-          summary: 'the record, against the tree',
+          summary: 'the code, against the ticket',
         },
       };
     },
@@ -3439,21 +3431,21 @@ test('a confirmed record finding in the repair lane takes an ordinary repair rou
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
 
-  // The MED reached the verifier and blocked, and it carries neither the
-  // advisory word nor a code lens.
+  // The HIGH reached the verifier and blocked, and it carries no advisory
+  // word. It is about the code: the record left the diff at the capture, so no
+  // finding of this review is about a record.
   const finding = events.find((e) => e.event === 'finding');
-  assert.equal(finding.lens, 'record');
-  assert.equal(finding.severity, 'MED');
-  assert.equal(finding.record, true);
-  assert.equal(finding.criterion, 'truth');
+  assert.equal(finding.lens, 'operational');
+  assert.equal(finding.severity, 'HIGH');
+  assert.equal(finding.record, undefined);
   assert.equal(finding.confirmed, true);
   assert.equal(finding.advisory, undefined);
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   assert.equal(renders[0].verdict, 'red');
   assert.deepEqual(renders[0].open, [finding.id]);
 
-  // The ordinary round, under the ordinary cap: the fix seat of this lane wrote
-  // the records, so nothing here dispatches the reconciliation write seat.
+  // The ordinary round: the fix seat of this lane answers the finding in the
+  // code, so nothing here dispatches the reconciliation write seat.
   const rounds = events.filter((e) => e.event === 'repair-round');
   assert.equal(rounds.length, 1);
   assert.equal(rounds[0].phase, undefined);
@@ -3461,26 +3453,27 @@ test('a confirmed record finding in the repair lane takes an ordinary repair rou
   assert.ok(fx.calls.some((c) => c.seat === 'repair-dev'));
   assert.ok(!fx.calls.some((c) => c.seat === 'reconcile-write'));
   assert.equal(renders.at(-1).verdict, 'green');
-
-  // The whole diff is records, so the seat read the record criteria and no code
-  // criterion at all, and it was told to read each record whole.
-  const brief = fx.calls.find((c) => c.seat === 'generalist-review').prompt;
-  assert.ok(brief.includes('Every file in the diff below is a decision record.'), brief);
-  assert.ok(brief.includes(`- ${ADR}`), brief);
-  assert.ok(brief.includes('Read every one of those files whole, from the working tree'), brief);
-  assert.ok(!brief.includes('- operational:'), brief);
-  // One round of five, and the round says which cap it counted against.
-  assert.equal(rounds[0].cap, 5);
+  // The round counts against the code cap. No diff of this lane is records
+  // alone any more: the record write of every pass is taken back before the
+  // commit, in this lane as in the story lane (ADR-0074).
+  assert.equal(rounds[0].cap, 3);
+  const takeBacks = events.filter((e) => e.event === 'diff-policy-recapture');
+  assert.equal(takeBacks.length, 2);
+  assert.deepEqual([...new Set(takeBacks.map((e) => e.class))], ['record']);
+  assert.deepEqual(takeBacks[0].recaptured, [ADR]);
+  assert.deepEqual(takeBacks.map((e) => e.seat), ['dev', 'repair-dev']);
+  // The record the run judged is the record the tree still holds.
+  const committed = events.filter((e) => e.event === 'implementation-committed');
+  assert.ok(committed.every((e) => e.dropped.includes(ADR)));
 });
 
 // -- the cap a repair round counts against (ADR-0007) -------------------------
 //
-// Every reconciliation of a story that shipped before the in-run rewrite comes
-// back as a repair-lane ticket, so a record-only repair used to count against
-// the code cap of three. A record is settled by reading a document and
-// rewriting it, and three rounds ended those runs on the cap rather than on a
-// clean record. So the arm asks the derivation the review asks, and a diff of
-// decision records and nothing else takes `gates.reconcileRounds`.
+// A repair round counts against the code cap of three. The record cap of
+// `gates.reconcileRounds` belongs to the rounds that rewrite a record, and no
+// round of this lane does: the record write of a dev seat is taken back at the
+// capture, so no diff here is decision records and nothing else (ADR-0074). The
+// record rounds and their cap live in the reconcile stage.
 
 const CAP_ADR = 'docs/adr/0001-doubling.md';
 const CAP_ADR_TEXT = '# ADR-0001: Doubling\n\nStatus: accepted\n\nf(x) doubles x.\n';
@@ -3518,16 +3511,15 @@ function capRepairSeats({ claims, alsoCode = false }) {
           findings: claim
             ? [
                 {
-                  lens: 'record',
-                  severity: 'MED',
-                  finding: `the record states a ${claim} the tree does not implement`,
+                  lens: 'operational',
+                  severity: 'HIGH',
+                  finding: `the module holds no ${claim} the ticket asks for`,
                   evidence: `src/base.mjs, on the ${claim} claim`,
-                  file: CAP_ADR,
-                  criterion: 'truth',
+                  file: 'src/base.mjs',
                 },
               ]
             : [],
-          summary: 'the record, against the tree',
+          summary: 'the code, against the ticket',
         },
       };
     },
@@ -3552,32 +3544,35 @@ function capFixture(t, { claims, alsoCode = false }) {
   });
 }
 
-test('a record-only repair stalls on the sixth round, under the record cap', async (t) => {
-  const fx = capFixture(t, { claims: CAP_CLAIMS });
+// The rounds a repair whose every write reaches the record tree spends: the
+// record never enters a diff, so the run stalls on the code cap and the
+// reconciliation write seat is dispatched by nothing here.
+test('a repair whose writes reach the records stalls on the fourth round, under the code cap', async (t) => {
+  const fx = capFixture(t, { claims: CAP_CLAIMS.slice(0, 4), alsoCode: true });
   const { runId } = await fx.launchFromConsole({ lane: 'repair', ticket: 'tickets/t1.md' });
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
 
-  // Five rounds, each one carrying the cap it counted against, and the sixth
-  // render is the stall.
   const rounds = events.filter((e) => e.event === 'repair-round');
   assert.deepEqual(
     rounds.map((e) => [e.round, e.cap]),
     [
-      [1, 5],
-      [2, 5],
-      [3, 5],
-      [4, 5],
-      [5, 5],
+      [1, 3],
+      [2, 3],
+      [3, 3],
     ],
   );
   const stall = events.find((e) => e.event === 'stall');
   assert.equal(stall.reason, 'cap-exhausted');
   assert.equal(stall.pass, 1);
   const reds = events.filter((e) => e.event === 'verdict-rendered' && e.verdict === 'red');
-  assert.equal(reds.length, 6);
-  // The seat does not change with the cap: the fix seat of this lane wrote the
-  // records, so the reconciliation write seat is not dispatched here.
+  assert.equal(reds.length, 4);
+  // Every write to the record tree was taken back, and no round of this lane
+  // is a record round.
+  const takeBacks = events.filter((e) => e.event === 'diff-policy-recapture');
+  assert.ok(takeBacks.length >= rounds.length);
+  assert.deepEqual([...new Set(takeBacks.map((e) => e.class))], ['record']);
+  assert.deepEqual([...new Set(takeBacks.flatMap((e) => e.recaptured))], [CAP_ADR]);
   assert.ok(!fx.calls.some((c) => c.seat === 'reconcile-write'));
   assert.equal(events.filter((e) => e.event === 'repair-round' && e.phase === 'reconcile').length, 0);
   const fresh = events.find((e) => e.event === 'fresh-pass');
@@ -3604,11 +3599,11 @@ test('a mixed repair diff stalls on the fourth round, under the code cap', async
   assert.equal(stall.reason, 'cap-exhausted');
   const reds = events.filter((e) => e.event === 'verdict-rendered' && e.verdict === 'red');
   assert.equal(reds.length, 4);
-  // The diff holds a source file, so the code lenses read it and the record
-  // lens rides beside them.
+  // The diff holds the source file and no record, because the record write was
+  // taken back, so the seat reads the code lenses and no record lens.
   const brief = fx.calls.find((c) => c.seat === 'generalist-review').prompt;
-  assert.ok(brief.includes('- record: the decision records this diff changes'), brief);
-  assert.ok(brief.includes('That rule is about the code files'), brief);
+  assert.ok(!brief.includes('- record: the decision records this diff changes'), brief);
+  assert.ok(brief.includes('- operational:'), brief);
   assert.equal(events.filter((e) => e.event === 'verdict-rendered').at(-1).verdict, 'green');
 });
 
@@ -4825,4 +4820,79 @@ test('the re-freeze carries the map brief and its check, and stamps its own map'
   // The stamp lands on the write the checks passed, before the commit.
   const committed = events.find((e) => e.event === 'suite-committed');
   assert.ok(stamps[0].seq < committed.seq);
+});
+
+// -- the finding line a code brief carries (ADR-0073) ------------------------
+//
+// Six briefs of this module state a finding through one line: the repair
+// round, the stall park, the triage prior-open list, the suite amendment, the
+// spec amendment and the fresh-pass brief. A record finding reaches them
+// rebuilt from the ledger, and the unit it is about is what the seat needs.
+
+test('a record finding prints its unit and the second place; a code finding is unchanged', () => {
+  // The code line, byte for byte as every one of those briefs carried it.
+  assert.equal(
+    findingLine({
+      source: 'review',
+      lens: 'correctness',
+      severity: 'HIGH',
+      summary: 'the guard is missing',
+      evidence: 'src/feature.mjs:12',
+    }),
+    '[correctness HIGH] the guard is missing (evidence: src/feature.mjs:12)',
+  );
+  // A triage finding carries its class in the same place.
+  assert.equal(
+    findingLine({
+      source: 'triage',
+      class: 'code-defect',
+      summary: 'the acceptance layer is red',
+      evidence: 'boom',
+    }),
+    '[code-defect] the acceptance layer is red (evidence: boom)',
+  );
+  // A record finding is about one sentence of one document. The unit and its
+  // head ride the line, and a `consistent` finding names the second place as
+  // well. The fields survive the rebuild from the ledger.
+  const index = findingIndex([
+    {
+      seq: 1,
+      event: 'finding',
+      id: 'F1',
+      source: 'review',
+      lens: 'record',
+      severity: 'HIGH',
+      record: true,
+      criterion: 'consistent',
+      file: 'docs/adr/adr-001-first.md',
+      unit: 'U7',
+      head: 'The public surface is exactly two routes',
+      file2: 'docs/adr/adr-002-second.md',
+      unit2: 'U3',
+      head2: 'The public surface is one route',
+      summary: 'the two records decide the surface two ways',
+      evidence: 'src/routes.mjs:1',
+    },
+  ]);
+  assert.equal(
+    findingLine(index.get('F1')),
+    '[record HIGH] [unit: U7 "The public surface is exactly two routes"] ' +
+      '[against: docs/adr/adr-002-second.md U3 "The public surface is one route"] ' +
+      'the two records decide the surface two ways (evidence: src/routes.mjs:1)',
+  );
+  // A record finding about one record names one place.
+  assert.equal(
+    findingLine({
+      source: 'review',
+      lens: 'record',
+      severity: 'MEDIUM',
+      record: true,
+      unit: 'U2',
+      head: 'The helper doubles its input',
+      summary: 'the record states a rule the tree does not hold',
+      evidence: 'src/feature.mjs:1',
+    }),
+    '[record MEDIUM] [unit: U2 "The helper doubles its input"] ' +
+      'the record states a rule the tree does not hold (evidence: src/feature.mjs:1)',
+  );
 });

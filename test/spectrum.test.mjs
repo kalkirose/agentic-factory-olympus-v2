@@ -1163,7 +1163,10 @@ test('a layer with no standing green runs whatever its ground says', () => {
   ]);
 });
 
-test('the reconciliation plan is the third sweep, and it needs a render behind it', () => {
+// The reconciliation sweep is gone with the round that named it. A record diff
+// takes the record plan, whatever cycle it arrives on, and this module no longer
+// holds a set the ship stage hands it (ADR-0075).
+test('there is no reconciliation sweep, and a record diff plans on its own', () => {
   const events = [
     { event: 'implementation-committed', pass: 1 },
     ...GROUNDED.map((l) => ({ event: 'layer-result', cycle: 1, layer: l.name, status: 'green' })),
@@ -1173,11 +1176,198 @@ test('the reconciliation plan is the third sweep, and it needs a render behind i
     cycle: 2,
     pass: 1,
     layers: GROUNDED,
-    reconcile: { changed: ['docs/adr/0001-x.md'] },
+    changed: ['docs/adr/0001-x.md'],
+    recordPaths: ['docs/adr'],
+    recordLayers: ['docs'],
   });
-  assert.equal(plan.sweep, 'reconcile');
-  assert.deepEqual([...plan.run].sort(), ['bare', 'docs', 'lint', 'unit']);
-  // Without the record diff the same ledger plans the targeted set, which is
+  assert.equal(plan.sweep, 'records');
+  assert.deepEqual([...plan.run], ['docs']);
+  // A project that names no record layers plans the targeted set, which is
   // empty because every layer is green.
   assert.equal(cyclePlan(events, { cycle: 2, pass: 1, layers: GROUNDED }).sweep, 'targeted');
+  assert.equal(
+    cyclePlan(events, { cycle: 2, pass: 1, layers: GROUNDED, changed: ['docs/adr/0001-x.md'] })
+      .sweep,
+    'targeted',
+  );
+});
+
+// -- the record attribution --------------------------------------------------
+//
+// The project names the layers a record path is read by. Such a path selects
+// those layers and no other, whatever any ground declares, and a cycle whose
+// whole diff is records runs them alone.
+
+const RECORDS = { recordPaths: ['docs/adr', '!docs/adr/TEMPLATE.md'], recordLayers: ['form'] };
+
+/** A spectrum with a record layer that needs a prerequisite, as ceq has. */
+const RECORD_LAYERS = [
+  { name: 'lockfile', command: 'green', ground: ['pnpm-lock.yaml'] },
+  { name: 'form', command: 'green', ground: ['docs/adr/**', 'scripts/form.ts'], needs: ['lockfile'] },
+  { name: 'lint', command: 'green', ground: ['src', 'docs'] },
+  { name: 'unit', command: 'green', ground: ['src'] },
+];
+
+const allGreen = (layers = RECORD_LAYERS) =>
+  new Map(layers.map((l) => [l.name, { layer: l.name, status: 'green' }]));
+
+test('a changed record path selects the record layers and no other', () => {
+  // lint claims `docs` and would take the record diff on its ground alone.
+  // The project has said which layers read a record, so it does not.
+  const target = groundedLayers(RECORD_LAYERS, allGreen(), {
+    changed: ['docs/adr/adr-020-x.md'],
+    ...RECORDS,
+  });
+  assert.deepEqual([...target].sort(), ['form']);
+});
+
+test('a project that names no record layer keeps the selection it had', () => {
+  const target = groundedLayers(RECORD_LAYERS, allGreen(), {
+    changed: ['docs/adr/adr-020-x.md'],
+    recordPaths: RECORDS.recordPaths,
+  });
+  assert.deepEqual([...target].sort(), ['form', 'lint']);
+});
+
+test('a record path the exclusion names is ground like any other', () => {
+  const target = groundedLayers(RECORD_LAYERS, allGreen(), {
+    changed: ['docs/adr/TEMPLATE.md'],
+    ...RECORDS,
+  });
+  assert.deepEqual([...target].sort(), ['form', 'lint']);
+});
+
+test('a code path of a record layer selects it by its own ground', () => {
+  const target = groundedLayers(RECORD_LAYERS, allGreen(), {
+    changed: ['scripts/form.ts'],
+    ...RECORDS,
+  });
+  assert.deepEqual([...target].sort(), ['form']);
+});
+
+test('the needs closure runs over the selected set as it always did', () => {
+  const chained = [...RECORD_LAYERS, { name: 'after', command: 'green', needs: ['form'] }];
+  const target = groundedLayers(chained, allGreen(chained), {
+    changed: ['docs/adr/adr-020-x.md'],
+    ...RECORDS,
+  });
+  assert.deepEqual([...target].sort(), ['after', 'form']);
+});
+
+test('the breadth list never carries a record to a layer', () => {
+  // A breadth entry under the record paths would give every suite ground over
+  // the record tree and undo the attribution in one line of config.
+  const target = groundedLayers(RECORD_LAYERS, allGreen(), {
+    changed: ['docs/adr/adr-020-x.md'],
+    breadth: ['docs/adr/**'],
+    ...RECORDS,
+  });
+  assert.deepEqual([...target].sort(), ['form']);
+});
+
+test('a record-only diff runs the record layers and their needs, on the first cycle too', () => {
+  // Nothing is proven and no render stands, so today's plan is the full
+  // spectrum. The diff is a change the project states no code layer reads.
+  const plan = cyclePlan([], {
+    cycle: 1,
+    pass: 1,
+    layers: RECORD_LAYERS,
+    changed: ['docs/adr/adr-020-x.md', 'docs/adr/adr-021-y.md'],
+    ...RECORDS,
+  });
+  assert.equal(plan.sweep, 'records');
+  // The prerequisite runs because it holds no green: a record layer whose
+  // prerequisite nothing ran reports not-runnable instead of judging.
+  assert.deepEqual([...plan.run].sort(), ['form', 'lockfile']);
+  // The rest are skipped and not carried. This cycle earns them no green and
+  // claims none for them.
+  assert.deepEqual([...plan.skip].sort(), ['lint', 'unit']);
+});
+
+test('a prerequisite with a green to carry is not run again', () => {
+  const plan = cyclePlan([], {
+    cycle: 2,
+    pass: 1,
+    layers: RECORD_LAYERS,
+    changed: ['docs/adr/adr-020-x.md'],
+    ...RECORDS,
+  });
+  assert.deepEqual([...plan.run].sort(), ['form', 'lockfile']);
+  const green = [
+    { event: 'implementation-committed', pass: 1 },
+    ...RECORD_LAYERS.map((l) => ({
+      event: 'layer-result',
+      cycle: 1,
+      layer: l.name,
+      status: 'green',
+    })),
+    { event: 'verdict-rendered', cycle: 1, pass: 1, verdict: 'green' },
+  ];
+  const carried = cyclePlan(green, {
+    cycle: 2,
+    pass: 1,
+    layers: RECORD_LAYERS,
+    changed: ['docs/adr/adr-020-x.md'],
+    ...RECORDS,
+  });
+  assert.deepEqual([...carried.run], ['form']);
+  assert.deepEqual([...carried.skip], []);
+});
+
+test('a diff that is not records alone takes the plan it always took', () => {
+  const mixed = cyclePlan([], {
+    cycle: 1,
+    pass: 1,
+    layers: RECORD_LAYERS,
+    changed: ['docs/adr/adr-020-x.md', 'src/api/f.mjs'],
+    ...RECORDS,
+  });
+  assert.deepEqual(mixed, { sweep: 'full' });
+  // And so does a project that states no record attribution at all.
+  const undeclared = cyclePlan([], {
+    cycle: 1,
+    pass: 1,
+    layers: RECORD_LAYERS,
+    changed: ['docs/adr/adr-020-x.md'],
+  });
+  assert.deepEqual(undeclared, { sweep: 'full' });
+  // An empty diff decides nothing: every path of nothing is a record, and the
+  // cycle that judged no change would skip the spectrum on a vacuous reading.
+  assert.deepEqual(
+    cyclePlan([], { cycle: 1, pass: 1, layers: RECORD_LAYERS, changed: [], ...RECORDS }),
+    { sweep: 'full' },
+  );
+});
+
+test('a skipped layer neither runs nor carries, and the ledger says nothing of it', async (t) => {
+  const { root, ctx } = fixture(t);
+  const marker = join(root, 'skipped-marker');
+  const tattling = [
+    'node',
+    '-e',
+    `require('fs').writeFileSync(${JSON.stringify(marker)},'x');process.exit(0);`,
+  ];
+  const { results } = await runSpectrum(ctx, {
+    layers: [
+      { name: 'form', command: 'green' },
+      { name: 'unit', command: 'tattling' },
+    ],
+    commands: { green: GREEN, tattling },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'sha1',
+    run: new Set(['form']),
+    skip: new Set(['unit']),
+  });
+  assert.deepEqual(
+    results.map((r) => [r.layer, r.status, r.mode]),
+    [['form', 'green', 'run']],
+  );
+  assert.equal(existsSync(marker), false, 'a skipped layer ran');
+  assert.deepEqual(
+    events(ctx)
+      .filter((e) => e.event === 'layer-result')
+      .map((e) => e.layer),
+    ['form'],
+  );
 });

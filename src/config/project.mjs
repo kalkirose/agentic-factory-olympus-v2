@@ -71,6 +71,21 @@ export const DEFAULT_EXCERPT_CHARS = 12_000;
 export const DEFAULT_RECORD_PATHS = Object.freeze(['docs/adr']);
 
 /**
+ * How a project changes a record that is already accepted.
+ *
+ * `rewrite` is the behaviour every project had before this key existed: a seat
+ * edits the record in place. `supersede` is the other lifecycle: an accepted
+ * record is immutable except for its status line, a change is a new record that
+ * names the one it replaces, and the old body is kept. A project declares one
+ * of the two words and the harness refuses any other, because a value nobody
+ * validates turns a lifecycle rule into silence (ADR-0026).
+ */
+export const RECORD_LIFECYCLES = Object.freeze(['rewrite', 'supersede']);
+
+/** The lifecycle a project gets when it declares none. */
+export const DEFAULT_RECORD_LIFECYCLE = 'rewrite';
+
+/**
  * How many rounds a repair over decision records may spend: the corrective
  * record rewrites of one implementation pass, and the repair rounds of a run
  * whose diff is decision records and nothing else.
@@ -98,14 +113,21 @@ export function defaultProjectConfig() {
     repo: {
       testPaths: [],
       uiPaths: [],
-      // The tree the project keeps its decision records in. It decides three
-      // things and nothing else: which review findings are record findings,
-      // which diffs are read through the record lens, and which cap a repair
-      // round counts against (ADR-0007, ADR-0026).
-      // Neither the reconciliation judge nor the write seat's containment check
-      // reads it. Discovery still decides which records get rewritten and where
-      // the seat may write.
+      // The tree the project keeps its decision records in. It decides which
+      // review findings are record findings, which diffs are read through the
+      // record lens, which cap a repair round counts against, which files the
+      // enumeration and the neighbourhood read, and which paths no seat that
+      // writes code may touch (ADR-0007, ADR-0026).
+      // An entry that opens with `!` is an exclusion: the file it names is not
+      // a record, whatever another entry says. A template is the case it exists
+      // for. Read the list through `recordPathIncludes`.
       recordPaths: [...DEFAULT_RECORD_PATHS],
+      // How a change to an accepted record is made: `rewrite` or `supersede`.
+      recordLifecycle: DEFAULT_RECORD_LIFECYCLE,
+      // The style rule files that bind every sentence a record seat writes,
+      // repo-relative. The seats read them beside the constitution; a project
+      // that names none binds its records by the constitution alone.
+      styleFiles: [],
       routesRoot: 'apps/storefront/src/routes',
       componentsRoot: 'apps/storefront/src/lib/components',
     },
@@ -140,7 +162,10 @@ export function defaultProjectConfig() {
     // corrective record rewrites one pass may spend, and the repair rounds of a
     // record-only diff. Absent is DEFAULT_RECONCILE_ROUNDS, and the code repair
     // cap is a different number (ADR-0007).
-    gates: { tier1: [] },
+    // `recordLayers` names the Tier-1 layers a changed record path is
+    // attributed to, and to no other layer, whatever any family declares. An
+    // empty list is today's attribution (ADR-0026).
+    gates: { tier1: [], recordLayers: [] },
     // one convention per line; prompt assembly consumes these
     conventions: [],
     // the lenses the judgment review carries; naming a lens the default panel
@@ -280,10 +305,24 @@ function validateRepo(repo, err) {
   // tree here. An empty list turns the path rule off, and the reconciliation
   // cycle still raises record findings, because that rule reads the phase.
   validateStringList(repo.recordPaths, 'repo.recordPaths', err);
+  if (isStringList(repo.recordPaths)) {
+    repo.recordPaths.forEach((entry, i) => {
+      // `!` alone excludes nothing and reads like an exclusion, which is the
+      // one spelling of this list that means two things.
+      if (entry === '!') err(`repo.recordPaths[${i}]`, 'must name a path after the ! exclusion');
+    });
+  }
+  // The two words a lifecycle may take. An unknown word is refused here rather
+  // than read as `rewrite`, because a project that asked for `supersede` and
+  // spelled it wrong would get the lifecycle it asked to leave (ADR-0026).
+  if (repo.recordLifecycle !== undefined && !RECORD_LIFECYCLES.includes(repo.recordLifecycle)) {
+    err('repo.recordLifecycle', `must be one of: ${RECORD_LIFECYCLES.join(', ')}`);
+  }
   // The two roots a spec claim about the tree resolves under. They are
   // validated by one rule because they are one kind of value: a plain
   // repo-relative directory the lint reads the tree under, or null to turn
   // that lint rule off by name (ADR-0067).
+  validateStringList(repo.styleFiles, 'repo.styleFiles', err);
   validateTreeRoot(repo.routesRoot, 'repo.routesRoot', err);
   validateTreeRoot(repo.componentsRoot, 'repo.componentsRoot', err);
 }
@@ -461,6 +500,30 @@ function validateGates(gates, commands, err, launch = false) {
     if (typeof layer.name === 'string') seen.add(layer.name);
   });
   validateConcurrencyGroups(gates, seen, err);
+  validateRecordLayers(gates, seen, err);
+}
+
+/**
+ * The Tier-1 layers a changed record path is attributed to.
+ *
+ * Every name must be a layer of this project, on the precedent of
+ * `concurrencyGroups` and `credentials[].layers`. A typo here attributes a
+ * record path to a layer that does not run, so a record-only render greens
+ * with no layer at all, and the only trace is one word in a ledger. A project
+ * that names none keeps today's attribution (ADR-0026).
+ */
+function validateRecordLayers(gates, layerNames, err) {
+  const layers = gates.recordLayers;
+  if (layers === undefined) return;
+  if (!isStringList(layers)) {
+    err('gates.recordLayers', 'must be an array of gates.tier1 layer names');
+    return;
+  }
+  layers.forEach((name, i) => {
+    if (!layerNames.has(name)) {
+      err(`gates.recordLayers[${i}]`, `must name a gates.tier1 layer: ${name}`);
+    }
+  });
 }
 
 /**
@@ -860,18 +923,24 @@ function validateTripwires(tripwires, err) {
   });
 }
 
-// The diff policy the candidate capture enforces, per lane. Only the lanes
-// that run a dev seat take one; a name outside that set is a typo the launch
-// must not swallow, because a policy nobody reads protects nothing.
-// `recapturablePaths` and `sweptPaths` ride the same block and are not tiers:
-// they block nothing and admit nothing. `recapturablePaths` classes the writes
-// the capture takes back from frozen paths, so a take-back on an artifact a
-// re-freeze re-takes is recorded quietly rather than as an open loud item.
-// `sweptPaths` names where a red test run drops generated artifacts, so a file
-// the freeze never held is cleared instead of reported as a take-back
-// (ADR-0017).
-const LANES = ['story', 'repair'];
-const POLICED_LANES = new Set(LANES);
+// Every lane the daemon runs, and the one list of them. A lane name in the
+// config is a typo the launch must not swallow, so each block that takes one is
+// checked against a closed set. A reader outside this module that enumerates or
+// counts lanes reads this list as well, so one edit reaches every one of them.
+// The two sets differ: every lane spends seats, so every lane takes a budget;
+// only a lane with a dev seat takes a diff policy, because the policy polices
+// what that seat wrote. The records lane holds no dev seat (ADR-0074).
+export const LANES = Object.freeze(['story', 'repair', 'records']);
+const BUDGETED_LANES = new Set(LANES);
+const POLICED_LANES = new Set(['story', 'repair']);
+
+// The diff policy the candidate capture enforces, per lane. `recapturablePaths`
+// and `sweptPaths` ride the same block and are not tiers: they block nothing and
+// admit nothing. `recapturablePaths` classes the writes the capture takes back
+// from frozen paths, so a take-back on an artifact a re-freeze re-takes is
+// recorded quietly rather than as an open loud item. `sweptPaths` names where a
+// red test run drops generated artifacts, so a file the freeze never held is
+// cleared instead of reported as a take-back (ADR-0017).
 const TIER_KEYS = [
   'deniedPaths',
   'declaredPaths',
@@ -889,7 +958,10 @@ function validateDiffPolicy(policy, err) {
   for (const [lane, tiers] of Object.entries(policy)) {
     const at = (key) => `diffPolicy.${lane}.${key}`;
     if (!POLICED_LANES.has(lane)) {
-      err(`diffPolicy.${lane}`, `must name a lane with a dev seat: ${LANES.join(' | ')}`);
+      err(
+        `diffPolicy.${lane}`,
+        `must name a lane with a dev seat: ${[...POLICED_LANES].join(' | ')}`,
+      );
       continue;
     }
     if (!isPlainObject(tiers)) {
@@ -929,7 +1001,7 @@ function validateBudgets(budgets, err) {
     return;
   }
   for (const [lane, value] of Object.entries(budgets)) {
-    if (!POLICED_LANES.has(lane)) {
+    if (!BUDGETED_LANES.has(lane)) {
       err(`budgets.${lane}`, `must name a lane: ${LANES.join(' | ')}`);
       continue;
     }
@@ -1321,6 +1393,28 @@ export function globRegExp(pattern) {
   const compiled = new RegExp(re + '$');
   globCache.set(pattern, compiled);
   return compiled;
+}
+
+/**
+ * True when a file is one of the project's decision records.
+ *
+ * `repo.recordPaths` is the one path list that carries exclusions, because a
+ * record tree holds a file that is not a record: the template every new record
+ * is written from. An entry that opens with `!` names such a file, and it wins
+ * over every entry that includes it. Every reader of the record tree asks this
+ * question here, so the template is out of the enumeration, out of the
+ * neighbourhood, out of the scope and out of the deny rules by one rule.
+ */
+export function recordPathIncludes(file, recordPaths = []) {
+  let included = false;
+  for (const entry of recordPaths) {
+    if (entry.startsWith('!')) {
+      if (entry.length > 1 && underEntry(file, entry.slice(1))) return false;
+    } else if (underEntry(file, entry)) {
+      included = true;
+    }
+  }
+  return included;
 }
 
 /** True when a repo-relative file falls under a path entry. */

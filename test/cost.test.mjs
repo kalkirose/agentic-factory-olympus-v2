@@ -64,6 +64,51 @@ test('a corrective re-prompt is two invocations of one seat, counted once each',
   assert.equal(runCost(events), 4.25);
 });
 
+// The record review fans out one seat per record, in parallel, and each
+// dispatch carries a slot suffix. The suffix is the seat identity, so three
+// open invocations settle on their own stamps: keyed by the base name, the
+// second spawn would settle the first seat's snapshot while it still ran.
+test('three slots of one seat are three invocations, each counted once', () => {
+  const report = (seat, cost) => line('seat-report', { actor: seat, seat, cost });
+  // Three dispatches in flight at once, their stamps interleaved as the ledger
+  // takes them.
+  const events = [
+    spawned('record-review:1'),
+    progress('record-review:1', 1),
+    spawned('record-review:2'),
+    progress('record-review:2', 0.5),
+    spawned('record-review:3'),
+    progress('record-review:1', 1.5),
+    progress('record-review:3', 3),
+    progress('record-review:2', 2),
+    report('record-review:2', 2),
+    report('record-review:1', 1.5),
+    report('record-review:3', 3),
+  ];
+  assert.equal(runCost(events), 6.5);
+  // The same three dispatches under one name: each spawn settles the snapshot
+  // of the seat still running, and the run pays that dispatch twice.
+  const shared = events.map((e) => ({
+    ...e,
+    ...(e.seat && { seat: 'record-review' }),
+    ...(e.actor !== 'daemon' && { actor: 'record-review' }),
+  }));
+  assert.equal(runCost(shared), 8);
+});
+
+// Sequential slots of the write seat, each with its own report.
+test('slots of the write seat each carry their own cost line', () => {
+  const events = [
+    spawned('reconcile-write:1'),
+    progress('reconcile-write:1', 4),
+    line('seat-report', { actor: 'reconcile-write:1', seat: 'reconcile-write:1', cost: 4 }),
+    spawned('reconcile-write:2'),
+    progress('reconcile-write:2', 2.25),
+    line('seat-report', { actor: 'reconcile-write:2', seat: 'reconcile-write:2', cost: 2.25 }),
+  ];
+  assert.equal(runCost(events), 6.25);
+});
+
 test('a terminal stamp without a figure falls back to the invocation snapshots', () => {
   const events = [
     spawned('cassandra'),
@@ -220,6 +265,13 @@ test('a budgets block takes positive dollars on a lane the daemon runs', () => {
   assert.deepEqual(validateProjectConfig({ ...base, budgets: { story: 160, repair: 50 } }), []);
   assert.deepEqual(validateProjectConfig({ ...base, budgets: {} }), []);
   assert.deepEqual(validateProjectConfig(base), []);
+  // The records lane is the third lane the daemon runs, and it spends seats
+  // like the other two, so it takes a budget (ADR-0074).
+  assert.deepEqual(validateProjectConfig({ ...base, budgets: { records: 25 } }), []);
+  assert.deepEqual(
+    validateProjectConfig({ ...base, budgets: { story: 160, repair: 50, records: 25 } }),
+    [],
+  );
 });
 
 test('a budgets block refuses an unknown lane and a figure that is not money', () => {
@@ -234,4 +286,13 @@ test('a budgets block refuses an unknown lane and a figure that is not money', (
   ]);
   assert.match(errors.find((e) => e.path === 'budgets.spec').message, /must name a lane/);
   assert.match(errors.find((e) => e.path === 'budgets.story').message, /positive number/);
+  // The set stays closed, and it names all three lanes.
+  const other = validateProjectConfig({ ...base, budgets: { other: 10 } });
+  assert.deepEqual(other.map((e) => e.path), ['budgets.other']);
+  assert.equal(other[0].message, 'must name a lane: story | repair | records');
+  // A records budget is money like any other.
+  assert.deepEqual(
+    validateProjectConfig({ ...base, budgets: { records: -1 } }).map((e) => e.path),
+    ['budgets.records'],
+  );
 });

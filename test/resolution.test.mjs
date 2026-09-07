@@ -51,6 +51,7 @@ test('an owning event is an event some ledger can actually stamp', () => {
       'layer-result',
       'merged',
       're-freeze',
+      'reconciliation-judged',
       'run-archived',
       'verdict-rendered',
       'workflow-recovered',
@@ -185,6 +186,37 @@ test('the merge owns the alert that said it would not fire', () => {
   const alert = line('gate-integrity', { kind: 'auto-merge', pr: 7, sha: 'abc' });
   const events = [alert, line('merged', { pr: 7, sha: 'abc' })];
   assert.deepEqual(ownedResolutions(events), [{ resolves: alert.seq, owner: 'merged' }]);
+});
+
+// A stage that spent its rounds with findings open takes the fallback on its
+// own and parks nobody. What answers the record is the ticket that carries the
+// open findings out of the run (ADR-0075).
+
+test('the ticket the close writes owns the record stall', () => {
+  const stall = line('reconcile-stall', { rounds: 5, open: ['F1', 'F2'] });
+  const events = [
+    stall,
+    // The judgment before the close carries no ticket and answers nothing.
+    line('reconciliation-judged', { ok: true, owed: true, records: ['docs/adr/a.md'] }),
+    line('merged', { pr: 7, sha: 'abc' }),
+    line('reconciliation-judged', {
+      ok: true,
+      owed: true,
+      records: ['docs/adr/a.md'],
+      ticket: 'C:/home/tickets/reconcile-r1.md',
+    }),
+  ];
+  assert.deepEqual(ownedResolutions(events), [
+    { resolves: stall.seq, owner: 'reconciliation-judged' },
+  ]);
+});
+
+test('a stall whose ticket was never written stays open', () => {
+  // The true report: the records are owed and nothing holds them. The lost
+  // reconciliation is loud beside it under its own kind.
+  const stall = line('reconcile-stall', { rounds: 5, open: ['F1'] });
+  const events = [stall, line('merged', { pr: 7 }), line('run-closed', { state: 'shipped' })];
+  assert.deepEqual(ownedResolutions(events), []);
 });
 
 test('a harness finding is owned by the first verdict that drops it', () => {

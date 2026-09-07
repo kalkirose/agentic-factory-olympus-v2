@@ -54,8 +54,10 @@ has these shapes.
   attempt is removed before dispatch so it can never validate as fresh.
 - **The `eval-review` stamp.** Queued-classed, appended only after the
   report validates. It carries the review index, `ships` (the run ids the
-  window held, in merge order), `lanes` (`{story: n, repair: n}` over the
-  window), `shipCount` (the total number of ships at dispatch, information
+  window held, in merge order), `lanes` (one count per lane the daemon
+  runs, zero-filled from `LANES` in `src/config/project.mjs`, so a lane
+  the window never shipped still reads as zero), `shipCount` (the total
+  number of ships at dispatch, information
   only), the report path, the proposal count, and the judging model from
   the transcript. It joins the resolvable set: the human triages the
   proposals, then resolves the queue item. Open reviews are derivable like
@@ -80,10 +82,12 @@ window and the fast-path escape window, so a shipped repair counts there
 too. The freeze collector stays story-only, because a repair freezes
 nothing.
 
-The lane travels with each ship because the seat judges the two lanes on
+The lane travels with each ship because the seat judges each lane on
 different evidence. A story is judged against its card and its frozen
 suite. A repair is judged against its ticket, and the presence of an
-escape says whether the harness already counted the defect it fixes.
+escape says whether the harness already counted the defect it fixes. A
+records run is judged against its ticket and the records it wrote; it
+carries no escape.
 
 ## Why the boundary is a named ship and not a count
 

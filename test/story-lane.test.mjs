@@ -324,6 +324,17 @@ function seatFixture(seats) {
   return { commandFor, calls };
 }
 
+// The birth seat's report where a story decides no record: no file written,
+// and nothing to answer by unit. Every scenario runs through the records stage,
+// and the ones whose subject is not the records take this (ADR-0074).
+const NO_RECORD_DECIDED = {
+  rewritten: [],
+  unchanged: [],
+  units: [],
+  divergences: [],
+  summary: 'the specification decides no record the tree does not hold',
+};
+
 // `waves` raises the adversary wave count for the scenarios whose subject is
 // the multi-wave machinery. Omitted, the fixture takes the harness default,
 // which is the one wave a round runs today.
@@ -398,7 +409,7 @@ function storyFixture(
     composeRunner,
     forgeFor: forgeFor ?? (() => null),
   });
-  const fixture = seatFixture(seats);
+  const fixture = seatFixture({ 'record-author': () => ({ report: NO_RECORD_DECIDED }), ...seats });
   t.after(async () => {
     await daemon.stop();
     removeDir(root);

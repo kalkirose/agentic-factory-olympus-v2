@@ -1,18 +1,24 @@
 // The ship step: the run ends at close-out, not at the green verdict.
-// `shipStep({forgeFor})` supplies the three stages after the verdict —
-// `update` (the reconciliation round, the ship token, then the branch update
-// that precedes the final verdict), `ship` (PR open carrying the diff's
-// labels, with auto-merge armed, the check watcher, the CI red route, the
-// competing-merge update, the merge round) and `close-out`
-// (red-merge breach conversion, merge-commit checks to terminal, the card
-// sweep, the reconciliation ticket for records that did not ride, the
-// configured learning artifact, the escape fix-back, ledger close).
+// `shipStep({forgeFor})` supplies the four stages after the verdict —
+// `reconcile` (the records, in a stage of its own, from `lanes/reconcile.mjs`),
+// `update` (the ship token, then the branch update that precedes the final
+// verdict), `ship` (PR open carrying the diff's labels, with auto-merge armed,
+// the check watcher, the CI red route, the competing-merge update, the merge
+// round) and `close-out` (red-merge breach conversion, merge-commit checks to
+// terminal, the card sweep, the reconciliation ticket for records that did not
+// ride, the configured learning artifact, the escape fix-back, ledger close).
 //
-// The reconciliation round is the head of the update stage, in front of the
-// token (ADR-0026). A story run judges its own diff against the decision
-// records, rewrites the records it owes onto its own branch, and lets the
-// verdict certify code and records together. So the default branch moves once
-// per shipped story, and none of that work holds another run out of its merge.
+// The reconciliation stands in front of the token, and it belongs to the stage
+// that owns it (ADR-0075). A run judges its own diff against the decision
+// records and writes the records it owes onto its own branch before it queues
+// for the merge. So the default branch moves once per shipped story, and none of
+// that work holds another run out of its merge.
+//
+// The admission gate reads two certifications, each at its own sha: a green
+// `verdict-rendered` at the last code commit and a green `reconcile-rendered` at
+// the last record commit. They are two facts about two trees and they are never
+// one, so a moved default branch is asked two questions and each answer is kept
+// or redone on its own.
 //
 // Ships are serial per project and everything before them is not. The update
 // stage holds the seam: a run takes the project's ship token there, merges the
@@ -64,7 +70,7 @@ import {
   runReportPath,
 } from '../daemon/home.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
-import { DEFAULT_PROJECT_CONFIG_PATH } from '../config/project.mjs';
+import { DEFAULT_PROJECT_CONFIG_PATH, recordPathIncludes } from '../config/project.mjs';
 import { assertDefectKind } from '../ledger/registry.mjs';
 import { budgetOpen, ciFlakes, deterministicRed, FLAKE_LIMIT } from '../ledger/cycles.mjs';
 import { instanceParkForms } from '../ledger/parks.mjs';
@@ -93,7 +99,7 @@ import {
   commitAll,
   resetHard,
 } from '../isolation/tree.mjs';
-import { testEditDenyRules } from '../seats/boundary.mjs';
+import { editDenyRules } from '../seats/boundary.mjs';
 import { attemptOrder, noLogReason, PartialLogRefusal } from '../ship/forge.mjs';
 import { derivedLabels } from '../ship/labels.mjs';
 import { releaseShipToken, takeShipToken } from '../ship/token.mjs';
@@ -108,12 +114,18 @@ import { fastPathDecision } from './fastpath.mjs';
 import { runCommand } from './exec.mjs';
 import { probeCredentials, worldConfig } from './probes.mjs';
 import { MERGE_SUITE_SCHEMA } from './story.mjs';
+import { WRITE_SEAT, findingLine } from './records.mjs';
 import {
-  RECONCILE_WRITE_SCHEMA,
-  WRITE_SEAT,
-  writeChecks,
-  writeRole,
-} from './records.mjs';
+  RECONCILE_STAGE,
+  SHIP_WITHOUT_RECORDS,
+  lastRendered,
+  nextCycle,
+  reconcileCertification,
+  reconcileHandler,
+  reconcileTicketFromBranch,
+} from './reconcile.mjs';
+import { recordBase, recordsCommitted } from './records-stage.mjs';
+import { recordNeighbours } from './units.mjs';
 import {
   DEV_SCHEMA,
   triageStep,
@@ -121,6 +133,7 @@ import {
   currentPass,
   freshPass,
   answerCount,
+  passOpeningSha,
   sweepSkippedAfter,
 } from './verdict.mjs';
 import {
@@ -133,12 +146,7 @@ import {
   answeredPath,
   freezeExclusions,
   invocationCount,
-  lastRecoveryPark,
   parkDirective,
-  reconcileCommit,
-  renderOverReconcile,
-  seatFailureAfter,
-  seatWithChecks,
   sinceFreshPass,
   GATE_FORMS,
   withAbandonGuard,
@@ -189,6 +197,10 @@ export const CANCELLED_POLLS = 20;
  * takes the update, exactly as it did before the pre-verdict one existed.
  */
 export const UPDATE_CAP = 2;
+
+// The stage's own answer at a failed write, re-exported where the console and
+// the tests have always read it.
+export { SHIP_WITHOUT_RECORDS, reconcileTicketFromBranch };
 
 /**
  * Stamps one gate-integrity record under a closed defect kind. Every stamp on
@@ -291,8 +303,9 @@ export const CARD_SWEEP_SCHEMA = {
 export function shipStep({ forgeFor, pollMs = 15000, enqueueRepair = null } = {}) {
   if (typeof forgeFor !== 'function') throw new Error('shipStep requires a forgeFor resolver');
   return {
-    stages: ['update', 'ship', 'close-out'],
+    stages: [RECONCILE_STAGE, 'update', 'ship', 'close-out'],
     handlers: withAbandonGuard({
+      [RECONCILE_STAGE]: reconcileHandler({ next: 'update' }),
       update: updateHandler({ forgeFor, pollMs }),
       ship: shipHandler({ forgeFor, pollMs }),
       'close-out': closeOutHandler({ forgeFor, pollMs, enqueueRepair }),
@@ -332,24 +345,9 @@ function updateHandler({ forgeFor, pollMs }) {
     // verdict certifies, and no hold of the token changes that. Without this a
     // crash between the release and the stage transition puts the run in the
     // queue to be told to go and re-verdict.
-    if (releasedForVerdict(runEvents(ctx))) return { next: 'verdict' };
+    const released = releasedForVerdict(runEvents(ctx));
+    if (released) return { next: released };
     const base = await shipBase(ctx, forgeFor);
-    // The reconciliation round runs here, in front of the token: the judgment,
-    // the record rewrite and the cycle that certifies it belong to this run's
-    // own branch, and none of them may hold another run of the project out of
-    // its merge (ADR-0026).
-    //
-    // Its exits release the token for the same reason every other exit of this
-    // stage does. A run reaching this line ordinarily holds nothing, so the
-    // release is a no-op; a run that comes back here after a fresh pass may
-    // hold it, and a record rewrite is no more a reason to stand on the token
-    // than a verdict cycle is (ADR-0033).
-    if (base.storyLane) {
-      const directive = await reconcileRound(ctx, base);
-      if (directive?.next && directive.next !== 'ship') releaseShipToken(ctx, 're-verdict');
-      else if (directive?.park) releaseShipToken(ctx, 'park');
-      if (directive) return directive;
-    }
     const heart = stageHeartbeat(ctx);
     for (;;) {
       if (ctx.stopped()) return null;
@@ -365,7 +363,13 @@ function updateHandler({ forgeFor, pollMs }) {
       // The two exits that leave work behind them. A close needs no release,
       // because a run that is over holds nothing; and a daemon stop is no exit
       // at all, so the run keeps the token and the restart hands it back.
-      if (directive?.next && directive.next !== 'ship') releaseShipToken(ctx, 're-verdict');
+      //
+      // The reason names the stage the run left for, because the resume rule at
+      // the top of this handler sends the run back to it. A record re-run and a
+      // code re-judgment are two different journeys and the token is given back
+      // for both (ADR-0075).
+      if (directive?.next === 'verdict') releaseShipToken(ctx, 're-verdict');
+      else if (directive?.next === RECONCILE_STAGE) releaseShipToken(ctx, 're-reconcile');
       else if (directive?.park) releaseShipToken(ctx, 'park');
       return directive;
     }
@@ -373,25 +377,36 @@ function updateHandler({ forgeFor, pollMs }) {
 }
 
 /**
- * Whether the run stands where a release for the verdict left it: the token
- * given back on the way to a cycle, and no green verdict since.
+ * The stage a release left the run owing, or null: the token given back on the
+ * way to a cycle, and no green render of that cycle's own kind since.
  *
- * The release is the last thing the stage does before it hands the run to the
- * verdict, so this reads exactly one state: the crash window between that stamp
- * and the transition behind it. A green render after the release is the run
- * coming back the way it left, and the stage takes the token again.
+ * The release is the last thing the stage does before it hands the run on, so
+ * this reads exactly one state: the crash window between that stamp and the
+ * transition behind it. A green render after the release is the run coming back
+ * the way it left, and the stage takes the token again.
  *
- * The reason is half the question. A release for a park stops the run AT this
- * stage, and the answer resumes the stage to finish the update it could not
- * finish. Reading that release as a re-verdict would send the answered run to
- * judge a tree it never merged, and buy a whole cycle to arrive back here.
+ * The reason is half the question, and it now names two journeys. A release for
+ * a park stops the run AT this stage, and the answer resumes the stage to finish
+ * the update it could not finish; reading that release as a re-verdict would
+ * send the answered run to judge a tree it never merged. A release for a record
+ * re-run is answered by a green `reconcile-rendered` and never by a code verdict,
+ * because the two certifications stand on two trees (ADR-0075).
+ * @returns {'verdict'|'reconcile'|null}
  */
 export function releasedForVerdict(events) {
   const token = findLast(events, 'ship-token');
-  if (token?.state !== 'released' || token.reason !== 're-verdict') return false;
-  return !events.some(
-    (e) => e.event === 'verdict-rendered' && e.verdict === 'green' && e.seq > token.seq,
+  if (token?.state !== 'released') return null;
+  if (token.reason === 're-verdict') {
+    const green = events.some(
+      (e) => e.event === 'verdict-rendered' && e.verdict === 'green' && e.seq > token.seq,
+    );
+    return green ? null : 'verdict';
+  }
+  if (token.reason !== 're-reconcile') return null;
+  const green = events.some(
+    (e) => e.event === 'reconcile-rendered' && e.verdict === 'green' && e.seq > token.seq,
   );
+  return green ? null : RECONCILE_STAGE;
 }
 
 // Why a capped pass leaves the update to the ship stage. The stamp carries it,
@@ -400,37 +415,99 @@ const UPDATE_CAP_NOTE =
   'the base moved twice under one pass: the ship stage takes the update from ' +
   'here, as it did before this one existed';
 
-// Why a tree nothing certified goes back to the verdict.
+/**
+ * The stage that certifies the tree of one lane.
+ *
+ * Every route of this stage that sends the run back to be certified reads it.
+ * The story and repair lanes certify code, and the verdict renders that. The
+ * records lane renders no code verdict at all: what certifies its tree is the
+ * reconcile stage, and a route that named the verdict there would hand the run
+ * to a stage its lane graph does not hold (ADR-0075).
+ * @param {{mode?: string}} base the lane base
+ */
+export function certifyingStage(base) {
+  return base?.mode === 'records' ? RECONCILE_STAGE : 'verdict';
+}
+
+// Why a tree nothing certified goes back to be certified again.
 const UNCERTIFIED_TREE_NOTE =
   'the tree at the head is not a tree any green verdict judged and not one a ' +
   'fast path carried: it is judged now';
 
 /**
- * Whether the ledger PROVES the tree at one sha may open a request.
+ * The two certifications the admission gate reads, each with its own sha.
  *
- * There are exactly two proofs and the stage accepts nothing else. A green
- * verdict rendered at the sha judged that tree. A taken fast-path record for
- * the sha carried a certification onto it, on purpose, with the reasons in the
- * record. Everything else is a tree with no standing about it.
+ * A code certification is a green `verdict-rendered` at the last code commit's
+ * sha, or a taken fast-path record that carried one onto it. A record
+ * certification is a green `reconcile-rendered` at the last record commit's sha.
+ * They are two facts about two trees and they are never one: the stage commits
+ * records after the verdict's final green, so no green code render ever stands
+ * at the head sha again, and a gate that asked one question of the head would
+ * loop the run through the verdict on every ship (ADR-0075).
+ *
+ * Either may be null. A lane that owes no reconciliation certifies no records; a
+ * records-lane run renders no code verdict. A `null` says the lane holds no such
+ * certification and never that the certification failed.
  *
  * The rule exists because the merge is not evidence. Every write this stage
  * makes has a crash window behind it: after a resolved merge round, after the
  * `ran: true` stamp, after a fast-path REFUSAL. On any of those resumes the
  * merge answers "already up to date" and reads exactly like a base that never
  * moved, so a route decided on the merge would take the run to the request over
- * a tree nothing judged, and the last of them would turn a recorded refusal
- * into a carried certification. A route decided on the proofs cannot: none of
- * those resumes has one, and each goes back to the verdict.
+ * a tree nothing judged. A route decided on the proofs cannot.
+ * @param {object[]} events the run's ledger, in order
+ * @param {{mode?: string}} [base] the lane base
+ * @returns {{code: {sha: string, ok: boolean}|null,
+ *   records: {sha: string, ok: boolean}|null}}
  */
-export function certifiedTree(events, sha) {
-  if (typeof sha !== 'string' || sha.length === 0) return false;
-  return events.some(
+export function certifiedTrees(events, base = {}) {
+  return {
+    code: base.mode === 'records' ? null : codeTree(events),
+    records: reconcileCertification(events),
+  };
+}
+
+/** The code tree at the run's last code commit, and whether a green covers it. */
+function codeTree(events) {
+  const commit = [...events]
+    .reverse()
+    .find((e) => e.event === 'implementation-committed' && typeof e.sha === 'string');
+  const sha = commit?.sha ?? null;
+  if (sha === null) return null;
+  const ok = events.some(
     (e) =>
       (e.event === 'verdict-rendered' && e.verdict === 'green' && e.sha === sha) ||
       (e.event === 'fast-path-ship' && e.taken === true && e.toSha === sha),
   );
+  return { sha, ok };
 }
 
+/**
+ * Whether the ledger PROVES the tree the run holds may open a request: both
+ * certifications the lane owes, each green at its own sha.
+ * @param {object[]} events the run's ledger, in order
+ * @param {object} base the lane base
+ */
+export function admitted(events, base) {
+  const trees = certifiedTrees(events, base);
+  return Object.values(trees).every((tree) => tree === null || tree.ok === true);
+}
+
+/**
+ * The seam between a moved default branch and the request: one merge, two
+ * grounds, two answers (ADR-0075).
+ *
+ * `groundVerdict` lists the incoming files once and answers each certification
+ * on its own ground. The code question is what the suites declare; the
+ * reconciliation's is the run's own records and their neighbourhood. So an
+ * incoming change to a record outside the neighbourhood costs nothing, and an
+ * incoming change to a record the run itself touched re-runs the record review
+ * and leaves the code verdict alone.
+ *
+ * The stamp lands after both answers are known, because the answers are what it
+ * carries. A record re-run spends the update cap exactly as a code re-judgment
+ * does: the run has merged twice under one pass either way.
+ */
 async function preVerdictUpdate(ctx, base) {
   const events = runEvents(ctx);
   const pass = currentPass(events);
@@ -460,48 +537,96 @@ async function preVerdictUpdate(ctx, base) {
   // this call's merge. A merge is idempotent, so every crash window in this
   // stage resumes with a merge that answers "already up to date" and a base
   // that reads as one which never moved (ADR-0033).
-  const certified = certifiedTree(runEvents(ctx), out.toSha);
-  ctx.store.append('pre-verdict-update', {
-    actor: ACTOR,
-    pass,
-    ran,
-    mainSha: out.mainSha,
-    ...(ran && { fromSha: out.fromSha, toSha: out.toSha }),
-    ...(!ran && !certified && { toSha: out.toSha, uncertified: true, note: UNCERTIFIED_TREE_NOTE }),
-  });
-  if (certified) return { next: 'ship' };
-  // A tree nothing certified that this call's merge did not build: the run took
-  // a merge it never recorded, and the shas the fast path reads went with the
-  // record. The full re-verdict, never the fast path over shas it cannot name.
-  if (!ran) return { next: 'verdict' };
+  const certified = admitted(runEvents(ctx), base);
+  const uncertified = { toSha: out.toSha, uncertified: true, note: UNCERTIFIED_TREE_NOTE };
+  if (!ran) {
+    // The base never moved. Nothing was re-decided, so the stamp says what the
+    // ledger already held about the tree the run stands on.
+    ctx.store.append('pre-verdict-update', {
+      actor: ACTOR,
+      pass,
+      ran: false,
+      mainSha: out.mainSha,
+      ...(!certified && uncertified),
+    });
+    // A tree nothing certified that this call's merge did not build: the run
+    // took a merge it never recorded, and the shas the fast path reads went with
+    // the record. The full re-certification, never the fast path over shas it
+    // cannot name.
+    return certified ? { next: 'ship' } : { next: certifyingStage(base) };
+  }
   // The flag is the whole of the difference. Absent or false, the moved tree
   // goes back to the verdict exactly as it always has, and nothing above or
   // below this line reads differently (ADR-0056).
-  if (base.config?.gates?.fastPathShip !== true) return { next: 'verdict' };
-  return (await fastPathShip(ctx, base, out)) ? { next: 'ship' } : { next: 'verdict' };
+  const decision =
+    base.config?.gates?.fastPathShip === true && certified
+      ? await fastPathShip(ctx, base, out)
+      : offPath(runEvents(ctx), base);
+  ctx.store.append('pre-verdict-update', {
+    actor: ACTOR,
+    pass,
+    ran: true,
+    mainSha: out.mainSha,
+    fromSha: out.fromSha,
+    toSha: out.toSha,
+    ...(decision.code && { code: { answer: decision.code.answer, files: decision.code.files ?? [] } }),
+    ...(decision.records && {
+      records: { answer: decision.records.answer, files: decision.records.files ?? [] },
+    }),
+    ...(!certified && uncertified),
+  });
+  // The code answer routes first where both were redone. The reconcile stage
+  // stands behind the verdict in every lane graph, and it reads the re-run off
+  // this stamp, so one route carries both journeys in their own order.
+  if (decision.code?.answer === 'rejudge') return { next: 'verdict' };
+  if (decision.records?.answer === 'rerun') return { next: RECONCILE_STAGE, rerun: true };
+  return { next: 'ship' };
 }
 
 /**
- * The clean-rebase fast path over one moved base: the decision, the stamp,
- * and nothing else. Returns true when the run may keep the certification it
- * already earned and go straight to the request.
+ * The two answers where the fast path never ran: the project turned it off, or
+ * the lane holds a certification it cannot show. Every certification the lane
+ * holds is redone, which is what the run did before either question existed.
+ */
+function offPath(events, base) {
+  const trees = certifiedTrees(events, base);
+  return {
+    taken: false,
+    code: trees.code ? { answer: 'rejudge', files: [] } : null,
+    records: trees.records ? { answer: 'rerun', files: [] } : null,
+  };
+}
+
+/**
+ * The clean-rebase fast path over one moved base: the two questions, the stamp,
+ * and nothing else. It returns the decision, whose `code` and `records` answers
+ * say which certification the run may keep and which it must earn again.
  *
  * Every ending of the check that is not a clean yes is a no, including the
  * ones the check itself caused. A throw inside it is stamped as the closed
- * internal-error refusal and the run takes the re-verdict it would have taken
- * anyway: this path can remove work and can never block a ship.
+ * internal-error refusal and the run takes the work it would have taken anyway:
+ * this path can remove work and can never block a ship.
  */
 async function fastPathShip(ctx, base, out) {
   const events = runEvents(ctx);
   const pass = currentPass(events);
   let decision;
   try {
-    decision = await fastPathDecision(base, events, out);
+    decision = await fastPathDecision(base, events, out, {
+      certification: certifiedTrees(events, base),
+      // The reconciliation's own ground: the run's records and the records they
+      // name, computed at the merge (ADR-0075).
+      records: {
+        neighbourhood: recordNeighbourhood(base, events),
+        recordPaths: base.recordPaths ?? [],
+      },
+    });
   } catch (error) {
     decision = {
       taken: false,
       refusal: 'internal-error',
       detail: gist(String(error?.message ?? error)),
+      ...offPath(events, base),
     };
   }
   ctx.store.append('fast-path-ship', {
@@ -512,7 +637,26 @@ async function fastPathShip(ctx, base, out) {
     toSha: out.toSha,
     ...decision,
   });
-  return decision.taken === true;
+  return decision;
+}
+
+/**
+ * The reconciliation's ground: this run's own records and the records they name,
+ * by path. A record outside it is a record no claim of this run rests on, so the
+ * default branch may move it and the reconciliation still stands.
+ */
+function recordNeighbourhood(base, events) {
+  const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written');
+  const own = [
+    ...new Set([...(written?.rewritten ?? []), ...(recordsCommitted(events)?.paths ?? [])]),
+  ];
+  const out = new Set(own);
+  for (const record of own) {
+    for (const near of recordNeighbours(base.worktree, record, base.recordPaths ?? []).neighbours) {
+      out.add(near);
+    }
+  }
+  return [...out];
 }
 
 /**
@@ -576,8 +720,14 @@ function shipHandler({ forgeFor, pollMs }) {
         lastRender.verdict === 'red' &&
         !sweepSkippedAfter(events, lastRender.seq)
       ) {
-        return { next: 'verdict' };
+        // The records lane holds no verdict stage: what it answers a red with is
+        // the reconcile stage's corrective round (ADR-0075).
+        return { next: certifyingStage(base) };
       }
+      // The stage's own red, from a CI check on a record layer. It resumes the
+      // same way: the render is the stage's and the stage answers it.
+      const lastRecordRender = lastRendered(events);
+      if (lastRecordRender?.verdict === 'red') return { next: RECONCILE_STAGE };
       if (findLast(events, 'merged')) return { next: 'close-out' };
       // A fresh pass interrupted between its stamp and its dev seat resumes
       // here too; finish it before touching the forge.
@@ -1335,6 +1485,12 @@ async function handleRed(ctx, base, opened, sha, redNow) {
 async function ciTriage(ctx, base, opened, sha, redChecks, waited = null) {
   const notDone = await runsNotDone(base, redChecks);
   if (notDone.length > 0) return stampWait(ctx, opened, sha, notDone, redChecks);
+  // The records lane has no dev seat, so no triage of it can end in a repair.
+  // A red that is a record layer and nothing else is the reconcile stage's, and
+  // every other red is a person's: the lane cannot answer a code check at all,
+  // and a triage that rendered one would route the run to a stage the lane does
+  // not hold (ADR-0075).
+  if (base.mode === 'records') return recordsLaneCiRed(ctx, base, opened, sha, redChecks);
   const events = runEvents(ctx);
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   const cycle = renders.length + 1;
@@ -1412,6 +1568,46 @@ async function ciTriage(ctx, base, opened, sha, redChecks, waited = null) {
   return { next: 'verdict' };
 }
 
+/**
+ * The records lane's answer to a red pull-request check.
+ *
+ * Every failed check that is a record layer routes to the reconcile stage: the
+ * layer judges the record diff, the stage owns the seat that answers it, and the
+ * corrective round is the repair. One failed check that is not a record layer is
+ * a code check the lane has no seat for, so it parks with the names.
+ */
+export function recordsLaneCiRed(ctx, base, opened, sha, redChecks) {
+  const events = runEvents(ctx);
+  const names = redChecks.map((r) => r.name);
+  const layers = new Set(base.recordLayers ?? []);
+  const foreign = names.filter((name) => !layers.has(name));
+  if (foreign.length === 0 && names.length > 0) {
+    // A red record layer is a red render with the layer named in `open`, whether
+    // the harness ran it or CI did. The stage answers its own red, and the
+    // corrective round is the repair (ADR-0075).
+    const last = lastRendered(events);
+    ctx.store.append('reconcile-rendered', {
+      actor: ACTOR,
+      cycle: nextCycle(events),
+      sha,
+      source: 'ci',
+      verdict: 'red',
+      open: names,
+      records: last?.records ?? [],
+      layers: names.map((layer) => ({ layer, status: 'red' })),
+      gist: gist(`the record layers are red in CI: ${names.join(', ')}`),
+    });
+    return { next: RECONCILE_STAGE };
+  }
+  return parkDirective('ci-red', {
+    ...GATE_FORMS,
+    question:
+      `PR #${opened.pr} is red on ${foreign.join(', ')}. This run writes decision records ` +
+      'and holds no seat that may repair code. Repair the check, then answer.',
+    detail: { pr: opened.pr, sha, checks: names },
+  });
+}
+
 // -- green but no merge ------------------------------------------------------
 
 async function greenNoMerge(ctx, base, opened, sha) {
@@ -1471,8 +1667,9 @@ async function stampMerged(ctx, base, opened, st) {
     ...(redChecks.length > 0 && { redChecks }),
     // The decision records rode this request. It is stamped where the default
     // branch moves, because the reading this mechanism is measured by is the
-    // number of moves one shipped story costs (ADR-0026).
-    ...(reconcileCommit(runEvents(ctx)) && { reconciled: true }),
+    // number of moves one shipped story costs (ADR-0026). The stage's own
+    // render is what says so: the verdict certifies no record commit (ADR-0075).
+    ...(reconcileCertification(runEvents(ctx)) && { reconciled: true }),
     // And the record findings that rode with them. The rewrite is a correction
     // of what the judge found owed, so it ships with less drift than the
     // records it replaced; these ids are what it did not close, and the close
@@ -1552,8 +1749,14 @@ async function mergeRound(
   { fromSha, mainSha, conflicts },
   { push: doPush = true, stamp = true } = {},
 ) {
-  const testConflicts = conflicts.filter((f) => underAny(f, base.testPaths));
-  const codeConflicts = conflicts.filter((f) => !underAny(f, base.testPaths));
+  // Three arms, and the third is the record tree's. A conflict on a record file
+  // is the record writer's work: the dev seat may not touch a record in any
+  // lane, so a route that sent this one there would leave the markers in the
+  // file and stall the merge (ADR-0074).
+  const recordConflicts = conflicts.filter((f) => recordPathIncludes(f, base.recordPaths));
+  const rest = conflicts.filter((f) => !recordConflicts.includes(f));
+  const testConflicts = rest.filter((f) => underAny(f, base.testPaths));
+  const codeConflicts = rest.filter((f) => !underAny(f, base.testPaths));
   const brief = await incomingBrief(base, mainSha);
   let cause = null;
   if (codeConflicts.length > 0) {
@@ -1566,14 +1769,20 @@ async function mergeRound(
       cwd: base.worktree,
       env: base.env,
       constitution: base.constitution,
-      ...(base.storyLane && {
-        denyTools: testEditDenyRules(base.testPaths, {
-          except: base.frozenExclusions,
-          worktree: base.worktree,
-        }),
+      // Both lanes, and both lists. The frozen suite and the record tree are
+      // frozen for this seat wherever it runs (ADR-0074).
+      denyTools: editDenyRules({
+        ...(base.storyLane && { testPaths: base.testPaths }),
+        recordPaths: base.recordPaths,
+        except: base.frozenExclusions,
+        worktree: base.worktree,
       }),
     });
     if (!result.ok) cause = 'dev seat failed';
+  }
+  if (!cause && recordConflicts.length > 0) {
+    const result = await recordConflictSeat(ctx, base, recordConflicts, brief);
+    if (!result.ok) cause = 'record write seat failed';
   }
   if (!cause && testConflicts.length > 0) {
     // Conflict hunks in test files are the suite seat's work — the test-edit
@@ -1639,10 +1848,46 @@ async function mergeRound(
   return { fromSha, toSha: sha, mainSha };
 }
 
+/**
+ * The record conflict arm: one `reconcile-write` seat over the conflicted record
+ * files, with the incoming brief and no dev seat.
+ *
+ * The seat resolves the markers and nothing else. It writes no report the stage
+ * reads, because this is a merge and not a reconciliation: the round's own
+ * marker check is what says the resolution stands, and the reconcile stage
+ * judges the merged tree behind it (ADR-0075).
+ */
+function recordConflictSeat(ctx, base, conflicts, brief) {
+  const n = invocationCount(runEvents(ctx), WRITE_SEAT) + 1;
+  return ctx.runSeat({
+    seat: `${WRITE_SEAT}:${n}`,
+    roleBlock: recordConflictRole(base, conflicts, brief),
+    reportPath: runReportPath(ctx.paths, ctx.runId, `${WRITE_SEAT}-merge-${n}`),
+    schema: DEV_SCHEMA,
+    cwd: base.worktree,
+    env: base.env,
+    constitution: base.constitution,
+    styleFiles: base.styleFiles,
+  });
+}
+
 // A failed merge round is a stall: the run's one fresh pass is born on
 // updated main, where the conflict dissolves. A second stall parks.
 async function mergeStall(ctx, base, failedRound) {
   const events = runEvents(ctx);
+  // The records lane implements nothing, so a fresh pass there has no seat to
+  // dispatch and no code to rebuild. Its merge conflict is a stage precondition
+  // a person settles, and the answer resumes the stage (ADR-0075).
+  if (base.mode === 'records') {
+    return blocked(
+      ctx,
+      'merge-conflict',
+      `The merge round could not resolve the conflicts with ${base.defaultBranch} ` +
+        `(${failedRound.cause}). Conflicted files:\n` +
+        failedRound.conflicts.map((f) => `- ${f}`).join('\n') +
+        '\nResolve them on the run branch, then answer "retry".',
+    );
+  }
   let stall = [...events]
     .reverse()
     .find((e) => e.event === 'stall' && e.reason === 'merge-conflict' && e.seq > failedRound.seq);
@@ -1703,6 +1948,11 @@ function freshBase(base, resetSha) {
   return {
     worktree: base.worktree,
     testPaths: base.testPaths,
+    // The record tree rides the carry beside the frozen suite. A merge-born pass
+    // resets to the updated default branch, which never held this run's own
+    // records, so without it the pass deletes the records the run was born with
+    // and the stage that writes them is behind the freeze (ADR-0074).
+    recordPaths: base.recordPaths,
     // The freeze's exclusions travel with the test paths: a merge-born fresh
     // pass restores the same suite every other pass restores.
     frozenExclusions: base.frozenExclusions,
@@ -1739,8 +1989,10 @@ function closeOutHandler({ forgeFor, pollMs, enqueueRepair }) {
     // The close judges no reconciliation: the judgment ran before the ship, and
     // the records it owed rode this merge or they did not. What is left here is
     // the ticket for the ones that did not, which names the merge commit and so
-    // could not be written before it existed (ADR-0026).
-    if (base.storyLane) reconcileClose(ctx, base, merged);
+    // could not be written before it existed (ADR-0026). Every lane owes it: the
+    // reconcile stage runs in all three, so all three can leave records owed
+    // (ADR-0075).
+    reconcileClose(ctx, base, merged);
     // Both lanes: the count that says a record finding shipped as advice.
     recordFindingsShipped(ctx, base, merged);
     if (base.storyLane && !runEvents(ctx).some((e) => e.event === 'learning-lesson')) {
@@ -2391,265 +2643,7 @@ function noteWritten(worktree, note) {
   );
 }
 
-// -- the reconciliation round (ADR-0026) -------------------------------------
-
-const RECONCILE_JUDGE_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    owed: { type: 'boolean' },
-    records: { type: 'array', items: { type: 'string' } },
-    reason: { type: 'string' },
-  },
-  required: ['owed', 'records', 'reason'],
-};
-
-/**
- * The answer that ships the certified tree and leaves the records owed. It is
- * offered at the write seat's failure park alone, and it takes the operator's
- * reason, because it ships work a check did not cover (ADR-0062). The word
- * says what happens rather than what stops: an option opening with "abandon"
- * reads at a console like the option that closes the run.
- */
-export const SHIP_WITHOUT_RECORDS = 'ship-without-records';
-
-/**
- * What the reconciliation round owes next, from the run ledger alone.
- *
- * This is the whole of the round's restart safety. The update stage re-enters
- * from the top on every daemon restart, so the next step is derived here and
- * never remembered, and committed work is never repeated.
- *
- * - `judge`: nothing has judged this tree.
- * - `done`: nothing is owed (not owed, or a judgment nobody could make), the
- *   fallback is spent, the seat found nothing to rewrite, or a verdict has
- *   already certified the record commit. The run may queue for the token.
- * - `write`: the records are owed and no seat has written them.
- * - `certify`: the records are committed and no green verdict covers that
- *   commit. A red one is answered inside the verdict stage, by a corrective
- *   rewrite under its own cap (ADR-0007), so it never comes back here unsettled.
- *
- * A `fresh-pass` after any of the three stamps discards the tree they were
- * about, so the round is owed again on the tree that pass built.
- * @param {object[]} events the run's ledger, in order
- */
-export function reconcileStep(events) {
-  const judged = sinceFreshPass(events, (e) => e.event === 'reconciliation-judged');
-  if (!judged) return 'judge';
-  if (judged.ok !== true || judged.owed !== true) return 'done';
-  const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written');
-  if (written && written.ok !== true) return 'done';
-  const commit = reconcileCommit(events);
-  if (written && !commit) return 'done';
-  // The record commit ships only where a verdict has certified it, and the
-  // render over that commit is what says so. A red one never reaches this
-  // stage: the ladder answers it inside the verdict, with a corrective rewrite
-  // by the seat that wrote the record (ADR-0007).
-  if (commit) return renderOverReconcile(events)?.verdict === 'green' ? 'done' : 'certify';
-  return 'write';
-}
-
-/**
- * The reconciliation round, between the final green verdict and the ship
- * token. It returns a directive where the run must leave this stage, and null
- * where the round is done and the run may queue for the token.
- */
-async function reconcileRound(ctx, base) {
-  const events = runEvents(ctx);
-  switch (reconcileStep(events)) {
-    case 'judge':
-      return reconcileJudge(ctx, base);
-    case 'write':
-      return reconcileWrite(
-        ctx,
-        base,
-        sinceFreshPass(events, (e) => e.event === 'reconciliation-judged'),
-      );
-    case 'certify':
-      return { next: 'verdict' };
-    default:
-      return null;
-  }
-}
-
-/**
- * A fresh-context seat judges whether this run's own diff implements or
- * contradicts any decision record. It reads the run branch against the default
- * branch, which is the work this run is about to merge, and it judges only.
- *
- * Both verdicts stamp with the reason, and a failed judgment stamps ok:false
- * with the cause: an unjudged ship is a recorded miss, never a silent skip.
- * Nothing here blocks the ship.
- */
-async function reconcileJudge(ctx, base) {
-  try {
-    // The default-branch ref the diff is taken against. Without the fetch it
-    // is the branch as it stood when this run last met it, and the merge base
-    // behind that ref counts work this run merged in as its own.
-    await fetchClone(cloneDir(ctx.paths, ctx.project));
-  } catch (error) {
-    ctx.store.append('reconciliation-judged', {
-      actor: ACTOR,
-      ok: false,
-      cause: `fetch: ${error.message}`,
-    });
-    return null;
-  }
-  const result = await ctx.runSeat({
-    seat: 'reconcile-judge',
-    roleBlock: judgeRole(base),
-    reportPath: runReportPath(ctx.paths, ctx.runId, 'reconcile-judge'),
-    schema: RECONCILE_JUDGE_SCHEMA,
-    cwd: base.worktree,
-    env: base.env,
-  });
-  if (!result.ok) {
-    ctx.store.append('reconciliation-judged', { actor: ACTOR, ok: false, cause: 'seat-failure' });
-    return null;
-  }
-  const { owed, records, reason } = result.report;
-  if (!owed) {
-    ctx.store.append('reconciliation-judged', { actor: ACTOR, ok: true, owed: false, reason });
-    return null;
-  }
-  const judged = ctx.store.append('reconciliation-judged', {
-    actor: ACTOR,
-    ok: true,
-    owed: true,
-    records,
-    reason,
-    gist: gist(`reconciliation owed: ${records.join(', ')}`),
-  });
-  return reconcileWrite(ctx, base, judged);
-}
-
-/**
- * A fresh seat rewrites the judged records inside the run worktree, and the
- * run commits them onto its own branch. The seat implements nothing and reads
- * the committed diff, so the rule the intake was built on holds: the context
- * that implemented the work does not reconcile the records against it.
- *
- * The checks are the containment. No deny rule can say "everything except
- * these directories" without walking the repository, so the boundary is a
- * check over what the seat left in the tree, in the shape the card sweep
- * already uses, and the commit is behind it.
- */
-async function reconcileWrite(ctx, base, judged) {
-  const asked = lastRecoveryPark(runEvents(ctx));
-  if (
-    asked?.answer?.option === SHIP_WITHOUT_RECORDS &&
-    asked.park.type === 'seat-failure' &&
-    asked.park.detail?.seat === WRITE_SEAT
-  ) {
-    return reconcileFallback(ctx, base, 'operator');
-  }
-  // A seat that died mid-edit leaves whatever it had written, and the next
-  // dispatch must be the same dispatch as the first (ADR-0070).
-  await resetHard(base.worktree, await headSha(base.worktree));
-  const records = judged.records ?? [];
-  const outcome = await seatWithChecks(ctx, {
-    seat: WRITE_SEAT,
-    schema: RECONCILE_WRITE_SCHEMA,
-    cwd: base.worktree,
-    env: base.env,
-    constitution: base.constitution,
-    buildRole: (brief) => writeRole(base, judged, brief),
-    checks: (report) => writeChecks(base, records, report),
-    park: {
-      options: [SHIP_WITHOUT_RECORDS],
-      reasoned: [SHIP_WITHOUT_RECORDS],
-      note:
-        `Answer "${SHIP_WITHOUT_RECORDS}" with your reason to ship the code this run ` +
-        'already certified: the records stay owed, the close writes the ticket, and the ' +
-        'sweep launches the rewrite as a repair run.',
-    },
-  });
-  if (outcome.fail) {
-    // A work-product defect past its corrective round is the seat's answer,
-    // and it is not a question for a person: the code is certified, and the
-    // ticket is the route the harness took for every story before this round
-    // existed. A seat that never delivered a report at all is the other shape,
-    // and that one parks.
-    const failure = seatFailureAfter(runEvents(ctx), WRITE_SEAT, judged.seq);
-    if (Array.isArray(failure?.defects)) {
-      return reconcileFallback(ctx, base, 'work-product-defect');
-    }
-    return outcome.fail;
-  }
-  const report = outcome.report;
-  const baseSha = await headSha(base.worktree);
-  const sha = await commitAll(base.worktree, `reconcile: ${ctx.runId}`);
-  ctx.store.append('reconciliation-written', {
-    actor: ACTOR,
-    ok: true,
-    rewritten: report.rewritten,
-    unchanged: report.unchanged.map((u) => u.record),
-    // What the seat says it found, per judged record, with the sentence behind
-    // each word. The checks above proved every `named` statement is in the file;
-    // whether a divergence exists that nobody named is the review's question,
-    // and this declaration is what the review and the corrective round read.
-    divergences: report.divergences,
-    ...(sha !== baseSha && { sha }),
-    gist: gist(`records rewritten: ${report.rewritten.join(', ')}`),
-  });
-  // A seat that changed nothing leaves the tree the verdict already certified.
-  if (sha === baseSha) return null;
-  ctx.store.append('implementation-committed', {
-    actor: ACTOR,
-    pass: currentPass(runEvents(ctx)),
-    phase: 'reconcile',
-    baseSha,
-    sha,
-  });
-  return { next: 'verdict' };
-}
-
-/**
- * The route a write nobody could make takes: the tree goes back to the sha the
- * last green verdict certified, and the run ships the code it earned. The
- * reconciliation stays owed, the close writes the ticket, and the repair-lane
- * rewrite behind it is the path the intake always had.
- */
-async function reconcileFallback(ctx, base, cause) {
-  const events = runEvents(ctx);
-  const certified = [...events]
-    .reverse()
-    .find((e) => e.event === 'verdict-rendered' && e.verdict === 'green');
-  try {
-    if (certified?.sha) await resetHard(base.worktree, certified.sha);
-  } catch (error) {
-    // The reset is what makes this ship the ship the verdict certified. A tree
-    // that will not move is a stage precondition the run cannot settle itself.
-    return blocked(
-      ctx,
-      'reconcile-reset',
-      `The worktree could not be returned to the certified tree ${certified?.sha}: ` +
-        `${error.message}\nRepair the worktree, then answer.`,
-    );
-  }
-  ctx.store.append('reconciliation-written', {
-    actor: ACTOR,
-    ok: false,
-    cause,
-    ...(certified?.sha && { reset: certified.sha }),
-  });
-  return null;
-}
-
-function judgeRole(base) {
-  return [
-    'Judge whether the diff of this run implements or contradicts any decision',
-    'record (ADR). You judge only; change nothing.',
-    `The diff is this branch against ${base.defaultBranch}. Read it with:`,
-    `git diff ${base.defaultBranch}...HEAD`,
-    'Locate the decision-record tree (commonly docs/adr/). No such tree means',
-    'owed=false with that as the reason.',
-    'owed=true when the diff implements a recorded decision, contradicts one,',
-    'or deviates from one. Implementation counts even when the diff never',
-    'touches the record files themselves. List every affected record path in',
-    'records, and state the reason in one or two sentences.',
-  ].join('\n');
-}
+// -- the reconciliation ticket (ADR-0075) ------------------------------------
 
 /**
  * The reconciliation ticket: the fallback route, written at the close where
@@ -2736,11 +2730,11 @@ function reconcileClose(ctx, base, merged) {
   // The records that rode this merge with a confirmed finding still open. The
   // rewrite ships, because the judge found the old records owed and discarding
   // it would ship those; the ticket carries the short list of what is still
-  // wrong, and the run behind it is small (ADR-0026).
+  // wrong, and the run behind it is small (ADR-0075).
   const residual = residualDetail(events, written);
-  // The records rode this merge whole: the commit is in the branch that merged
-  // and nothing stands open, or the seat read them and found nothing to change.
-  if (residual.length === 0 && (reconcileCommit(events) || written?.ok === true)) return;
+  // The records rode this merge whole: the stage rendered them green, or the
+  // seat read them and found nothing to change.
+  if (residual.length === 0 && written?.ok === true) return;
   const records = judged.records ?? [];
   try {
     const ticket = reconcileTicketPath(ctx.paths, ctx.runId);
@@ -2810,7 +2804,9 @@ function recordFindingsShipped(ctx, base, merged) {
       e.event === 'finding' &&
       e.advisory === true &&
       typeof e.file === 'string' &&
-      underAny(e.file, paths),
+      // The record tree's own membership test: an `!` entry names a file that
+      // is not a record, and a plain prefix match cannot see one (ADR-0073).
+      recordPathIncludes(e.file, paths),
   );
   if (shipped.length === 0) return;
   gateIntegrity(ctx, {
@@ -2957,6 +2953,25 @@ function conflictRole(base, conflicts, brief) {
   ].join('\n');
 }
 
+/**
+ * The record writer's conflict brief. It states the one rule the merge cannot
+ * break: an accepted record is never edited, so a conflict on one is resolved by
+ * keeping both sides' facts and never by dropping either (ADR-0073).
+ */
+function recordConflictRole(base, conflicts, brief) {
+  return [
+    `A merge of ${base.defaultBranch} into the run branch left conflicts in decision records.`,
+    'Resolve the conflict markers in these files; keep the facts of both sides:',
+    ...conflicts.map((f) => `- ${f}`),
+    `The spec of this run: ${base.specRef}`,
+    'An accepted record is never edited away. Where the two sides decide one unbuilt part',
+    'differently, the newer decision stands and the older record keeps its own body.',
+    'Change conflicted record files only. Do not edit source, tests or config.',
+    'Do not commit; the orchestrator concludes the merge.',
+    ...briefLines(brief),
+  ].join('\n');
+}
+
 function testConflictRole(base, conflicts, brief) {
   return [
     `A merge of ${base.defaultBranch} into the run branch left conflicts in test files.`,
@@ -3076,7 +3091,11 @@ async function shipBase(ctx, forgeFor) {
         ? ticket
         : join(worktree, ticket)
       : null;
-  return {
+  const rangeFrom = passOpeningSha(
+    runEvents(ctx),
+    ctx.payload.baseSha ?? recordsCommitted(runEvents(ctx))?.sha ?? null,
+  );
+  return recordBase({
     forge,
     config,
     worktree,
@@ -3087,19 +3106,23 @@ async function shipBase(ctx, forgeFor) {
     // ground the certification rests on (ADR-0056).
     configPath: ctx.payload.configPath ?? DEFAULT_PROJECT_CONFIG_PATH,
     testPaths: config.repo.testPaths ?? [],
-    // The decision-record tree, for the close's own count. Nothing on this
-    // stage narrows or blocks on it (ADR-0026).
-    recordPaths: config.repo.recordPaths ?? [],
+    // The Tier-1 layers a changed record path is attributed to. The records
+    // lane's CI route reads them to tell a record red from a code red
+    // (ADR-0075).
+    recordLayers: config.gates?.recordLayers ?? [],
     frozenExclusions: cardPath ? freezeExclusions(ctx.paths, ctx.runId) : [],
-    env: runEnv(ctx, config),
+    rangeFrom,
+    env: runEnv(ctx, config, { rangeFrom }),
     constitution: readConstitution(worktree, config),
     cardPath,
     storyKey,
     cardTitle,
     specRef,
     storyLane: cardPath !== null,
-    mode: cardPath !== null ? 'story' : 'repair',
-  };
+    // The records lane carries a ticket and no card, so the card cannot name it.
+    // The lane does (ADR-0074).
+    mode: cardPath !== null ? 'story' : ctx.lane === 'records' ? 'records' : 'repair',
+  });
 }
 
 function normalize(run) {

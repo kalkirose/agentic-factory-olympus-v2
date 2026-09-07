@@ -14,7 +14,7 @@ import {
   workspaceRoot,
 } from '../src/isolation/worktrees.mjs';
 import { changedFiles, commitAll, filesAt } from '../src/isolation/tree.mjs';
-import { runEnv } from '../src/lanes/shared.mjs';
+import { BASE_SHA_ENV, runEnv } from '../src/lanes/shared.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import {
   tempDir,
@@ -189,7 +189,7 @@ test('a console launch carries the ticket into the repair payload', async (t) =>
         project: 'alpha',
         ticket: 'tickets/t1.md',
       }),
-    /ticket applies to the repair lane only \(lane: story\)/,
+    /ticket applies to the repair and records lanes only \(lane: story\)/,
   );
   assert.equal(payloads.length, 1);
 });
@@ -317,6 +317,20 @@ test('a project may refuse the cache, and then nothing offers one', async (t) =>
   assert.ok(!existsSync(runCacheDir(worktree)));
   const env = runEnv({ runId: 'r', payload: { worktree } }, projectConfig);
   assert.equal(env[RUN_CACHE_ENV], undefined);
+});
+
+// A gate command that judges a diff needs the two ends of it. Inside a run
+// neither end is a branch a CI variable names, so the harness exports the
+// pass's opening sha and the command reads it there.
+test('the pass opening sha rides the environment where the base names one', () => {
+  const ctx = { runId: 'r', payload: { worktree: null } };
+  const config = { runCache: false };
+  // No range: the environment is what it was, which is nothing at all here.
+  assert.equal(runEnv(ctx, config), undefined);
+  assert.equal(runEnv(ctx, config, {}), undefined);
+  assert.equal(runEnv(ctx, config, { rangeFrom: '' }), undefined);
+  assert.deepEqual(runEnv(ctx, config, { rangeFrom: 'abc1234' }), { [BASE_SHA_ENV]: 'abc1234' });
+  assert.equal(BASE_SHA_ENV, 'OLYMPUS_BASE_SHA');
 });
 
 test('the launch stamp carries what every step of the setup cost', async (t) => {

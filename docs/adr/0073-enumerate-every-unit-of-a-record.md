@@ -1,0 +1,80 @@
+# ADR-0073: Enumerate every unit of a record and answer it by id
+
+Status: accepted (2026-09-07)
+
+## Context
+
+A decision record is a list of claims, and a confirmed finding on one blocks the
+ship. Nothing stated what a claim is. No seat showed which claims it read, so
+each seat answered the ones it reached. One cycle of a live reconciliation read a
+record whole and passed over a false sentence. The next cycle graded it HIGH.
+
+Two failures ride with it. A seat that edits an accepted record leaves a trail of
+amendments, and the trail hides the current sentence. Two active records can also
+decide one unbuilt part two ways, because the tree settles nothing about it.
+
+## Decision
+
+The harness enumerates the units of a record, and every record seat answers every
+unit by id.
+
+`recordUnits` in `src/lanes/units.mjs` splits a record into ordered units. The
+title is `U0`. Then one unit per head-block line, paragraph, list item at any
+depth, table row and top-level fenced block. A list item is one unit whatever it
+holds. A heading, a blank line, a table header, a table rule and an HTML comment
+are structure. `bin/olympus-units.mjs` prints the same list, so the seat and the
+harness read one list. Ids are positional, so `matchUnits` carries a
+finding across a write by head text and then by line.
+
+Each report entry names the record, the unit id, a kind, a verdict and the
+evidence. The kinds are `title`, `status`, `claim`, `open` and `rationale`. The
+verdicts are `holds`, `fails` and `not-built`. `unitChecks` in
+`src/lanes/records.mjs` refuses eight numbered defects: a missing entry; an entry
+for no unit of the file; a doubled entry; a claim with no path in the worktree; a
+rationale entry whose text reads as a claim; a writer's `fails`; a review's
+`fails` with no finding; and a finding on a unit the review reported `holds`. A
+refusal buys the seat its one corrective attempt.
+
+`repo.recordLifecycle` is `rewrite` or `supersede`. Under `supersede` no seat
+edits an accepted record. A change is a new record with a `Supersedes` line. The
+old record keeps its body and takes a closed status line. `supersedeChecks`
+computes the accepted set at the merge base of the run branch and the default
+branch, per write.
+
+`RECORD_CRITERIA.consistent` in `src/lanes/lenses.mjs` is the seventh criterion.
+An open part of a record does not contradict an open part of an active record
+beside it. `recordNeighbours` caps that neighbourhood at twelve, and the brief
+states what the cap dropped.
+
+## Consequences
+
+A report grows with the record, one entry per unit. The writer miss rate catches
+a seat that answers `holds` without reading; no check does. A one-word correction
+to an accepted record costs a new record, so the tree grows.
+
+This record is superseded when the unit check refuses a correct report on more
+than one reconciliation in five. That reading says the enumerator and the seats
+disagree about what a unit is.
+
+## Rejected options
+
+- Coverage as a count from the seat: nobody can check a count.
+- One larger review seat at higher effort: it sampled four records.
+- A second review seat as a coverage adversary: it doubles the sample.
+- Extraction by sentence: a split over paths and code spans is not deterministic.
+- An amendment trail: the trail is the defect.
+
+## Fallback path
+
+The alternative is the criteria alone: no unit list, no per-unit answer. Nothing
+calls `unitChecks`, and every brief drops its unit duty. The switch trigger is
+the reversal trigger above. The reversal cost is low.
+
+## References
+
+- ADR-0026, ADR-0038, ADR-0074, ADR-0075
+- `src/lanes/units.mjs`
+- `src/lanes/records.mjs`
+- `src/lanes/lenses.mjs`
+- `src/config/project.mjs`
+- `bin/olympus-units.mjs`

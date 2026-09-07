@@ -19,6 +19,7 @@ import {
   tempDir,
   removeDir,
   waitFor,
+  waitRunEvents,
   gitSync,
   writeTree,
   commitTree,
@@ -53,6 +54,34 @@ test('f doubles', async () => {
 `;
 
 const IMPLEMENTATION = 'export const f = (x) => 2 * x;\n';
+
+// The record the first run's birth seat writes, and the unit answers the
+// harness holds it to. The evidence names a file the worktree holds: the code
+// does not exist yet, and a claim's path has to resolve (ADR-0073).
+const RECORD_PATH = 'docs/adr/adr-0001-double-the-input.md';
+const RECORD_TEXT = [
+  '# ADR-0001: Double the input',
+  '',
+  '**Status:** Accepted',
+  '',
+  '## Decision',
+  '',
+  'The module src/base.mjs holds the base value the feature doubles.',
+  '',
+  '## Consequences',
+  '',
+  'The suite asserts the doubling on one number.',
+  '',
+].join('\n');
+
+function recordUnitAnswers() {
+  return [
+    { record: RECORD_PATH, id: 'U0', kind: 'title', verdict: 'holds', evidence: 'the title' },
+    { record: RECORD_PATH, id: 'U1', kind: 'status', verdict: 'holds', evidence: 'accepted' },
+    { record: RECORD_PATH, id: 'U2', kind: 'claim', verdict: 'holds', evidence: 'src/base.mjs' },
+    { record: RECORD_PATH, id: 'U3', kind: 'claim', verdict: 'holds', evidence: 'src/base.mjs' },
+  ];
+}
 
 // -- fixture machinery -------------------------------------------------------
 
@@ -108,6 +137,16 @@ function seatFixture(seats) {
   return { commandFor, calls };
 }
 
+/** The tracked files of a worktree, by path, with their text. */
+function worktreeFiles(worktree) {
+  const entries = gitSync(['ls-files'], worktree)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((file) => [file, readFileSync(join(worktree, file), 'utf8')]);
+  return Object.fromEntries(entries);
+}
+
 /**
  * A project fixture with the story lane and a recording post-freeze stage.
  * The stage closes the run failed, which is exactly the shape a resume
@@ -138,9 +177,14 @@ function fixture(t, { originFiles = {} } = {}) {
         stages: ['build'],
         handlers: {
           build: async (ctx) => {
+            const worktree = ctx.payload.worktree;
+            // The tree the stage was handed, read where it still stands. The
+            // close releases the workspace and deletes the worktree, so a reader
+            // that waits for the close reads a directory that is gone.
             entered.push({
               runId: ctx.runId,
-              head: gitSync(['rev-parse', 'HEAD'], ctx.payload.worktree).trim(),
+              head: gitSync(['rev-parse', 'HEAD'], worktree).trim(),
+              files: worktreeFiles(worktree),
             });
             return { close: { state: 'failed', reason: 'fixture-stop' } };
           },
@@ -166,10 +210,11 @@ async function waitClosed(paths, runId) {
 }
 
 function waitParked(paths, runId, type) {
-  return waitFor(
-    () =>
-      readEvents(runLedgerPath(paths, runId)).find((e) => e.event === 'park' && e.type === type),
-    { label: `park ${type}`, attempts: 400, intervalMs: 100 },
+  return waitRunEvents(
+    paths,
+    runId,
+    (events) => events.find((e) => e.event === 'park' && e.type === type),
+    { label: `park ${type}`, attempts: 400 },
   );
 }
 
@@ -279,6 +324,18 @@ test('a resume inherits a real freeze and enters the post-freeze stage seatless'
       report: { outcome: 'spec-born', summary: 'born' },
     }),
     'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
+    // The first run's records stage. This story decides one record, so the
+    // resumed run inherits it and stamps it as its own (ADR-0074).
+    'record-author': () => ({
+      files: { [RECORD_PATH]: RECORD_TEXT },
+      report: {
+        rewritten: [RECORD_PATH],
+        unchanged: [],
+        units: recordUnitAnswers(),
+        divergences: [],
+        summary: 'one record born',
+      },
+    }),
     suite: () => ({
       files: { 'tests/feature.test.mjs': SUITE_TEST },
       report: {
@@ -327,6 +384,15 @@ test('a resume inherits a real freeze and enters the post-freeze stage seatless'
   assert.ok(!events.some((e) => e.event === 'seat-spawned'));
   assert.equal(seat.calls.length, priorCalls);
   assert.ok(!events.some((e) => e.event === 'freeze'));
+  // The records the freeze carries are stamped as this run's own, marked
+  // resumed: no pre-freeze seat ran, and a run that stamped nothing would leave
+  // every record it inherited counted as one the judge found late (ADR-0074).
+  const born = events.find((e) => e.event === 'records-committed');
+  assert.deepEqual(born.paths, [RECORD_PATH]);
+  assert.equal(born.decided, true);
+  assert.equal(born.resumed, true);
+  const carriedRecord = fx.entered.find((e) => e.runId === second.runId).files[RECORD_PATH];
+  assert.match(carriedRecord, /# ADR-0001: Double the input/);
   // The inheritance is stamped and names its source.
   const inherited = events.find((e) => e.event === 'freeze-inherited');
   assert.equal(inherited.from, first.runId);

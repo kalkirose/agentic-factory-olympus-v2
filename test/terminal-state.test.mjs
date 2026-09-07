@@ -18,6 +18,7 @@ import {
   tempDir,
   removeDir,
   waitFor,
+  waitRunEvents,
   initOriginRepo,
   projectConfigJson,
   FIXTURE_ACCEPTANCE,
@@ -54,14 +55,20 @@ title: Alpha feature
 Provide f(x) that doubles x in src/feature.mjs.
 `;
 
-// The closed set of terminal routes, now two. A new entry belongs to a
+// The closed set of terminal routes, now three. A new entry belongs to a
 // design-level decision recorded in an ADR, never to a call site that found a
 // new way to give up. Every park of every type offers `abandon`, and that one
 // route closes on the reason the answered park recorded — so no park type
 // carries a close of its own.
+//
+// The third is the records lane at the record cap. That lane holds no code, so
+// there is nothing to ship and no merge commit a ticket could name: the stage
+// tickets the work from the run branch and the run ends. It asks nobody, which
+// is the decision the stall records (ADR-0075).
 const CLOSE_SET = new Set([
   'shipped', // the ship step's close-out
   'failed:<answer>', // the abandon route (lanes/shared.mjs)
+  'failed:reconcile-cap', // the records lane at its record cap (lanes/reconcile.mjs)
 ]);
 
 // -- source scan -------------------------------------------------------------
@@ -248,7 +255,7 @@ function fixture(t, { seats = {}, card = CARD, config = {}, originFiles = {} } =
       },
     }),
   });
-  const seatDefs = seatFixture(seats);
+  const seatDefs = seatFixture({ 'record-author': () => ({ report: NO_RECORD_DECIDED }), ...seats });
   let daemon = new Daemon(home, { waitSleep: NO_WAIT, lanes: lanes() });
   t.after(async () => {
     await daemon.stop();
@@ -281,14 +288,11 @@ function fixture(t, { seats = {}, card = CARD, config = {}, originFiles = {} } =
 }
 
 function waitParked(paths, runId, type, nth = 1) {
-  return waitFor(
-    () => {
-      const parks = readEvents(runLedgerPath(paths, runId)).filter(
-        (e) => e.event === 'park' && e.type === type,
-      );
-      return parks.length >= nth ? parks[nth - 1] : undefined;
-    },
-    { label: `park ${type} #${nth}`, attempts: 400, intervalMs: 100 },
+  return waitRunEvents(
+    paths,
+    runId,
+    (events) => events.filter((e) => e.event === 'park' && e.type === type)[nth - 1],
+    { label: `park ${type} #${nth}`, attempts: 400 },
   );
 }
 
@@ -302,12 +306,11 @@ async function waitClosed(paths, runId) {
 }
 
 function waitStage(paths, runId, stage) {
-  return waitFor(
-    () =>
-      readEvents(runLedgerPath(paths, runId)).find(
-        (e) => e.event === 'stage-entered' && e.stage === stage,
-      ),
-    { label: `stage ${stage}`, attempts: 400, intervalMs: 100 },
+  return waitRunEvents(
+    paths,
+    runId,
+    (events) => events.find((e) => e.event === 'stage-entered' && e.stage === stage),
+    { label: `stage ${stage}`, attempts: 400 },
   );
 }
 
@@ -322,6 +325,17 @@ function chainSeats(suiteBehavior) {
     suite: suiteBehavior,
   };
 }
+
+// The birth seat's report where a story decides no record. The records stage
+// stands between the gate and the suite, and these scenarios are about the
+// terminal states, so every one of them decides nothing (ADR-0074).
+const NO_RECORD_DECIDED = {
+  rewritten: [],
+  unchanged: [],
+  units: [],
+  divergences: [],
+  summary: 'no record decided',
+};
 
 // -- scenarios ---------------------------------------------------------------
 
@@ -482,10 +496,10 @@ test('a spec-lint park replays across a restart, and one retry buys one invocati
   );
   // One answer, one invocation, carrying the lint failures by name.
   fx.answer(runId, { option: 'retry' });
-  await waitFor(
-    () => readEvents(runLedgerPath(fx.paths, runId)).find((e) => e.event === 'spec-born'),
-    { label: 'spec born', attempts: 400, intervalMs: 100 },
-  );
+  await waitRunEvents(fx.paths, runId, (events) => events.find((e) => e.event === 'spec-born'), {
+    label: 'spec born',
+    attempts: 400,
+  });
   assert.equal(specCalls().length, 3);
   assert.match(specCalls()[2].prompt, /Correction brief/);
   assert.match(specCalls()[2].prompt, /touched-paths/);
