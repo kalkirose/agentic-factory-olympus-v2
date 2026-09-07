@@ -136,6 +136,16 @@ function seatFixture(seats) {
   return { commandFor, calls };
 }
 
+/** The tracked files of a worktree, by path, with their text. */
+function worktreeFiles(worktree) {
+  const entries = gitSync(['ls-files'], worktree)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((file) => [file, readFileSync(join(worktree, file), 'utf8')]);
+  return Object.fromEntries(entries);
+}
+
 /**
  * A project fixture with the story lane and a recording post-freeze stage.
  * The stage closes the run failed, which is exactly the shape a resume
@@ -166,10 +176,14 @@ function fixture(t, { originFiles = {} } = {}) {
         stages: ['build'],
         handlers: {
           build: async (ctx) => {
+            const worktree = ctx.payload.worktree;
+            // The tree the stage was handed, read where it still stands. The
+            // close releases the workspace and deletes the worktree, so a reader
+            // that waits for the close reads a directory that is gone.
             entered.push({
               runId: ctx.runId,
-              worktree: ctx.payload.worktree,
-              head: gitSync(['rev-parse', 'HEAD'], ctx.payload.worktree).trim(),
+              head: gitSync(['rev-parse', 'HEAD'], worktree).trim(),
+              files: worktreeFiles(worktree),
             });
             return { close: { state: 'failed', reason: 'fixture-stop' } };
           },
@@ -375,10 +389,7 @@ test('a resume inherits a real freeze and enters the post-freeze stage seatless'
   assert.deepEqual(born.paths, [RECORD_PATH]);
   assert.equal(born.decided, true);
   assert.equal(born.resumed, true);
-  const carriedRecord = readFileSync(
-    join(fx.entered.find((e) => e.runId === second.runId).worktree, RECORD_PATH),
-    'utf8',
-  );
+  const carriedRecord = fx.entered.find((e) => e.runId === second.runId).files[RECORD_PATH];
   assert.match(carriedRecord, /# ADR-0001: Double the input/);
   // The inheritance is stamped and names its source.
   const inherited = events.find((e) => e.event === 'freeze-inherited');
