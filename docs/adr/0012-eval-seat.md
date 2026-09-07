@@ -82,10 +82,12 @@ window and the fast-path escape window, so a shipped repair counts there
 too. The freeze collector stays story-only, because a repair freezes
 nothing.
 
-The lane travels with each ship because the seat judges the two lanes on
+The lane travels with each ship because the seat judges each lane on
 different evidence. A story is judged against its card and its frozen
 suite. A repair is judged against its ticket, and the presence of an
-escape says whether the harness already counted the defect it fixes.
+escape says whether the harness already counted the defect it fixes. A
+records run is judged against its ticket and the records it wrote; it
+carries no escape.
 
 ## Why the boundary is a named ship and not a count
 

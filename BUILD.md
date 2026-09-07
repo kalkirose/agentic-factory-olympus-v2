@@ -694,6 +694,7 @@ never carries a project's specifics.
   reads the archived render shape and the new one as one series. ADR-0073,
   ADR-0074 and ADR-0075 are new; ADR-0006, ADR-0007, ADR-0010, ADR-0017,
   ADR-0022, ADR-0026, ADR-0033, ADR-0034, ADR-0038, ADR-0046, ADR-0056, ADR-0066
-  and ADR-0070 are rewritten around the stage. One gap ships with it:
-  `SHIP_TOKEN_RELEASE_REASONS` does not hold `re-reconcile`, so the update
-  stage's token release for a record re-run throws.
+  and ADR-0070 are rewritten around the stage. A read-only audit against
+  the plan found the finding line, the lane lists, the reconciliation guard,
+  one ship route and the token release reason short of the tree; each is
+  fixed and pinned in the same build.
