@@ -22,6 +22,7 @@ import {
   waitFor,
   initOriginRepo,
   commitTree,
+  gitSync,
   projectConfigJson,
   fakeComposeRunner,
   NO_WAIT,
@@ -257,6 +258,47 @@ test('a launch the daemon refuses is stamped, not only left in a reason file', a
   // The console's own feedback is untouched.
   assert.ok(readdirSync(paths.controlRejected).some((f) => f.endsWith(`${name}.reason.txt`)));
   assert.ok(!readEvents(paths.instanceLedger).some((e) => e.event === 'launch'));
+});
+
+// ADR-0076. A project whose default branch declares no LF rule commits
+// carriage returns. No setting the harness carries can undo that. The door
+// refuses it before a slot, a workspace or a seat is spent.
+test('a project that declares no line-ending rule does not launch', async (t) => {
+  const lanes = {
+    solo: { stages: ['work'], handlers: { work: async () => ({ close: { state: 'shipped' } }) } },
+  };
+  const { origin, paths, daemon } = fixture(t, { lanes, composeRunner: fakeComposeRunner() });
+  await daemon.start();
+
+  // An attributes file that normalises nothing: `text=auto` alone leaves the
+  // working tree to the host's own `core.autocrlf`.
+  commitTree(origin, { '.gitattributes': '* text=auto\n' }, 'drop the lf rule');
+  await assert.rejects(
+    () => daemon.launchRun({ project: 'alpha', lane: 'solo' }),
+    /declares no line-ending rule on main.*holds no line that gives \* the attribute eol=lf/s,
+  );
+
+  // No attributes file at all reads the same way, and says which fact it found.
+  gitSync(['rm', '--quiet', '.gitattributes'], origin);
+  gitSync(['-c', 'commit.gpgsign=false', 'commit', '-m', 'no attributes'], origin);
+  writeControlCommand(paths, {
+    actor: 'operator',
+    command: 'launch',
+    project: 'alpha',
+    lane: 'solo',
+  });
+  const stamped = await waitFor(
+    () => readEvents(paths.instanceLedger).find((e) => e.event === 'launch-rejected'),
+    { label: 'the refusal to be stamped' },
+  );
+  assert.match(stamped.reason, /\.gitattributes is not on main/);
+  assert.match(stamped.reason, /Add the line "\* text=auto eol=lf" to \.gitattributes/);
+  assert.equal(stamped.detail.path, '.gitattributes');
+
+  // Nothing was provisioned by either refusal.
+  assert.ok(!readEvents(paths.instanceLedger).some((e) => e.event === 'launch'));
+  assert.equal(daemon.engine.runs.size, 0);
+  assert.deepEqual(existsSync(paths.worktrees) ? readdirSync(paths.worktrees) : [], []);
 });
 
 // -- the run cache and the setup measurement ---------------------------------

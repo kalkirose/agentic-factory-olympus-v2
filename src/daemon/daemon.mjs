@@ -111,6 +111,9 @@ const FAULT_MAX = 600; // a stamp carries the head of a stack, not the stack
 const CARD_ERRORS_NAMED = 3;
 const CONTROL_READS = 2;
 const CONTROL_REREAD_MS = 50;
+// The one file that tells git what a project's line endings are. The door
+// reads it at the root of the default branch (ADR-0076).
+const GITATTRIBUTES = '.gitattributes';
 // The code this daemon runs from. Nothing else in the process names it: the
 // home, the working directory and the config all belong to the operator, and a
 // pin is a checkout somebody made somewhere else.
@@ -622,6 +625,7 @@ export class Daemon {
         await this.refuseForbiddenTicket(project, entry, payload.ticket);
         await this.refuseWrongLaneTicket(project, entry, lane, payload.ticket);
       }
+      await this.refuseUnnormalisedRepo(project, entry);
       await this.refuseUnprovenCredentials(project, entry);
       const ws = await this.isolation.provision({
         runId,
@@ -889,6 +893,41 @@ export class Daemon {
     if (lane === 'records' && (klass === 'mixed' || klass === 'code')) {
       throw new Error(codeTicketRefusal(ticket, code));
     }
+  }
+
+  /**
+   * A project whose default branch declares no LF rule does not launch
+   * (ADR-0076). The harness writes LF alone, and every seam below the
+   * attribute depends on it. The commit holds the bytes the attributes
+   * normalise a seat's file to, and the working tree holds the commit's own.
+   * A project with no such attribute commits carriage returns, and no setting
+   * the harness carries can undo that.
+   *
+   * The rule is one line of the root `.gitattributes` on the default branch.
+   * That line gives the pattern `*` the attribute `eol=lf`. An unreadable file
+   * is a refusal too: a project with no attributes has no rule.
+   *
+   * The refusal costs a read the door already pays for, and it leaves nothing
+   * behind (ADR-0067, ADR-0068).
+   */
+  async refuseUnnormalisedRepo(project, entry) {
+    const read = await this.readFromDefaultBranch(project, entry, GITATTRIBUTES);
+    if (read.error === undefined && declaresLfRule(read.text)) return;
+    const why =
+      read.error === undefined
+        ? `${GITATTRIBUTES} holds no line that gives * the attribute eol=lf.`
+        : `${GITATTRIBUTES} is not on ${entry.defaultBranch}: ${read.error}.`;
+    const error = new Error(
+      `the project ${project} declares no line-ending rule on ${entry.defaultBranch}. ` +
+        `${why} The harness writes LF alone, and a gate reads the working tree while CI ` +
+        'reads the commit. Add the line "* text=auto eol=lf" to .gitattributes, and ' +
+        'launch again.',
+    );
+    error.detail = {
+      path: GITATTRIBUTES,
+      ...(read.error !== undefined && { read: read.error }),
+    };
+    throw error;
   }
 
   /**
@@ -1983,6 +2022,25 @@ export class Daemon {
       this.lock = null;
     }
   }
+}
+
+/**
+ * True when a `.gitattributes` text gives every path an LF rule.
+ *
+ * The rule is one line whose pattern is `*` and whose attributes hold
+ * `eol=lf`. Comments and blank lines are skipped. A pattern narrower than `*`
+ * leaves the rest of the tree unruled, which is what the door refuses.
+ * @param {string} text
+ * @returns {boolean}
+ */
+function declaresLfRule(text) {
+  for (const line of String(text).split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith('#')) continue;
+    const [pattern, ...attributes] = trimmed.split(/\s+/);
+    if (pattern === '*' && attributes.includes('eol=lf')) return true;
+  }
+  return false;
 }
 
 /**
