@@ -447,7 +447,7 @@ const RECORD_STAMPS = new Set([
 
 // The record seat that reviews. Every other record seat writes, and the miss
 // rate is the writers' answers against the review's findings. A dispatch is
-// one seat per record, so the stamped name carries a slot suffix (ADR-0073).
+// one seat per record, so the stamped name carries a slot suffix (ADR-0075).
 const RECORD_REVIEW_SEAT = 'record-review';
 
 function recordsView(allRuns, pinTs) {

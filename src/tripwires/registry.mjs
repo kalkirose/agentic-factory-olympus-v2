@@ -282,7 +282,7 @@ export const TRIPWIRE_METRICS = {
   },
   // The mean wall clock of the record write, in minutes, over the last N stage
   // runs that wrote anything. The writers run one record at a time by the
-  // owner's decision (ADR-0073); this is the reading that says when the
+  // owner's decision (ADR-0075); this is the reading that says when the
   // decision stops paying, and its answer is the review of it.
   'record-write-time': {
     unit: 'reconciliations',

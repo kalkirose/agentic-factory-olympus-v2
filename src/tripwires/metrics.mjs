@@ -785,7 +785,7 @@ export function recordCyclesReading(paths, project, { window = 5, runs, pinTs = 
  * stage runs of the project that wrote anything.
  *
  * The writers run one record at a time, in one worktree, each with its own seat
- * identity and its own commit (ADR-0073). That is the owner's decision and this
+ * identity and its own commit (ADR-0075). That is the owner's decision and this
  * is the reading that says when it stops paying: the span from the first write
  * seat of a stage run to the last `reconciliation-written` of it. A mean over
  * the band says the answer is to review whether the writers should run in
@@ -841,7 +841,7 @@ export function recordWriteTimeReading(paths, project, { window = 5, runs } = {}
 /**
  * Whether a seat name is a record writer's. A write is dispatched once per
  * record, so the name a spawn stamps carries a slot suffix and the seat behind
- * it is the name before the colon (ADR-0073). The name is read here and never
+ * it is the name before the colon (ADR-0075). The name is read here and never
  * written, the way the repair ladder reads its own dev seat's name.
  */
 function writeSeat(seat) {

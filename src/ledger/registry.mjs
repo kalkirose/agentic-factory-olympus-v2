@@ -488,9 +488,9 @@ export const RUN_EVENTS = new Set([
   // fallback: the seat could not deliver, the run ships the code it certified,
   // and the close writes the ticket the sweep launches from (ADR-0026).
   //
-  // One writer runs per record, in sequence, each with its own seat identity.
-  // So `records` carries one entry per record, `{record, seat, cost, attempts,
-  // unitsAnswered}`, and a reader prices one record rather than one stage.
+  // One writer runs per record, in sequence, each with its own seat identity
+  // (ADR-0075). So `records` carries one entry per record, `{record, seat,
+  // cost, attempts, unitsAnswered}`, and a reader prices one record.
   // A divergence entry carries `evidence`, the path that shows the
   // shift, so a later eval can ask how many recorded shifts were wrong without
   // re-reading the run. `siblings` is what the write answered for every active
