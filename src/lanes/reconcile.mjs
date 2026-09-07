@@ -29,7 +29,7 @@ import {
   WORK_PRODUCT_DEFECT,
   assertReconcileCause,
 } from '../ledger/registry.mjs';
-import { DEFAULT_RECONCILE_ROUNDS, recordPathIncludes } from '../config/project.mjs';
+import { DEFAULT_RECONCILE_ROUNDS } from '../config/project.mjs';
 import { cloneDir, fetchClone } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 import {
