@@ -340,12 +340,19 @@ async function waitClosed(paths, runId, attempts = 900) {
   return readEvents(archivedRunLedgerPath(paths, runId));
 }
 
+/**
+ * Waits for one stamp of a run, in the ledger the run has: the live one while
+ * it runs, the archived one once the close moves it. A run that passed the
+ * stamp between two polls still made it, and a wait that reads the live path
+ * alone reads an empty file from the close onwards.
+ */
 function waitEvent(paths, runId, predicate, label, attempts = 900) {
-  return waitFor(() => readEvents(runLedgerPath(paths, runId)).find(predicate), {
-    label,
-    attempts,
-    intervalMs: 100,
-  });
+  return waitFor(
+    () =>
+      readEvents(runLedgerPath(paths, runId)).find(predicate) ??
+      readEvents(archivedRunLedgerPath(paths, runId)).find(predicate),
+    { label, attempts, intervalMs: 100 },
+  );
 }
 
 // -- the seat table ----------------------------------------------------------
@@ -933,11 +940,24 @@ test('the branch ticket names the branch, the records and the open findings', ()
 /**
  * A restart at one step boundary: the stage runs to the stamp the boundary is
  * behind, the daemon goes down and comes back, and the run finishes.
+ *
+ * `hold` names the seat the boundary stands in front of, and its first dispatch
+ * hangs. Only the stop ends that seat, so the daemon goes down with the run on
+ * the boundary. Without the hold the stage runs the whole cycle out and the run
+ * closes, and the restart lands on a run that is already over.
  */
-async function restartAt(t, { at, seats }) {
-  const fx = stageFixture(t, { seats });
+async function restartAt(t, { at, hold, seats }) {
+  const fx = stageFixture(t, { seats: { ...seats, [hold]: hangFirst(seats[hold]) } });
   const runId = await fx.launch();
   await waitEvent(fx.paths, runId, at.predicate, at.label);
+  // The held seat has to stand before the stop: a stop that starts in front of
+  // the spawn ends nothing, and the seat it leaves behind belongs to no daemon.
+  await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'seat-spawned' && e.seat.split(':')[0] === hold,
+    `${hold} spawned`,
+  );
   await fx.restart();
   const events = await waitClosed(fx.paths, runId);
   return { fx, events };
@@ -946,6 +966,7 @@ async function restartAt(t, { at, seats }) {
 test('a restart before the judge re-judges and nothing else', async (t) => {
   const { fx, events } = await restartAt(t, {
     at: { predicate: (e) => e.event === 'stage-entered' && e.stage === 'reconcile', label: 'entered' },
+    hold: 'reconcile-judge',
     seats: {
       'reconcile-judge': judgeOwed(),
       'reconcile-write': writeOnce(),
@@ -960,6 +981,7 @@ test('a restart before the judge re-judges and nothing else', async (t) => {
 test('a restart after the judgment writes once and never twice', async (t) => {
   const { fx, events } = await restartAt(t, {
     at: { predicate: (e) => e.event === 'reconciliation-judged', label: 'judged' },
+    hold: 'reconcile-write',
     seats: {
       'reconcile-judge': judgeOwed(),
       'reconcile-write': writeOnce(),
@@ -976,6 +998,7 @@ test('a restart after the judgment writes once and never twice', async (t) => {
 test('a restart after the write never repeats the committed write', async (t) => {
   const { fx, events } = await restartAt(t, {
     at: { predicate: (e) => e.event === 'reconciliation-written', label: 'written' },
+    hold: 'record-review',
     seats: {
       'reconcile-judge': judgeOwed(),
       'reconcile-write': writeOnce(),
@@ -990,6 +1013,7 @@ test('a restart after the write never repeats the committed write', async (t) =>
 test('a restart after the spectrum keeps the layer results it already earned', async (t) => {
   const { events } = await restartAt(t, {
     at: { predicate: (e) => e.event === 'layer-result', label: 'layer-result' },
+    hold: 'record-review',
     seats: {
       'reconcile-judge': judgeOwed(),
       'reconcile-write': writeOnce(),
