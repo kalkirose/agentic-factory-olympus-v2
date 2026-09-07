@@ -637,6 +637,7 @@ function settle(ctx, spec, made) {
     spec;
   const disposition = dispositionOf(made, attempt, layer.memoryCeilingMb ?? null, target, keep);
   made.disposition = disposition;
+  const elapsedMs = elapsedSince(made.start);
   // The terminal stamp closes the span the start opened, and says the same
   // thing about it: this reading is not the machine's whole cost for that
   // stretch, and this duration is not the cycle's (ADR-0047).
@@ -654,6 +655,12 @@ function settle(ctx, spec, made) {
     made.record = stampLayer(ctx, 'layer-result', {
       ...identity,
       status: disposition.status,
+      // What this attempt cost in wall clock, from the start stamp it closes.
+      // A layer is the one command in a run long enough for its minutes to be
+      // a fact worth keeping, and before this the only record of them was the
+      // gap between two stamps: a reader had to hold the ledger open between
+      // them, and a record-only render's whole cost is the sum of this field.
+      ...(elapsedMs !== null && { elapsedMs }),
       // What the layer's process tree peaked at, on every result the harness
       // could measure. A green carries it too: a green at the ceiling is the
       // reading the forecast needs, and it is the one nobody would think to
@@ -702,6 +709,17 @@ function settle(ctx, spec, made) {
     ...mark,
   });
   if (disposition.exhaustion) stampExhaustion(ctx, spec, disposition.exhaustion);
+}
+
+/**
+ * The wall clock one attempt held, from the `layer-started` its terminal stamp
+ * closes. Null where that stamp carries no time this can read, so a reader
+ * never takes an invented duration for a measured one.
+ */
+function elapsedSince(start) {
+  const began = Date.parse(start?.ts ?? '');
+  if (!Number.isFinite(began)) return null;
+  return Math.max(0, Date.now() - began);
 }
 
 /**

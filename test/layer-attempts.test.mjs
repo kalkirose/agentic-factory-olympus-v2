@@ -93,6 +93,30 @@ test('a green attempt stamps the layer result under its own attempt number', asy
   assertPaired(ctx);
 });
 
+test('a result says what the attempt cost in wall clock, from the start it closes', async (t) => {
+  const { ctx } = fixture(t);
+  await runSpectrum(ctx, {
+    ...ONE_LAYER,
+    commands: { suite: GREEN },
+    exec: seam(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { code: 0, output: '', truncated: false, parts: [] };
+    }),
+  });
+  const start = events(ctx).find((e) => e.event === 'layer-started');
+  const result = events(ctx).find((e) => e.event === 'layer-result');
+  assert.ok(result.elapsedMs >= 20, `${result.elapsedMs} is under the time the layer held`);
+  // The span is the pair's, so it never outruns the two stamps around it.
+  assert.ok(result.elapsedMs <= Date.parse(result.ts) - Date.parse(start.ts) + 5);
+  // A red carries it too: the minutes a failure spent are the ones a reader
+  // asks about first.
+  const red = fixture(t);
+  await runSpectrum(red.ctx, { ...ONE_LAYER, commands: { suite: RED } });
+  const failed = events(red.ctx).find((e) => e.event === 'layer-result');
+  assert.equal(failed.status, 'red');
+  assert.equal(typeof failed.elapsedMs, 'number');
+});
+
 // -- respawn: the re-run the flake filter owes a red --------------------------
 
 test('a red attempt the re-run replaces is stamped with what it printed', async (t) => {
