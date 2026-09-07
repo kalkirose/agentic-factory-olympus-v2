@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { removeDir, tempDir, writeTree } from './helpers.mjs';
@@ -126,12 +126,15 @@ test('the title is U0 and each head-block line is one unit', () => {
   assert.equal(gate.byId('U0').head.split(/\s+/).length, 8);
 });
 
-// The two harness records the enumeration is read against in the tree it
-// describes. The assertions are structural, because the record text is the
-// harness's own and it moves with the harness.
-test('a harness record enumerates title first, status second, and no unit inside a fence', () => {
-  for (const name of ['0010-tripwire-watcher', '0026-reconciliation-intake']) {
-    const text = harness(name);
+// The harness's own record tree, read in the tree it describes. The
+// assertions are structural, because this text moves with the harness while
+// the ceq fixtures above stand still.
+test('every harness record enumerates title first, status second, and structure never', () => {
+  const names = readdirSync(join(ROOT, 'docs/adr')).filter((name) => name.endsWith('.md'));
+  assert.ok(names.length > 2, 'the harness keeps its decisions in docs/adr');
+  const nested = [];
+  for (const name of names) {
+    const text = harness(name.replace(/\.md$/, ''));
     const list = recordUnits(text);
     const lines = text.split('\n');
     assert.equal(list[0].id, 'U0', name);
@@ -139,7 +142,7 @@ test('a harness record enumerates title first, status second, and no unit inside
     assert.equal(list[1].kind, 'status', name);
     assert.equal(list[1].line, statusOf(text).line, name);
     // Ids run in document order, one per line at most, and never onto a
-    // heading, a blank line or a fence.
+    // heading or a blank line.
     let previous = 0;
     for (const unit of list) {
       assert.ok(unit.line > previous, `${name} ${unit.id}`);
@@ -153,18 +156,17 @@ test('a harness record enumerates title first, status second, and no unit inside
       ['U0', ...list.slice(1).map((_, i) => `U${i + 1}`)],
       name,
     );
+    // A nested list item is a unit of its own, wherever the tree holds one.
+    for (const [i, line] of lines.entries()) {
+      if (!/^ {2}[-*] /.test(line)) continue;
+      nested.push(`${name}:${i + 1}`);
+      assert.ok(
+        list.some((unit) => unit.line === i + 1),
+        `${name} nested item at line ${i + 1}`,
+      );
+    }
   }
-  // The nested bullets of ADR-0010 are units of their own.
-  const nested = recordUnits(harness('0010-tripwire-watcher'));
-  const lines = harness('0010-tripwire-watcher').split('\n');
-  const indented = lines.map((line, i) => [line, i + 1]).filter(([line]) => /^ {2}[-*] /.test(line));
-  assert.ok(indented.length > 0);
-  for (const [, line] of indented) {
-    assert.ok(
-      nested.some((u) => u.line === line),
-      `nested item at line ${line}`,
-    );
-  }
+  assert.ok(nested.length > 0, 'the harness tree holds a nested list item');
 });
 
 // The synthetic record holds every structure at once: a comment before the
