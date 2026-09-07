@@ -22,6 +22,7 @@ import {
   ctl,
   ctlRefused,
   diagnostics,
+  forgeCalls,
   gateMarks,
   instanceEvents,
   originSha,
@@ -76,9 +77,22 @@ ${RECORD}
 \`\`\`
 `;
 
+// The live shape of a records-lane judgment. The whole diff of the run is the
+// birth write. The judge leaves out a born record that still stands, so it owes
+// nothing. The born set is the run's record set all the same, and the stage
+// reads it (ADR-0077).
 const SCENARIO = {
-  // The birth writes the record the ticket decides; the reconciliation rewrites
-  // it against the tree the run merges.
+  bornRecords: { [RECORD]: RECORD_TEXT },
+  reconcileJudge: {
+    owed: false,
+    records: [],
+    reason: 'the record this run wrote states what the tree holds',
+  },
+};
+
+// The other shape: a judge that owes the record. The stage then writes it
+// against the tree before it reviews it.
+const SCENARIO_OWED = {
   bornRecords: { [RECORD]: RECORD_TEXT },
   reconcileJudge: {
     owed: true,
@@ -142,7 +156,6 @@ test('a record-only ticket ships through the records lane', async (t) => {
     'stage-entered',
     'records-committed',
     'reconciliation-judged',
-    'reconciliation-written',
     'reconcile-rendered',
     'pr-opened',
     'check-transition',
@@ -175,13 +188,9 @@ test('a record-only ticket ships through the records lane', async (t) => {
   assert.deepEqual(judged.born, [RECORD]);
   assert.deepEqual(judged.late, []);
 
-  // One writer, with its own slot identity, and the per-record entry behind it.
-  const written = events.find((e) => e.event === 'reconciliation-written');
-  assert.equal(written.ok, true);
-  assert.deepEqual(written.rewritten, [RECORD]);
-  assert.equal(written.records.length, 1);
-  assert.equal(written.records[0].seat, 'reconcile-write:1');
-  assert.ok(written.records[0].unitsAnswered > 0);
+  // Nothing was written. The judge owed no record, and no writer ran over the
+  // one the birth wrote.
+  assert.ok(!events.some((e) => e.event === 'reconciliation-written'));
 
   // Every record seat answered every unit of the record it was given.
   const unitStamps = events.filter((e) => e.event === 'record-units');
@@ -191,7 +200,7 @@ test('a record-only ticket ships through the records lane', async (t) => {
     'a record seat answered a record it was not given',
   );
   assert.ok(unitStamps.every((e) => e.units.length > 0));
-  assert.ok(unitStamps.some((e) => e.seat.startsWith('reconcile-write')));
+  assert.ok(unitStamps.some((e) => e.seat === 'record-author'));
   assert.ok(unitStamps.some((e) => e.seat.startsWith('record-review')));
 
   // The stage's own render, at the record commit's own sha, and no finding.
@@ -219,12 +228,12 @@ test('a record-only ticket ships through the records lane', async (t) => {
     events.filter((e) => e.event === 'layer-result').every((e) => typeof e.elapsedMs === 'number'),
   );
 
-  // The seats the lane spends: the birth, the judge, one writer and one review.
+  // The seats the lane spends: the birth, the judge and one review.
   const seats = seatCalls(fx);
   for (const call of seats) assertSeatArgv(assert, call);
   assert.deepEqual(
     seats.map((c) => c.seat),
-    ['record-author', 'reconcile-judge', 'reconcile-write', 'record-review'],
+    ['record-author', 'reconcile-judge', 'record-review'],
     'the records lane spawned seats it does not owe',
   );
   // Every record seat reads the harness's own enumerator by absolute path, and
@@ -234,6 +243,11 @@ test('a record-only ticket ships through the records lane', async (t) => {
   assert.ok(!review.prompt.includes('git diff'), 'the record review was given a diff');
   assert.match(review.prompt, /olympus-units\.mjs/);
   assert.equal(review.named, 'record-review:1');
+
+  // The request names the lane that opened it. The records lane used to
+  // borrow the repair word (ADR-0077).
+  const create = forgeCalls(fx).find((c) => c.handled === 'pr-create');
+  assert.equal(create.argv[create.argv.indexOf('--title') + 1], `records: ${runId}`);
 
   // The records rode the merge, and the default branch holds them.
   const merged = events.find((e) => e.event === 'merged');
@@ -246,6 +260,60 @@ test('a record-only ticket ships through the records lane', async (t) => {
   assert.equal(closed.state, 'shipped');
   // Nothing is owed behind it: the records shipped with the run that wrote them.
   assert.ok(!events.some((e) => e.event === 'reconciliation-judged' && e.ticket));
+
+  await stopDaemon(fx);
+});
+
+test('a judge that owes the born record writes it, and the write rides the merge', async (t) => {
+  // The other shape of the same lane. The judge names the born record, so the
+  // stage writes it before the review reads it. The write stamp is the anchor
+  // of that cycle, as it always was (ADR-0075).
+  const fx = buildFixture({
+    prefix: 'olympus-e2e-records-owed-',
+    scenario: SCENARIO_OWED,
+    tree: { [TICKET]: RECORD_TICKET },
+  });
+  t.after(() => cleanup(fx));
+
+  await startDaemon(fx);
+  ctl(fx, ['launch', '--project', PROJECT, '--lane', 'records', '--ticket', TICKET]);
+  const runId = await pollFor(
+    'the launch stamp',
+    () => instanceEvents(fx).find((e) => e.event === 'launch')?.runId,
+    { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
+  );
+  await pollFor(
+    'the run to close',
+    () => runEvents(fx, runId).some((e) => e.event === 'run-closed'),
+    { attempts: 900, abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+
+  const events = runEvents(fx, runId);
+  assertNoWiringFailure(assert, fx, runId);
+  assertMilestones(assert, events, [
+    'records-committed',
+    'reconciliation-judged',
+    'reconciliation-written',
+    'reconcile-rendered',
+    'pr-opened',
+    'merged',
+    'run-closed',
+  ]);
+
+  // One writer, with its own slot identity, and the per-record entry behind it.
+  const written = events.find((e) => e.event === 'reconciliation-written');
+  assert.equal(written.ok, true);
+  assert.deepEqual(written.rewritten, [RECORD]);
+  assert.equal(written.records.length, 1);
+  assert.equal(written.records[0].seat, 'reconcile-write:1');
+  assert.ok(written.records[0].unitsAnswered > 0);
+
+  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
+  assert.equal(rendered.at(-1).verdict, 'green');
+  assert.deepEqual(rendered.at(-1).records, [RECORD]);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The rewritten record is what the default branch holds.
+  assert.ok(originTree(fx, 'main').includes(RECORD), 'the record did not ride the merge');
 
   await stopDaemon(fx);
 });

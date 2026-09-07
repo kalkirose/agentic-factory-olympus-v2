@@ -300,6 +300,9 @@ function seedRecordRun(paths) {
   });
   writeRunLedger(paths, 'r-rec', [
     line(0, 'run-launched', { project: 'alpha', lane: 'story', storyKey: 's-rec' }),
+    // The birth the judgment's born list names. `born` is every path the birth
+    // wrote, and `late` is the owed record it did not write (ADR-0077).
+    line(2, 'records-committed', { sha: 'a1', paths: ['docs/adr/a.md'], decided: true }),
     line(5, 'reconciliation-judged', {
       ok: true,
       owed: true,
@@ -332,6 +335,22 @@ function seedRecordRun(paths) {
       cost: 1.2,
     }),
     line(80, 'layer-result', { cycle: 4, layer: 'adr-form', status: 'green', elapsedMs: 120_000 }),
+    // The review's own answers over the same enumeration. The miss rate reads
+    // the writer's holds against these. A hold no review answered says nothing
+    // about the writer (ADR-0077).
+    line(84, 'record-units', {
+      seat: 'record-review:1',
+      cycle: 4,
+      record: 'docs/adr/a.md',
+      units: [
+        { id: 'U1', kind: 'claim', verdict: 'fails', evidence: 'src/a.mjs' },
+        { id: 'U2', kind: 'claim', verdict: 'holds', evidence: 'src/b.mjs' },
+        { id: 'U3', kind: 'open', verdict: 'not-built' },
+      ],
+      counts: { claims: 2, holds: 1, fails: 1, notBuilt: 1 },
+      neighbours: 3,
+      neighboursDropped: 0,
+    }),
     line(85, 'finding', {
       cycle: 4,
       id: 'F1',
@@ -459,6 +478,134 @@ test('a home with no record stamp reports the section empty, never zero', async 
   assert.equal(r.gateMinutes.mean, null);
   assert.equal(r.writeMinutes.mean, null);
   assert.deepEqual(r.tree, []);
+});
+
+/**
+ * A records-lane run whose birth wrote the records and whose judge owed
+ * nothing. The born set took the cycle, so a review read it. The writer's
+ * answers are then readable against that review (ADR-0077).
+ */
+function seedBornRun(paths) {
+  let seq = 0;
+  const line = (minutes, event, fields = {}) => ({
+    seq: ++seq,
+    ts: REC(minutes),
+    event,
+    actor: ACTOR,
+    ...fields,
+  });
+  writeRunLedger(paths, 'r-born', [
+    line(0, 'run-launched', { project: 'alpha', lane: 'records' }),
+    line(5, 'records-committed', {
+      sha: 'b1',
+      paths: ['docs/adr/c.md', 'docs/adr/d.md'],
+      decided: true,
+      unreported: ['docs/adr/d.md'],
+    }),
+    line(6, 'record-units', {
+      seat: 'record-author',
+      record: 'docs/adr/c.md',
+      units: [
+        { id: 'U1', kind: 'claim', verdict: 'holds', evidence: 'src/a.mjs' },
+        { id: 'U2', kind: 'claim', verdict: 'holds', evidence: 'src/b.mjs' },
+      ],
+      counts: { claims: 2, holds: 2, fails: 0, notBuilt: 0 },
+      neighbours: 1,
+      neighboursDropped: 0,
+      cost: 0.9,
+    }),
+    // A record the birth changed and no review ever read. A status-line edit on
+    // a superseded record owes no units. A writer answer over it is out of the
+    // denominator.
+    line(7, 'record-units', {
+      seat: 'record-author',
+      record: 'docs/adr/d.md',
+      units: [
+        { id: 'U1', kind: 'claim', verdict: 'holds', evidence: 'src/a.mjs' },
+        { id: 'U2', kind: 'claim', verdict: 'holds', evidence: 'src/a.mjs' },
+        { id: 'U3', kind: 'claim', verdict: 'holds', evidence: 'src/a.mjs' },
+      ],
+      counts: { claims: 3, holds: 3, fails: 0, notBuilt: 0 },
+      neighbours: 1,
+      neighboursDropped: 0,
+    }),
+    line(10, 'reconciliation-judged', {
+      ok: true,
+      owed: false,
+      reason: 'the records this run wrote still stand',
+      born: ['docs/adr/c.md', 'docs/adr/d.md'],
+      late: [],
+    }),
+    line(20, 'layer-result', { cycle: 1, layer: 'adr-form', status: 'green', elapsedMs: 60_000 }),
+    line(25, 'record-units', {
+      seat: 'record-review:1',
+      cycle: 1,
+      record: 'docs/adr/c.md',
+      units: [
+        { id: 'U1', kind: 'claim', verdict: 'fails', evidence: 'src/a.mjs' },
+        { id: 'U2', kind: 'claim', verdict: 'holds', evidence: 'src/b.mjs' },
+      ],
+      counts: { claims: 2, holds: 1, fails: 1, notBuilt: 0 },
+      neighbours: 1,
+      neighboursDropped: 0,
+    }),
+    line(26, 'finding', {
+      cycle: 1,
+      id: 'F1',
+      lens: 'record',
+      record: true,
+      file: 'docs/adr/c.md',
+      unit: 'U1',
+      head: 'the module holds the base value',
+      confirmed: true,
+    }),
+    // Findings on the record no review stamp answered. They are outside the
+    // holds this rate reads, and a numerator that counted them would report a
+    // share past one.
+    ...['U1', 'U2', 'U3'].map((unit, i) =>
+      line(27 + i, 'finding', {
+        cycle: 1,
+        id: `F${i + 2}`,
+        lens: 'record',
+        record: true,
+        file: 'docs/adr/d.md',
+        unit,
+        head: 'the status line reads superseded',
+        confirmed: true,
+      }),
+    ),
+    line(30, 'reconcile-rendered', {
+      cycle: 1,
+      sha: 'b1',
+      verdict: 'red',
+      open: ['F1', 'F2', 'F3', 'F4'],
+      records: ['docs/adr/c.md', 'docs/adr/d.md'],
+      layers: ['adr-form'],
+    }),
+  ]);
+}
+
+test('a born cycle feeds the miss rate, and an owed-nothing judgment reads zero late', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const paths = scaffoldHome(join(root, 'home'));
+  seedBornRun(paths);
+
+  const r = (await buildSnapshot(paths, { now: NOW })).stats.records;
+  assert.equal(r.runs, 1);
+  // Two holds a review answered, one of them refuted. The holds over a record
+  // no review read count nowhere, and neither do the findings on them.
+  assert.deepEqual(r.writerMiss, {
+    holds: 2,
+    missed: 1,
+    rate: 0.5,
+    records: ['docs/adr/c.md'],
+  });
+  // The rate is a share, and both halves read one set of units.
+  assert.ok(r.writerMiss.rate >= 0 && r.writerMiss.rate <= 1, String(r.writerMiss.rate));
+  // The judgment owed nothing, and the run still bore two records. The share is
+  // nought, which is a reading; an absent one is not.
+  assert.deepEqual(r.late, { born: 2, late: 0, share: 0 });
 });
 
 test('a seat chip carries the retry ordinal, a first spawn carries none', async (t) => {

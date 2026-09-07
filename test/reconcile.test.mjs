@@ -571,6 +571,48 @@ test('the stage derives every one of its steps from its own stamps', () => {
   );
 });
 
+test('a born record set anchors the cycle where the pass wrote nothing', () => {
+  // The judge leaves out a born record that still stands. A pass whose whole
+  // diff is the birth write is therefore judged "nothing owed". The born stamp
+  // is that pass's record set, and it takes the cycle (ADR-0077).
+  const clean = { event: 'reconciliation-judged', ok: true, owed: false, born: [ADR], late: [] };
+  assert.equal(reconcileStep(ledger(clean)), 'done');
+  // A birth that decided nothing is no record set either.
+  assert.equal(
+    reconcileStep(ledger({ event: 'records-committed', decided: false, paths: [] }, clean)),
+    'done',
+  );
+  const born = { event: 'records-committed', decided: true, paths: [ADR], sha: 'bbb' };
+  assert.equal(reconcileStep(ledger(born, clean)), 'spectrum');
+  const layer = { event: 'layer-result', cycle: 1, layer: 'adr-form', status: 'green' };
+  assert.equal(reconcileStep(ledger(born, clean, layer)), 'review');
+  const unitsStamp = { event: 'record-units', cycle: 1, record: ADR, seat: 'record-review:1' };
+  assert.equal(reconcileStep(ledger(born, clean, layer, unitsStamp)), 'verify');
+  const verified = { event: 'seat-report', seat: 'fury-verifier' };
+  assert.equal(reconcileStep(ledger(born, clean, layer, unitsStamp, verified)), 'render');
+  const green = { event: 'reconcile-rendered', cycle: 1, sha: 'aaa', verdict: 'green', open: [] };
+  const red = { ...green, verdict: 'red', open: ['F1'] };
+  assert.equal(reconcileStep(ledger(born, clean, layer, unitsStamp, verified, green)), 'done');
+  assert.equal(reconcileStep(ledger(born, clean, layer, unitsStamp, verified, red)), 'correct');
+  assert.equal(
+    reconcileStep(
+      ledger(born, clean, layer, unitsStamp, verified, red, {
+        event: 'reconcile-round',
+        round: 1,
+      }),
+      { cap: 1 },
+    ),
+    'stall',
+  );
+  // A write is the anchor wherever the pass holds one. The born stamp answers
+  // for a pass that wrote nothing, and never for one that wrote.
+  const written = { event: 'reconciliation-written', ok: true, rewritten: [ADR], records: [] };
+  assert.equal(reconcileStep(ledger(born, clean, written)), 'spectrum');
+  // A judgment that owes records still buys the write first, born set or not.
+  const owed = { event: 'reconciliation-judged', ok: true, owed: true, records: [ADR] };
+  assert.equal(reconcileStep(ledger(born, owed)), 'write');
+});
+
 test('a repair round past a green render owes the recheck, and a re-run owes a cycle', () => {
   const base = ledger(
     { event: 'reconciliation-judged', ok: true, owed: true, records: [ADR] },
@@ -663,15 +705,56 @@ test('an owed judgment writes the record, runs the record layers and renders gre
   assert.notEqual(rendered.sha, events.find((e) => e.event === 'verdict-rendered').sha);
 });
 
-test('a judgment that owes nothing spends no writer and hands the run on', async (t) => {
+test('no born record and nothing owed: no cycle, and the run is handed on', async (t) => {
   const fx = stageFixture(t, { seats: { 'reconcile-judge': judgeClean } });
   const runId = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   const judged = events.find((e) => e.event === 'reconciliation-judged');
   assert.equal(judged.owed, false);
+  // The lists ride the stamp whatever the answer, and this pass bore nothing.
+  assert.deepEqual(judged.born, []);
+  assert.deepEqual(judged.late, []);
   assert.ok(!events.some((e) => e.event === 'reconciliation-written'));
   assert.ok(!events.some((e) => e.event === 'reconcile-rendered'));
   assert.ok(!fx.calls.some((c) => c.seat === 'reconcile-write'));
+});
+
+test('a born record takes the cycle, and spends no writer', async (t) => {
+  // The pass wrote its records before the stage, so the judge owes nothing.
+  // No writer runs. The record set is the birth's, and the cycle reads it. That
+  // is the layers, one review seat per record, and a render (ADR-0077).
+  const fx = stageFixture(t, {
+    seed: seedHandler((ctx, { sha }) => {
+      ctx.store.append('records-committed', { actor: 'daemon', sha, paths: [ADR], decided: true });
+    }),
+    seats: { 'reconcile-judge': judgeClean, 'record-review': reviewClean },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+
+  const judged = events.find((e) => e.event === 'reconciliation-judged');
+  assert.equal(judged.owed, false);
+  assert.deepEqual(judged.born, [ADR]);
+  assert.deepEqual(judged.late, []);
+  // No write of any kind: the birth wrote the record and the judge owes none.
+  assert.ok(!events.some((e) => e.event === 'reconciliation-written'));
+  assert.ok(!fx.calls.some((c) => c.seat === 'reconcile-write'));
+
+  // One review seat for the born record, and the record layers over its commit.
+  const reviews = fx.calls.filter((c) => c.seat === 'record-review');
+  assert.equal(reviews.length, 1);
+  assert.ok(reviews[0].prompt.includes(`Review one decision record: ${ADR}`), reviews[0].prompt);
+  assert.deepEqual(
+    events.filter((e) => e.event === 'layer-result').map((e) => [e.layer, e.status]),
+    [['adr-form', 'green']],
+  );
+
+  // The render names the born record and stands green.
+  const rendered = events.find((e) => e.event === 'reconcile-rendered');
+  assert.equal(rendered.verdict, 'green');
+  assert.deepEqual(rendered.open, []);
+  assert.deepEqual(rendered.records, [ADR]);
 });
 
 test('three records take three writers in turn, each with its own identity', async (t) => {

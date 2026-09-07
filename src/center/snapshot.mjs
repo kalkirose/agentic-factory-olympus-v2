@@ -517,6 +517,11 @@ function recordsView(allRuns, pinTs) {
  * one file at one sha, so the ids are the same list; the head a finding carries
  * beside its id is what matches a finding across a write, which is a different
  * question.
+ *
+ * A unit no review ever answered is out of the denominator. The rate is the
+ * share of the writer's `holds` a reader refuted. A hold nobody read reports
+ * nothing about the writer. It would only make the rate look better
+ * (ADR-0077).
  */
 function writerMissRate(runs) {
   let holds = 0;
@@ -524,14 +529,24 @@ function writerMissRate(runs) {
   const records = new Set();
   for (const { runId, events } of runs) {
     const answers = new Map();
+    const read = new Set();
     for (const e of events) {
-      if (e.event !== 'record-units' || reviewSeat(e.seat)) continue;
-      for (const unit of e.units ?? []) answers.set(`${runId}|${e.record}|${unit.id}`, unit.verdict);
+      const key = (unit) => `${runId}|${e.record}|${unit.id}`;
+      if (reviewSeat(e.seat)) {
+        if (e.event === 'record-units') for (const unit of e.units ?? []) read.add(key(unit));
+        continue;
+      }
+      if (e.event !== 'record-units') continue;
+      for (const unit of e.units ?? []) answers.set(key(unit), unit.verdict);
     }
-    holds += [...answers.values()].filter((verdict) => verdict === 'holds').length;
+    holds += [...answers].filter(([key, verdict]) => verdict === 'holds' && read.has(key)).length;
     for (const e of events) {
       if (e.event !== 'finding' || e.record !== true || e.unit === undefined) continue;
-      if (answers.get(`${runId}|${e.file}|${e.unit}`) !== 'holds') continue;
+      const key = `${runId}|${e.file}|${e.unit}`;
+      // The numerator takes the denominator's guard. A finding on a unit no
+      // review stamp answered is outside the holds this rate reads. A count of
+      // it could put the share past one (ADR-0077).
+      if (answers.get(key) !== 'holds' || !read.has(key)) continue;
       missed += 1;
       records.add(e.file);
     }
@@ -545,9 +560,15 @@ function reviewSeat(seat) {
 }
 
 /**
- * The late share: the records the judge found owed after the freeze, over every
- * record the run owed. A high share says the cards and the tickets do not state
- * their decisions, so the birth seat has nothing to write from (ADR-0074).
+ * The late share: the records the judge found owed after the freeze, over the
+ * whole record set of the pass. `born` is every record the pass's own birth
+ * wrote. `late` is every owed record the birth did not write. A high share says
+ * the cards and the tickets do not state their decisions. The birth seat then
+ * has nothing to write from (ADR-0074).
+ *
+ * Every judgment carries the two lists, the ones that owe nothing included. A
+ * records-lane run whose birth stated every decision reports a share of nought.
+ * A reading that counted no such run reported nothing at all (ADR-0077).
  */
 function lateShare(runs) {
   let born = 0;

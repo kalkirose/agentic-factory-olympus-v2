@@ -179,6 +179,7 @@ export async function carryRecords(ctx, base, mode) {
     sha,
     paths,
     decided: stamp.decided === true,
+    ...(stamp.unreported?.length > 0 && { unreported: stamp.unreported }),
     carried: true,
   });
   return sha;
@@ -405,21 +406,37 @@ async function birthSiblings(base, report) {
  * The commit and the stamps of one birth. A seat that wrote nothing commits
  * nothing: the stamp says the work decided nothing new, which is what the
  * born and late counts read (ADR-0074).
+ *
+ * `paths` names every record path the commit changed, read from the tree. The
+ * seat's `rewritten` list alone is not enough. A superseded record's
+ * status-line edit is a legal write that owes no units. The old list left it
+ * out, so the reconcile stage read a set without it. `unreported` names the
+ * paths the seat did not report, so a reader tells the two kinds apart
+ * (ADR-0077).
  */
 async function commitRecords(ctx, base, report, cost, neighbours = null) {
-  const paths = [...new Set(report.rewritten ?? [])];
-  const decided = paths.length > 0;
+  const reported = [...new Set(report.rewritten ?? [])];
   // The unit answers are facts about the report and not about the commit, so
   // they are stamped first: a stop between the two repeats them on the next
   // dispatch, where a stop after the commit would lose them. The reader joins
   // by record and unit id, so a repeat is one answer either way.
   stampUnits(ctx, report, cost, neighbours);
   const changed = await changedFiles(base.worktree);
+  const touched = changed.filter((file) => recordPathIncludes(file, base.recordPaths));
+  const unreported = touched.filter((file) => !reported.includes(file));
+  const paths = [...new Set([...reported, ...touched])];
+  const decided = paths.length > 0;
   const sha =
     changed.length > 0
       ? await commitAll(base.worktree, `records: ${base.key}`)
       : await headSha(base.worktree);
-  const stamp = { actor: ACTOR, sha, paths, decided };
+  const stamp = {
+    actor: ACTOR,
+    sha,
+    paths,
+    decided,
+    ...(unreported.length > 0 && { unreported }),
+  };
   ctx.store.append('records-committed', stamp);
   return stamp;
 }

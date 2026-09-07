@@ -25,6 +25,7 @@ import {
   ticketPathClass,
   withReconcileStage,
 } from '../src/lanes/records-stage.mjs';
+import { kindTest } from '../src/lanes/records.mjs';
 import { commitAll, headSha, resetHard } from '../src/isolation/tree.mjs';
 import {
   tempDir,
@@ -186,7 +187,9 @@ function seatFixture(seats) {
       prompt: opts.prompt,
       denyTools: opts.denyTools,
     });
-    const behavior = seats[seat];
+    // A slot suffix is not a seat. The table entry for `record-review` answers
+    // `record-review:1` where the table names no slot of its own.
+    const behavior = seats[seat] ?? seats[seat.split(':')[0]];
     if (!behavior) throw new Error(`no fixture behavior for seat ${seat}`);
     const out = behavior({ seat, prompt: opts.prompt, attempt: opts.attempt }) ?? {};
     return {
@@ -205,7 +208,7 @@ function seatFixture(seats) {
  * of its own. The repair and records lanes run their real stages to the same
  * seam.
  */
-function laneFixture(t, { seats, files = {} } = {}) {
+function laneFixture(t, { seats, files = {}, config = {}, realReconcile = false } = {}) {
   const root = tempDir();
   const origin = initOriginRepo(join(root, 'origin'), {
     [CONFIG_PATH]: projectConfigJson({
@@ -214,6 +217,7 @@ function laneFixture(t, { seats, files = {} } = {}) {
       gates: { tier1: [{ name: 'unit', command: 'suite' }] },
       lanes: { story: { suiteCommand: 'suite' } },
       stack: null,
+      ...config,
     }),
     [CARD_PATH]: CARD,
     'src/base.mjs': 'export const base = 1;\n',
@@ -239,8 +243,9 @@ function laneFixture(t, { seats, files = {} } = {}) {
   const post = postFreeze({ afterVerdict: done });
   const repair = repairLane({ afterVerdict: done });
   const seam = async () => ({ next: 'done' });
-  // The reconcile stage is a seam here for the reason the verdict is: nothing in
-  // this file is about a reconciliation, and that stage has a suite of its own.
+  // The reconcile stage is a seam here, for the reason the verdict is. That
+  // stage has a suite of its own. One scenario runs the real stage over the
+  // record set a birth leaves, and it asks for it by `realReconcile`.
   const records = recordsLane({ afterRecords: done });
   const lanes = {
     story: storyLane({
@@ -253,7 +258,11 @@ function laneFixture(t, { seats, files = {} } = {}) {
       stages: repair.stages,
       handlers: { ...repair.handlers, verdict: seam, reconcile: seam },
     },
-    records: { stages: records.stages, handlers: { ...records.handlers, reconcile: seam } },
+    // The records lane keeps the real reconcile stage where a scenario is
+    // about what that stage reads. Every other scenario leaves it a seam.
+    records: realReconcile
+      ? records
+      : { stages: records.stages, handlers: { ...records.handlers, reconcile: seam } },
   };
   let daemon = new Daemon(join(root, 'home'), { waitSleep: NO_WAIT, lanes });
   const fixture = seatFixture(seats);
@@ -591,6 +600,84 @@ test('a record-only ticket runs on the records lane, and one seat writes it', as
   assert.deepEqual([...new Set(fx.calls.map((c) => c.seat))], ['record-author']);
   assert.match(fx.calls[0].prompt, /tickets[\\/]records\.md/);
 });
+
+// The record layers of a records-lane run: a command that answers green, and
+// the record diff selects it.
+const RECORD_LAYER_CONFIG = {
+  commands: {
+    suite: ['node', '--test', 'tests/*.test.mjs'],
+    adrform: [process.execPath, '-e', 'process.exit(0)'],
+  },
+  gates: {
+    tier1: [
+      { name: 'unit', command: 'suite' },
+      { name: 'adr-form', command: 'adrform' },
+    ],
+    recordLayers: ['adr-form'],
+  },
+};
+
+test('a record-only ticket is judged to the end of the stage, and the render exists', async (t) => {
+  // The whole diff of this run is the birth write, so the judge owes nothing.
+  // The born record is still the run's record set, and it takes the cycle.
+  // That is the record layers, a review seat, and a render (ADR-0077).
+  const fx = laneFixture(t, {
+    realReconcile: true,
+    config: RECORD_LAYER_CONFIG,
+    seats: {
+      'record-author': () => ({ files: { [RECORD_PATH]: RECORD_TEXT }, report: bornReport() }),
+      'reconcile-judge': () => ({
+        report: { owed: false, records: [], reason: 'the record this run wrote still stands' },
+      }),
+      'record-review': ({ prompt }) => ({
+        report: {
+          findings: [],
+          units: reviewedUnits(prompt),
+          summary: 'the record stands against the tree',
+        },
+      }),
+    },
+    files: { 'tickets/records.md': ticketText([RECORD_PATH]) },
+  });
+  const { runId } = await fx.launch({ lane: 'records', ticket: 'tickets/records.md' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+
+  const judged = events.find((e) => e.event === 'reconciliation-judged');
+  assert.equal(judged.owed, false);
+  assert.deepEqual(judged.born, [RECORD_PATH]);
+  assert.deepEqual(judged.late, []);
+  // No writer: the birth wrote the record and the judge owes none.
+  assert.ok(!events.some((e) => e.event === 'reconciliation-written'));
+
+  // One review seat over the born record, and the record layer over its commit.
+  const reviews = fx.calls.filter((c) => c.seat.startsWith('record-review'));
+  assert.equal(reviews.length, 1);
+  assert.ok(reviews[0].prompt.includes(`Review one decision record: ${RECORD_PATH}`));
+  assert.deepEqual(
+    events.filter((e) => e.event === 'layer-result').map((e) => [e.layer, e.status]),
+    [['adr-form', 'green']],
+  );
+
+  const rendered = events.find((e) => e.event === 'reconcile-rendered');
+  assert.equal(rendered.verdict, 'green');
+  assert.deepEqual(rendered.open, []);
+  assert.deepEqual(rendered.records, [RECORD_PATH]);
+});
+
+/** The unit answers a review seat reports, read off the brief it was given. */
+function reviewedUnits(prompt) {
+  const record = /^Review one decision record: (.+)$/m.exec(prompt)?.[1]?.trim() ?? RECORD_PATH;
+  return [...prompt.matchAll(/^- (U\d+) \(line \d+(?:, (\w+))?\): (.+)$/gm)].map(
+    ([, id, kind, head]) => ({
+      record,
+      id,
+      kind: kind ?? (kindTest(head) ?? 'rationale'),
+      verdict: 'holds',
+      evidence: kind ? 'structure' : (kindTest(head) ? 'src/base.mjs' : 'structure'),
+    }),
+  );
+}
 
 // A reconciliation ticket names its records in prose under a heading and
 // carries no fenced block. The paths the work touches are those records, so
