@@ -535,9 +535,11 @@ export const RUN_EVENTS = new Set([
   // round committed, the `units` whose evidence paths it touched, what the
   // `judge` said about a record not already owed, and the `result`. A repair
   // changes the diff a green reconciliation answered, and the intersection is
-  // what keeps that from costing a whole stage again (ADR-0075). An empty
-  // intersection is stamped too: a recheck that found nothing is the evidence
-  // that the rule is not too narrow.
+  // what keeps that from costing a whole stage again (ADR-0075). `result` is
+  // `kept` where the delta touched no evidence path and implicated no record.
+  // That one is stamped too: a recheck that found nothing is the evidence that
+  // the rule is not too narrow, and the yield reads every other word as work
+  // the recheck did.
   'reconcile-recheck',
   // The close-out learning artifact a project asks for in its config: `ok`
   // with the artifact paths the seat reported, or ok:false with the reason
