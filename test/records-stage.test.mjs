@@ -148,7 +148,7 @@ function fixtureParse(line) {
   }
 }
 
-function seatScript({ reportPath, model, report, files = {} }) {
+function seatScript({ reportPath, model, report, files = {}, hang = false }) {
   const stmts = [
     "const fs = require('fs');",
     "const path = require('path');",
@@ -160,6 +160,10 @@ function seatScript({ reportPath, model, report, files = {} }) {
       `fs.writeFileSync(${JSON.stringify(file)}, ${JSON.stringify(content)});`,
     );
   }
+  // A seat that never answers: it writes what it had got to and stands there.
+  // Only a stop ends it, and the half-written tree it leaves is what a
+  // scenario about a daemon that went down inside a seat needs.
+  if (hang) return [...stmts, 'setInterval(() => {}, 1 << 30);'].join('\n');
   stmts.push(
     `fs.mkdirSync(path.dirname(${JSON.stringify(reportPath)}), { recursive: true });`,
     `fs.writeFileSync(${JSON.stringify(reportPath)}, ${JSON.stringify(JSON.stringify(report))});`,
@@ -242,7 +246,7 @@ function laneFixture(t, { seats, files = {} } = {}) {
     repair: { stages: repair.stages, handlers: { ...repair.handlers, verdict: seam } },
     records: recordsLane({ afterRecords: done }),
   };
-  const daemon = new Daemon(join(root, 'home'), { waitSleep: NO_WAIT, lanes });
+  let daemon = new Daemon(join(root, 'home'), { waitSleep: NO_WAIT, lanes });
   const fixture = seatFixture(seats);
   t.after(async () => {
     await daemon.stop();
@@ -255,10 +259,23 @@ function laneFixture(t, { seats, files = {} } = {}) {
     get daemon() {
       return daemon;
     },
-    async launch(payload) {
+    /** A stop, and a new daemon over the same ledgers: the restart recipe. */
+    async restart() {
+      await daemon.stop();
+      daemon = new Daemon(join(root, 'home'), { waitSleep: NO_WAIT, lanes });
       await daemon.start();
       daemon.engine.seatDefaults = () => ({ commandFor: fixture.commandFor });
+    },
+    async launch(payload) {
+      if (!daemon.running) await daemon.start();
+      daemon.engine.seatDefaults = () => ({ commandFor: fixture.commandFor });
       return daemon.launchRun({ project: 'proj', ...payload });
+    },
+    /** The console route: the launch a `launch` control command performs. */
+    async launchFromConsole(command) {
+      if (!daemon.running) await daemon.start();
+      daemon.engine.seatDefaults = () => ({ commandFor: fixture.commandFor });
+      return daemon.launchCommand({ actor: 'console:test', project: 'proj', ...command });
     },
     /** A launch the door is expected to refuse: the throw it answers with. */
     async refused(payload) {
@@ -560,6 +577,69 @@ test('a record-only ticket runs on the records lane, and one seat writes it', as
   // The lane runs one seat and no other: no fix, no suite, no code verdict.
   assert.deepEqual([...new Set(fx.calls.map((c) => c.seat))], ['record-author']);
   assert.match(fx.calls[0].prompt, /tickets[\\/]records\.md/);
+});
+
+// The stop that catches the stage inside its seat: the seat left half a record
+// in the tree, and the next dispatch is the same dispatch as the first
+// (ADR-0070). A restart at the other three boundaries is the step derivation
+// above, which is what the restart reads.
+test('a stop inside the birth seat re-dispatches it over the tree it started on', async (t) => {
+  let spawns = 0;
+  const fx = laneFixture(t, {
+    seats: {
+      'record-author': () => {
+        spawns += 1;
+        // The first seat writes half a record and never answers.
+        return spawns === 1
+          ? { files: { [RECORD_PATH]: '# ADR-0002: Doub' }, hang: true }
+          : { files: { [RECORD_PATH]: RECORD_TEXT }, report: bornReport() };
+      },
+    },
+    files: { 'tickets/records.md': ticketText([RECORD_PATH]) },
+  });
+  const { runId } = await fx.launch({ lane: 'records', ticket: 'tickets/records.md' });
+  await waitFor(
+    () =>
+      readEvents(runLedgerPath(fx.paths, runId)).some(
+        (e) => e.event === 'seat-spawned' && e.seat === 'record-author',
+      ),
+    { label: 'the birth seat', attempts: 600, intervalMs: 100 },
+  );
+  await fx.restart();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(spawns, 2);
+  assert.equal(
+    events.filter((e) => e.event === 'seat-spawned' && e.seat === 'record-author').length,
+    2,
+  );
+  // One commit, of the record the second seat wrote whole.
+  const born = events.filter((e) => e.event === 'records-committed');
+  assert.equal(born.length, 1);
+  assert.deepEqual(born[0].paths, [RECORD_PATH]);
+  assert.match(fx.closed[0].record, /The doubling is not yet implemented/);
+  assert.ok(!fx.closed[0].record.includes('# ADR-0002: Doub\n'));
+});
+
+test('the console launches the records lane, and refuses it without a ticket', async (t) => {
+  const fx = laneFixture(t, {
+    seats: {
+      'record-author': () => ({ files: { [RECORD_PATH]: RECORD_TEXT }, report: bornReport() }),
+    },
+    files: { 'tickets/records.md': ticketText([RECORD_PATH]) },
+  });
+  const { runId } = await fx.launchFromConsole({ lane: 'records', ticket: 'tickets/records.md' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-launched').lane, 'records');
+  await assert.rejects(
+    () => fx.launchFromConsole({ lane: 'records' }),
+    /a records launch requires a ticket path/,
+  );
+  // The escape linkage stays the repair lane's: no escape record names a
+  // decision record.
+  await assert.rejects(
+    () => fx.launchFromConsole({ lane: 'records', ticket: 'tickets/records.md', escape: 4 }),
+    /an escape applies to the repair lane only/,
+  );
 });
 
 test('a record-only ticket on the repair lane is refused with the lane to use', async (t) => {

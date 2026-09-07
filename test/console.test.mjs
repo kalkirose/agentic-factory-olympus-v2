@@ -340,7 +340,7 @@ test('a queued command appears under its claimed name whole or not at all', asyn
   assert.deepEqual(readdirSync(paths.control).filter((f) => f.endsWith('.tmp')), []);
 });
 
-test('a repair launch carries its ticket; lane and ticket must agree', (t) => {
+test('a ticketed launch carries its ticket; lane and ticket must agree', (t) => {
   const { root, paths } = seededHome(t);
   const bin = join(import.meta.dirname, '..', 'bin', 'olympusctl.mjs');
   const home = join(root, 'home');
@@ -362,11 +362,24 @@ test('a repair launch carries its ticket; lane and ticket must agree', (t) => {
   assert.equal(launch.lane, 'repair');
   assert.equal(launch.ticket, 'tickets/t1.md');
 
-  // A repair run without its ticket has no spec, and a ticket the lane drops
-  // is a silent surprise: both are refused before the inbox, exit code 2.
+  // A ticketed run without its ticket has no spec, and a ticket the lane drops
+  // is a silent surprise: both are refused before the inbox, exit code 2. The
+  // records lane is ticketed too: its ticket names decision records and
+  // nothing else (ADR-0074).
   const noTicket = refused(['launch', '--home', home, '--project', 'alpha', '--lane', 'repair']);
   assert.equal(noTicket.status, 2);
   assert.match(noTicket.stderr, /--lane repair requires --ticket/);
+  const noRecordTicket = refused([
+    'launch',
+    '--home',
+    home,
+    '--project',
+    'alpha',
+    '--lane',
+    'records',
+  ]);
+  assert.equal(noRecordTicket.status, 2);
+  assert.match(noRecordTicket.stderr, /--lane records requires --ticket/);
   const wrongLane = refused([
     'launch',
     '--home',
@@ -377,8 +390,23 @@ test('a repair launch carries its ticket; lane and ticket must agree', (t) => {
     'tickets/t1.md',
   ]);
   assert.equal(wrongLane.status, 2);
-  assert.match(wrongLane.stderr, /--ticket applies to --lane repair only \(lane: story\)/);
+  assert.match(wrongLane.stderr, /--ticket applies to --lane repair and --lane records only/);
   assert.equal(readdirSync(paths.control).filter((f) => f.endsWith('.json')).length, 1);
+});
+
+test('a records launch carries its ticket to the inbox', (t) => {
+  const { root, paths } = seededHome(t);
+  const bin = join(import.meta.dirname, '..', 'bin', 'olympusctl.mjs');
+  const home = join(root, 'home');
+  execFileSync(
+    process.execPath,
+    [bin, 'launch', '--home', home, '--project', 'alpha', '--lane', 'records', '--ticket', 'tickets/r1.md'],
+    { encoding: 'utf8', windowsHide: true },
+  );
+  const file = readdirSync(paths.control).find((f) => f.startsWith('launch'));
+  const launch = JSON.parse(readFileSync(join(paths.control, file), 'utf8'));
+  assert.equal(launch.lane, 'records');
+  assert.equal(launch.ticket, 'tickets/r1.md');
 });
 
 test('a repair launch carries the escape it repairs; the daemon reads the rest', (t) => {
