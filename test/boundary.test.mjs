@@ -1,8 +1,8 @@
-// The test-edit boundary at the tool level: deny rules from the project's
-// test paths, carried into the claude argv as disallowed tools.
+// The edit boundary at the tool level: deny rules from the project's test paths
+// and record paths, carried into the claude argv as disallowed tools.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { testEditDenyRules } from '../src/seats/boundary.mjs';
+import { editDenyRules, testEditDenyRules } from '../src/seats/boundary.mjs';
 import { claudeSeatCommand } from '../src/seats/claude.mjs';
 import { seatDef } from '../src/seats/seatmap.mjs';
 import { tempDir, removeDir, writeTree } from './helpers.mjs';
@@ -96,6 +96,63 @@ test('a bracketed exclusion is narrowed by its path, not by what it would match'
     'Edit(tests/routes/other/**)',
   ]);
   assert.ok(!rules.some((r) => r.includes('[step]')));
+});
+
+// A decision record is written by a record seat and by nothing else, so the
+// record paths join the frozen paths at the same boundary the test paths use.
+test('the record paths are denied beside the test paths, in that order', () => {
+  const rules = editDenyRules({ testPaths: ['tests'], recordPaths: ['docs/adr'] });
+  assert.deepEqual(rules, [
+    'Edit(tests/**)',
+    'Write(tests/**)',
+    'NotebookEdit(tests/**)',
+    'Edit(docs/adr/**)',
+    'Write(docs/adr/**)',
+    'NotebookEdit(docs/adr/**)',
+  ]);
+  // Either list alone, and neither list at all.
+  assert.deepEqual(editDenyRules({ recordPaths: ['docs/adr'] }), [
+    'Edit(docs/adr/**)',
+    'Write(docs/adr/**)',
+    'NotebookEdit(docs/adr/**)',
+  ]);
+  assert.deepEqual(editDenyRules({}), []);
+  assert.deepEqual(editDenyRules(), []);
+  // One path in both lists is denied once.
+  assert.deepEqual(editDenyRules({ testPaths: ['docs/adr'], recordPaths: ['docs/adr/'] }), [
+    'Edit(docs/adr/**)',
+    'Write(docs/adr/**)',
+    'NotebookEdit(docs/adr/**)',
+  ]);
+});
+
+// An exclusion names a file that is not a record. The entry it was carved out
+// of already denies that file, so denying it again would state a claim on it
+// the record tree does not make.
+test('an exclusion entry is not a deny rule', () => {
+  const rules = editDenyRules({
+    recordPaths: ['docs/adr', '!docs/adr/TEMPLATE.md'],
+  });
+  assert.deepEqual(rules, [
+    'Edit(docs/adr/**)',
+    'Write(docs/adr/**)',
+    'NotebookEdit(docs/adr/**)',
+  ]);
+  assert.ok(!rules.some((r) => r.includes('!')));
+  assert.ok(!rules.some((r) => r.includes('TEMPLATE')));
+  // Nothing but exclusions denies nothing.
+  assert.deepEqual(editDenyRules({ recordPaths: ['!docs/adr/TEMPLATE.md'] }), []);
+});
+
+// H5's sites still call the boundary with the test paths alone, and they get
+// the rules they always got.
+test('the old positional call is the test half of the same boundary', () => {
+  assert.deepEqual(testEditDenyRules(['tests', 'e2e']), editDenyRules({ testPaths: ['tests', 'e2e'] }));
+  assert.deepEqual(testEditDenyRules(['tests']), [
+    'Edit(tests/**)',
+    'Write(tests/**)',
+    'NotebookEdit(tests/**)',
+  ]);
 });
 
 test('denyTools ride the claude argv as disallowed tools', () => {
