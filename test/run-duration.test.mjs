@@ -369,12 +369,17 @@ test('a stage the harness has just gained builds its band from its first visits'
   // ledgers hold for it, and the band stays null until five visits exist.
   const events = [
     line(1, 0, 'run-launched', { project: 'alpha', lane: 'story' }),
-    line(2, 1, 'stage-entered', { stage: 'reconcile' }),
-    line(3, 2, 'stage-entered', { stage: 'update' }),
-    line(4, 3, 'run-closed', { state: 'shipped' }),
+    line(2, 1, 'stage-entered', { stage: 'records' }),
+    line(3, 2, 'stage-entered', { stage: 'reconcile' }),
+    line(4, 4, 'stage-entered', { stage: 'update' }),
+    line(5, 5, 'run-closed', { state: 'shipped' }),
   ];
-  assert.deepEqual(stageDurations(events, 'reconcile'), [HOUR]);
+  assert.deepEqual(stageDurations(events, 'records'), [HOUR]);
+  assert.deepEqual(stageDurations(events, 'reconcile'), [2 * HOUR]);
   assert.equal(durationBand(stageDurations(events, 'reconcile')), null);
+  // The reset is the `update` stage's alone: a stage that gained its history
+  // after the reset keeps every visit it has.
+  assert.deepEqual(stageDurations(events, 'reconcile', { resetTs: at(0) }), [2 * HOUR]);
 });
 
 test('an unmeasurable ledger reads as no duration, never a negative one', () => {
