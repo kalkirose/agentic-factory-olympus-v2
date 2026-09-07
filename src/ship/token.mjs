@@ -33,9 +33,12 @@ const ACTOR = 'daemon';
  * count of nothing (ADR-0008).
  *
  * `re-verdict` is one verdict cycle and the run comes back on its own.
+ * `re-reconcile` is one reconciliation cycle over the record tree, and the run
+ * comes back on its own as well. The two cycles judge two trees, so the reason
+ * names which one the run left for (ADR-0075).
  * `park` is a wait on a person, which no run can bound.
  */
-export const SHIP_TOKEN_RELEASE_REASONS = new Set(['re-verdict', 'park']);
+export const SHIP_TOKEN_RELEASE_REASONS = new Set(['re-verdict', 're-reconcile', 'park']);
 
 /** The reason, or a throw naming it. The only way a reason reaches a stamp. */
 export function assertReleaseReason(reason) {
@@ -139,7 +142,7 @@ export function takeShipToken(ctx) {
  * releasing there buys nothing: the request is open, so a competing merge under
  * it costs the branch update it was going to cost (ADR-0033).
  * @param {{paths: object, runId: string, store: object}} ctx
- * @param {'re-verdict'|'park'} reason
+ * @param {'re-verdict'|'re-reconcile'|'park'} reason
  * @returns {boolean} whether the run gave the token back
  */
 export function releaseShipToken(ctx, reason) {
