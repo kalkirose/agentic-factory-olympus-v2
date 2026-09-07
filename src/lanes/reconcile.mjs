@@ -87,7 +87,11 @@ import {
 /** The stage's name in every lane that holds it, where its readers reach it. */
 export { RECONCILE_STAGE };
 
-/** The stage the reconciliation hands the run to when it is done. */
+/**
+ * The stage the reconciliation hands the run to where its lane names none. Every
+ * assembled lane opens its continuation with the update, and a lane that opens
+ * with something else says so at composition.
+ */
 const NEXT_STAGE = 'update';
 
 /**
@@ -116,8 +120,13 @@ const RECHECK_JUDGE_SCHEMA = RECONCILE_JUDGE_SCHEMA;
  * The stage handler, for every lane that names the stage. It derives its step,
  * takes it, and derives again, so a stop anywhere inside resumes at the step
  * the stop interrupted.
+ *
+ * `next` is the stage the lane puts behind this one. The lane composer knows it
+ * and the stage does not: a handler that named one stage would be a handler that
+ * only one lane graph could hold.
+ * @param {{next?: string}} [opts]
  */
-export function reconcileHandler() {
+export function reconcileHandler({ next = NEXT_STAGE } = {}) {
   return async function reconcile(ctx) {
     const base = await reconcileBase(ctx);
     if (base.fail) return base.fail;
@@ -125,31 +134,31 @@ export function reconcileHandler() {
       if (ctx.stopped()) return null;
       const events = runEvents(ctx);
       const step = reconcileStep(events, { cap: base.cap });
-      if (step === 'done') return { next: NEXT_STAGE };
-      const directive = await takeStep(ctx, base, step);
+      if (step === 'done') return { next };
+      const directive = await takeStep(ctx, base, { step, next });
       if (directive) return directive;
     }
   };
 }
 
 /** One step of the stage. A directive ends the stage; null derives again. */
-async function takeStep(ctx, base, step) {
+async function takeStep(ctx, base, { step, next }) {
   switch (step) {
     case 'judge':
       return judgeStep(ctx, base);
     case 'write':
-      return writeStep(ctx, base);
+      return writeStep(ctx, base, next);
     case 'spectrum':
     case 'review':
     case 'verify':
     case 'render':
       return cycleStep(ctx, base);
     case 'correct':
-      return correctStep(ctx, base);
+      return correctStep(ctx, base, next);
     case 'recheck':
       return recheckStep(ctx, base);
     default:
-      return stallStep(ctx, base);
+      return stallStep(ctx, base, next);
   }
 }
 
@@ -386,7 +395,7 @@ function recordEntriesOf(list) {
  * which is the same dispatch again, and every record the ledger already answered
  * is stepped over.
  */
-async function writeStep(ctx, base) {
+async function writeStep(ctx, base, next) {
   const judged = judgment(runEvents(ctx));
   const records = judged.records ?? [];
   const asked = lastRecoveryPark(runEvents(ctx));
@@ -395,7 +404,7 @@ async function writeStep(ctx, base) {
     asked.park.type === 'seat-failure' &&
     asked.park.detail?.seat?.startsWith(WRITE_SEAT)
   ) {
-    return fallbackStep(ctx, base, { cause: OPERATOR });
+    return fallbackStep(ctx, base, { cause: OPERATOR, next });
   }
   // What a recheck asked this write for, where the write is a recheck's. The
   // units the repair's delta touched are the sentences to re-answer; every other
@@ -416,7 +425,7 @@ async function writeStep(ctx, base) {
   });
   if (outcome.fail) return outcome.fail;
   if (outcome.stopped) return null;
-  if (outcome.fallback) return fallbackStep(ctx, base, { cause: outcome.fallback });
+  if (outcome.fallback) return fallbackStep(ctx, base, { cause: outcome.fallback, next });
   await stampWritten(ctx, base, { entries: outcome.entries, reports: outcome.reports });
   return null;
 }
@@ -754,10 +763,10 @@ async function cycleStep(ctx, base) {
   const records = await stageScope(base, sha, changed);
   const priorRender = lastRendered(events);
   const index = findingIndex(events);
-  const priorConfirmed =
-    priorRender && priorRender.seq > (written?.seq ?? 0)
-      ? []
-      : (priorRender?.open ?? []).map((id) => index.get(id)).filter(Boolean);
+  // What the last render of this stage left open, as findings. A layer name in
+  // that set is not a finding and resolves nowhere: the layer answers for
+  // itself, on its own next run.
+  const priorConfirmed = (priorRender?.open ?? []).map((id) => index.get(id)).filter(Boolean);
   const round = await recordReviewRound(ctx, base, {
     records,
     units: unitsFor(base, records),
@@ -893,7 +902,7 @@ async function showAt(worktree, sha, file) {
  * each other's rounds, and nothing here reaches the verdict: a corrective record
  * round changes no code and buys no code cycle (ADR-0075).
  */
-async function correctStep(ctx, base) {
+async function correctStep(ctx, base, next) {
   const events = runEvents(ctx);
   const judged = judgment(events);
   const rendered = lastRendered(events);
@@ -924,7 +933,7 @@ async function correctStep(ctx, base) {
   });
   if (outcome.fail) return outcome.fail;
   if (outcome.stopped) return null;
-  if (outcome.fallback) return fallbackStep(ctx, base, { cause: outcome.fallback });
+  if (outcome.fallback) return fallbackStep(ctx, base, { cause: outcome.fallback, next });
   await stampWritten(ctx, base, {
     entries: outcome.entries,
     reports: outcome.reports,
@@ -1089,7 +1098,7 @@ function recheckRole(base, { delta, touched }) {
  * lane has no code, so the run closes on the cap and the ticket names the run
  * branch in place of a merge commit (ADR-0075).
  */
-async function stallStep(ctx, base) {
+async function stallStep(ctx, base, next) {
   const events = runEvents(ctx);
   const judged = judgment(events);
   const rendered = lastRendered(events);
@@ -1100,14 +1109,14 @@ async function stallStep(ctx, base) {
     open,
     gist: gist(`the record rounds are spent with ${open.length} open: ${open.join(', ')}`),
   });
-  return fallbackStep(ctx, base, { cause: RECORD_CAP, residual: open });
+  return fallbackStep(ctx, base, { cause: RECORD_CAP, residual: open, next });
 }
 
 /**
  * The fallback stamp, and the route behind it. The records ride the merge with
  * the open findings named, or the records lane closes on the cap.
  */
-async function fallbackStep(ctx, base, { cause, residual = [] }) {
+async function fallbackStep(ctx, base, { cause, residual = [], next = NEXT_STAGE }) {
   const index = findingIndex(runEvents(ctx));
   const findings = residual.filter((id) => index.has(id));
   ctx.store.append('reconciliation-written', {
@@ -1120,7 +1129,7 @@ async function fallbackStep(ctx, base, { cause, residual = [] }) {
     ...(cause === RECORD_CAP && { partial: true, residual: findings }),
     gist: gist(`the record write ended in a fallback: ${cause}`),
   });
-  if (base.mode !== 'records') return { next: NEXT_STAGE };
+  if (base.mode !== 'records') return { next };
   return closeOnCap(ctx, base, { cause, residual: findings, open: residual });
 }
 

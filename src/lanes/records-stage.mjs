@@ -201,10 +201,13 @@ export function withReconcileStage(continuation) {
   const stages = continuation.stages.includes(RECONCILE_STAGE)
     ? [...continuation.stages]
     : [RECONCILE_STAGE, ...continuation.stages];
+  // The stage the lane puts behind this one. The composer knows it and the stage
+  // does not, so a continuation that opens with anything is composable.
+  const next = stages.find((stage) => stage !== RECONCILE_STAGE);
   return {
     stages,
     handlers: {
-      [RECONCILE_STAGE]: reconcileHandler(),
+      [RECONCILE_STAGE]: reconcileHandler({ next }),
       ...continuation.handlers,
     },
   };

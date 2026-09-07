@@ -305,7 +305,7 @@ export function shipStep({ forgeFor, pollMs = 15000, enqueueRepair = null } = {}
   return {
     stages: [RECONCILE_STAGE, 'update', 'ship', 'close-out'],
     handlers: withAbandonGuard({
-      [RECONCILE_STAGE]: reconcileHandler(),
+      [RECONCILE_STAGE]: reconcileHandler({ next: 'update' }),
       update: updateHandler({ forgeFor, pollMs }),
       ship: shipHandler({ forgeFor, pollMs }),
       'close-out': closeOutHandler({ forgeFor, pollMs, enqueueRepair }),
