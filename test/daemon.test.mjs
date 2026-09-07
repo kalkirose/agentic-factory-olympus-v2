@@ -52,6 +52,32 @@ test('start scaffolds the home and stamps lifecycle events', async (t) => {
   assert.equal(events.at(-1).event, 'daemon-stopped');
 });
 
+test('the start stamps the harness it runs from, and ends the update history once', async (t) => {
+  const home = tempDir();
+  const daemon = new Daemon(home);
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(home);
+  });
+  await daemon.start();
+  await daemon.stop();
+  const started = instanceEvents(home).find((e) => e.event === 'daemon-started');
+  // The head of the code directory this daemon runs from. It dates every
+  // ledger after it, and the two-shape rule reads renders against it.
+  assert.match(started.harnessSha, /^[0-9a-f]{40}$/);
+  const resets = () => instanceEvents(home).filter((e) => e.event === 'duration-reset');
+  assert.deepEqual(
+    resets().map((e) => [e.stage, e.reason]),
+    [['update', 'plan-35']],
+  );
+  // The record is its own marker, so a second start says nothing new.
+  const again = new Daemon(home);
+  t.after(async () => await again.stop());
+  await again.start();
+  await again.stop();
+  assert.equal(resets().length, 1);
+});
+
 test('a second daemon on the same home is refused', async (t) => {
   const home = tempDir();
   const daemon = new Daemon(home);

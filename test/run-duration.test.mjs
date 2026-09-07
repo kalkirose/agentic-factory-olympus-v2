@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { runDuration, inactiveSpans, inactiveMs } from '../src/ledger/durations.mjs';
+import {
+  durationBand,
+  durationResetAt,
+  stageDurations,
+} from '../src/tripwires/duration.mjs';
 import { RunEngine } from '../src/engine/engine.mjs';
 import { scaffoldHome, runLedgerPath, archivedRunLedgerPath } from '../src/daemon/home.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
@@ -317,6 +322,59 @@ test('a stated window needs no launch stamp, and clamps the spans to itself', ()
   ]);
   const stageOnly = events.filter((e) => e.event !== 'run-launched');
   assert.equal(inactiveMs(stageOnly, { start: at(1), end: at(6), classes: ['queue'] }), 3 * HOUR);
+});
+
+// -- the duration history a reset ends ----------------------------------------
+//
+// A band is a reading of what the same stage of the same lane did. The record
+// judgment and the record write left the `update` stage for a stage of their
+// own, so every completed `update` visit before the pin measures work that
+// stage no longer does (ADR-0034, ADR-0075).
+
+test('a reset drops the visits before it, and keeps the ones after', () => {
+  const events = [
+    line(1, 0, 'run-launched', { project: 'alpha', lane: 'story' }),
+    line(2, 1, 'stage-entered', { stage: 'update' }),
+    line(3, 2, 'stage-entered', { stage: 'ship' }),
+    line(4, 3, 'stage-entered', { stage: 'update' }),
+    line(5, 5, 'run-closed', { state: 'shipped' }),
+  ];
+  assert.deepEqual(stageDurations(events, 'update'), [HOUR, 2 * HOUR]);
+  // The reset stands between the two visits: the first is history the band no
+  // longer holds, the second is a visit of the stage as it now runs.
+  assert.deepEqual(stageDurations(events, 'update', { resetTs: at(2.5) }), [2 * HOUR]);
+  // A reset before every visit keeps them all; one after every visit keeps none.
+  assert.deepEqual(stageDurations(events, 'update', { resetTs: at(0) }), [HOUR, 2 * HOUR]);
+  assert.deepEqual(stageDurations(events, 'update', { resetTs: at(9) }), []);
+  // No reset is the reading the stage always had.
+  assert.deepEqual(stageDurations(events, 'update', { resetTs: null }), [HOUR, 2 * HOUR]);
+});
+
+test('the reset instant is the newest one the instance stamped for that stage', () => {
+  const instance = [
+    line(1, 1, 'duration-reset', { stage: 'update', reason: 'plan-35' }),
+    line(2, 2, 'duration-reset', { stage: 'verdict', reason: 'other' }),
+    line(3, 3, 'duration-reset', { stage: 'update', reason: 'plan-35' }),
+  ];
+  assert.equal(durationResetAt(instance, 'update'), at(3));
+  assert.equal(durationResetAt(instance, 'verdict'), at(2));
+  // A stage nothing reset has its whole history, and so has an empty ledger.
+  assert.equal(durationResetAt(instance, 'ship'), null);
+  assert.equal(durationResetAt([], 'update'), null);
+  assert.equal(durationResetAt(undefined, 'update'), null);
+});
+
+test('a stage the harness has just gained builds its band from its first visits', () => {
+  // Nothing special is owed to a new stage name: the history is whatever the
+  // ledgers hold for it, and the band stays null until five visits exist.
+  const events = [
+    line(1, 0, 'run-launched', { project: 'alpha', lane: 'story' }),
+    line(2, 1, 'stage-entered', { stage: 'reconcile' }),
+    line(3, 2, 'stage-entered', { stage: 'update' }),
+    line(4, 3, 'run-closed', { state: 'shipped' }),
+  ];
+  assert.deepEqual(stageDurations(events, 'reconcile'), [HOUR]);
+  assert.equal(durationBand(stageDurations(events, 'reconcile')), null);
 });
 
 test('an unmeasurable ledger reads as no duration, never a negative one', () => {
