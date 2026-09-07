@@ -69,15 +69,19 @@ branch moves once per shipped story.
   `RECORD_RULE`, the spec or ticket, the neighbourhood by path with the count
   above the cap, and the unit heads this round moved. It carries no diff text.
   Each seat runs under the unit checks, so a report that leaves a unit unanswered
-  reaches no verifier. A `consistent` finding that names one record, and a
-  finding on a closed record, are work-product defects rather than findings.
+  reaches no verifier. A `consistent` finding that names one record is a
+  work-product defect rather than a finding, and so is a finding on a superseded
+  or retired record where the project runs the supersede lifecycle.
 - **`repo.recordPaths` names the record tree.** It is an optional list of path
   entries in the project config, in the vocabulary of `repo.testPaths` and
   `repo.uiPaths`, and it defaults to `['docs/adr']`. An entry may carry an `!`
-  prefix for an exclusion, and `recordPathIncludes` in
-  `src/config/project.mjs` is the one membership test. It decides the scope of
-  the reconciliation, the tree the dev seats are denied (ADR-0074), the paths a
-  record layer is attributed to (ADR-0022), and the neighbourhood the criteria
+  prefix for an exclusion, which is how a record tree keeps its template outside
+  the rule; an exclusion wins over every entry that includes it.
+  `recordPathIncludes` in `src/config/project.mjs` answers the membership
+  question for the record readers, and `recordMatch` in `src/lanes/parts.mjs`
+  answers it for the ground readers. The list decides the scope of the
+  reconciliation, the tree the dev seats are denied (ADR-0074), the layers a
+  record path is attributed to (ADR-0046), and the neighbourhood the criteria
   are read against. Neither the reconciliation judge nor the write seat's
   containment check reads it, so discovery still decides which records get
   rewritten and where the seat may write.
