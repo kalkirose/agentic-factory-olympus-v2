@@ -16,8 +16,8 @@ seat wrote files into the run worktree with whatever bytes its tools produced.
 `commitAll` left the working tree alone after the commit.
 
 The gates of a verdict read the working tree; CI reads the commit. A file a seat
-wrote with carriage returns was judged with carriage returns in the run, and
-with LF in CI. The project's `.gitattributes` was the one thing that kept the
+wrote with carriage returns was judged with carriage returns in the run. CI
+judged the same file with LF. The project's `.gitattributes` was the one thing that kept the
 committed bytes LF. Nothing checked that a project had such a rule.
 
 ## Decision
@@ -47,17 +47,33 @@ a second read is the proof. A `w/crlf` answer after that is a harness fault with
 the path named, never a silent pass.
 
 The replacement deletes the file and checks it out. Git will not overwrite a
-file its own stat cache calls current, and after `git add` the cache holds the
-seat's file. A plain checkout of the path returns and writes nothing. Every
+file its own stat cache calls current. After `git add` that cache holds the
+seat's file, so a plain checkout of the path returns and writes nothing. Every
 pathspec is literal, because a repository path may hold `[` and `]` and a bare
 pathspec is wildmatched. The paths ride in batches, because a Windows command
 line has a ceiling and a commit does not. This covers every seat that commits:
 dev, repair, record, reconcile-write, suite, and the cards sweep.
 
+A rewrite that moves the bytes and nothing else stages nothing. `status` lists
+the path, because the bytes moved. `add` normalises them back to the blob the
+index already holds, and `commit` on an empty index exits non-zero. The commit
+is therefore asked for only when the index has something in it. The tree is put
+right either way.
+
 **A project with no LF rule does not launch.** `refuseUnnormalisedRepo` in
-`src/daemon/daemon.mjs` reads `.gitattributes` from the default branch through
-`readBranchFile`. It refuses when no line gives the pattern `*` the attribute
-`eol=lf`. An unreadable file is a refusal too. The refusal is a plain `Error`
+`src/daemon/daemon.mjs` reads `.gitattributes` from the default branch. It
+refuses when no line gives the pattern `*` the attribute `eol=lf`. An
+unreadable file is a refusal too.
+
+The rule is read the way git reads it. Git applies the last `eol` a path
+matches. A file that says `* eol=lf` and then `* eol=crlf` declares CRLF, and
+the door refuses it. The pattern must be `*`: a narrower one leaves the rest of the tree
+unruled, and the door fails closed on that.
+
+`readBranchFiles` in `src/isolation/clones.mjs` reads the config and the
+attributes in one clone pass: one lock, one fetch, two blobs. The credential
+gate beside this one reads the same answer, so the refusal costs no fetch of its
+own. The refusal is a plain `Error`
 with the sentence and `.detail`, as the four door refusals beside it are.
 `stampRejectedLaunch` stamps `launch-rejected` with no change. No slot, no
 workspace, no ledger (ADR-0067, ADR-0068).
@@ -75,8 +91,8 @@ build carries it too, in `initOriginRepo` (`test/helpers.mjs`), `fixtureTree`
 
 Every commit costs one `ls-files` read over the changed paths. Milliseconds. A
 commit whose paths all agree costs nothing more. Only a path that disagrees is
-deleted and checked out, so a build cache keeps every file the commit agreed
-with.
+deleted and checked out. A build cache therefore keeps every file the commit
+agreed with.
 
 A seat that deliberately writes a binary file with CR bytes is unaffected: the
 `-text` and `binary` attributes exempt it, as ceq's own fixtures already do.

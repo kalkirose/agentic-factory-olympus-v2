@@ -35,8 +35,8 @@ const LINE_ENDINGS = ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf'];
  * path under that, which clears 260 characters on an ordinary tree, and git
  * without `core.longPaths` fails those checkouts and removals with "Filename
  * too long". Neither setting is taken from the user's global config. The
- * daemon's git runs under whatever account the service manager gives it, which
- * is not reliably the account that config belongs to.
+ * daemon's git runs under whatever account the service manager gives it. That
+ * is not reliably the account the config belongs to.
  * @param {string[]} args
  * @param {string} [platform]
  * @returns {string[]}

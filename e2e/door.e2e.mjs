@@ -2,11 +2,11 @@
 // arrives, and a launch the daemon refuses leaves nothing behind — no slot, no
 // clone worktree, no stack, no run ledger, no leftover to sweep (ADR-0068).
 //
-// Five refusals through the assembled binaries: a launch that names no card, a
-// card the default branch does not hold, a card the parser cannot read, a
-// credential whose probe answers no, and a project that declares no
-// line-ending rule. Nothing here waits on a run, because the point is that no
-// run is ever created.
+// Five refusals through the assembled binaries. A launch that names no card, a
+// card the default branch does not hold, a card the parser cannot read. Then a
+// credential whose probe answers no, and a project that declares no line-ending
+// rule. Nothing here waits on a run, because the point is that no run is ever
+// created.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
