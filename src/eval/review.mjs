@@ -19,6 +19,7 @@
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
+import { LANES } from '../config/project.mjs';
 import { DEFECT_KINDS } from '../ledger/registry.mjs';
 import { listShips } from '../telemetry/readers.mjs';
 import { runSeat } from '../seats/runner.mjs';
@@ -158,7 +159,7 @@ export class EvalScheduler {
       ...(typeof result.model === 'string' && { model: result.model }),
       gist: gist(
         `eval review ${review}: ${window.length} ships ` +
-          `(${lanes.story} story, ${lanes.repair} repair), ${proposals} proposals`,
+          `(${laneCounts(lanes)}), ${proposals} proposals`,
       ),
     });
   }
@@ -183,11 +184,24 @@ export function evalWindow(ships, last) {
   return ships.filter((s) => s.ts >= boundary && !named.has(s.runId));
 }
 
-/** Ships per lane over a window. Story and repair always appear, zero-filled. */
+/**
+ * Ships per lane over a window. Every lane the daemon runs appears, zero-filled
+ * from the one lane list, so a lane the harness gains is counted here and named
+ * in the gist without a second edit. A lane the list does not hold still counts,
+ * behind the zero-filled ones: a ledger names the lane, and a reading that
+ * dropped it would report a window shorter than the window it read.
+ */
 function lanesOf(window) {
-  const lanes = { story: 0, repair: 0 };
+  const lanes = Object.fromEntries(LANES.map((lane) => [lane, 0]));
   for (const ship of window) lanes[ship.lane] = (lanes[ship.lane] ?? 0) + 1;
   return lanes;
+}
+
+/** The per-lane counts as the gist states them, in the order `lanesOf` holds. */
+function laneCounts(lanes) {
+  return Object.entries(lanes)
+    .map(([lane, n]) => `${n} ${lane}`)
+    .join(', ');
 }
 
 function roleBlock({ review, window, last, paths }) {

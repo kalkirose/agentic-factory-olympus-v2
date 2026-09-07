@@ -14,6 +14,7 @@ import {
   evalReportPath,
   evalWindow,
 } from '../src/eval/review.mjs';
+import { TICKETED_LANES } from '../src/lanes/records-stage.mjs';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { tempDir, removeDir, waitFor, NO_WAIT } from './helpers.mjs';
 
@@ -49,7 +50,7 @@ function shipRun(paths, runId, project, ts, { lane = 'story', escapeSeq } = {}) 
     line(1, ts, 'run-launched', {
       project,
       lane,
-      ...(lane === 'repair' && { ticket: `/home/tickets/${runId}.md` }),
+      ...(TICKETED_LANES.includes(lane) && { ticket: `/home/tickets/${runId}.md` }),
       ...(escapeSeq !== undefined && { escapeSeq }),
     }),
     line(2, ts, 'merged', { sha: 'a'.repeat(7) }),
@@ -190,15 +191,32 @@ test('a shipped repair is a ship the review counts, and the role block names its
   assert.equal(fixture.calls.length, 1);
   const review = readEvents(paths.instanceLedger).find((e) => e.event === 'eval-review');
   assert.deepEqual(review.ships, ['s1', 's2', 's3', 'r1', 'r2']);
-  assert.deepEqual(review.lanes, { story: 3, repair: 2 });
+  assert.deepEqual(review.lanes, { story: 3, repair: 2, records: 0 });
   assert.equal(review.shipCount, 5);
-  assert.match(review.gist, /5 ships \(3 story, 2 repair\)/);
+  assert.match(review.gist, /5 ships \(3 story, 2 repair, 0 records\)/);
   const prompt = fixture.calls[0].prompt;
   assert.match(prompt, /- s1 \(p, story, merged 2026-08-01T00:00:00Z\)/);
   assert.match(prompt, /- r1 \(p, repair, escape #7, merged 2026-08-04T00:00:00Z\)/);
   assert.match(prompt, /- r2 \(q, repair, maintenance, merged 2026-08-05T00:00:00Z\)/);
   assert.match(prompt, /a story run has a card; a repair run has a ticket/);
   assert.match(prompt, /whether a maintenance repair should have\nbeen a story/);
+});
+
+test('a records-lane ship is counted by name, and every lane is zero-filled', async (t) => {
+  const paths = home(t);
+  const fixture = evalFixture(() => ({ report: { summary: 'ok', proposals: [] } }));
+  const { evals } = scheduler(t, paths, fixture);
+  for (let i = 1; i <= 4; i++) shipRun(paths, `s${i}`, 'p', `2026-08-0${i}T00:00:00Z`);
+  shipRun(paths, 'd1', 'p', '2026-08-05T00:00:00Z', { lane: 'records' });
+  await evals.notify();
+  assert.equal(fixture.calls.length, 1);
+  const review = readEvents(paths.instanceLedger).find((e) => e.event === 'eval-review');
+  assert.deepEqual(review.ships, ['s1', 's2', 's3', 's4', 'd1']);
+  // The count and the gist read the same lane list the daemon runs, so the
+  // third lane is one of the numbers and a lane with no ship reads as zero.
+  assert.deepEqual(review.lanes, { story: 4, repair: 0, records: 1 });
+  assert.match(review.gist, /5 ships \(4 story, 0 repair, 1 records\)/);
+  assert.match(fixture.calls[0].prompt, /- d1 \(p, records, merged 2026-08-05T00:00:00Z\)/);
 });
 
 test('the brief states the record stage as the harness now stamps it', async (t) => {
@@ -269,7 +287,7 @@ test('the window starts after the newest ship the last review named, not at a co
   assert.equal(fixture.calls.length, 2);
   const reviews = readEvents(paths.instanceLedger).filter((e) => e.event === 'eval-review');
   assert.deepEqual(reviews[1].ships, ['s6', 's7', 's8', 's9', 'r-new']);
-  assert.deepEqual(reviews[1].lanes, { story: 4, repair: 1 });
+  assert.deepEqual(reviews[1].lanes, { story: 4, repair: 1, records: 0 });
   assert.equal(reviews[1].shipCount, 12);
   assert.ok(!fixture.calls[1].prompt.includes('- s5 ('));
   assert.ok(!fixture.calls[1].prompt.includes('- r-old ('));
@@ -387,7 +405,7 @@ test('a repair that closes shipped notifies the scheduler', async (t) => {
   );
   const review = readEvents(paths.instanceLedger).find((e) => e.event === 'eval-review');
   assert.deepEqual(review.ships, ['s1', 's2', 's3', 's4', 'r1']);
-  assert.deepEqual(review.lanes, { story: 4, repair: 1 });
+  assert.deepEqual(review.lanes, { story: 4, repair: 1, records: 0 });
   await daemon.stop();
 });
 

@@ -923,12 +923,14 @@ function validateTripwires(tripwires, err) {
   });
 }
 
-// Every lane the daemon runs. A lane name in the config is a typo the launch
-// must not swallow, so each block that takes one is checked against a closed
-// set. The two sets differ: every lane spends seats, so every lane takes a
-// budget; only a lane with a dev seat takes a diff policy, because the policy
-// polices what that seat wrote. The records lane holds no dev seat (ADR-0074).
-const LANES = ['story', 'repair', 'records'];
+// Every lane the daemon runs, and the one list of them. A lane name in the
+// config is a typo the launch must not swallow, so each block that takes one is
+// checked against a closed set. A reader outside this module that enumerates or
+// counts lanes reads this list as well, so one edit reaches every one of them.
+// The two sets differ: every lane spends seats, so every lane takes a budget;
+// only a lane with a dev seat takes a diff policy, because the policy polices
+// what that seat wrote. The records lane holds no dev seat (ADR-0074).
+export const LANES = Object.freeze(['story', 'repair', 'records']);
 const BUDGETED_LANES = new Set(LANES);
 const POLICED_LANES = new Set(['story', 'repair']);
 
