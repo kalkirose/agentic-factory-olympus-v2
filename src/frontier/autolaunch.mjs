@@ -24,7 +24,11 @@ import { openCardParks } from '../telemetry/queue.mjs';
 import { readGraphSource } from './source.mjs';
 import { computeFrontier } from './graph.mjs';
 import { owedRepairs, repairLaunch } from './repairs.mjs';
-import { owedReconciliations, reconciliationLaunch } from './reconciliations.mjs';
+import {
+  RECONCILIATION_LANE,
+  owedReconciliations,
+  reconciliationLaunch,
+} from './reconciliations.mjs';
 
 const ACTOR = 'daemon';
 const GIST_MAX = 120;
@@ -206,10 +210,15 @@ export class FrontierLauncher {
    * restarted between the judgment and the launch catches up. A paused
    * project launches nothing and nothing goes loud: the owed set persists in
    * the run ledgers, and the record tree's own hygiene gate bounds the gap.
+   *
+   * The guard names the lane the launch names. A reconciliation runs on the
+   * records lane (ADR-0074), so an instance that registers the repair lane and
+   * not the records lane would send every owed reconciliation to a lane the
+   * engine refuses, and the sweep would stamp a rejection per owed item.
    */
   async reconciliationPass(project) {
     const d = this.daemon;
-    if (!d.engine.lanes.has('repair') || !this.isArmed(project)) return 0;
+    if (!d.engine.lanes.has(RECONCILIATION_LANE) || !this.isArmed(project)) return 0;
     const owed = owedReconciliations(d.paths, project);
     let waiting = 0;
     for (let i = 0; i < owed.length; i++) {

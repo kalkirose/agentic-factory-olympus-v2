@@ -10,7 +10,9 @@ import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, repairTicketPath, reconcileTicketPath } from '../src/daemon/home.mjs';
 import { openEscapesStore, openRunStore } from '../src/telemetry/stores.mjs';
 import { recordEscape, ticketEscape } from '../src/telemetry/escapes.mjs';
+import { readEvents } from '../src/ledger/ledger.mjs';
 import {
+  RECONCILIATION_LANE,
   owedReconciliations,
   reconciliationLaunch,
   launchedReconciliations,
@@ -162,4 +164,74 @@ test('the sweep launches repairs, then reconciliations, then the story frontier'
   assert.deepEqual(owedReconciliations(paths, 'alpha'), []);
   // The launch stamp carries the ship it answers.
   assert.deepEqual(launchedReconciliations(paths), new Set(['shipped-1']));
+});
+
+// -- the pass guards on the lane its launch names (ADR-0074) -----------------
+
+/**
+ * A daemon over one project with a named lane set and no story graph, so the
+ * sweep's only pass with work to do is the reconciliation one.
+ */
+function passFixture(t, lanes) {
+  const root = tempDir();
+  const launched = [];
+  const origin = initOriginRepo(join(root, 'origin'), {
+    'compose.harness.yml': 'services: {}\n',
+    [CONFIG_PATH]: projectConfigJson(),
+  });
+  const paths = scaffoldHome(join(root, 'home'));
+  writeFileSync(
+    paths.instanceConfig,
+    JSON.stringify({ version: 1, projects: { alpha: { repoUrl: origin, slotCap: 1 } } }) + '\n',
+  );
+  const stub = {
+    stages: ['work'],
+    handlers: {
+      work: async (ctx) => {
+        launched.push(`${ctx.lane}:${ctx.payload.reconcilesRunId}`);
+        return { close: { state: 'shipped' } };
+      },
+    },
+  };
+  const daemon = new Daemon(join(root, 'home'), {
+    waitSleep: NO_WAIT,
+    lanes: Object.fromEntries(lanes.map((name) => [name, stub])),
+    composeRunner: fakeComposeRunner(),
+  });
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(root);
+  });
+  return { paths, daemon, launched };
+}
+
+test('a lane set without the records lane skips the pass; one with it runs the pass', async (t) => {
+  // The launch names the records lane, so the guard reads that lane and no
+  // other. An instance that runs the repair lane and not the records lane holds
+  // no lane for a reconciliation: the pass stands down, the owed set waits, and
+  // nothing is stamped rejected.
+  assert.equal(RECONCILIATION_LANE, 'records');
+  const without = passFixture(t, ['story', 'repair']);
+  await without.daemon.start();
+  seedStoryRun(without.paths, { runId: 'r1', judged: owedJudgment(without.paths, 'r1') });
+  without.daemon.frontier.setArmed('alpha', true, 'human');
+  assert.equal(await without.daemon.frontier.reconciliationPass('alpha'), 0);
+  assert.deepEqual(without.launched, []);
+  assert.deepEqual(
+    owedReconciliations(without.paths, 'alpha').map((o) => o.runId),
+    ['r1'],
+  );
+  assert.ok(
+    !readEvents(without.paths.instanceLedger).some((e) => e.event === 'launch-rejected'),
+    'the pass stamped a rejection',
+  );
+
+  // The same instance with the lane the launch names runs the pass.
+  const withLane = passFixture(t, ['story', 'repair', 'records']);
+  await withLane.daemon.start();
+  seedStoryRun(withLane.paths, { runId: 'r1', judged: owedJudgment(withLane.paths, 'r1') });
+  withLane.daemon.frontier.setArmed('alpha', true, 'human');
+  await waitFor(() => withLane.launched.length === 1, { ...WAIT, label: 'the reconciliation' });
+  assert.deepEqual(withLane.launched, ['records:r1']);
+  assert.deepEqual(owedReconciliations(withLane.paths, 'alpha'), []);
 });

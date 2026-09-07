@@ -55,16 +55,20 @@ export function owedReconciliations(paths, project) {
 }
 
 /**
- * The launch payload of one owed reconciliation. The ticket is the lane's spec.
+ * The lane a reconciliation runs on: the ticket names decision records and
+ * nothing else, so there is no code to fix, no suite to run and no code verdict
+ * to render, and the repair lane would refuse it at the door (ADR-0074).
  *
- * The lane is `records`: the ticket names decision records and nothing else, so
- * there is no code to fix, no suite to run and no code verdict to render, and
- * the repair lane would refuse it at the door (ADR-0074).
+ * The launch and the sweep's own guard read this one name. A guard on any other
+ * lane would send the owed set to a lane the engine may not hold.
  */
+export const RECONCILIATION_LANE = 'records';
+
+/** The launch payload of one owed reconciliation. The ticket is the lane's spec. */
 export function reconciliationLaunch(owed) {
   return {
     project: owed.project,
-    lane: 'records',
+    lane: RECONCILIATION_LANE,
     ticket: owed.ticket,
     reconcilesRunId: owed.runId,
   };
