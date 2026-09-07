@@ -41,10 +41,15 @@ function seedStoryRun(paths, { runId, project = 'alpha', judged = null, state = 
   store.close();
 }
 
-/** Seeds a reconciliation run's launch stamp the way the sweep leaves it. */
-function seedReconciliationRun(paths, { runId, reconcilesRunId, project = 'alpha' }) {
+/**
+ * Seeds a reconciliation run's launch stamp the way the sweep leaves it. The
+ * lane defaults to `records`, which is where a reconciliation runs now; one
+ * launched before that lane existed carries `repair`, and the owed set reads
+ * both.
+ */
+function seedReconciliationRun(paths, { runId, reconcilesRunId, project = 'alpha', lane = 'records' }) {
   const store = openRunStore(paths, runId);
-  store.append('run-launched', { actor: 'daemon', project, lane: 'repair', reconcilesRunId });
+  store.append('run-launched', { actor: 'daemon', project, lane, reconcilesRunId });
   store.close();
 }
 
@@ -90,16 +95,22 @@ test('the owed set is judged owed, shipped, unlaunched, and of this project', (t
   // A reconciliation run that exists answers its ship, open or closed.
   seedStoryRun(paths, { runId: 'r6', judged: owedJudgment(paths, 'r6') });
   seedReconciliationRun(paths, { runId: 'rr6', reconcilesRunId: 'r6' });
+  // A reconciliation from before the records lane ran on the repair lane, and
+  // it answers its ship exactly as one launched today does.
+  seedStoryRun(paths, { runId: 'r7', judged: owedJudgment(paths, 'r7') });
+  seedReconciliationRun(paths, { runId: 'rr7', reconcilesRunId: 'r7', lane: 'repair' });
 
-  assert.deepEqual(launchedReconciliations(paths), new Set(['r6']));
+  assert.deepEqual(launchedReconciliations(paths), new Set(['r6', 'r7']));
   const owed = owedReconciliations(paths, 'alpha');
   assert.deepEqual(
     owed.map((o) => o.runId),
     ['r1'],
   );
+  // The ticket names decision records and nothing else, so the reconciliation
+  // launches on the lane that holds no dev seat (ADR-0074).
   assert.deepEqual(reconciliationLaunch(owed[0]), {
     project: 'alpha',
-    lane: 'repair',
+    lane: 'records',
     ticket: reconcileTicketPath(paths, 'r1'),
     reconcilesRunId: 'r1',
   });
@@ -135,7 +146,7 @@ test('the sweep launches repairs, then reconciliations, then the story frontier'
   });
   const daemon = new Daemon(join(root, 'home'), {
     waitSleep: NO_WAIT,
-    lanes: { story: stub('story'), repair: stub('repair') },
+    lanes: { story: stub('story'), repair: stub('repair'), records: stub('records') },
     composeRunner: fakeComposeRunner(),
   });
   t.after(async () => {
@@ -147,7 +158,7 @@ test('the sweep launches repairs, then reconciliations, then the story frontier'
   seedStoryRun(paths, { runId: 'shipped-1', judged: owedJudgment(paths, 'shipped-1') });
   daemon.frontier.setArmed('alpha', true, 'human');
   await waitFor(() => launched.length === 3, { ...WAIT, label: 'repair, reconciliation, story' });
-  assert.deepEqual(launched, [`repair:${seq}`, 'repair:shipped-1', 'story:s1']);
+  assert.deepEqual(launched, [`repair:${seq}`, 'records:shipped-1', 'story:s1']);
   assert.deepEqual(owedReconciliations(paths, 'alpha'), []);
   // The launch stamp carries the ship it answers.
   assert.deepEqual(launchedReconciliations(paths), new Set(['shipped-1']));

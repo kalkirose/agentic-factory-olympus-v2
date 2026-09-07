@@ -1,11 +1,12 @@
-// The lane graph the daemon runs: story and repair, assembled from the lane
-// composers. The daemon registers lanes once at start, so the graph is built
-// once — but one instance holds many projects, and each project ships to its
-// own repository. The forge is therefore resolved per run from the run's
+// The lane graph the daemon runs: story, repair and records, assembled from the
+// lane composers. The daemon registers lanes once at start, so the graph is
+// built once — but one instance holds many projects, and each project ships to
+// its own repository. The forge is therefore resolved per run from the run's
 // project, out of the live instance config; nothing here binds a repository
 // at assembly time.
 import { storyLane } from './story.mjs';
 import { postFreeze, repairLane } from './verdict.mjs';
+import { recordsLane } from './records-stage.mjs';
 import { shipStep } from './ship.mjs';
 import { gitHubForge, parseGitHubRepo } from '../ship/forge.mjs';
 
@@ -30,8 +31,12 @@ export function projectForge(config, project, { runner } = {}) {
 
 /**
  * Assembles the lanes the daemon registers:
- *   story  → storyLane → postFreeze → shipStep
- *   repair → repairLane → shipStep
+ *   story   → storyLane → postFreeze → shipStep
+ *   repair  → repairLane → shipStep
+ *   records → recordsLane → shipStep
+ * The records lane is the third one: a ticket that names decision records and
+ * nothing else is a run of its own, with no fix seat, no suite and no code
+ * verdict (ADR-0074).
  * @param {{instanceConfig: () => object,
  *   enqueueRepair?: (info: object) => unknown}} opts `instanceConfig` reads
  *   the live config, so a config edit reaches the next forge resolution.
@@ -52,5 +57,6 @@ export function assembleLanes({ instanceConfig, enqueueRepair = null } = {}) {
   return {
     story: storyLane({ afterFreeze: postFreeze({ afterVerdict: ship }), forgeFor }),
     repair: repairLane({ afterVerdict: ship }),
+    records: recordsLane({ afterRecords: ship, forgeFor }),
   };
 }

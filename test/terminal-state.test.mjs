@@ -248,7 +248,7 @@ function fixture(t, { seats = {}, card = CARD, config = {}, originFiles = {} } =
       },
     }),
   });
-  const seatDefs = seatFixture(seats);
+  const seatDefs = seatFixture({ 'record-author': () => ({ report: NO_RECORD_DECIDED }), ...seats });
   let daemon = new Daemon(home, { waitSleep: NO_WAIT, lanes: lanes() });
   t.after(async () => {
     await daemon.stop();
@@ -322,6 +322,17 @@ function chainSeats(suiteBehavior) {
     suite: suiteBehavior,
   };
 }
+
+// The birth seat's report where a story decides no record. The records stage
+// stands between the gate and the suite, and these scenarios are about the
+// terminal states, so every one of them decides nothing (ADR-0074).
+const NO_RECORD_DECIDED = {
+  rewritten: [],
+  unchanged: [],
+  units: [],
+  divergences: [],
+  summary: 'no record decided',
+};
 
 // -- scenarios ---------------------------------------------------------------
 

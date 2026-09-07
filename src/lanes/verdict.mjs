@@ -39,7 +39,7 @@
 // state, so a daemon restart resumes mid-verdict without memory.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join } from 'node:path';
-import { DEFAULT_RECONCILE_ROUNDS } from '../config/project.mjs';
+import { DEFAULT_RECONCILE_ROUNDS, recordPathIncludes } from '../config/project.mjs';
 import { reviewDiffPath, runReportPath } from '../daemon/home.mjs';
 import {
   carryPaths,
@@ -52,7 +52,7 @@ import {
   changedInRange,
   resetHard,
 } from '../isolation/tree.mjs';
-import { testEditDenyRules } from '../seats/boundary.mjs';
+import { editDenyRules } from '../seats/boundary.mjs';
 import {
   DROP_NOTE,
   RECAPTURE_NOTE,
@@ -80,7 +80,12 @@ import {
 } from '../ledger/acks.mjs';
 import { cycleRepeat, openIdentities } from '../ledger/cycles.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
-import { assertDefectKind, RECORD_FINDINGS, RECORD_LAYER_RED } from '../ledger/registry.mjs';
+import {
+  assertDefectKind,
+  assertRecaptureClass,
+  RECORD_FINDINGS,
+  RECORD_LAYER_RED,
+} from '../ledger/registry.mjs';
 import { openEscapesStore } from '../telemetry/stores.mjs';
 import { readEscapeSet, recordEscape } from '../telemetry/escapes.mjs';
 import {
@@ -120,6 +125,18 @@ import {
   reconcileWriteSchema,
   writeChecks,
 } from './records.mjs';
+import {
+  RECORD_TAKEBACK_NOTE,
+  birthRecords,
+  carriedPaths,
+  carryRecords,
+  recordBase,
+  recordDropLine,
+  recordLaneRefusal,
+  recordTakeBackGist,
+  ticketPathClass,
+  withReconcileStage,
+} from './records-stage.mjs';
 import { freezeAnchor } from './resume.mjs';
 import { parseIntentCard } from './card.mjs';
 import {
@@ -244,16 +261,20 @@ export function postFreeze({ afterVerdict }) {
  */
 export function repairLane({ afterVerdict }) {
   requireContinuation(afterVerdict, 'repairLane');
+  // The records are judged in a stage of their own, between the verdict and the
+  // update: nothing in that stage changes a verdict, and nothing in the verdict
+  // reads a record commit (ADR-0075).
+  const after = withReconcileStage(afterVerdict);
   return {
-    stages: ['fix', 'verdict', ...afterVerdict.stages],
+    stages: ['fix', 'verdict', ...after.stages],
     // A lane root carries both stage-entry guards: the abandon route out of
     // any park (ADR-0015), and, inside it, the tree refresh a bought retry on
     // a stage-blocked park is owed (ADR-0055).
     handlers: withAbandonGuard(
       withTreeRefresh({
         fix: implementationHandler('repair'),
-        verdict: verdictHandler('repair', afterVerdict.stages[0]),
-        ...afterVerdict.handlers,
+        verdict: verdictHandler('repair', after.stages[0]),
+        ...after.handlers,
       }),
     ),
   };
@@ -337,6 +358,13 @@ function implementationHandler(mode) {
     if (base.fail) return base.fail;
     const events = runEvents(ctx);
     if (events.some((e) => e.event === 'implementation-committed')) return { next: 'verdict' };
+    // A repair ticket that names decision records is classified before any seat
+    // runs. Records only is another lane's work; records beside code is one
+    // birth and then the dev seat, with the records frozen for it (ADR-0074).
+    if (mode === 'repair') {
+      const born = await ticketRecords(ctx, base);
+      if (born) return born;
+    }
     const baseSha = await headSha(base.worktree);
     // The capture gate holds the structural test-edit guarantee: the frozen
     // suite is restored from its sha before the tree is committed or judged.
@@ -363,6 +391,49 @@ function implementationHandler(mode) {
     });
     return { next: 'verdict' };
   };
+}
+
+/**
+ * The record half of a repair ticket, before its dev seat. Returns a directive
+ * when the stage cannot go on, and null when the dev seat is next.
+ *
+ * The ticket's fenced touched-paths block is the declaration, so it is parsed
+ * and not searched: a ticket that names `docs/adr/x.md` in a sentence declares
+ * nothing, and the block is what the lane is judged against everywhere else
+ * (ADR-0067).
+ *
+ * A record-only ticket is refused here as it is refused at the launch door. The
+ * door reads the ticket from the default branch and a ticket it could not read
+ * is admitted, so the stage asks again over the tree the run holds.
+ */
+async function ticketRecords(ctx, base) {
+  let text;
+  try {
+    text = readFileSync(base.specRef, 'utf8');
+  } catch {
+    return null; // an unreadable ticket is the ticket park's, not this rule's
+  }
+  const { klass } = ticketPathClass(text, base.recordPaths);
+  if (klass === 'records') {
+    return blocked(ctx, 'record-only-ticket', recordLaneRefusal(base.specRef), {
+      lane: 'records',
+    });
+  }
+  if (klass !== 'mixed') return null;
+  const outcome = await birthRecords(
+    ctx,
+    recordBase({
+      ...base,
+      key: ctx.runId,
+      spec: {
+        key: ctx.runId,
+        path: base.specRef,
+        reason: 'the intake ticket states the decisions this run records',
+        touchedPaths: parseTouchedPaths(text),
+      },
+    }),
+  );
+  return outcome.fail ?? null;
 }
 
 // -- verdict (loop) ----------------------------------------------------------
@@ -2624,13 +2695,21 @@ export async function freshPass(ctx, base, mode, { newPass, trigger, open, last 
     await resetHard(base.worktree, base.resetSha);
     const stamp = { actor: ACTOR, pass: newPass, trigger };
     if (mode === 'story') {
-      await carryPaths(base.worktree, currentSuiteSha(events), base.testPaths, {
+      // The records ride with the frozen suite: they were committed before the
+      // freeze, so the freeze sha carries both and one call takes them over the
+      // reset. Without it a pass deletes the records the run was born with, and
+      // the stage that writes them is behind the freeze (ADR-0074).
+      await carryPaths(base.worktree, currentSuiteSha(events), carriedPaths(base), {
         except: base.frozenExclusions,
       });
       stamp.sha = await commitAll(base.worktree, `suite carry: ${ctx.runId}`);
     }
     ctx.store.append('fresh-pass', stamp);
   }
+  // The stamp the readers of this pass read: a `records-committed` from before
+  // the reset says nothing about the tree the pass stands on. It is derived
+  // from the ledger, so a restart repeats the carry rather than losing it.
+  await carryRecords(ctx, base, mode);
   // The stall brief always rides; a capture correction rides with it.
   const stall = stallBrief(open);
   const withStall = (brief) => (brief ? [stall, ...(Array.isArray(brief) ? brief : [brief])] : stall);
@@ -2878,6 +2957,32 @@ async function captureDefects(ctx, base, mode, { seat, capture }) {
   if (mode === 'story') {
     await restorePaths(base.worktree, anchor, base.testPaths, { except: exempt });
   }
+  // The record tree is frozen for this seat in both lanes. The anchor is the
+  // run's own last commit and not the freeze: the tree carries the records this
+  // run was born with, the ones a reconciliation wrote after it, and the ones a
+  // mixed ticket's own birth committed, and every one of them is the state this
+  // write is taken back to (ADR-0074). The take-back is per file, so an `!`
+  // exclusion in the record paths is never restored and never counted.
+  const recordWrites = changed.filter(
+    (f) => !frozenWrites.includes(f) && recordPathIncludes(f, base.recordPaths ?? []),
+  );
+  if (recordWrites.length > 0) {
+    await restorePaths(base.worktree, await headSha(base.worktree), recordWrites);
+    ctx.store.append('diff-policy-recapture', {
+      actor: ACTOR,
+      seat,
+      lane: mode,
+      kind: assertDefectKind('capture-takeback'),
+      class: assertRecaptureClass('record'),
+      recaptured: recordWrites,
+      note: RECORD_TAKEBACK_NOTE,
+      recapturedLines: recordWrites.map(recordDropLine),
+      gist: gist(recordTakeBackGist(recordWrites)),
+    });
+    for (const path of recordWrites) {
+      if (!capture.dropped.includes(path)) capture.dropped.push(path);
+    }
+  }
   const tier = laneDiffPolicy(base.config, mode);
   // The sweep parts first, because a swept path is not a take-back at all: the
   // freeze never held the file, so the restore that just ran took nothing back
@@ -2899,7 +3004,7 @@ async function captureDefects(ctx, base, mode, { seat, capture }) {
   // first capture took back is gone from the commit the corrective attempt
   // produces, and the commit record has to say so.
   for (const path of dropped) if (!capture.dropped.includes(path)) capture.dropped.push(path);
-  const kept = changed.filter((f) => !frozenWrites.includes(f));
+  const kept = changed.filter((f) => !frozenWrites.includes(f) && !recordWrites.includes(f));
   const violations = diffPolicyViolations(kept, tier, declaresPath(base, mode, tier));
   // The two classes of take-back part here, and only in the record: the quiet
   // class is reverted, committed around and stated downstream exactly like the
@@ -2912,6 +3017,7 @@ async function captureDefects(ctx, base, mode, { seat, capture }) {
       seat,
       lane: mode,
       kind: assertDefectKind('capture-takeback'),
+      class: assertRecaptureClass('test'),
       recaptured,
       note: RECAPTURE_NOTE,
       recapturedLines: recaptured.map(recaptureLine),
@@ -2934,7 +3040,13 @@ async function captureDefects(ctx, base, mode, { seat, capture }) {
     });
   }
   if (violations.length === 0) return [];
-  return [...violations.map(violationLine), ...dropped.map(dropLine)];
+  // The corrective brief states every take-back beside the violations: the seat
+  // is about to re-read a tree that no longer holds those writes.
+  return [
+    ...violations.map(violationLine),
+    ...dropped.map(dropLine),
+    ...recordWrites.map(recordDropLine),
+  ];
 }
 
 /**
@@ -2954,10 +3066,16 @@ async function sweptWrites(base, tier, frozenWrites, anchor) {
 }
 
 /**
- * Whether the run declared a path, per lane. The story lane reads the born
- * spec's touched-paths block. The repair lane has no spec, so the intake
- * ticket answers: a path the ticket names verbatim is declared. Unreadable
- * source text declares nothing.
+ * Whether the run declared a path. Both lanes read the fenced touched-paths
+ * block of their own source: the born spec in the story lane, the intake ticket
+ * in the repair lane. Unreadable source text declares nothing.
+ *
+ * The repair lane read the whole ticket for the path before this, so a ticket
+ * that named a file in a sentence declared it. A ticket that carries a block is
+ * read by the block alone, which is the list the launch door judges (ADR-0067)
+ * and the list the record classification reads, so one declaration answers all
+ * three. A ticket with no block keeps the text match: the block is optional in
+ * that lane, and a ticket without one would otherwise declare nothing at all.
  */
 function declaresPath(base, mode, tier) {
   if (!tier?.declaredPaths?.length) return () => false;
@@ -2967,8 +3085,8 @@ function declaresPath(base, mode, tier) {
   } catch {
     return () => false;
   }
-  if (mode === 'repair') return (path) => text.includes(path);
   const declared = new Set(parseTouchedPaths(text));
+  if (mode === 'repair' && declared.size === 0) return (path) => text.includes(path);
   return (path) => declared.has(path);
 }
 
@@ -2984,6 +3102,16 @@ function declaresPath(base, mode, tier) {
  */
 async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
   const capture = { dropped: [], allowlists: [] };
+  // The record tree is denied in both lanes: no seat that writes code writes a
+  // decision record, and the repair lane is where most records are owed
+  // (ADR-0074). The test paths are the story lane's freeze alone — the repair
+  // lane's dev seat writes the regression test.
+  const denyTools = editDenyRules({
+    testPaths: mode === 'story' ? base.testPaths : [],
+    recordPaths: base.recordPaths ?? [],
+    except: base.frozenExclusions,
+    worktree: base.worktree,
+  });
   const outcome = await seatWithChecks(ctx, {
     seat,
     label: null,
@@ -2991,12 +3119,7 @@ async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
-    ...(mode === 'story' && {
-      denyTools: testEditDenyRules(base.testPaths, {
-        except: base.frozenExclusions,
-        worktree: base.worktree,
-      }),
-    }),
+    ...(denyTools.length > 0 && { denyTools }),
     buildRole,
     checks: () => captureDefects(ctx, base, mode, { seat, capture }),
   });

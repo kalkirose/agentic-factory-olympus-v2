@@ -50,6 +50,12 @@ import { parseProjectConfig } from '../config/project.mjs';
 import { diffPolicyViolations, laneDiffPolicy, parseTouchedBlock } from '../seats/diffpolicy.mjs';
 import { parseIntentCard } from '../lanes/card.mjs';
 import { credentialRefusal, probeCredentials } from '../lanes/probes.mjs';
+import {
+  TICKETED_LANES,
+  codeTicketRefusal,
+  recordLaneRefusal,
+  ticketPathClass,
+} from '../lanes/records-stage.mjs';
 import { readInheritance, closeState } from '../lanes/resume.mjs';
 import { FrontierLauncher } from '../frontier/autolaunch.mjs';
 import { launchEscape } from '../frontier/repairs.mjs';
@@ -612,8 +618,9 @@ export class Daemon {
       }
       if (inherit) await this.requireFrozenTree(project, entry, inherit);
       if (lane === 'story') await this.refuseUnreadableCard(project, entry, payload.card);
-      if (lane === 'repair' && typeof payload.ticket === 'string') {
+      if (TICKETED_LANES.includes(lane) && typeof payload.ticket === 'string') {
         await this.refuseForbiddenTicket(project, entry, payload.ticket);
+        await this.refuseWrongLaneTicket(project, entry, lane, payload.ticket);
       }
       await this.refuseUnprovenCredentials(project, entry);
       const ws = await this.isolation.provision({
@@ -862,6 +869,29 @@ export class Daemon {
   }
 
   /**
+   * A ticket launched on the lane that cannot do its work is refused here,
+   * before a slot, a workspace or a seat is spent on it (ADR-0074). The
+   * touched-paths block is the declaration, as it is for the ground refusal
+   * above, and the record tree is what classifies it.
+   *
+   * A ticket whose block names decision records and nothing else is refused on
+   * the repair lane: that lane runs a dev seat, and no dev seat writes a
+   * record. A ticket that names code is refused on the records lane: that lane
+   * holds no dev seat and no code verdict. A ticket with no block is accepted
+   * on either, as a ticket with no block always was; the lane's own stage reads
+   * the ticket again from the tree the run holds.
+   */
+  async refuseWrongLaneTicket(project, entry, lane, ticket) {
+    const text = await this.readTicketText(project, entry, ticket);
+    const config = await this.readLaunchConfig(project, entry);
+    const { klass, code } = ticketPathClass(text, config?.repo?.recordPaths ?? []);
+    if (lane === 'repair' && klass === 'records') throw new Error(recordLaneRefusal(ticket));
+    if (lane === 'records' && (klass === 'mixed' || klass === 'code')) {
+      throw new Error(codeTicketRefusal(ticket, code));
+    }
+  }
+
+  /**
    * The ticket text, read from where the run would read it: an absolute path
    * from the daemon home, a repo-relative one from the default branch of the
    * clone after a fetch. Null when it cannot be read, which leaves that
@@ -921,9 +951,10 @@ export class Daemon {
    * A console launch: `{project, lane?, card?, ticket?, resumeFrom?}`. A
    * story launch reads the card from the clone for its key, so the frontier's
    * run history matches; an unreadable card launches anyway — readiness fails
-   * it with evidence. The repair lane's intake ticket is its spec, so lane and ticket
-   * must agree: the mismatch is refused here, before any provisioning, rather
-   * than at the fix seat of a run that already holds a slot and a workspace.
+   * it with evidence. The intake ticket is the spec of the repair lane and of
+   * the records lane, so lane and ticket must agree: the mismatch is refused
+   * here, before any provisioning, rather than at the fix seat of a run that
+   * already holds a slot and a workspace.
    * A resume names the run whose freeze it inherits. It belongs to the story
    * lane, and the prior run supplies the card, so both mismatches are refused
    * here as well.
@@ -945,14 +976,21 @@ export class Daemon {
       }
     }
     let carried = null;
-    if (lane === 'repair') {
+    if (TICKETED_LANES.includes(lane)) {
       if (typeof ticket !== 'string' || ticket.length === 0) {
-        throw new Error('a repair launch requires a ticket path');
+        throw new Error(`a ${lane} launch requires a ticket path`);
       }
-      carried = launchEscape(this.paths, { ticket, escape });
+      // The escape linkage is the repair lane's: a records run repairs a
+      // decision record, and no escape record names one.
+      if (lane === 'repair') carried = launchEscape(this.paths, { ticket, escape });
+      else if (escape !== undefined) {
+        throw new Error(`an escape applies to the repair lane only (lane: ${lane})`);
+      }
     } else {
       if (ticket !== undefined) {
-        throw new Error(`a ticket applies to the repair lane only (lane: ${lane})`);
+        throw new Error(
+          `a ticket applies to the ${TICKETED_LANES.join(' and ')} lanes only (lane: ${lane})`,
+        );
       }
       if (escape !== undefined) {
         throw new Error(`an escape applies to the repair lane only (lane: ${lane})`);

@@ -20,7 +20,8 @@ const STORY_STAGES = [
   'ship',
   'close-out',
 ];
-const REPAIR_STAGES = ['fix', 'verdict', 'update', 'ship', 'close-out'];
+const REPAIR_STAGES = ['fix', 'verdict', 'reconcile', 'update', 'ship', 'close-out'];
+const RECORDS_STAGES = ['readiness', 'records', 'reconcile', 'update', 'ship', 'close-out'];
 
 function twoProjectConfig() {
   return withDefaults({
@@ -43,11 +44,12 @@ function recordingRunner() {
   return runner;
 }
 
-test('the assembled graph carries the story and repair lanes end to end', () => {
+test('the assembled graph carries the story, repair and records lanes end to end', () => {
   const lanes = assembleLanes({ instanceConfig: () => twoProjectConfig() });
-  assert.deepEqual(Object.keys(lanes).sort(), ['repair', 'story']);
+  assert.deepEqual(Object.keys(lanes).sort(), ['records', 'repair', 'story']);
   assert.deepEqual(lanes.story.stages, STORY_STAGES);
   assert.deepEqual(lanes.repair.stages, REPAIR_STAGES);
+  assert.deepEqual(lanes.records.stages, RECORDS_STAGES);
   for (const [name, lane] of Object.entries(lanes)) {
     for (const stage of lane.stages) {
       assert.equal(typeof lane.handlers[stage], 'function', `${name}/${stage} has no handler`);
@@ -55,10 +57,29 @@ test('the assembled graph carries the story and repair lanes end to end', () => 
   }
 });
 
+// The records are born before the freeze, by a seat that did not write the
+// code, and judged in a stage of their own between the verdict and the update
+// (ADR-0074, ADR-0075).
+test('the records stage stands after the spec gate and the reconcile stage before the update', () => {
+  const lanes = assembleLanes({ instanceConfig: () => twoProjectConfig() });
+  const story = lanes.story.stages;
+  assert.equal(story[story.indexOf('spec-gate') + 1], 'records');
+  assert.equal(story[story.indexOf('records') + 1], 'suite');
+  for (const lane of ['repair', 'records']) {
+    const stages = lanes[lane].stages;
+    assert.equal(stages[stages.indexOf('reconcile') + 1], 'update');
+  }
+  // The records lane holds no fix seat, no suite and no code verdict.
+  for (const stage of ['fix', 'suite', 'verdict', 'adversary']) {
+    assert.ok(!lanes.records.stages.includes(stage), stage);
+  }
+});
+
 test('the assembled stages match the pipeline display', () => {
   const lanes = assembleLanes({ instanceConfig: () => twoProjectConfig() });
   assert.deepEqual(lanes.story.stages, LANE_STAGES.story);
   assert.deepEqual(lanes.repair.stages, LANE_STAGES.repair);
+  assert.deepEqual(lanes.records.stages, LANE_STAGES.records);
 });
 
 test('assembly refuses to build without a config reader', () => {
@@ -122,7 +143,7 @@ test('the ship stage resolves its forge per run, from the live config', async (t
   assert.equal(reads, 2);
 });
 
-test('a started daemon holds both assembled lanes', async (t) => {
+test('a started daemon holds every assembled lane', async (t) => {
   const home = tempDir();
   const paths = scaffoldHome(home);
   writeFileSync(
@@ -139,9 +160,10 @@ test('a started daemon holds both assembled lanes', async (t) => {
     removeDir(home);
   });
   await daemon.start();
-  assert.deepEqual([...daemon.engine.lanes.keys()].sort(), ['repair', 'story']);
+  assert.deepEqual([...daemon.engine.lanes.keys()].sort(), ['records', 'repair', 'story']);
   assert.deepEqual(daemon.engine.lanes.get('story').stages, STORY_STAGES);
   assert.deepEqual(daemon.engine.lanes.get('repair').stages, REPAIR_STAGES);
+  assert.deepEqual(daemon.engine.lanes.get('records').stages, RECORDS_STAGES);
   // The config the lanes read is the config the start loaded.
   assert.deepEqual(daemon.config.ghCommand, ['gh']);
 });
