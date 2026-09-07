@@ -127,7 +127,11 @@ function scanBody(lines, start, add) {
     const indent = line.length - line.trimStart().length;
     const fence = FENCE.exec(line);
     const item = LIST_ITEM.exec(line);
-    const opens = Boolean(fence || item || HEADING.test(line) || COMMENT_OPEN.test(line) || TABLE_ROW.test(line));
+    const opens =
+      Boolean(fence || item) ||
+      HEADING.test(line) ||
+      COMMENT_OPEN.test(line) ||
+      TABLE_ROW.test(line);
     // A line under the item's content indent leaves the item, and so does any
     // line that opens a block of its own. A plain line after a non-blank one
     // is the item's own paragraph, wrapped: markdown calls it a lazy
@@ -196,9 +200,8 @@ function opensBlock(line) {
 function fenceEnd(lines, open, marker) {
   for (let i = open + 1; i < lines.length; i++) {
     const close = FENCE.exec(lines[i]);
-    if (close && close[2][0] === marker[0] && close[2].length >= marker.length && close[3].trim() === '') {
-      return i + 1;
-    }
+    if (!close || close[2][0] !== marker[0] || close[2].length < marker.length) continue;
+    if (close[3].trim() === '') return i + 1;
   }
   return lines.length;
 }
@@ -433,9 +436,10 @@ export function recordNeighbours(worktree, record, recordPaths = []) {
     .map((id) => byId.get(id))
     .filter(Boolean);
   const named = new Set(cited);
-  const citing = active.filter(
-    (other) => !named.has(other) && self !== null && recordRefs(readText(join(worktree, other)) ?? '').has(self),
-  );
+  const citing = active.filter((other) => {
+    if (named.has(other) || self === null) return false;
+    return recordRefs(readText(join(worktree, other)) ?? '').has(self);
+  });
   return capped([...cited, ...citing.sort(byRecordId)]);
 }
 
@@ -447,7 +451,9 @@ export function recordNeighbours(worktree, record, recordPaths = []) {
  */
 export function birthNeighbours(worktree, touchedPaths = [], recordPaths = []) {
   const active = activeRecords(worktree, recordPaths);
-  const paths = touchedPaths.map((p) => String(p).replaceAll('\\', '/')).filter((p) => p.length > 0);
+  const paths = touchedPaths
+    .map((path) => String(path).replaceAll('\\', '/'))
+    .filter((path) => path.length > 0);
   const byId = new Map();
   const texts = new Map();
   for (const file of active) {

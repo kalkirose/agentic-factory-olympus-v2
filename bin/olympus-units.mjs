@@ -17,8 +17,9 @@ if (files.length !== 1) {
   console.error('olympus-units: one file path is required');
   process.exit(2);
 }
-if (args.some((arg) => arg.startsWith('--') && arg !== '--json')) {
-  console.error(`olympus-units: unknown option: ${args.find((a) => a.startsWith('--') && a !== '--json')}`);
+const unknown = args.find((arg) => arg.startsWith('--') && arg !== '--json');
+if (unknown) {
+  console.error(`olympus-units: unknown option: ${unknown}`);
   process.exit(2);
 }
 

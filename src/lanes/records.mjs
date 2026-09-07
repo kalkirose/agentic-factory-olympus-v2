@@ -705,7 +705,16 @@ function evidenceDefects(base, record, entry, head) {
 }
 
 /** The verbs that make a sentence a statement about the tree. Closed. */
-const CLAIM_VERBS = new Set(['is', 'are', 'reads', 'returns', 'runs', 'writes', 'serves', 'exposes']);
+const CLAIM_VERBS = new Set([
+  'is',
+  'are',
+  'reads',
+  'returns',
+  'runs',
+  'writes',
+  'serves',
+  'exposes',
+]);
 
 /**
  * Whether a unit's own text reads as a claim about the tree, whatever kind the
@@ -806,7 +815,9 @@ async function acceptedEditDefects(worktree, mergeBase, file, added) {
         'removed; supersede it and keep its body.',
     ];
   }
-  if (before === null) return [`${file} is an accepted record and its accepted text cannot be read.`];
+  if (before === null) {
+    return [`${file} is an accepted record and its accepted text cannot be read.`];
+  }
   const status = statusOf(before);
   const moved = changedLines(before, after);
   if (moved === null || moved.length !== 1 || moved[0] + 1 !== status.line) {
