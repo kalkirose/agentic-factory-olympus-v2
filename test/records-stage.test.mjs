@@ -582,6 +582,30 @@ test('a record-only ticket runs on the records lane, and one seat writes it', as
   assert.match(fx.calls[0].prompt, /tickets[\\/]records\.md/);
 });
 
+// A reconciliation ticket names its records in prose under a heading and
+// carries no fenced block. The paths the work touches are those records, so
+// the brief states them and the neighbourhood is derived from them.
+test('a ticket with no block gives the birth the records it names', async (t) => {
+  const ticket = [
+    '# Reconciliation ticket: run r1',
+    '',
+    '## Records to reconcile',
+    '',
+    '- docs/adr/adr-0001-keep-one-entry-point.md',
+    '',
+  ].join('\n');
+  const fx = laneFixture(t, {
+    seats: {
+      'record-author': () => ({ files: { [RECORD_PATH]: RECORD_TEXT }, report: bornReport() }),
+    },
+    files: { 'tickets/reconcile.md': ticket },
+  });
+  const { runId } = await fx.launch({ lane: 'records', ticket: 'tickets/reconcile.md' });
+  await waitClosed(fx.paths, runId);
+  const brief = fx.calls.find((c) => c.seat === 'record-author').prompt;
+  assert.match(brief, /The paths this work touches:\n- docs\/adr\/adr-0001-keep-one-entry-point\.md/);
+});
+
 // The stop that catches the stage inside its seat: the seat left half a record
 // in the tree, and the next dispatch is the same dispatch as the first
 // (ADR-0070). A restart at the other three boundaries is the step derivation

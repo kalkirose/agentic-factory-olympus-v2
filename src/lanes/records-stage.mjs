@@ -28,7 +28,7 @@ import { parseTouchedPaths } from '../seats/diffpolicy.mjs';
 import { parseIntentCard } from './card.mjs';
 import { probeCredentials } from './probes.mjs';
 import { AUTHOR_SEAT, birthRole, reconcileWriteSchema, writeChecks } from './records.mjs';
-import { birthNeighbours, citingRecords, readText, statusOf } from './units.mjs';
+import { birthNeighbours, citingRecords, readText, recordFiles, statusOf } from './units.mjs';
 import {
   ACTOR,
   answeredPath,
@@ -494,6 +494,7 @@ async function recordsBase(ctx, mode) {
     };
   }
   const key = source.key ?? ctx.runId;
+  const recordPaths = config.repo.recordPaths ?? [];
   return recordBase({
     config,
     worktree,
@@ -506,9 +507,25 @@ async function recordsBase(ctx, mode) {
       key,
       path: source.path,
       ...(source.reason && { reason: source.reason }),
-      touchedPaths: parseTouchedPaths(readFileSync(source.path, 'utf8')),
+      touchedPaths: touchedPaths(readFileSync(source.path, 'utf8'), worktree, recordPaths),
     },
   });
+}
+
+/**
+ * The paths a work item touches, which the birth neighbourhood is derived
+ * from. The fenced block is the declaration where the item carries one.
+ *
+ * A ticket without a block names its records in prose — a reconciliation ticket
+ * lists them under a heading — and a neighbourhood of nothing would leave the
+ * seat reading no record beside the ones it writes. So a record the text names
+ * verbatim counts, which is the rule the repair lane's own declaration falls
+ * back to.
+ */
+function touchedPaths(text, worktree, recordPaths) {
+  const declared = parseTouchedPaths(text);
+  if (declared.length > 0) return declared;
+  return recordFiles(worktree, recordPaths).filter((file) => text.includes(file));
 }
 
 /** The record fields of a lane base, filled from the project config. */
