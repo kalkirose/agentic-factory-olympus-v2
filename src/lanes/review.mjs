@@ -42,6 +42,7 @@ import {
 } from './lenses.mjs';
 import { REVIEW_SEAT, UNITS_BIN, unitChecks } from './records.mjs';
 import {
+  NEIGHBOUR_CAP,
   UNIT_KINDS,
   UNIT_VERDICTS,
   isActiveRecord,
@@ -983,7 +984,7 @@ function neighbourhoodLines(neighbours) {
     ...(neighbours.dropped > 0
       ? [
           `${neighbours.dropped} more active records cite this one or are cited by it. The`,
-          'neighbourhood is capped by rank, and those are outside the cap.',
+          `neighbourhood is capped at ${NEIGHBOUR_CAP} by rank, and those are outside the cap.`,
         ]
       : []),
   ];

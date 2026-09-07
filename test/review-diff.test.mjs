@@ -37,7 +37,12 @@ import {
   RECORD_RULE,
 } from '../src/lanes/lenses.mjs';
 import { UNITS_BIN, kindTest } from '../src/lanes/records.mjs';
-import { UNIT_KINDS, UNIT_VERDICTS, recordUnits } from '../src/lanes/units.mjs';
+import {
+  NEIGHBOUR_CAP,
+  UNIT_KINDS,
+  UNIT_VERDICTS,
+  recordUnits,
+} from '../src/lanes/units.mjs';
 import { scaffoldHome, reviewDiffPath, runLedgerPath } from '../src/daemon/home.mjs';
 import { openRunStore } from '../src/telemetry/stores.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
@@ -712,6 +717,7 @@ test('a record review brief carries the units and no diff', async (t) => {
   assert.ok(brief.includes('The price doubles.'), brief);
   assert.ok(brief.includes(`- ${OTHER_RECORD}`), brief);
   assert.ok(brief.includes('8 more active records cite this one'), brief);
+  assert.ok(brief.includes(`capped at ${NEIGHBOUR_CAP} by rank`), brief);
   assert.ok(
     brief.includes(
       'The units this round moved: "The helper doubles the price in src/pay.mjs.".',
