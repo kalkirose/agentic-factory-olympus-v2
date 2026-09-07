@@ -4865,9 +4865,9 @@ test('a records-lane update over an uncertified tree goes to the stage that cert
 });
 
 test('a records-lane tree with no record certification is refused, and the park names it', () => {
-  // A null record certification says the lane owes no reconciliation, and on
-  // every lane that certifies code that is what it says. The records lane
-  // certifies nothing else, so null there is a tree no stage read (ADR-0076).
+  // A null record certification says the lane owes no reconciliation. On every
+  // lane that certifies code that is what it says. The records lane certifies
+  // nothing else, so null there is a tree no stage read (ADR-0076).
   const event = (seq, name, extra = {}) => ({ seq, event: name, ...extra });
   const RECORDS = 'r'.repeat(40);
   const base = { mode: 'records' };

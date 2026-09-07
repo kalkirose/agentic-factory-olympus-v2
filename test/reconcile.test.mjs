@@ -604,7 +604,7 @@ test('a born record set anchors the cycle where the pass wrote nothing', () => {
     ),
     'stall',
   );
-  // A write is the anchor wherever the pass holds one: the born stamp answers
+  // A write is the anchor wherever the pass holds one. The born stamp answers
   // for a pass that wrote nothing, and never for one that wrote.
   const written = { event: 'reconciliation-written', ok: true, rewritten: [ADR], records: [] };
   assert.equal(reconcileStep(ledger(born, clean, written)), 'spectrum');

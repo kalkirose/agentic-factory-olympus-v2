@@ -90,8 +90,8 @@ const SCENARIO = {
   },
 };
 
-// The other shape: a judge that owes the record, so the stage writes it against
-// the tree before it reviews it.
+// The other shape: a judge that owes the record. The stage then writes it
+// against the tree before it reviews it.
 const SCENARIO_OWED = {
   bornRecords: { [RECORD]: RECORD_TEXT },
   reconcileJudge: {
@@ -188,8 +188,8 @@ test('a record-only ticket ships through the records lane', async (t) => {
   assert.deepEqual(judged.born, [RECORD]);
   assert.deepEqual(judged.late, []);
 
-  // Nothing was written: the judge owed no record, and the stage spent no
-  // writer on the one the birth already wrote.
+  // Nothing was written. The judge owed no record, and no writer ran over the
+  // one the birth wrote.
   assert.ok(!events.some((e) => e.event === 'reconciliation-written'));
 
   // Every record seat answered every unit of the record it was given.
@@ -265,9 +265,9 @@ test('a record-only ticket ships through the records lane', async (t) => {
 });
 
 test('a judge that owes the born record writes it, and the write rides the merge', async (t) => {
-  // The other shape of the same lane: the judge names the born record, so the
-  // stage writes it against the tree before the review reads it. The write
-  // stamp is the anchor of that cycle, as it always was (ADR-0075).
+  // The other shape of the same lane. The judge names the born record, so the
+  // stage writes it before the review reads it. The write stamp is the anchor
+  // of that cycle, as it always was (ADR-0075).
   const fx = buildFixture({
     prefix: 'olympus-e2e-records-owed-',
     scenario: SCENARIO_OWED,
