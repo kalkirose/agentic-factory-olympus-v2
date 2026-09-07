@@ -10,11 +10,8 @@ import { basename, dirname, join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
 import {
-  droppedFindings,
   interruptedStep,
   postFreeze,
-  reconcileFallbackStamp,
-  reconcileRounds,
   repairLane,
   repairRounds,
 } from '../src/lanes/verdict.mjs';
@@ -306,12 +303,19 @@ function verdictFixture(t, opts) {
   );
   const done = { stages: ['done'], handlers: { done: async () => ({ close: { state: 'shipped' } }) } };
   const post = postFreeze({ afterVerdict: done });
+  // The reconcile stage is a seam here. Nothing in this file is about a
+  // reconciliation: the records are judged in a stage of their own, and that
+  // stage has a suite of its own (ADR-0075).
+  const repair = repairLane({ afterVerdict: done });
   const lanes = {
     story: {
       stages: ['seed', ...post.stages],
       handlers: { seed: seedHandler(suiteFiles, seedExtra, specText, exclusions), ...post.handlers },
     },
-    repair: repairLane({ afterVerdict: done }),
+    repair: {
+      stages: repair.stages,
+      handlers: { ...repair.handlers, reconcile: async () => ({ next: 'done' }) },
+    },
   };
   let daemon = new Daemon(join(root, 'home'), { lanes, waitSleep: NO_WAIT });
   const fixture = seatFixture(seats);
@@ -2812,40 +2816,6 @@ test('a confirmed approach finding rides the repair brief, and the stall behind 
 function ledger(...events) {
   return events.map((e, i) => ({ seq: i + 1, ...e }));
 }
-
-// The two caps count two things, and a story that spent code rounds must not
-// find its record rounds gone (ADR-0007).
-test('the code repair cap and the reconcile cap count apart', () => {
-  const events = ledger(
-    { event: 'repair-round', pass: 1, round: 1 },
-    { event: 'repair-round', pass: 1, round: 2, phase: 'reconcile', seat: 'reconcile-write' },
-    { event: 'repair-round', pass: 1, round: 3, phase: 'reconcile', seat: 'reconcile-write' },
-    { event: 'repair-round', pass: 2, round: 1 },
-  );
-  assert.equal(repairRounds(events, 1), 1);
-  assert.equal(reconcileRounds(events, 1), 2);
-  assert.equal(repairRounds(events, 2), 1);
-  assert.equal(reconcileRounds(events, 2), 0);
-});
-
-// A fresh pass drops its findings by moving the pass number. These fallbacks
-// move no pass, so the drop is explicit and every derivation of the open set
-// reads it (ADR-0026).
-test('a fallback names the findings the run gave up on, and both derivations drop them', () => {
-  const events = ledger(
-    { event: 'reconciliation-written', ok: true, partial: true, residual: ['F2', 'F3'] },
-    { event: 'reconciliation-written', ok: false, cause: 'record-layer-red', discarded: ['F4'] },
-  );
-  assert.deepEqual([...droppedFindings(events)].sort(), ['F2', 'F3', 'F4']);
-  assert.deepEqual([...droppedFindings(ledger({ event: 'verdict-rendered' }))], []);
-  // Only a fallback earns a cycle. The first write, a corrective round and the
-  // write nobody could make say nothing about a rendered verdict.
-  assert.equal(reconcileFallbackStamp(events[0]), true);
-  assert.equal(reconcileFallbackStamp(events[1]), true);
-  assert.equal(reconcileFallbackStamp({ ok: true, rewritten: ['docs/adr/1.md'] }), false);
-  assert.equal(reconcileFallbackStamp({ ok: true, corrective: true, answered: ['F1'] }), false);
-  assert.equal(reconcileFallbackStamp({ ok: false, cause: 'work-product-defect' }), false);
-});
 
 test('the interrupted step is read off the ledger, and never off how it ended', () => {
   const render = { event: 'verdict-rendered', cycle: 1, pass: 1 };

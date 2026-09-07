@@ -8,14 +8,15 @@ import {
   GATE_INTEGRITY_KINDS,
   OBSERVED_DEFECT_KINDS,
   RECAPTURE_CLASSES,
+  RECONCILE_CAUSES,
   RECORD_CAP,
-  RECORD_FINDINGS,
   RECORD_LAYER_RED,
   RUN_EVENTS,
   INSTANCE_EVENTS,
   LOUD_EVENTS,
   assertDefectKind,
   assertRecaptureClass,
+  assertReconcileCause,
   streamOf,
 } from '../src/ledger/registry.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
@@ -161,15 +162,21 @@ test('the record stage stamps every fact it is asked for', (t) => {
   assert.equal(stall.stream, 'loud');
 });
 
-test('the fallback causes are closed, and two of them are retired', () => {
+test('the fallback causes are closed, and one of them is retired', () => {
   // The cap is the only way records with open findings leave a run: under the
-  // record rule a confirmed finding blocks, so the partial ship and the whole
-  // discard the other two named cannot happen. Both stay declared while a
-  // reader of an archived ledger still meets the word.
+  // record rule a confirmed finding blocks, so the partial ship the retired
+  // word named cannot happen. It stays declared while a reader of an archived
+  // ledger still meets it, and no stamp may carry it.
+  assert.deepEqual([...RECONCILE_CAUSES].sort(), [
+    'operator',
+    'record-cap',
+    'work-product-defect',
+  ]);
   assert.equal(RECORD_CAP, 'record-cap');
-  assert.equal(RECORD_FINDINGS, 'record-findings');
   assert.equal(RECORD_LAYER_RED, 'record-layer-red');
-  assert.equal(new Set([RECORD_CAP, RECORD_FINDINGS, RECORD_LAYER_RED]).size, 3);
+  assert.ok(!RECONCILE_CAUSES.has(RECORD_LAYER_RED));
+  assert.equal(assertReconcileCause(RECORD_CAP), RECORD_CAP);
+  assert.throws(() => assertReconcileCause(RECORD_LAYER_RED), /unknown reconcile cause/);
 });
 
 test('payload keys cannot shadow the envelope', (t) => {
