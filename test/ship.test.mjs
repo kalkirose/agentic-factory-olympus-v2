@@ -47,6 +47,7 @@ import { standingTripwires, withTripwireDefaults } from '../src/tripwires/regist
 import { owedRepairs } from '../src/frontier/repairs.mjs';
 import { owedReconciliations, reconciliationLaunch } from '../src/frontier/reconciliations.mjs';
 import { blocked, sinceFreshPass } from '../src/lanes/shared.mjs';
+import { runParkForms } from '../src/ledger/parks.mjs';
 import { kindTest } from '../src/lanes/records.mjs';
 import { recordUnits } from '../src/lanes/units.mjs';
 import {
@@ -4897,5 +4898,8 @@ test('a records-lane tree with no record certification is refused, and the park 
   assert.equal(park.type, 'stage-blocked');
   assert.equal(park.reason, 'records-uncertified');
   assert.match(park.question, /reconcile-rendered/);
-  assert.deepEqual(park.options, ['retry', 'abandon']);
+  // The site names `retry`; the abandon rides every run park at the engine
+  // (ADR-0029).
+  assert.deepEqual(park.options, ['retry']);
+  assert.deepEqual(runParkForms(park).options, ['retry', 'abandon']);
 });
