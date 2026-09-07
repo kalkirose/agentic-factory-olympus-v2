@@ -64,7 +64,7 @@ test('the record lens is outside the panel vocabulary and rides no seat', () => 
   assert.deepEqual(furyPanel([...DEFAULT_LENSES, RECORD_LENS]), furyPanel([...DEFAULT_LENSES]));
 });
 
-test('the record criteria are six keyed lines, and each line opens with its key', () => {
+test('the record criteria are seven keyed lines, and each line opens with its key', () => {
   assert.deepEqual(RECORD_CRITERION_KEYS, [
     'fact',
     'truth',
@@ -72,6 +72,7 @@ test('the record criteria are six keyed lines, and each line opens with its key'
     'divergence',
     'reference',
     'whole',
+    'consistent',
   ]);
   for (const key of RECORD_CRITERION_KEYS) {
     assert.ok(RECORD_CRITERIA[key].startsWith(`${key}: `), key);
@@ -90,7 +91,16 @@ test('the record criteria are six keyed lines, and each line opens with its key'
 test('the criteria open with the rule that a record never conflicts with the code', () => {
   assert.ok(RECORD_RULE.includes('A record never conflicts with the code.'));
   assert.ok(RECORD_RULE.includes('true of the tree now, or marked as not yet built'));
-  assert.ok(RECORD_RULE.includes('There is no third kind of sentence.'));
+  assert.ok(RECORD_RULE.includes('There is no third kind of claim.'));
+  // And the rule names the sentences that claim nothing, so it and the unit
+  // schema's `rationale` kind state one thing.
+  assert.ok(
+    RECORD_RULE.includes(
+      'A sentence that states why, or what was rejected, or what would trigger a reversal, ' +
+        'is rationale and is neither.',
+    ),
+    RECORD_RULE,
+  );
   // `truth` is about the present tense, and it holds over the whole record: an
   // unchanged sentence the tree contradicts fails it exactly as a changed one
   // does (ADR-0026).
@@ -103,4 +113,19 @@ test('the criteria open with the rule that a record never conflicts with the cod
   // and a future part written as present fact is a `truth` defect.
   assert.ok(RECORD_CRITERIA.open.includes('stated as not implemented'));
   assert.ok(RECORD_CRITERIA.open.includes('fails truth, not open'), RECORD_CRITERIA.open);
+});
+
+// The seventh criterion. The tree settles what is built and settles nothing
+// about what is not, so two active records can decide one unbuilt part two
+// ways, and no code check can see it (ADR-0026).
+test('the seventh criterion holds a record against its neighbourhood', () => {
+  assert.equal(RECORD_CRITERION_KEYS[6], 'consistent');
+  assert.ok(RECORD_CRITERIA.consistent.includes('does not contradict an open part'));
+  assert.ok(RECORD_CRITERIA.consistent.includes('active record in its neighbourhood'));
+  // It rides every brief and every schema, because the keys are one list.
+  const lines = recordCriteriaLines();
+  assert.equal(lines[lines.length - 1], `- ${RECORD_CRITERIA.consistent}`);
+  // The six texts before it are unchanged by the seventh.
+  assert.ok(RECORD_CRITERIA.fact.startsWith('fact: implemented parts read as standalone'));
+  assert.ok(RECORD_CRITERIA.whole.endsWith('not as a trail of amendments.'));
 });
