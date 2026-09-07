@@ -7,6 +7,7 @@
 //
 // The scenario file (OLYMPUS_E2E_SCENARIO) holds the artifact texts, so one
 // stub drives every lane.
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 
@@ -15,7 +16,11 @@ const prompt = argv[argv.length - 1] ?? '';
 const model = valueOf('--model') ?? '(none)';
 const scenario = JSON.parse(readFileSync(process.env.OLYMPUS_E2E_SCENARIO, 'utf8'));
 
-const seat = match(/You are the (\S+) seat in an Olympus run/)?.[1] ?? null;
+// A seat name may carry a slot suffix (`reconcile-write:2`). The suffix is the
+// dispatch's identity and not a seat, so the behaviour table reads the base.
+const named = match(/You are the (\S+) seat in an Olympus run/)?.[1] ?? null;
+const seat = named === null ? null : named.split(':')[0];
+const slot = named === null ? null : (named.split(':')[1] ?? null);
 const reportPath = reportPathFrom(prompt);
 
 record();
@@ -91,10 +96,137 @@ function behaviour(name) {
   if (name === 'card-sweep') {
     return { report: { updatedCards: [], invalidated: [], summary: 'every card still stands' } };
   }
-  if (name === 'reconcile-judge') {
-    return { report: { owed: false, records: [], reason: 'no decision-record tree in this fixture' } };
-  }
+  if (name === 'reconcile-judge') return reconcileJudge();
+  if (name === 'record-author') return recordAuthor();
+  if (name === 'reconcile-write') return recordWrite();
+  if (name === 'record-review') return recordReview();
   throw new Error(`no fixture behaviour for the ${name} seat`);
+}
+
+// -- the record seats (ADR-0073, ADR-0074, ADR-0075) --------------------------
+//
+// Every one of them answers the harness's own enumeration rather than a list of
+// its own: the unit check counts the file, and a stub that guessed would prove
+// nothing about the check. The brief names the enumerator by absolute path, so
+// the stub runs the same command a real seat is told to run.
+
+/** The units of one record, as `olympus-units` counts them. */
+function unitsOf(record) {
+  const bin = match(/node (\S*olympus-units\.mjs)/)?.[1];
+  if (!bin) throw new Error('the brief names no unit enumerator');
+  const out = execFileSync(process.execPath, [bin, record, '--json'], { encoding: 'utf8' });
+  return JSON.parse(out);
+}
+
+/** One answer per unit: the kind the enumerator gave it, and a path for a claim. */
+function unitAnswers(record, evidence) {
+  return unitsOf(record).map((unit) => ({
+    record,
+    id: unit.id,
+    kind: unit.kind ?? (claimLike(unit.head) ? 'claim' : 'rationale'),
+    verdict: 'holds',
+    evidence: claimLike(unit.head) ? evidence : 'structure',
+  }));
+}
+
+/**
+ * Whether a unit head reads as a claim about the tree. The stub mirrors the
+ * harness's own kind test rather than importing it: a claim filed as rationale
+ * is one of the refusals this fixture must be able to meet.
+ */
+function claimLike(head) {
+  return /[\w-]+\/[\w./-]+|`[^`]+`|\b(is|are|reads|returns|runs|writes|serves|exposes)\b/.test(head);
+}
+
+/** The judgment the scenario states, or a fixture with no record tree at all. */
+function reconcileJudge() {
+  const judged = scenario.reconcileJudge;
+  if (!judged) {
+    return {
+      report: { owed: false, records: [], reason: 'no decision-record tree in this fixture' },
+    };
+  }
+  // The recheck asks about the delta alone, and this fixture's repairs never
+  // implicate a further record.
+  if (prompt.includes('A repair round changed this run')) {
+    return { report: { owed: false, records: [], reason: 'the delta implicates no record' } };
+  }
+  return { report: judged };
+}
+
+/** The birth: the records the scenario decides, or a work that decides none. */
+function recordAuthor() {
+  const records = scenario.bornRecords ?? {};
+  const paths = Object.keys(records);
+  for (const [path, content] of Object.entries(records)) {
+    const full = join(process.cwd(), path);
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, content);
+  }
+  return {
+    report: {
+      rewritten: paths,
+      unchanged: [],
+      units: paths.flatMap((path) => unitAnswers(path, path)),
+      divergences: [],
+      ...(scenario.recordSiblings && { siblings: [] }),
+      summary: paths.length > 0 ? 'the records this work decides' : 'the work decides no record',
+    },
+  };
+}
+
+/** One record, rewritten to state the tree. The brief names the one record. */
+function recordWrite() {
+  const record = match(/^- (\S+\.md)$/m)?.[1];
+  if (!record) throw new Error('the write brief names no record');
+  const text = (scenario.reconcileWrites ?? {})[record];
+  if (text) {
+    const full = join(process.cwd(), record);
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, text);
+  }
+  const corrective = prompt.includes('Confirmed findings:');
+  return {
+    report: {
+      rewritten: text ? [record] : [],
+      unchanged: text ? [] : [{ record, reason: 'the record already states the tree' }],
+      units: unitAnswers(record, record),
+      divergences: [
+        {
+          record,
+          state: 'none',
+          statement: 'the record and the tree state one thing',
+          evidence: record,
+        },
+      ],
+      ...(corrective && {
+        answered: [...prompt.matchAll(/^- \[(F\d+)\]/gm)].map((m) => m[1]),
+      }),
+      ...(scenario.recordSiblings && { siblings: [] }),
+      summary: `${record}, as the tree stands`,
+    },
+  };
+}
+
+/** One record, reviewed whole. The brief carries the enumeration it answers. */
+function recordReview() {
+  const record = match(/^Review one decision record: (.+)$/m)?.[1]?.trim();
+  if (!record) throw new Error('the review brief names no record');
+  return {
+    report: {
+      findings: [],
+      units: [...prompt.matchAll(/^- (U\d+) \(line \d+(?:, (\w+))?\): (.+)$/gm)].map(
+        ([, id, kind, head]) => ({
+          record,
+          id,
+          kind: kind ?? (claimLike(head) ? 'claim' : 'rationale'),
+          verdict: 'holds',
+          evidence: claimLike(head) ? record : 'structure',
+        }),
+      ),
+      summary: 'every unit of the record stands',
+    },
+  };
 }
 
 /**
@@ -301,6 +433,10 @@ function record() {
     JSON.stringify({
       at: Date.now(),
       seat,
+      // The whole identity, slot and all: N writers in one run are N dispatches
+      // and a scenario counts them apart (ADR-0075).
+      named,
+      slot,
       model,
       argv,
       prompt,

@@ -79,6 +79,19 @@ function behavior(name) {
   if (name === 'reconcile-judge') {
     return { report: { owed: false, records: [], reason: 'no decision-record tree in this fixture' } };
   }
+  // The birth before the freeze. This scenario is about cards and its stories
+  // decide no record, so the seat writes nothing and says so (ADR-0074).
+  if (name === 'record-author') {
+    return {
+      report: {
+        rewritten: [],
+        unchanged: [],
+        units: [],
+        divergences: [],
+        summary: 'the story decides no record the tree does not hold',
+      },
+    };
+  }
   throw new Error(`no fixture behavior for the ${name} seat`);
 }
 

@@ -186,7 +186,16 @@ function seatFixture(seats) {
  */
 function stageFixture(
   t,
-  { seats, config = {}, files = {}, lane = 'repair', seed = null, records = true } = {},
+  {
+    seats,
+    config = {},
+    files = {},
+    lane = 'repair',
+    seed = null,
+    records = true,
+    holdUpdate = false,
+    repairOnce = false,
+  } = {},
 ) {
   const root = tempDir();
   const origin = initOriginRepo(join(root, 'origin'), {
@@ -211,9 +220,28 @@ function stageFixture(
     paths.instanceConfig,
     JSON.stringify({ version: 1, projects: { proj: { repoUrl: origin, slotCap: 2 } } }) + '\n',
   );
+  // The stage after the reconciliation. It closes the run, and a scenario about
+  // the boundary behind the render holds it there once: the first entry waits
+  // for the stop, and the daemon that comes back closes.
+  let held = false;
+  let repaired = false;
   const shipStub = {
     stages: ['update'],
-    handlers: { update: async () => ({ close: { state: 'shipped' } }) },
+    handlers: {
+      update: async (ctx) => {
+        if (holdUpdate && !held) {
+          held = true;
+          while (!ctx.stopped()) await new Promise((resolve) => setTimeout(resolve, 20));
+          return null;
+        }
+        // A scenario about the recheck sends the run back for one repair round.
+        if (repairOnce && !repaired) {
+          repaired = true;
+          return { next: 'seed' };
+        }
+        return { close: { state: 'shipped' } };
+      },
+    },
   };
   const reconcile = withReconcileStage(shipStub);
   const lanes = {
@@ -284,11 +312,31 @@ function seedHandler(extra = null) {
 }
 
 async function waitClosed(paths, runId, attempts = 900) {
-  await waitFor(() => existsSync(archivedRunLedgerPath(paths, runId)), {
-    label: `run ${runId} archived`,
-    attempts,
-    intervalMs: 100,
-  });
+  try {
+    await waitFor(() => existsSync(archivedRunLedgerPath(paths, runId)), {
+      label: `run ${runId} archived`,
+      attempts,
+      intervalMs: 100,
+    });
+  } catch (error) {
+    const live = runLedgerPath(paths, runId);
+    const line = (e) =>
+      [
+        e.seq,
+        e.event,
+        e.seat ?? e.stage ?? e.layer ?? '',
+        e.verdict ?? e.reason ?? e.cause ?? '',
+        (e.question ?? e.detail ?? e.note ?? '').toString().slice(0, 1200),
+      ].join(' ');
+    const tail = existsSync(live)
+      ? readEvents(live)
+          .filter((e) => e.event !== 'stage-heartbeat')
+          .slice(-24)
+          .map(line)
+      : ['no live ledger'];
+    error.message += `\nledger tail:\n${tail.join('\n')}`;
+    throw error;
+  }
   return readEvents(archivedRunLedgerPath(paths, runId));
 }
 
@@ -436,6 +484,19 @@ const confirmAndResolve = ({ prompt }) => ({
     summary: 'verified',
   },
 });
+
+/**
+ * A seat that never answers its first dispatch. Only a stop ends it, so a
+ * scenario about a restart at one step boundary can hold the run exactly there.
+ */
+function hangFirst(behaviour) {
+  let first = true;
+  return (opts) => {
+    if (!first) return behaviour(opts);
+    first = false;
+    return { hang: true };
+  };
+}
 
 /** The verifier that refutes every new claim: a clean render behind a review. */
 const refuteAll = ({ prompt }) => ({
@@ -706,7 +767,11 @@ test('a confirmed record finding buys a corrective round, and no repair-dev runs
   // The corrective brief names the finding and its unit.
   const corrective = fx.calls.filter((c) => c.seat === 'reconcile-write').at(-1);
   assert.ok(corrective.prompt.includes('Confirmed findings:'));
-  assert.ok(corrective.prompt.includes('U3'));
+  // The finding names one unit, and the brief states it: a corrective round
+  // answers a sentence and never a file (ADR-0073).
+  const finding = events.find((e) => e.event === 'finding' && e.confirmed === true);
+  assert.ok(corrective.prompt.includes(finding.unit), finding.unit);
+  assert.ok(corrective.prompt.includes(finding.head), finding.head);
   // And the verdict never moved.
   assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 1);
 });
@@ -751,7 +816,9 @@ test('a round that closes nothing stalls on the progress rule, whatever the cap'
   const fx = stageFixture(t, {
     seats: {
       'reconcile-judge': judgeOwed(),
-      'reconcile-write': writeThenCorrect(ADR_REWRITTEN),
+      // The round writes, so the write check passes; what it does not do is
+      // close the finding.
+      'reconcile-write': writeThenCorrect(ADR_CORRECTED),
       // The same finding twice: the round moved nothing.
       'record-review': recordReview([
         'the record claims a doubling the tree does not hold',
@@ -935,35 +1002,66 @@ test('a restart after the spectrum keeps the layer results it already earned', a
   assert.equal(events.filter((e) => e.event === 'reconcile-rendered').length, 1);
 });
 
-test('a restart after the review keeps the unit answers and renders once', async (t) => {
-  const { events } = await restartAt(t, {
-    at: { predicate: (e) => e.event === 'record-units' && e.seat.startsWith('record-review'), label: 'reviewed' },
+test('a restart between the review and the verifier renders once, from the ledger', async (t) => {
+  // The boundary the verifier stands on. The review seats have reported and
+  // their answers are stamped; the stop lands on the seat that settles the
+  // findings, and the round the restart re-enters re-uses every id it assigned.
+  const fx = stageFixture(t, {
     seats: {
       'reconcile-judge': judgeOwed(),
-      'reconcile-write': writeOnce(),
-      'record-review': reviewClean,
+      'reconcile-write': writeThenCorrect(),
+      // The same finding on every dispatch: the restart re-runs the round, and a
+      // fixture that counted its own calls would answer the second one blind.
+      'record-review': recordReview(
+        Array(4).fill('the record claims a doubling the tree does not hold'),
+      ),
+      'fury-verifier': hangFirst(refuteAll),
     },
   });
-  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
-  assert.equal(
-    events.filter((e) => e.event === 'record-units' && e.seat.startsWith('record-review')).length,
-    1,
+  const runId = await fx.launch();
+  await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'record-units' && e.seat.startsWith('record-review'),
+    'reviewed',
   );
+  await waitEvent(fx.paths, runId, (e) => e.event === 'seat-spawned' && e.seat === 'fury-verifier', 'verifier');
+  await fx.restart();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // One unit stamp per seat per cycle, however many times the round re-entered.
+  const stamps = events.filter(
+    (e) => e.event === 'record-units' && e.seat.startsWith('record-review'),
+  );
+  assert.equal(stamps.length, 1);
+  // A refuted record finding is stamped once and blocks nothing.
+  assert.equal(events.filter((e) => e.event === 'finding' && e.record === true).length, 1);
   assert.equal(events.filter((e) => e.event === 'reconcile-rendered').length, 1);
+  assert.equal(events.find((e) => e.event === 'reconcile-rendered').verdict, 'green');
 });
 
 test('a restart after the render never re-enters the verdict', async (t) => {
-  const { events } = await restartAt(t, {
-    at: { predicate: (e) => e.event === 'reconcile-rendered', label: 'rendered' },
+  // The stage hands the run on and the update holds it there once, so the stop
+  // lands past the render and in front of the close.
+  const fx = stageFixture(t, {
+    holdUpdate: true,
     seats: {
       'reconcile-judge': judgeOwed(),
       'reconcile-write': writeOnce(),
       'record-review': reviewClean,
     },
   });
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'reconcile-rendered', 'rendered');
+  await fx.restart();
+  const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   assert.equal(events.filter((e) => e.event === 'reconcile-rendered').length, 1);
   assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 1);
+  // The restart resumed at the stage the render handed the run to, and nothing
+  // re-judged anything: one write, one review, one render.
+  assert.equal(events.filter((e) => e.event === 'reconciliation-written').length, 1);
+  assert.equal(fx.calls.filter((c) => c.seat === 'reconcile-judge').length, 1);
 });
 
 test('a restart inside a corrective round re-enters that round alone', async (t) => {
@@ -992,8 +1090,9 @@ test('a restart inside a corrective round re-enters that round alone', async (t)
 // -- the recheck (point 14) --------------------------------------------------
 
 /**
- * A seed that plants a green reconciliation and then a repair round behind it.
- * The stage is entered twice: once for the reconciliation, once for the recheck.
+ * A seed that plants one repair round on its second entry. The update stub sends
+ * the run back to it once, so the stage is entered twice: once for the
+ * reconciliation, once for the recheck the repair owes it.
  */
 function repairAfterGreen(deltaFile) {
   let seeded = false;
@@ -1010,7 +1109,14 @@ function repairAfterGreen(deltaFile) {
         baseSha,
         sha,
       });
-      ctx.store.append('repair-round', { actor: 'daemon', pass: 1, round: 1, cap: 3, sha, openBefore: [] });
+      ctx.store.append('repair-round', {
+        actor: 'daemon',
+        pass: 1,
+        round: 1,
+        cap: 3,
+        sha,
+        openBefore: [],
+      });
       return { next: 'reconcile' };
     }
     seeded = true;
@@ -1021,6 +1127,9 @@ function repairAfterGreen(deltaFile) {
 test('a repair whose delta touches no evidence path stamps the recheck kept', async (t) => {
   const fx = stageFixture(t, {
     seed: repairAfterGreen('src/other.mjs'),
+    // The first green render sends the run back for its repair round; the second
+    // time the update closes it.
+    repairOnce: true,
     seats: {
       'reconcile-judge': ({ prompt }) =>
         prompt.includes('A repair round changed this run')
@@ -1031,15 +1140,45 @@ test('a repair whose delta touches no evidence path stamps the recheck kept', as
     },
   });
   const runId = await fx.launch();
-  await waitEvent(fx.paths, runId, (e) => e.event === 'reconcile-rendered', 'first render');
-  // The stage hands the run to the update, which closes it; the seed's second
-  // entry is what plants the repair, so this scenario runs the stage twice.
   const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   const recheck = events.find((e) => e.event === 'reconcile-recheck');
   assert.equal(recheck.result, 'kept');
   assert.deepEqual(recheck.units, []);
   assert.ok(recheck.delta.includes('..'));
+  // The recheck judged the delta alone, and the stage wrote nothing behind it.
+  assert.equal(events.filter((e) => e.event === 'reconciliation-written').length, 1);
+  assert.equal(events.filter((e) => e.event === 'reconcile-rendered').length, 1);
   // A corrective record round triggers no code re-verdict.
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 1);
+});
+
+test('a repair whose delta touches an evidence path re-answers that unit alone', async (t) => {
+  const fx = stageFixture(t, {
+    // The unit answers of this fixture cite src/base.mjs, so a repair that
+    // touches it moves the evidence one claim rests on.
+    seed: repairAfterGreen('src/base.mjs'),
+    repairOnce: true,
+    seats: {
+      'reconcile-judge': ({ prompt }) =>
+        prompt.includes('A repair round changed this run')
+          ? { report: { owed: false, records: [], reason: 'the delta implicates no record' } }
+          : judgeOwed()(),
+      'reconcile-write': writeThenCorrect(),
+      'record-review': reviewClean,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const recheck = events.find((e) => e.event === 'reconcile-recheck');
+  assert.equal(recheck.result, 're-answered');
+  assert.ok(recheck.units.length > 0);
+  assert.ok(recheck.units.every((u) => u.startsWith(`${ADR}#U`)));
+  // The units the delta touched are re-answered and re-reviewed: a second write,
+  // a second render, and the verdict untouched.
+  assert.equal(events.filter((e) => e.event === 'reconciliation-written').length, 2);
+  assert.equal(events.filter((e) => e.event === 'reconcile-rendered').length, 2);
   assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 1);
 });
 

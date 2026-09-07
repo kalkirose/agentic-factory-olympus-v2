@@ -408,6 +408,7 @@ async function writeStep(ctx, base) {
       ),
   });
   if (outcome.fail) return outcome.fail;
+  if (outcome.stopped) return null;
   if (outcome.fallback) return fallbackStep(ctx, base, { cause: outcome.fallback });
   await stampWritten(ctx, base, { entries: outcome.entries, reports: outcome.reports });
   return null;
@@ -417,13 +418,22 @@ async function writeStep(ctx, base) {
  * One pass of per-record writers. Returns the per-record ledger entries and the
  * reports behind them, or the directive the round could not get past.
  */
-async function writeRound(ctx, base, { records, since, buildRole, findings = [] }) {
+async function writeRound(
+  ctx,
+  base,
+  { records, since, buildRole, findings = [], answered = false },
+) {
   const entries = [];
   const reports = [];
+  // What this round has already committed, by the message each dispatch signs
+  // its commit with. The commit is the durable half of a write and the stamp
+  // behind it is the recorded half, so a stop between the two is read off the
+  // tree and never repeated (ADR-0075).
+  const committed = await roundCommits(base, ctx.runId, since);
   for (let i = 0; i < records.length; i++) {
     const record = records[i];
     const seat = `${WRITE_SEAT}:${i + 1}`;
-    const done = writtenAlready(runEvents(ctx), seat, record, since);
+    const done = writtenAlready(ctx, runEvents(ctx), { seat, record, since, committed, base });
     if (done) {
       entries.push(done.entry);
       reports.push(done.report);
@@ -438,7 +448,7 @@ async function writeRound(ctx, base, { records, since, buildRole, findings = [] 
     const spawnedAt = lastSeq(runEvents(ctx));
     const outcome = await seatWithChecks(ctx, {
       seat,
-      schema: reconcileWriteSchema({ units: true, siblings: siblings !== null }),
+      schema: reconcileWriteSchema({ units: true, answered, siblings: siblings !== null }),
       cwd: base.worktree,
       env: base.env,
       constitution: base.constitution,
@@ -464,8 +474,14 @@ async function writeRound(ctx, base, { records, since, buildRole, findings = [] 
       if (Array.isArray(failure?.defects)) return { fallback: WORK_PRODUCT_DEFECT };
       return { fail: outcome.fail };
     }
+    // A stop between the seat's report and its commit leaves the write for the
+    // restart. The tree is one worktree and the daemon that comes back holds it,
+    // so a commit from a stopped run would race the run's own resume.
+    if (ctx.stopped()) return { stopped: true };
     const before = await headSha(base.worktree);
-    const sha = await commitAll(base.worktree, `reconcile: ${ctx.runId}`);
+    const changed = await changedFiles(base.worktree);
+    const sha =
+      changed.length > 0 ? await commitAll(base.worktree, commitMessage(ctx, seat, since)) : before;
     const entry = {
       record,
       seat,
@@ -482,19 +498,51 @@ async function writeRound(ctx, base, { records, since, buildRole, findings = [] 
 }
 
 /**
- * The write of one record the ledger already holds, or null. The `record-units`
- * stamp is the record of it: the seat answered, the checks passed, the commit
- * landed, and the answers were written down behind all three.
+ * The message one dispatch signs its commit with: the run, the seat identity
+ * and the ledger position the round opened at. It is what a resume reads to
+ * tell a write this round already made from one it still owes, and it is unique
+ * per record per round.
  */
-function writtenAlready(events, seat, record, since) {
+function commitMessage(ctx, seat, since) {
+  return `reconcile: ${ctx.runId} ${seat} @${since}`;
+}
+
+/** The dispatch messages this round has already committed. */
+async function roundCommits(base, runId, since) {
+  const log = await git(['log', '--format=%s', '-n', '200'], { cwd: base.worktree }).catch(
+    () => '',
+  );
+  const mark = `reconcile: ${runId} `;
+  return new Set(
+    log
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith(mark) && line.endsWith(`@${since}`)),
+  );
+}
+
+/**
+ * The write of one record this round already made, or null.
+ *
+ * Two facts say so and either one is enough. The `record-units` stamp is the
+ * whole record of a finished dispatch. The commit alone is a stop that fell
+ * between the commit and the stamp: the tree holds the write, so the dispatch
+ * is never made again, and the answers are stamped from the report the seat
+ * left behind (ADR-0070).
+ */
+function writtenAlready(ctx, events, { seat, record, since, committed, base }) {
   const stamp = [...events]
     .reverse()
     .find(
       (e) =>
         e.event === 'record-units' && e.seat === seat && e.record === record && e.seq > since,
     );
-  if (!stamp) return null;
   const report = readJson(lastSeatReportEvent(events, seat)?.path);
+  if (!stamp) {
+    if (!committed.has(commitMessage(ctx, seat, since)) || !report) return null;
+    stampUnits(ctx, base, { seat, record, report });
+    return { entry: entryOf(events, { seat, record, since, report }), report };
+  }
   return {
     entry: {
       record,
@@ -504,6 +552,16 @@ function writtenAlready(events, seat, record, since) {
       unitsAnswered: (stamp.units ?? []).length,
     },
     report: report ?? { rewritten: [record], unchanged: [], units: [], divergences: [] },
+  };
+}
+
+/** One per-record entry, rebuilt from the report a stop left behind. */
+function entryOf(events, { seat, record, since, report }) {
+  return {
+    record,
+    seat,
+    attempts: attemptsOf(events, seat, since),
+    unitsAnswered: (report.units ?? []).filter((u) => u.record === record).length,
   };
 }
 
@@ -824,6 +882,9 @@ async function correctStep(ctx, base) {
     records,
     since: rendered.seq,
     findings: open,
+    // A corrective invocation lists the ids it answered; the first write of a
+    // run answers no finding and is asked for no such list.
+    answered: true,
     buildRole: (record, brief) =>
       correctiveRole(
         base,
@@ -836,6 +897,7 @@ async function correctStep(ctx, base) {
       ),
   });
   if (outcome.fail) return outcome.fail;
+  if (outcome.stopped) return null;
   if (outcome.fallback) return fallbackStep(ctx, base, { cause: outcome.fallback });
   await stampWritten(ctx, base, {
     entries: outcome.entries,
