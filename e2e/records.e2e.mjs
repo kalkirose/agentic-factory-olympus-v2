@@ -22,6 +22,7 @@ import {
   ctl,
   ctlRefused,
   diagnostics,
+  forgeCalls,
   gateMarks,
   instanceEvents,
   originSha,
@@ -242,6 +243,11 @@ test('a record-only ticket ships through the records lane', async (t) => {
   assert.ok(!review.prompt.includes('git diff'), 'the record review was given a diff');
   assert.match(review.prompt, /olympus-units\.mjs/);
   assert.equal(review.named, 'record-review:1');
+
+  // The request names the lane that opened it. The records lane used to
+  // borrow the repair word (ADR-0076).
+  const create = forgeCalls(fx).find((c) => c.handled === 'pr-create');
+  assert.equal(create.argv[create.argv.indexOf('--title') + 1], `records: ${runId}`);
 
   // The records rode the merge, and the default branch holds them.
   const merged = events.find((e) => e.event === 'merged');
