@@ -49,7 +49,7 @@ export async function commitAll(tree, message) {
   const changed = await changedFiles(tree);
   if (changed.length > 0) {
     await git(['add', '-A'], { cwd: tree });
-    // A change git reports and then stages nothing for: a seat rewrote a file
+    // A change git reports and then stages nothing for. A seat rewrote a file
     // with carriage returns and changed nothing else. `status` lists the path
     // because the bytes moved; `add` normalises them back to the blob the
     // index already holds. `commit` on an empty index exits non-zero. The
@@ -93,7 +93,7 @@ function pathspecBatches(paths) {
 /**
  * What `git ls-files --eol` says about each tracked path among those given.
  * The answer is the line endings of the index blob, and those of the file
- * beside it. A path the index does not hold is absent: the caller commits
+ * beside it. A path the index does not hold is absent. The caller commits
  * deletions too, and a deleted path has no bytes to compare.
  *
  * The record is `i/<eol> w/<eol> attr/<attrs>`, one tab, then the path. `-z`
@@ -143,11 +143,17 @@ async function takeIndexBytes(tree, paths) {
     .filter((row) => row.worktree.length > 0 && row.worktree !== row.index)
     .map((row) => row.path);
   if (differing.length === 0) return;
-  // The house form for a delete on Windows: the extended-length path, and the
-  // short retry ladder a virus scanner or an indexer holds a file against
-  // (`src/isolation/removal.mjs`).
+  // The house form for a delete on Windows. The path goes in the
+  // extended-length form. The retry ladder answers a virus scanner or an
+  // indexer that holds the file. Node reads the two retry options only under
+  // `recursive`, as `src/isolation/removal.mjs` passes them.
   for (const path of differing) {
-    rmSync(longPath(join(tree, path)), { force: true, maxRetries: 3, retryDelay: 50 });
+    rmSync(longPath(join(tree, path)), {
+      force: true,
+      recursive: true,
+      maxRetries: 3,
+      retryDelay: 50,
+    });
   }
   for (const batch of pathspecBatches(differing)) {
     await git(['checkout', '--', ...batch], { cwd: tree });
