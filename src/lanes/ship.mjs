@@ -489,9 +489,30 @@ function codeTree(events) {
  * @param {object} base the lane base
  */
 export function admitted(events, base) {
+  if (unjudgedRecords(events, base)) return false;
   const trees = certifiedTrees(events, base);
   return Object.values(trees).every((tree) => tree === null || tree.ok === true);
 }
+
+/**
+ * A records-lane run that holds no record certification at all.
+ *
+ * A null certification reads as a lane with nothing to certify. On every other
+ * lane that is what it is. The records lane writes records and nothing else. A
+ * null there says the stage rendered over none of them. The run is unjudged,
+ * and the gate refuses it (ADR-0076).
+ * @param {object[]} events the run's ledger, in order
+ * @param {{mode?: string}} [base] the lane base
+ */
+export function unjudgedRecords(events, base = {}) {
+  return base?.mode === 'records' && reconcileCertification(events) === null;
+}
+
+/** The question the gate refuses an unjudged records-lane tree with. */
+export const UNJUDGED_RECORDS_QUESTION =
+  'This run holds no record certification. The records lane writes decision records and ' +
+  'nothing else. A tree with no `reconcile-rendered` behind it is a tree no record review ' +
+  'read. Answer "retry" to re-enter the stage, or "abandon" to close the run.';
 
 /**
  * The seam between a moved default branch and the request: one merge, two
@@ -538,6 +559,12 @@ async function preVerdictUpdate(ctx, base) {
   // stage resumes with a merge that answers "already up to date" and a base
   // that reads as one which never moved (ADR-0033).
   const certified = admitted(runEvents(ctx), base);
+  // The records lane with no render at all. Every other uncertified tree goes
+  // back to the stage that certifies it. This one would go back to a stage that
+  // already answered. It is the loud answer instead (ADR-0076).
+  if (unjudgedRecords(runEvents(ctx), base)) {
+    return blocked(ctx, 'records-uncertified', UNJUDGED_RECORDS_QUESTION);
+  }
   const uncertified = { toSha: out.toSha, uncertified: true, note: UNCERTIFIED_TREE_NOTE };
   if (!ran) {
     // The base never moved. Nothing was re-decided, so the stamp says what the
@@ -801,6 +828,18 @@ function shipHandler({ forgeFor, pollMs }) {
 
 // -- PR open + preflight -----------------------------------------------------
 
+/**
+ * The word a request's title opens with, by the lane the run holds. A card
+ * names its own request, and a ticketed lane has only its lane to name it. The
+ * records lane used to borrow the repair word. A reader of the default branch
+ * could not tell a record change from a code fix (ADR-0076).
+ */
+const LANE_TITLE_WORD = { records: 'records', repair: 'repair' };
+
+function laneWord(base) {
+  return LANE_TITLE_WORD[base?.mode] ?? 'repair';
+}
+
 async function openPr(ctx, base) {
   // The credential gate comes first: a CI round is the most expensive way to
   // learn that a key went stale since the launch proved it (ADR-0027).
@@ -851,7 +890,9 @@ async function openPr(ctx, base) {
   const pr = await base.forge.openPr({
     head: base.branch,
     base: base.defaultBranch,
-    title: base.storyKey ? `${base.storyKey}: ${base.cardTitle ?? 'ship'}` : `repair: ${ctx.runId}`,
+    title: base.storyKey
+      ? `${base.storyKey}: ${base.cardTitle ?? 'ship'}`
+      : `${laneWord(base)}: ${ctx.runId}`,
     body: [`Olympus run ${ctx.runId}.`, `Spec: ${base.specRef}`, `Head: ${sha}`].join('\n'),
     labels,
   });

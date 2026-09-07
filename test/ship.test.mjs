@@ -21,6 +21,8 @@ import {
   certifiedTrees,
   certifyingStage,
   recordsLaneCiRed,
+  unjudgedRecords,
+  UNJUDGED_RECORDS_QUESTION,
   checksByName,
   fastPathTaken,
   releasedForVerdict,
@@ -44,7 +46,7 @@ import { recordEscape, ticketEscape, readEscapeSet } from '../src/telemetry/esca
 import { standingTripwires, withTripwireDefaults } from '../src/tripwires/registry.mjs';
 import { owedRepairs } from '../src/frontier/repairs.mjs';
 import { owedReconciliations, reconciliationLaunch } from '../src/frontier/reconciliations.mjs';
-import { sinceFreshPass } from '../src/lanes/shared.mjs';
+import { blocked, sinceFreshPass } from '../src/lanes/shared.mjs';
 import { kindTest } from '../src/lanes/records.mjs';
 import { recordUnits } from '../src/lanes/units.mjs';
 import {
@@ -4859,4 +4861,41 @@ test('a records-lane update over an uncertified tree goes to the stage that cert
     event(1, 'reconcile-rendered', { cycle: 1, sha: RECORDS, verdict: 'green', open: [] }),
   ];
   assert.equal(admitted(green, base), true);
+});
+
+test('a records-lane tree with no record certification is refused, and the park names it', () => {
+  // A null record certification says the lane owes no reconciliation, and on
+  // every lane that certifies code that is what it says. The records lane
+  // certifies nothing else, so null there is a tree no stage read (ADR-0076).
+  const event = (seq, name, extra = {}) => ({ seq, event: name, ...extra });
+  const RECORDS = 'r'.repeat(40);
+  const base = { mode: 'records' };
+  assert.equal(unjudgedRecords([], base), true);
+  assert.equal(admitted([], base), false);
+  assert.deepEqual(certifiedTrees([], base), { code: null, records: null });
+  // The other lanes read a null the way they always did.
+  assert.equal(unjudgedRecords([], { mode: 'story' }), false);
+  assert.equal(admitted([], { mode: 'story' }), true);
+  assert.equal(unjudgedRecords([], { mode: 'repair' }), false);
+  assert.equal(unjudgedRecords([], {}), false);
+  // A render of either verdict is a certification, and the gate reads the
+  // verdict on it rather than the absence.
+  const green = [
+    event(1, 'reconcile-rendered', { cycle: 1, sha: RECORDS, verdict: 'green', open: [] }),
+  ];
+  assert.equal(unjudgedRecords(green, base), false);
+  assert.equal(admitted(green, base), true);
+  const red = [
+    event(1, 'reconcile-rendered', { cycle: 1, sha: RECORDS, verdict: 'red', open: ['F1'] }),
+  ];
+  assert.equal(unjudgedRecords(red, base), false);
+  assert.equal(admitted(red, base), false);
+  // The refusal is a park a person answers, and it names the render that is
+  // missing. The route back to the stage would meet a stage that already
+  // answered, so this one stops instead.
+  const { park } = blocked(stamping(), 'records-uncertified', UNJUDGED_RECORDS_QUESTION);
+  assert.equal(park.type, 'stage-blocked');
+  assert.equal(park.reason, 'records-uncertified');
+  assert.match(park.question, /reconcile-rendered/);
+  assert.deepEqual(park.options, ['retry', 'abandon']);
 });
