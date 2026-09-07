@@ -300,6 +300,9 @@ function seedRecordRun(paths) {
   });
   writeRunLedger(paths, 'r-rec', [
     line(0, 'run-launched', { project: 'alpha', lane: 'story', storyKey: 's-rec' }),
+    // The birth the judgment's born list names. `born` is every path the birth
+    // wrote, and `late` is the owed record it did not write (ADR-0076).
+    line(2, 'records-committed', { sha: 'a1', paths: ['docs/adr/a.md'], decided: true }),
     line(5, 'reconciliation-judged', {
       ok: true,
       owed: true,
@@ -511,14 +514,18 @@ function seedBornRun(paths) {
       neighboursDropped: 0,
       cost: 0.9,
     }),
-    // A record the birth changed and no review ever read: a status-line edit on
-    // a superseded record owes no units, and a writer answer over it is out of
-    // the denominator.
+    // A record the birth changed and no review ever read. A status-line edit on
+    // a superseded record owes no units. A writer answer over it is out of the
+    // denominator.
     line(7, 'record-units', {
       seat: 'record-author',
       record: 'docs/adr/d.md',
-      units: [{ id: 'U1', kind: 'claim', verdict: 'holds', evidence: 'src/a.mjs' }],
-      counts: { claims: 1, holds: 1, fails: 0, notBuilt: 0 },
+      units: [
+        { id: 'U1', kind: 'claim', verdict: 'holds', evidence: 'src/a.mjs' },
+        { id: 'U2', kind: 'claim', verdict: 'holds', evidence: 'src/a.mjs' },
+        { id: 'U3', kind: 'claim', verdict: 'holds', evidence: 'src/a.mjs' },
+      ],
+      counts: { claims: 3, holds: 3, fails: 0, notBuilt: 0 },
       neighbours: 1,
       neighboursDropped: 0,
     }),
@@ -552,11 +559,26 @@ function seedBornRun(paths) {
       head: 'the module holds the base value',
       confirmed: true,
     }),
+    // Findings on the record no review stamp answered. They are outside the
+    // holds this rate reads, and a numerator that counted them would report a
+    // share past one.
+    ...['U1', 'U2', 'U3'].map((unit, i) =>
+      line(27 + i, 'finding', {
+        cycle: 1,
+        id: `F${i + 2}`,
+        lens: 'record',
+        record: true,
+        file: 'docs/adr/d.md',
+        unit,
+        head: 'the status line reads superseded',
+        confirmed: true,
+      }),
+    ),
     line(30, 'reconcile-rendered', {
       cycle: 1,
       sha: 'b1',
       verdict: 'red',
-      open: ['F1'],
+      open: ['F1', 'F2', 'F3', 'F4'],
       records: ['docs/adr/c.md', 'docs/adr/d.md'],
       layers: ['adr-form'],
     }),
@@ -571,14 +593,16 @@ test('a born cycle feeds the miss rate, and an owed-nothing judgment reads zero 
 
   const r = (await buildSnapshot(paths, { now: NOW })).stats.records;
   assert.equal(r.runs, 1);
-  // Two holds a review answered, one of them refuted. The third hold is over a
-  // record no review read, and it counts nowhere.
+  // Two holds a review answered, one of them refuted. The holds over a record
+  // no review read count nowhere, and neither do the findings on them.
   assert.deepEqual(r.writerMiss, {
     holds: 2,
     missed: 1,
     rate: 0.5,
     records: ['docs/adr/c.md'],
   });
+  // The rate is a share, and both halves read one set of units.
+  assert.ok(r.writerMiss.rate >= 0 && r.writerMiss.rate <= 1, String(r.writerMiss.rate));
   // The judgment owed nothing, and the run still bore two records. The share is
   // nought, which is a reading; an absent one is not.
   assert.deepEqual(r.late, { born: 2, late: 0, share: 0 });

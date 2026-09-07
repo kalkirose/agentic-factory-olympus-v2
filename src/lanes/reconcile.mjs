@@ -238,9 +238,9 @@ function cycleStepOf(events, anchor) {
 /**
  * The records a cycle reviews, from the anchor that earned it. It is the widest
  * of the lists the anchor holds. Those are the records it rewrote, the records
- * it left alone, and the paths a born stamp names. A record the round did
- * not change is still a record the pass touched, and the review reads every one
- * of them on every cycle (ADR-0075, ADR-0076).
+ * it left alone, and the paths a born stamp names. A record the round did not
+ * change is still a record the pass touched. The review reads every one of them
+ * on every cycle (ADR-0075, ADR-0076).
  */
 function reviewedRecords(anchor) {
   const entries = Array.isArray(anchor?.records) ? anchor.records.map((r) => r.record) : [];
@@ -248,8 +248,8 @@ function reviewedRecords(anchor) {
 }
 
 /**
- * The stamp the pass's record cycle stands on: the write where the pass wrote
- * records, and the birth where it wrote none.
+ * The stamp the pass's record cycle stands on. It is the write where the pass
+ * wrote records, and the birth where it wrote none.
  *
  * The stage used to open its cycle on a write alone. The judge leaves out a
  * born record that still stands. On the records lane the whole diff is that
@@ -369,11 +369,12 @@ async function judgeStep(ctx, base) {
     return null;
   }
   const { owed, records, reason } = result.report;
+  // One definition of the two lists, on either answer. `born` is every record
+  // this pass's own birth wrote. `late` is every owed record the birth did not
+  // write. A judgment that owes nothing has no late record, and it still holds
+  // the born set (ADR-0074, ADR-0076).
   const born = recordsCommitted(runEvents(ctx))?.paths ?? [];
   if (!owed) {
-    // The born and late lists ride the stamp either way. A pass that owes
-    // nothing still holds the records its own birth wrote. A late share that
-    // read no such stamp reported nothing over a records-lane run (ADR-0076).
     ctx.store.append('reconciliation-judged', {
       actor: ACTOR,
       ok: true,
@@ -391,7 +392,7 @@ async function judgeStep(ctx, base) {
     owed: true,
     records,
     reason,
-    born: records.filter((record) => bornPaths.has(record)),
+    born,
     late: records.filter((record) => !bornPaths.has(record)),
     gist: gist(`reconciliation owed: ${records.join(', ')}`),
   });

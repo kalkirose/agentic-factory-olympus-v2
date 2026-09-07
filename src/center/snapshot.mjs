@@ -542,7 +542,11 @@ function writerMissRate(runs) {
     holds += [...answers].filter(([key, verdict]) => verdict === 'holds' && read.has(key)).length;
     for (const e of events) {
       if (e.event !== 'finding' || e.record !== true || e.unit === undefined) continue;
-      if (answers.get(`${runId}|${e.file}|${e.unit}`) !== 'holds') continue;
+      const key = `${runId}|${e.file}|${e.unit}`;
+      // The numerator takes the denominator's guard. A finding on a unit no
+      // review stamp answered is outside the holds this rate reads. A count of
+      // it could put the share past one (ADR-0076).
+      if (answers.get(key) !== 'holds' || !read.has(key)) continue;
       missed += 1;
       records.add(e.file);
     }
@@ -556,9 +560,11 @@ function reviewSeat(seat) {
 }
 
 /**
- * The late share: the records the judge found owed after the freeze, over every
- * record the run owed. A high share says the cards and the tickets do not state
- * their decisions, so the birth seat has nothing to write from (ADR-0074).
+ * The late share: the records the judge found owed after the freeze, over the
+ * whole record set of the pass. `born` is every record the pass's own birth
+ * wrote. `late` is every owed record the birth did not write. A high share says
+ * the cards and the tickets do not state their decisions. The birth seat then
+ * has nothing to write from (ADR-0074).
  *
  * Every judgment carries the two lists, the ones that owe nothing included. A
  * records-lane run whose birth stated every decision reports a share of nought.

@@ -696,7 +696,7 @@ function renderRecords(box, r) {
     "Units a write seat reported holds that the review then found false."));
   tiles.appendChild(tile("Late records", fmtShare(r.late.share), null,
     sub([r.late.born + " born · " + r.late.late + " late"]),
-    "Records the judge found owed after the freeze, over every record the runs owed."));
+    "Records the judge found owed after the freeze, over those and every record the births wrote."));
   tiles.appendChild(tile("Moved-tree cost", r.movedTree.rejudged + " · " + r.movedTree.rerun, null,
     sub([r.movedTree.updates + " moved bases · " + r.movedTree.both + " both · " + r.movedTree.neither + " neither"]),
     "Code re-judgments and record re-runs, over the updates whose tree moved."));
