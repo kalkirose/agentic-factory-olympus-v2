@@ -29,6 +29,14 @@
 // the rest on the project's own statement of what each layer reads, which is
 // the claim the ship fast path already carries a certification on.
 //
+// A cycle whose whole diff is the record tree runs a fourth set. The project
+// names the layers a record path is read by, so such a diff runs those layers,
+// the layers downstream of them, and the prerequisites none of them can be
+// judged without. Every other layer is neither run nor carried: this cycle
+// judged nothing about it and states nothing about it, and the reconciliation
+// carries a certification of its own. That is the whole of what a record-only
+// spectrum costs, on the first cycle of a pass as much as on a later one.
+//
 // Inside a layer that runs in parts, the same carrying goes one level finer
 // (ADR-0046). A caller may hand this runner a per-layer part plan: the parts
 // this cycle must execute, and the parts whose green it may carry. The
@@ -96,6 +104,7 @@ import {
   keptParts,
   layerGround,
   mergeParts,
+  recordAttribution,
   withPartReasons,
 } from './parts.mjs';
 import { underEntry } from '../config/project.mjs';
@@ -137,6 +146,7 @@ const ATTEMPTS = 2;
  * @param {{layers: Array<{name: string, command: string, needs?: string[]}>,
  *   commands: Record<string, string[]>, cwd: string, env?: object,
  *   cycle: number, sha: string, run?: Set<string>|null,
+ *   skip?: Set<string>|null,
  *   prior?: Map<string, object>|null, confirmation?: boolean,
  *   parts?: Map<string, {narrow: {run: string[], carry: Array<object>}|null,
  *     reasons: Map<string, string>, blindPaths: string[]}>|null,
@@ -144,6 +154,11 @@ const ATTEMPTS = 2;
  *   credentials?: Array<object>, exec?: typeof runCommand}} opts
  *   `run` names the layers this cycle executes; every other layer carries its
  *   `prior` green forward. Both absent means the full spectrum.
+ *   `skip` names the layers this cycle's attribution left out. They neither
+ *   run nor carry: the cycle stamps nothing for them and reports nothing about
+ *   them, because a layer the diff cannot reach earns no green here and a
+ *   layer with no green to carry would otherwise run. Absent is the behaviour
+ *   of every cycle before the record attribution existed.
  *   `groups` names the layers this project lets hold the machine together
  *   (ADR-0047). Absent is the strict sequence, which is what every project ran
  *   before the field existed.
@@ -203,6 +218,7 @@ export async function runSpectrum(
     cycle,
     sha,
     run = null,
+    skip = null,
     prior = null,
     confirmation = false,
     parts = null,
@@ -220,10 +236,15 @@ export async function runSpectrum(
   const mark = confirmation ? { confirmation: true } : {};
   const status = new Map();
   const results = [];
+  // The layers this cycle has anything to say about. A skipped layer leaves
+  // before the batching, so it holds no place in a concurrency group and
+  // blocks no dependent: the plan that skipped it also ran or carried every
+  // layer that needs it.
+  const active = skip ? layers.filter((layer) => !skip.has(layer.name)) : layers;
   // The sequence, batched by what this project lets run together (ADR-0047).
   // A batch of one is the whole of the old behaviour; a project that named no
   // group gets nothing but batches of one.
-  for (const batch of layerBatches(layers, groups)) {
+  for (const batch of layerBatches(active, groups)) {
     // Decided first, run second. What a layer of this batch says it ran beside
     // has to be true, and a batch-mate this cycle stamped already, carries, or
     // cannot run holds the machine for no part of it. So the batch is planned
@@ -616,6 +637,7 @@ function settle(ctx, spec, made) {
     spec;
   const disposition = dispositionOf(made, attempt, layer.memoryCeilingMb ?? null, target, keep);
   made.disposition = disposition;
+  const elapsedMs = elapsedSince(made.start);
   // The terminal stamp closes the span the start opened, and says the same
   // thing about it: this reading is not the machine's whole cost for that
   // stretch, and this duration is not the cycle's (ADR-0047).
@@ -633,6 +655,12 @@ function settle(ctx, spec, made) {
     made.record = stampLayer(ctx, 'layer-result', {
       ...identity,
       status: disposition.status,
+      // What this attempt cost in wall clock, from the start stamp it closes.
+      // A layer is the one command in a run long enough for its minutes to be
+      // a fact worth keeping, and before this the only record of them was the
+      // gap between two stamps: a reader had to hold the ledger open between
+      // them, and a record-only render's whole cost is the sum of this field.
+      ...(elapsedMs !== null && { elapsedMs }),
       // What the layer's process tree peaked at, on every result the harness
       // could measure. A green carries it too: a green at the ceiling is the
       // reading the forecast needs, and it is the one nobody would think to
@@ -681,6 +709,17 @@ function settle(ctx, spec, made) {
     ...mark,
   });
   if (disposition.exhaustion) stampExhaustion(ctx, spec, disposition.exhaustion);
+}
+
+/**
+ * The wall clock one attempt held, from the `layer-started` its terminal stamp
+ * closes. Null where that stamp carries no time this can read, so a reader
+ * never takes an invented duration for a measured one.
+ */
+function elapsedSince(start) {
+  const began = Date.parse(start?.ts ?? '');
+  if (!Number.isFinite(began)) return null;
+  return Math.max(0, Date.now() - began);
 }
 
 /**
@@ -1111,11 +1150,22 @@ export function targetedLayers(layers, prior) {
  * - A layer whose ground the diff touches runs, on the widest reading of that
  *   ground the two sources give.
  *
+ * A record path is attributed by the project and not by a ground. It selects
+ * the layers of `gates.recordLayers` and no other layer, whatever any ground
+ * declares, because the project has said which layers read its records. A
+ * project that names no record layer keeps the selection it always had.
+ *
  * @param {Array<{name: string, needs?: string[], ground?: string[]}>} layers
  * @param {Map<string, object>} prior each layer's standing `layer-result`
- * @param {{changed: string[], breadth?: string[]}} diff the record diff
+ * @param {{changed: string[], breadth?: string[], recordPaths?: string[],
+ *   recordLayers?: string[]}} diff the record diff and the attribution
  */
-export function groundedLayers(layers, prior, { changed, breadth = [] }) {
+export function groundedLayers(
+  layers,
+  prior,
+  { changed, breadth = [], recordPaths = [], recordLayers = [] },
+) {
+  const records = recordAttribution({ recordPaths, recordLayers });
   const target = new Set();
   for (const layer of layers) {
     const record = prior.get(layer.name);
@@ -1123,16 +1173,67 @@ export function groundedLayers(layers, prior, { changed, breadth = [] }) {
       target.add(layer.name);
       continue;
     }
-    const ground = layerGround(layer, record, breadth);
+    const ground = layerGround(layer, record, breadth, recordPaths);
     if (!ground.sources.config && !ground.sources.declared) {
       target.add(layer.name);
       continue;
     }
-    if (changed.some((file) => ground.entries.some((entry) => underEntry(file, entry)))) {
-      target.add(layer.name);
-    }
+    const reaches = (file) =>
+      records !== null && records.isRecord(file)
+        ? records.layers.has(layer.name)
+        : ground.entries.some((entry) => underEntry(file, entry));
+    if (changed.some(reaches)) target.add(layer.name);
   }
   return withDependents(layers, target);
+}
+
+/**
+ * The set a record-only cycle runs: the layers the project attributes its
+ * records to, the layers downstream of those, and the prerequisites of both
+ * that hold no green to stand on.
+ *
+ * The last clause is what makes the set runnable. A layer is not judged unless
+ * every layer it needs is green in this cycle, and a prerequisite this cycle
+ * skips is green in no cycle at all, so a record layer whose prerequisite has
+ * never run would report not-runnable rather than judge the records. A
+ * prerequisite that DOES hold a green carries it, exactly as it does in every
+ * other narrowed set.
+ *
+ * @param {Array<{name: string, needs?: string[]}>} layers
+ * @param {Map<string, object>} prior each layer's standing `layer-result`
+ * @param {Set<string>} named the project's `gates.recordLayers`
+ */
+export function recordLayerSet(layers, prior, named) {
+  const target = withDependents(
+    layers,
+    new Set(layers.filter((layer) => named.has(layer.name)).map((layer) => layer.name)),
+  );
+  const by = new Map(layers.map((layer) => [layer.name, layer]));
+  const queue = [...target];
+  for (let i = 0; i < queue.length; i++) {
+    for (const need of by.get(queue[i])?.needs ?? []) {
+      if (target.has(need) || !by.has(need)) continue;
+      if (prior?.get(need)?.status === 'green') continue;
+      target.add(need);
+      queue.push(need);
+    }
+  }
+  return target;
+}
+
+/**
+ * The layers a narrowed set neither runs nor may carry: they hold no proven
+ * green, and this cycle's attribution says the diff cannot reach them. A cycle
+ * that ran them would buy the whole spectrum back for a diff the project
+ * states no code layer reads.
+ */
+function skippedLayers(layers, run, prior) {
+  const skip = new Set();
+  for (const layer of layers) {
+    if (run.has(layer.name)) continue;
+    if (prior?.get(layer.name)?.status !== 'green') skip.add(layer.name);
+  }
+  return skip;
 }
 
 /**
@@ -1171,16 +1272,47 @@ function withDependents(layers, target) {
  * handing over the commit's own diff; nothing else in this module reads a
  * diff.
  *
+ * A cycle whose whole diff is the record tree runs a fourth set, and it runs
+ * it before every other clause, on the first cycle of a pass as much as on a
+ * later one. The full sweep exists because nothing is proven at the start of a
+ * pass; over a diff the project states no code layer reads, that sweep proves
+ * the code layers against a change none of them can see. So the record layers
+ * and what they need run, and the rest are skipped rather than carried: this
+ * cycle earns them no green and claims none for them.
+ *
+ * The caller says what the cycle judges by handing over `changed`. A caller
+ * that hands over nothing takes the three sets it always took.
+ *
  * The plan reads the ledger alone, and the stamps of the cycle being planned
  * never reach it, so a daemon restart mid-cycle derives the same set.
  */
-export function cyclePlan(events, { cycle, pass, layers, reconcile = null }) {
+export function cyclePlan(
+  events,
+  { cycle, pass, layers, reconcile = null, changed = null, recordPaths = [], recordLayers = [] },
+) {
+  const records = recordAttribution({ recordPaths, recordLayers });
+  const prior = priorStatus(events, cycle);
+  // An empty diff is not a record diff. Every path of nothing is a record on a
+  // vacuous reading, and a cycle that judged no change would skip its spectrum
+  // on it.
+  const recordOnly =
+    records !== null &&
+    Array.isArray(changed) &&
+    changed.length > 0 &&
+    changed.every((file) => records.isRecord(file));
+  if (recordOnly) {
+    const run = recordLayerSet(layers, prior, records.layers);
+    return { sweep: 'records', run, skip: skippedLayers(layers, run, prior), prior };
+  }
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   const previous = renders[renders.length - 1];
   if (!previous || previous.pass !== pass || previous.source === 'ci') return { sweep: 'full' };
-  const prior = priorStatus(events, cycle);
   if (reconcile) {
-    return { sweep: 'reconcile', run: groundedLayers(layers, prior, reconcile), prior };
+    return {
+      sweep: 'reconcile',
+      run: groundedLayers(layers, prior, { recordPaths, recordLayers, ...reconcile }),
+      prior,
+    };
   }
   return { sweep: 'targeted', run: targetedLayers(layers, prior), prior };
 }

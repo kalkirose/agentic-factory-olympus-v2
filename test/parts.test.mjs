@@ -423,6 +423,85 @@ test('groundless ground is matched in the vocabulary every path entry uses', () 
   );
 });
 
+// -- the records of the tree --------------------------------------------------
+//
+// The project states which Tier-1 layers read its records. A record path is
+// groundless for every other layer, so no code layer re-runs its parts for a
+// change the project says that layer cannot see.
+
+const RECORDS = { recordPaths: ['docs/adr', '!docs/adr/TEMPLATE.md'], recordLayers: ['form'] };
+const CODE_LAYER = { name: 'unit', command: 'unit', ground: ['apps', 'docs'] };
+const RECORD_LAYER = { name: 'form', command: 'form', ground: ['docs/adr/**'] };
+
+test('a record path is groundless for a layer the project does not attribute it to', () => {
+  // Alone in the diff it would have blinded the cycle and re-run every part.
+  const only = partPlan(prior(1, [ALPHA, BETA]), ['docs/adr/adr-020-x.md'], {
+    layer: CODE_LAYER,
+    ...RECORDS,
+  });
+  assert.deepEqual(asObject(only.reasons), {});
+  assert.deepEqual(only.blindPaths, []);
+  // Beside a real change it neither blinds the cycle nor reaches a part.
+  const beside = partPlan(
+    prior(1, [ALPHA, BETA]),
+    ['docs/adr/adr-020-x.md', 'apps/alpha/mail.tsx'],
+    { layer: CODE_LAYER, ...RECORDS },
+  );
+  assert.deepEqual(beside.narrow.run, ['alpha']);
+  assert.deepEqual(beside.blindPaths, []);
+  // Without the attribution the same diff is blind, which is the whole cost
+  // the two keys buy back.
+  assert.deepEqual(
+    partPlan(prior(1, [ALPHA, BETA]), ['docs/adr/adr-020-x.md', 'apps/alpha/mail.tsx'], {
+      layer: CODE_LAYER,
+    }).blindPaths,
+    ['docs/adr/adr-020-x.md'],
+  );
+});
+
+test('inside a record layer a record is attributed like any other path', () => {
+  const parts = [
+    { name: 'form', status: 'green', inputs: ['docs/adr'] },
+    { name: 'index', status: 'green', inputs: ['docs/index.md'] },
+  ];
+  const plan = partPlan(prior(1, parts), ['docs/adr/adr-020-x.md'], {
+    layer: RECORD_LAYER,
+    ...RECORDS,
+  });
+  assert.deepEqual(asObject(plan.reasons), { form: 'touched' });
+  // And a record no part of it claims still blinds the layer it belongs to.
+  const bare = partPlan(prior(1, [{ name: 'index', status: 'green', inputs: ['docs/index.md'] }]), [
+    'docs/adr/adr-020-x.md',
+  ], { layer: RECORD_LAYER, ...RECORDS });
+  assert.deepEqual(bare.blindPaths, ['docs/adr/adr-020-x.md']);
+});
+
+test('a record path the exclusion names reaches the parts it always did', () => {
+  const plan = partPlan(prior(1, [ALPHA, BETA]), ['docs/adr/TEMPLATE.md'], {
+    layer: CODE_LAYER,
+    ...RECORDS,
+  });
+  assert.deepEqual(plan.blindPaths, ['docs/adr/TEMPLATE.md']);
+});
+
+test('the breadth list never holds a record of the tree', () => {
+  // A breadth entry under the record paths belongs to every layer's ground,
+  // which is the one line of config that would undo the attribution.
+  const ground = layerGround(CODE_LAYER, { parts: [ALPHA] }, ['docs/adr/**'], RECORDS.recordPaths);
+  assert.ok(!ground.entries.includes('docs/adr/**'));
+  assert.ok(!ground.floor.includes('docs/adr/**'));
+  // Every other breadth entry joins as it always did.
+  const kept = layerGround(
+    CODE_LAYER,
+    { parts: [ALPHA] },
+    ['docs/adr/**', 'package-lock.json'],
+    RECORDS.recordPaths,
+  );
+  assert.ok(kept.entries.includes('package-lock.json'));
+  // A project that declares no record path loses nothing.
+  assert.ok(layerGround(CODE_LAYER, { parts: [ALPHA] }, ['docs/adr/**']).entries.includes('docs/adr/**'));
+});
+
 // -- the share ---------------------------------------------------------------
 
 test('the carry share counts every part of a cycle, carried layers included', () => {

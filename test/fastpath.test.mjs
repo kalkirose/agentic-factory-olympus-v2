@@ -12,14 +12,17 @@ import {
   FAST_PATH_REFUSALS,
   GIT_TIMEOUT_MS,
   assertFastPathRefusal,
+  codeCertification,
   declarationDigest,
   declarationSources,
   declaredGround,
+  fastPathDecision,
   fastPathFacts,
   fastPathVerdict,
   groundVerdict,
   parseRawDiff,
 } from '../src/lanes/fastpath.mjs';
+import { priorStatus } from '../src/lanes/spectrum.mjs';
 import { groundEntry } from '../src/config/project.mjs';
 
 // One raw-diff record, in the shape `git diff --raw -z` writes it.
@@ -580,92 +583,183 @@ const GROUND = {
 
 const changed = (...files) => ({ files, unclassifiable: [] });
 
+/** The code half alone, as a lane with one certification asks it. */
+const codeOf = (incoming, over = GROUND) => groundVerdict(incoming, { code: over }).code;
+
 test('ground the project declared inert is disjoint', () => {
-  assert.equal(groundVerdict({ ...GROUND, mainChanged: changed('docs/note.md') }), null);
+  assert.deepEqual(codeOf(changed('docs/note.md')), { answer: 'kept', files: [] });
 });
 
-test('ground no claim in the project reaches refuses', () => {
+test('ground no claim in the project reaches is re-judged', () => {
   // The part machinery's own rule (parts.mjs): a changed path no input set
   // claims makes every part affected, because nothing said what depends on it.
   // Reading that silence as safety is the one thing this check may never do.
-  const out = groundVerdict({ ...GROUND, mainChanged: changed('ops/deploy.sh') });
-  assert.equal(out.refusal, 'unclaimed-ground');
+  const out = codeOf(changed('ops/deploy.sh'));
+  assert.equal(out.answer, 'rejudge');
+  assert.equal(out.reason, 'unclaimed-ground');
+  assert.deepEqual(out.files, ['ops/deploy.sh']);
   assert.match(out.detail, /ops\/deploy\.sh/);
 });
 
-test('a project that declares no inert ground refuses every moved file', () => {
-  const out = groundVerdict({ ...GROUND, inert: [], mainChanged: changed('docs/note.md') });
-  assert.equal(out.refusal, 'unclaimed-ground');
+test('a project that declares no inert ground re-judges every moved file', () => {
+  const out = codeOf(changed('docs/note.md'), { ...GROUND, inert: [] });
+  assert.equal(out.reason, 'unclaimed-ground');
 });
 
 test('a declaration source is an intersection', () => {
   // The declarations decide the skip. The branch moving under them is the one
   // thing the ground question must never let through as inert.
-  const out = groundVerdict({ ...GROUND, mainChanged: changed('.olympus/gates/unit.mjs') });
-  assert.equal(out.refusal, 'ground-intersects');
+  const out = codeOf(changed('.olympus/gates/unit.mjs'));
+  assert.equal(out.reason, 'ground-intersects');
   assert.match(out.detail, /a declaration source/);
 });
 
-test('a claimed file refuses even where the inert list also names it', () => {
-  const out = groundVerdict({
-    ...GROUND,
-    inert: ['src'],
-    mainChanged: changed('src/api/other.mjs'),
-  });
-  assert.equal(out.refusal, 'ground-intersects');
+test('a claimed file is re-judged even where the inert list also names it', () => {
+  const out = codeOf(changed('src/api/other.mjs'), { ...GROUND, inert: ['src'] });
+  assert.equal(out.reason, 'ground-intersects');
 });
 
 test('a file the story itself changed is an intersection', () => {
-  const out = groundVerdict({ ...GROUND, mainChanged: changed('src/api/f.mjs') });
-  assert.equal(out.refusal, 'ground-intersects');
+  const out = codeOf(changed('src/api/f.mjs'));
+  assert.equal(out.reason, 'ground-intersects');
   assert.match(out.detail, /the story's own diff/);
 });
 
 test('a declared suite input is an intersection', () => {
-  const out = groundVerdict({ ...GROUND, mainChanged: changed('src/api/other.mjs') });
-  assert.equal(out.refusal, 'ground-intersects');
+  const out = codeOf(changed('src/api/other.mjs'));
+  assert.equal(out.reason, 'ground-intersects');
   assert.match(out.detail, /a declared suite input/);
 });
 
 test('a suite file is an intersection', () => {
-  const out = groundVerdict({ ...GROUND, mainChanged: changed('tests/api.test.mjs') });
-  assert.equal(out.refusal, 'ground-intersects');
+  const out = codeOf(changed('tests/api.test.mjs'));
+  assert.equal(out.reason, 'ground-intersects');
   assert.match(out.detail, /a suite file/);
 });
 
 test('the shared breadth list is an intersection whatever any suite declared', () => {
-  const out = groundVerdict({ ...GROUND, mainChanged: changed('db/migrations/0007.sql') });
-  assert.equal(out.refusal, 'ground-intersects');
+  const out = codeOf(changed('db/migrations/0007.sql'));
+  assert.equal(out.reason, 'ground-intersects');
   assert.match(out.detail, /the shared breadth list/);
 });
 
 test('a glob input reaches the files it matches', () => {
   // The path vocabulary is the config's own (project.mjs): a plain entry is a
   // prefix, and a glob entry matches whole paths.
-  const out = groundVerdict({
+  const reached = codeOf(changed('packages/two/src/index.mjs'), {
     ...GROUND,
     entries: ['packages/*/src/**'],
-    mainChanged: changed('packages/two/src/index.mjs'),
   });
-  assert.equal(out.refusal, 'ground-intersects');
-  assert.equal(
-    groundVerdict({
+  assert.equal(reached.reason, 'ground-intersects');
+  assert.deepEqual(
+    codeOf(changed('packages/two/docs/index.mjs'), {
       ...GROUND,
       entries: ['packages/*/src/**'],
       inert: ['packages/*/docs/**'],
-      mainChanged: changed('packages/two/docs/index.mjs'),
     }),
-    null,
+    { answer: 'kept', files: [] },
   );
 });
 
-test('ground the check cannot read refuses before any intersection is looked for', () => {
-  const out = groundVerdict({
-    ...GROUND,
-    mainChanged: { files: ['docs/note.md'], unclassifiable: ['vendor/lib'] },
-  });
-  assert.equal(out.refusal, 'unclassifiable-change');
+test('ground the check cannot read is re-judged before any intersection is looked for', () => {
+  const out = codeOf({ files: ['docs/note.md'], unclassifiable: ['vendor/lib'] });
+  assert.equal(out.reason, 'unclassifiable-change');
   assert.match(out.detail, /vendor\/lib/);
+});
+
+// -- the two questions off one list of files ----------------------------------
+//
+// The six rows of the point 13 table. The code verdict's ground is what the
+// suites declare; the reconciliation's ground is the run's own records and
+// their neighbourhood. Each answer is kept or redone on its own.
+
+const RECORDS = {
+  neighbourhood: ['docs/adr/adr-020-x.md', 'docs/adr/adr-021-y.md'],
+  recordPaths: ['docs/adr', '!docs/adr/TEMPLATE.md'],
+  own: ['docs/adr/adr-030-mine.md'],
+};
+
+const both = (incoming, over = {}) =>
+  groundVerdict(incoming, {
+    code: { ...GROUND, storyChanged: [...GROUND.storyChanged, ...RECORDS.own], ...over.code },
+    records: { ...RECORDS, ...over.records },
+  });
+
+test('incoming work in neither ground keeps both answers', () => {
+  const out = both(changed('docs/note.md'));
+  assert.equal(out.code.answer, 'kept');
+  assert.equal(out.records.answer, 'kept');
+});
+
+test('incoming code ground alone re-judges the code and keeps the records', () => {
+  const out = both(changed('src/api/other.mjs'));
+  assert.equal(out.code.answer, 'rejudge');
+  assert.equal(out.code.reason, 'ground-intersects');
+  assert.equal(out.records.answer, 'kept');
+});
+
+test('a record of the neighbourhood alone re-runs the records and keeps the code', () => {
+  const out = both(changed('docs/adr/adr-021-y.md'));
+  assert.equal(out.code.answer, 'kept');
+  assert.equal(out.records.answer, 'rerun');
+  assert.equal(out.records.reason, 'neighbourhood');
+  assert.deepEqual(out.records.files, ['docs/adr/adr-021-y.md']);
+});
+
+test('incoming work in both grounds re-judges the code and re-runs the records', () => {
+  const out = both(changed('src/api/other.mjs', 'docs/adr/adr-021-y.md'));
+  assert.equal(out.code.answer, 'rejudge');
+  assert.equal(out.records.answer, 'rerun');
+});
+
+test('a record outside the neighbourhood keeps both answers', () => {
+  // The reconciliation never rested on it, and no suite reads it: a record is
+  // in no code set at all, whatever ground a record layer declares.
+  const out = both(changed('docs/adr/adr-099-elsewhere.md'), {
+    code: { entries: ['src/api', 'docs/adr/**'] },
+  });
+  assert.equal(out.code.answer, 'kept');
+  assert.equal(out.records.answer, 'kept');
+});
+
+test('a record the run itself wrote re-runs the records and is never a refusal', () => {
+  // The first set of the code question is the run's own diff, and a record in
+  // it would otherwise read as an intersection. The stage that wrote the
+  // record answers the conflict, so the answer is a re-run.
+  const out = both(changed('docs/adr/adr-030-mine.md'));
+  assert.equal(out.code.answer, 'kept');
+  assert.equal(out.records.answer, 'rerun');
+  assert.equal(out.records.reason, 'own-record');
+  assert.deepEqual(out.records.files, ['docs/adr/adr-030-mine.md']);
+});
+
+test('a record path the exclusion names is a file like any other', () => {
+  // `!docs/adr/TEMPLATE.md` leaves the record tree, so the code question asks
+  // about it and the records question does not.
+  const out = both(changed('docs/adr/TEMPLATE.md'), {
+    code: { entries: ['src/api', 'docs/adr/**'] },
+  });
+  assert.equal(out.code.answer, 'rejudge');
+  assert.equal(out.code.reason, 'ground-intersects');
+  assert.equal(out.records.answer, 'kept');
+});
+
+test('a lane with one certification is asked one question', () => {
+  const codeOnly = groundVerdict(changed('docs/note.md'), { code: GROUND });
+  assert.equal(codeOnly.records, null);
+  assert.equal(codeOnly.code.answer, 'kept');
+  const recordsOnly = groundVerdict(changed('docs/adr/adr-020-x.md'), { records: RECORDS });
+  assert.equal(recordsOnly.code, null);
+  assert.equal(recordsOnly.records.answer, 'rerun');
+});
+
+test('a record moved by a change the check cannot read still re-runs the records', () => {
+  // A symlink or a mode flip on a record is that record moving. The code
+  // question refuses on it as it always did.
+  const out = both({ files: [], unclassifiable: ['docs/adr/adr-020-x.md'] });
+  assert.equal(out.code.answer, 'rejudge');
+  assert.equal(out.code.reason, 'unclassifiable-change');
+  assert.equal(out.records.answer, 'rerun');
 });
 
 // -- the whole decision -------------------------------------------------------
@@ -749,11 +843,157 @@ test('every refusal the module can return is in the closed set', () => {
     'no-certification',
     'no-standing-green',
     'no-suite-ground',
+    'records-rerun',
     'self-declared-ground',
     'unclaimed-ground',
     'unclassifiable-change',
     'undeclared-suite',
   ]);
+});
+
+// -- two certifications, two grounds, two answers -----------------------------
+
+/** The reconciliation's ground, as the ship computes it at the merge. */
+const NEIGHBOURHOOD = {
+  neighbourhood: ['docs/adr/adr-020-x.md', 'docs/adr/adr-021-y.md'],
+  recordPaths: ['docs/adr'],
+};
+
+test('a record of the neighbourhood re-runs the reconciliation and keeps the code', () => {
+  const out = fastPathVerdict(
+    inputs({
+      records: NEIGHBOURHOOD,
+      mainChanged: { files: ['docs/adr/adr-021-y.md'], unclassifiable: [] },
+    }),
+  );
+  // The code certification stands: no suite reads a record, so the tree the
+  // verdict judged is the tree that ships.
+  assert.equal(out.code.answer, 'kept');
+  assert.equal(out.records.answer, 'rerun');
+  // The run does not go straight to the request. It goes to the stage that
+  // owns the records, and the word says which of the two sent it.
+  assert.equal(out.taken, false);
+  assert.equal(out.refusal, 'records-rerun');
+});
+
+test('a moved base outside both grounds carries both certifications', () => {
+  const out = fastPathVerdict(inputs({ records: NEIGHBOURHOOD }));
+  assert.equal(out.taken, true, out.detail);
+  assert.equal(out.code.answer, 'kept');
+  assert.equal(out.records.answer, 'kept');
+});
+
+test('a records lane is judged on its records alone', () => {
+  // No code verdict, so no declared suite ground, no lens findings, and no
+  // suite files to ask about. Asking anyway would refuse every ship the lane
+  // takes.
+  const lane = inputs({
+    certification: null,
+    records: NEIGHBOURHOOD,
+    layers: [],
+    prior: new Map(),
+    breadth: [],
+    testPaths: [],
+    storyChanged: ['docs/adr/adr-030-mine.md'],
+    mainChanged: { files: ['src/api/other.mjs'], unclassifiable: [] },
+  });
+  const out = fastPathVerdict(lane);
+  assert.equal(out.taken, true, out.detail);
+  assert.equal(out.code, null);
+  assert.equal(out.records.answer, 'kept');
+  // Its own record moving on the branch is the one thing that re-runs it.
+  const conflicted = fastPathVerdict({
+    ...lane,
+    mainChanged: { files: ['docs/adr/adr-030-mine.md'], unclassifiable: [] },
+  });
+  assert.equal(conflicted.records.answer, 'rerun');
+  assert.equal(conflicted.records.reason, 'own-record');
+  assert.equal(conflicted.refusal, 'records-rerun');
+});
+
+test('a lane that certifies nothing carries nothing', () => {
+  const out = fastPathVerdict(inputs({ certification: null, records: null }));
+  assert.equal(out.taken, false);
+  assert.equal(out.refusal, 'no-certification');
+});
+
+test('a refusal carries the answer for every certification in scope', () => {
+  const out = fastPathVerdict(
+    inputs({ records: NEIGHBOURHOOD, storyDiffAfter: 'diff --git a/src/api/f.mjs\n+moved\n' }),
+  );
+  assert.equal(out.refusal, 'diff-changed');
+  assert.equal(out.code.answer, 'rejudge');
+  assert.equal(out.records.answer, 'rerun');
+  assert.equal(out.records.reason, 'diff-changed');
+});
+
+test('the standing green of a layer comes from the last cycle that ran it', () => {
+  // A record-only cycle runs the record layers and skips the rest, so the code
+  // layers hold no result of their own under it. The declaration comes off the
+  // cycle that earned the green, however many cycles ago that was.
+  const ledger = [
+    { event: 'layer-result', cycle: 1, layer: 'unit', status: 'green', parts: [part('api', ['src/api'])] },
+    { event: 'layer-result', cycle: 1, layer: 'form', status: 'green', parts: [part('form', ['docs/adr'])] },
+    { event: 'layer-result', cycle: 2, layer: 'form', status: 'green', parts: [part('form', ['docs/adr'])] },
+  ];
+  const out = declaredGround([layer('unit'), layer('form')], priorStatus(ledger, 3), {
+    breadth: ['package-lock.json'],
+  });
+  assert.equal(out.ok, true, out.detail);
+  assert.deepEqual(out.suites, ['form/form', 'unit/api']);
+});
+
+test('the certification a lane names is the render at that sha', () => {
+  const ledger = [
+    { event: 'verdict-rendered', cycle: 2, verdict: 'green', sha: 'aaa', record: '/r/v2.json' },
+    { event: 'verdict-rendered', cycle: 4, verdict: 'red', sha: 'bbb', record: '/r/v4.json' },
+  ];
+  // A caller that names no lane reads the last render and takes it only where
+  // it is green, exactly as it did before a run held two certifications.
+  assert.equal(codeCertification(ledger, undefined), null);
+  assert.deepEqual(codeCertification(ledger.slice(0, 1), undefined), {
+    cycle: 2,
+    sha: 'aaa',
+    record: '/r/v2.json',
+  });
+  // A lane that names the code tree it certified is answered from the render
+  // at that sha, whatever was rendered after it.
+  assert.deepEqual(codeCertification(ledger, { ok: true, sha: 'aaa' }), {
+    cycle: 2,
+    sha: 'aaa',
+    record: '/r/v2.json',
+  });
+  // A lane that holds a certification the ledger cannot show, and a lane whose
+  // certification is not green, each carry nothing.
+  assert.equal(codeCertification(ledger, { ok: true, sha: 'ccc' }), null);
+  assert.equal(codeCertification(ledger, { ok: false, sha: 'aaa' }), null);
+  assert.equal(codeCertification(ledger, null), null);
+});
+
+test('no-certification is refused for a certification the lane has and for no other', async () => {
+  // Each of these ends before the first git read, so the routes are decided
+  // from the lane's own statement and the ledger alone.
+  const base = { worktree: '/nowhere', config: { gates: {} } };
+  const shas = { fromSha: 'f', toSha: 't', mainSha: 'm' };
+  const none = await fastPathDecision(base, [], shas, {
+    certification: { code: null, records: null },
+  });
+  assert.equal(none.refusal, 'no-certification');
+  // A lane that holds a code certification the ledger cannot show.
+  const unshown = await fastPathDecision(base, [], shas, {
+    certification: { code: { ok: true, sha: 'aaa' }, records: null },
+  });
+  assert.equal(unshown.refusal, 'no-certification');
+  assert.equal(unshown.code.answer, 'rejudge');
+  assert.equal(unshown.records, null);
+  // A records lane whose reconciliation is not green. The code certification
+  // it does not hold is asked about nowhere.
+  const red = await fastPathDecision(base, [], shas, {
+    certification: { code: null, records: { ok: false, sha: 'bbb' } },
+  });
+  assert.equal(red.refusal, 'no-certification');
+  assert.equal(red.records.answer, 'rerun');
+  assert.equal(red.code, null);
 });
 
 // -- a spectrum of forty layers, most of them silent --------------------------
