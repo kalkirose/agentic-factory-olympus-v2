@@ -415,7 +415,21 @@ const UPDATE_CAP_NOTE =
   'the base moved twice under one pass: the ship stage takes the update from ' +
   'here, as it did before this one existed';
 
-// Why a tree nothing certified goes back to the verdict.
+/**
+ * The stage that certifies the tree of one lane.
+ *
+ * Every route of this stage that sends the run back to be certified reads it.
+ * The story and repair lanes certify code, and the verdict renders that. The
+ * records lane renders no code verdict at all: what certifies its tree is the
+ * reconcile stage, and a route that named the verdict there would hand the run
+ * to a stage its lane graph does not hold (ADR-0075).
+ * @param {{mode?: string}} base the lane base
+ */
+export function certifyingStage(base) {
+  return base?.mode === 'records' ? RECONCILE_STAGE : 'verdict';
+}
+
+// Why a tree nothing certified goes back to be certified again.
 const UNCERTIFIED_TREE_NOTE =
   'the tree at the head is not a tree any green verdict judged and not one a ' +
   'fast path carried: it is judged now';
@@ -537,9 +551,9 @@ async function preVerdictUpdate(ctx, base) {
     });
     // A tree nothing certified that this call's merge did not build: the run
     // took a merge it never recorded, and the shas the fast path reads went with
-    // the record. The full re-verdict, never the fast path over shas it cannot
-    // name.
-    return certified ? { next: 'ship' } : { next: 'verdict' };
+    // the record. The full re-certification, never the fast path over shas it
+    // cannot name.
+    return certified ? { next: 'ship' } : { next: certifyingStage(base) };
   }
   // The flag is the whole of the difference. Absent or false, the moved tree
   // goes back to the verdict exactly as it always has, and nothing above or
@@ -708,7 +722,7 @@ function shipHandler({ forgeFor, pollMs }) {
       ) {
         // The records lane holds no verdict stage: what it answers a red with is
         // the reconcile stage's corrective round (ADR-0075).
-        return { next: base.mode === 'records' ? RECONCILE_STAGE : 'verdict' };
+        return { next: certifyingStage(base) };
       }
       // The stage's own red, from a CI check on a record layer. It resumes the
       // same way: the render is the stage's and the stage answers it.

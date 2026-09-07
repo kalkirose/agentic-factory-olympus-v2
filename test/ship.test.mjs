@@ -19,6 +19,7 @@ import { postFreeze, repairLane, restoreAnchor } from '../src/lanes/verdict.mjs'
 import {
   admitted,
   certifiedTrees,
+  certifyingStage,
   recordsLaneCiRed,
   checksByName,
   fastPathTaken,
@@ -4816,4 +4817,45 @@ test('a records-lane CI red on a record layer routes to the stage, and a code re
       .park.type,
     'ci-red',
   );
+});
+
+test('a records-lane update over an uncertified tree goes to the stage that certifies it', () => {
+  // The update stage's own route, on the base that did not move. A tree no
+  // certification covers is certified again before the request opens, and the
+  // stage that certifies it is the lane's. The records lane holds no verdict
+  // stage, so a route that named the verdict would hand the run to a stage its
+  // graph never registered (ADR-0075).
+  assert.equal(certifyingStage({ mode: 'records' }), 'reconcile');
+  assert.equal(certifyingStage({ mode: 'story' }), 'verdict');
+  assert.equal(certifyingStage({ mode: 'repair' }), 'verdict');
+  // A base with no mode at all is a code lane: the field arrives from the lane
+  // base, and a reader that guessed `records` would divert every other lane.
+  assert.equal(certifyingStage({}), 'verdict');
+
+  // The ledger that takes the route: a records-lane run whose record tree is
+  // red at the record commit's own sha certifies nothing, so the update sends
+  // it back to the stage.
+  const event = (seq, name, extra = {}) => ({ seq, event: name, ...extra });
+  const RECORDS = 'r'.repeat(40);
+  const base = { mode: 'records' };
+  const red = [
+    event(1, 'reconcile-rendered', { cycle: 1, sha: RECORDS, verdict: 'red', open: ['F1'] }),
+  ];
+  assert.equal(admitted(red, base), false);
+  assert.deepEqual(certifiedTrees(red, base), {
+    code: null,
+    records: { sha: RECORDS, ok: false },
+  });
+  // The token goes back with the reason that names the stage, and the resume
+  // rule at the top of the handler reads the same stage off it.
+  assert.equal(
+    releasedForVerdict([event(2, 'ship-token', { state: 'released', reason: 're-reconcile' })]),
+    'reconcile',
+  );
+  // A green render at the record commit certifies the tree, and the same run
+  // opens its request instead.
+  const green = [
+    event(1, 'reconcile-rendered', { cycle: 1, sha: RECORDS, verdict: 'green', open: [] }),
+  ];
+  assert.equal(admitted(green, base), true);
 });
