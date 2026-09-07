@@ -1267,18 +1267,13 @@ function withDependents(layers, target) {
  * cycle judges a tree a repair round, a re-freeze, or an operational fix
  * touched, and runs the targeted set.
  *
- * A cycle that judges the reconciliation commit runs a third set: the layers
- * whose declared ground that commit reached (ADR-0026). The caller says so by
- * handing over the commit's own diff; nothing else in this module reads a
- * diff.
- *
- * A cycle whose whole diff is the record tree runs a fourth set, and it runs
- * it before every other clause, on the first cycle of a pass as much as on a
- * later one. The full sweep exists because nothing is proven at the start of a
- * pass; over a diff the project states no code layer reads, that sweep proves
- * the code layers against a change none of them can see. So the record layers
- * and what they need run, and the rest are skipped rather than carried: this
- * cycle earns them no green and claims none for them.
+ * A cycle whose whole diff is the record tree runs a third set, and it runs it
+ * before every other clause, on the first cycle of a pass as much as on a later
+ * one. The full sweep exists because nothing is proven at the start of a pass;
+ * over a diff the project states no code layer reads, that sweep proves the
+ * code layers against a change none of them can see. So the record layers and
+ * what they need run, and the rest are skipped rather than carried: this cycle
+ * earns them no green and claims none for them.
  *
  * The caller says what the cycle judges by handing over `changed`. A caller
  * that hands over nothing takes the three sets it always took.
@@ -1288,7 +1283,7 @@ function withDependents(layers, target) {
  */
 export function cyclePlan(
   events,
-  { cycle, pass, layers, reconcile = null, changed = null, recordPaths = [], recordLayers = [] },
+  { cycle, pass, layers, changed = null, recordPaths = [], recordLayers = [] },
 ) {
   const records = recordAttribution({ recordPaths, recordLayers });
   const prior = priorStatus(events, cycle);
@@ -1307,12 +1302,5 @@ export function cyclePlan(
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   const previous = renders[renders.length - 1];
   if (!previous || previous.pass !== pass || previous.source === 'ci') return { sweep: 'full' };
-  if (reconcile) {
-    return {
-      sweep: 'reconcile',
-      run: groundedLayers(layers, prior, { recordPaths, recordLayers, ...reconcile }),
-      prior,
-    };
-  }
   return { sweep: 'targeted', run: targetedLayers(layers, prior), prior };
 }

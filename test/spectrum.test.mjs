@@ -1163,7 +1163,10 @@ test('a layer with no standing green runs whatever its ground says', () => {
   ]);
 });
 
-test('the reconciliation plan is the third sweep, and it needs a render behind it', () => {
+// The reconciliation sweep is gone with the round that named it. A record diff
+// takes the record plan, whatever cycle it arrives on, and this module no longer
+// holds a set the ship stage hands it (ADR-0075).
+test('there is no reconciliation sweep, and a record diff plans on its own', () => {
   const events = [
     { event: 'implementation-committed', pass: 1 },
     ...GROUNDED.map((l) => ({ event: 'layer-result', cycle: 1, layer: l.name, status: 'green' })),
@@ -1173,13 +1176,20 @@ test('the reconciliation plan is the third sweep, and it needs a render behind i
     cycle: 2,
     pass: 1,
     layers: GROUNDED,
-    reconcile: { changed: ['docs/adr/0001-x.md'] },
+    changed: ['docs/adr/0001-x.md'],
+    recordPaths: ['docs/adr'],
+    recordLayers: ['docs'],
   });
-  assert.equal(plan.sweep, 'reconcile');
-  assert.deepEqual([...plan.run].sort(), ['bare', 'docs', 'lint', 'unit']);
-  // Without the record diff the same ledger plans the targeted set, which is
+  assert.equal(plan.sweep, 'records');
+  assert.deepEqual([...plan.run], ['docs']);
+  // A project that names no record layers plans the targeted set, which is
   // empty because every layer is green.
   assert.equal(cyclePlan(events, { cycle: 2, pass: 1, layers: GROUNDED }).sweep, 'targeted');
+  assert.equal(
+    cyclePlan(events, { cycle: 2, pass: 1, layers: GROUNDED, changed: ['docs/adr/0001-x.md'] })
+      .sweep,
+    'targeted',
+  );
 });
 
 // -- the record attribution --------------------------------------------------

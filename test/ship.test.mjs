@@ -349,15 +349,26 @@ function seatScript({ reportPath, model, report, files = {}, exitCode = 0 }) {
 function seatFixture(seats) {
   const calls = [];
   const commandFor = (opts) => {
-    const seat = /You are the (\S+) seat/.exec(opts.prompt)[1];
+    // A seat name may carry a slot suffix (`reconcile-write:2`). The suffix is
+    // the dispatch's identity and not a seat, so the table reads the base name
+    // and the call record keeps the whole of it (ADR-0075).
+    const named = /You are the (\S+) seat/.exec(opts.prompt)[1];
+    const seat = named.split(':')[0];
     const lines = opts.prompt.split('\n');
     const contract = lines.findIndex((l) => l.includes('write your JSON report to this file'));
     const reportPath = lines[contract + 1];
     const label = basename(reportPath, '.json');
-    calls.push({ seat, label, attempt: opts.attempt, prompt: opts.prompt, denyTools: opts.denyTools });
+    calls.push({
+      seat,
+      named,
+      label,
+      attempt: opts.attempt,
+      prompt: opts.prompt,
+      denyTools: opts.denyTools,
+    });
     const behavior = seats[seat];
     if (!behavior) throw new Error(`no fixture behavior for seat ${seat}`);
-    const out = behavior({ seat, label, prompt: opts.prompt, attempt: opts.attempt }) ?? {};
+    const out = behavior({ seat, named, label, prompt: opts.prompt, attempt: opts.attempt }) ?? {};
     return {
       cmd: process.execPath,
       args: ['-e', seatScript({ reportPath, model: opts.model, ...out })],
@@ -2785,6 +2796,14 @@ test('a merge onto ground no suite declares carries the certification it earned'
   // One verdict, and the merged tree never went back for a second one.
   assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 1);
   assert.ok(fast.seq > render.seq);
+  // The stamp lands after the answers, never before them: `code: kept` is what
+  // the fast path decided, and the stamp is where it is read from (ADR-0075).
+  const update = events.find((e) => e.event === 'pre-verdict-update' && e.ran);
+  assert.ok(fast.seq < update.seq);
+  assert.deepEqual(update.code, { answer: 'kept', files: [] });
+  // This lane owes no reconciliation, so it certifies no record tree and the
+  // second question has nothing to answer about.
+  assert.equal(update.records, undefined);
   // The close says the ship carried rather than earned.
   assert.equal(events.find((e) => e.event === 'run-closed').fastPath, true);
   // Both sides landed.
@@ -3305,6 +3324,11 @@ test('with the flag off the same ship is byte for byte what it always was', asyn
   assert.equal(renders.at(-1).verdict, 'green');
   const update = events.find((e) => e.event === 'pre-verdict-update' && e.ran);
   assert.equal(renders.at(-1).sha, update.toSha);
+  // The stamp carries the answers, and it lands after both are known: with the
+  // fast path off every certification the lane holds is redone, and this lane
+  // holds the code one alone (ADR-0075).
+  assert.deepEqual(update.code, { answer: 'rejudge', files: [] });
+  assert.equal(update.records, undefined);
   const closed = events.find((e) => e.event === 'run-closed');
   assert.equal(closed.state, 'shipped');
   assert.equal(closed.fastPath, undefined);
@@ -3546,32 +3570,46 @@ test('a refused fast path gives the token back, and another run ships on it', as
   assert.ok(Date.parse(waiterAcquire.ts) <= Date.parse(stamps.at(-1).ts));
 });
 
-test('a run resumed on its own release goes to the verdict, not to the queue', () => {
+test('a run resumed on its own release goes to the stage it left for', () => {
   // The crash window between the release stamp and the stage transition behind
   // it. Without this the run would take the token back, or stand in the queue
   // for it, to be told to go and judge its tree.
   const held = { seq: 9, event: 'ship-token', state: 'acquired' };
   const released = { seq: 10, event: 'ship-token', state: 'released', reason: 're-verdict' };
-  assert.equal(releasedForVerdict([held, released]), true);
-  assert.equal(releasedForVerdict([held]), false);
-  assert.equal(releasedForVerdict([]), false);
+  assert.equal(releasedForVerdict([held, released]), 'verdict');
+  assert.equal(releasedForVerdict([held]), null);
+  assert.equal(releasedForVerdict([]), null);
   // A release for a park stopped the run at this stage. The answer resumes the
   // stage to finish the update, and sending it to the verdict would buy a whole
   // cycle to arrive back here with the same merge still owed.
-  assert.equal(releasedForVerdict([held, { ...released, reason: 'park' }]), false);
+  assert.equal(releasedForVerdict([held, { ...released, reason: 'park' }]), null);
   // A green render after the release is the run coming back the way it left.
   assert.equal(
     releasedForVerdict([released, { seq: 11, event: 'verdict-rendered', verdict: 'green' }]),
-    false,
+    null,
   );
   // A red one is not: it certifies nothing, and the run has no tree to ship.
   assert.equal(
     releasedForVerdict([released, { seq: 11, event: 'verdict-rendered', verdict: 'red' }]),
-    true,
+    'verdict',
   );
   // A run that took the token again is holding it, not resuming on a release.
-  assert.equal(releasedForVerdict([released, { ...held, seq: 12 }]), false);
+  assert.equal(releasedForVerdict([released, { ...held, seq: 12 }]), null);
+  // The record re-run is the second journey the token is given back for, and it
+  // is answered by a green reconciliation and never by a code verdict: the two
+  // certifications stand on two trees (ADR-0075).
+  const rerun = { seq: 10, event: 'ship-token', state: 'released', reason: 're-reconcile' };
+  assert.equal(releasedForVerdict([held, rerun]), 'reconcile');
+  assert.equal(
+    releasedForVerdict([rerun, { seq: 11, event: 'verdict-rendered', verdict: 'green' }]),
+    'reconcile',
+  );
+  assert.equal(
+    releasedForVerdict([rerun, { seq: 11, event: 'reconcile-rendered', verdict: 'green' }]),
+    null,
+  );
 });
+
 
 test('the close-out card sweep pushes with no ship token', async (t) => {
   let atSweep = null;
