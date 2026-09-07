@@ -31,8 +31,8 @@ const LINE_ENDINGS = ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf'];
 /**
  * The argv git is actually invoked with. Every invocation carries the harness's
  * line-ending settings. On Windows it also carries long-path support of its
- * own: a run worktree nests a run id under the daemon home and a workspace
- * path under that, which clears 260 characters on an ordinary tree, and git
+ * own. A run worktree nests a run id under the daemon home, and a workspace
+ * path under that. Such a path clears 260 characters on an ordinary tree. Git
  * without `core.longPaths` fails those checkouts and removals with "Filename
  * too long". Neither setting is taken from the user's global config. The
  * daemon's git runs under whatever account the service manager gives it. That

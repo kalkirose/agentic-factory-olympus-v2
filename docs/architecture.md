@@ -254,10 +254,10 @@ Two levels; the ownership test decides placement.
   support a deep run worktree needs. One quiet `seat-environment` stamp per
   defect, once per instance; a clean host says nothing, and no finding stops
   the start (ADR-0030).
-- **Line endings** (ADR-0076). The harness reads the bytes CI reads: the two
-  settings ride every harness git call and every clone, every commit leaves the
-  committed bytes in the tree, and a project that declares no LF rule is
-  refused at the door.
+- **Line endings** (ADR-0076). The harness reads the bytes CI reads. The two
+  settings ride every harness git call and every clone. Every commit leaves the
+  committed bytes in the tree. A project that declares no LF rule is refused at
+  the door.
 - **Semaphores.** No model is capped by default: the instance file carries
   no `semaphores` entry, every seat runs at once, and nothing is stamped
   (ADR-0005). The mechanism stays for a project that wants a cap: a global

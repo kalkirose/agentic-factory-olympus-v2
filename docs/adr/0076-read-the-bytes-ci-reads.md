@@ -26,23 +26,23 @@ The harness reads the bytes CI reads. Four seams carry the rule, because four
 readers exist.
 
 **Every harness git call carries the settings.** `gitArgv` in
-`src/isolation/git.mjs` adds `-c core.autocrlf=false -c core.eol=lf` on every
-platform, before the win32 `core.longPaths` entry. `gitPlain` keeps its bypass.
+`src/isolation/git.mjs` adds them on every platform. They stand before the
+win32 `core.longPaths` entry. `gitPlain` keeps its bypass.
 It answers with the host's own settings, which is what a check of the host is
 for (ADR-0030). It writes no tree of its own.
 
 **Every clone carries the settings.** `ensureBareClone` in
-`src/isolation/clones.mjs` writes `core.autocrlf=false` and `core.eol=lf` into
-the clone on every call, beside the `remote.origin.fetch` re-pin. A clone made
-before this record heals at its next launch. This binds the seat's own git and
-every gate command the project runs: both read the clone config, and neither
-takes a harness argument. `src/daemon/environment.mjs` states the same class for
+`src/isolation/clones.mjs` writes both keys into the clone on every call. They
+stand beside the `remote.origin.fetch` re-pin. A clone made before this record
+heals at its next launch. This binds the seat's own git and every gate command
+the project runs. Both read the clone config, and neither takes a harness
+argument. `src/daemon/environment.mjs` states the same class for
 `core.longPaths`.
 
 **After a commit, the tree holds the committed bytes.** `commitAll` and
-`concludeMerge` in `src/isolation/tree.mjs` read `git ls-files --eol` over the
-paths they committed. The read gives the index bytes and the working-tree bytes
-of each path. A path where the two differ is replaced with the index bytes, and
+`concludeMerge` read `git ls-files --eol`. The paths are the ones they
+committed, and both functions live in `src/isolation/tree.mjs`. The read gives
+the index bytes and the working-tree bytes of each path. A path where the two differ is replaced with the index bytes, and
 a second read is the proof. A `w/crlf` answer after that is a harness fault with
 the path named, never a silent pass.
 
@@ -67,8 +67,9 @@ unreadable file is a refusal too.
 
 The rule is read the way git reads it. Git applies the last `eol` a path
 matches. A file that says `* eol=lf` and then `* eol=crlf` declares CRLF, and
-the door refuses it. The pattern must be `*`: a narrower one leaves the rest of the tree
-unruled, and the door fails closed on that.
+the door refuses it. A later `-text`, `binary` or `-eol` line clears the rule
+in the same way. The pattern must be `*`. A narrower one leaves the rest of the
+tree unruled, and the door fails closed on that.
 
 `readBranchFiles` in `src/isolation/clones.mjs` reads the config and the
 attributes in one clone pass: one lock, one fetch, two blobs. The credential
@@ -94,7 +95,7 @@ commit whose paths all agree costs nothing more. Only a path that disagrees is
 deleted and checked out. A build cache therefore keeps every file the commit
 agreed with.
 
-A seat that deliberately writes a binary file with CR bytes is unaffected: the
+A seat that deliberately writes a binary file with CR bytes is unaffected. The
 `-text` and `binary` attributes exempt it, as ceq's own fixtures already do.
 
 The `w/crlf` fault fires on a path whose attributes exempt it from LF while the
@@ -103,19 +104,19 @@ the fault says so with the path named.
 
 ## Rejected options
 
-- An environment variable for the seat processes: the e2e fixture already holds
-  `GIT_CONFIG_COUNT` for its URL rewrite, and an environment travels only where
-  the harness spawns. The clone config travels with the clone.
-- The clone config alone: the harness's own git reads a clone config only inside
-  a clone or a worktree of one. A check of the host runs in neither.
-- The tree repair alone: a project with no LF attribute commits CRLF blobs, so
-  the tree and CI agree on the wrong bytes.
+- An environment variable for the seat processes. The e2e fixture already holds
+  `GIT_CONFIG_COUNT` for its URL rewrite. An environment travels only where the
+  harness spawns, and the clone config travels with the clone.
+- The clone config alone. The harness's own git reads a clone config only
+  inside a clone or a worktree. A check of the host runs in neither.
+- The tree repair alone. A project with no LF attribute commits CRLF blobs, and
+  the tree and CI then agree on the wrong bytes.
 - A warning rather than a door refusal: the owner asked for the loud answer.
 
 ## Fallback path
 
-The alternative is the three seams without the door refusal: `launchRun` skips
-`refuseUnnormalisedRepo` and a project with no attribute launches with LF
+The alternative is the three seams without the door refusal. `launchRun` skips
+`refuseUnnormalisedRepo`. A project with no attribute then launches with the LF
 settings alone. The switch trigger is a project the harness must run that cannot
 carry an LF attribute. The reversal cost is one call; the `launch-rejected`
 stamp and its detail stay, because every other refusal uses them.
