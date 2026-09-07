@@ -22,6 +22,7 @@ import {
   tempDir,
   removeDir,
   waitFor,
+  waitRunEvents,
   initOriginRepo,
   projectConfigJson,
   gitSync,
@@ -340,19 +341,8 @@ async function waitClosed(paths, runId, attempts = 900) {
   return readEvents(archivedRunLedgerPath(paths, runId));
 }
 
-/**
- * Waits for one stamp of a run, in the ledger the run has: the live one while
- * it runs, the archived one once the close moves it. A run that passed the
- * stamp between two polls still made it, and a wait that reads the live path
- * alone reads an empty file from the close onwards.
- */
 function waitEvent(paths, runId, predicate, label, attempts = 900) {
-  return waitFor(
-    () =>
-      readEvents(runLedgerPath(paths, runId)).find(predicate) ??
-      readEvents(archivedRunLedgerPath(paths, runId)).find(predicate),
-    { label, attempts, intervalMs: 100 },
-  );
+  return waitRunEvents(paths, runId, (events) => events.find(predicate), { label, attempts });
 }
 
 // -- the seat table ----------------------------------------------------------
@@ -493,15 +483,17 @@ const confirmAndResolve = ({ prompt }) => ({
 });
 
 /**
- * A seat that never answers its first dispatch. Only a stop ends it, so a
+ * A seat that never answers its `nth` dispatch. Only a stop ends that one, so a
  * scenario about a restart at one step boundary can hold the run exactly there.
+ * Every other dispatch is the behaviour the seat table names, and the hung one
+ * never reaches it: a fixture that counts its own rounds counts the dispatches
+ * that answered.
  */
-function hangFirst(behaviour) {
-  let first = true;
+function hangNth(nth, behaviour) {
+  let seen = 0;
   return (opts) => {
-    if (!first) return behaviour(opts);
-    first = false;
-    return { hang: true };
+    seen += 1;
+    return seen === nth ? { hang: true } : behaviour(opts);
   };
 }
 
@@ -941,26 +933,32 @@ test('the branch ticket names the branch, the records and the open findings', ()
  * A restart at one step boundary: the stage runs to the stamp the boundary is
  * behind, the daemon goes down and comes back, and the run finishes.
  *
- * `hold` names the seat the boundary stands in front of, and its first dispatch
- * hangs. Only the stop ends that seat, so the daemon goes down with the run on
- * the boundary. Without the hold the stage runs the whole cycle out and the run
- * closes, and the restart lands on a run that is already over.
+ * `hold` names the seat the boundary stands in front of and `nth` which of its
+ * dispatches hangs, so a boundary inside a later round is held as exactly as
+ * the first one. Only the stop ends that dispatch, so the daemon goes down with
+ * the run on the boundary. Without the hold the stage runs the whole cycle out
+ * and the run closes, and the restart lands on a run that is already over.
  */
-async function restartAt(t, { at, hold, seats }) {
-  const fx = stageFixture(t, { seats: { ...seats, [hold]: hangFirst(seats[hold]) } });
+async function restartAt(t, { at, hold, nth = 1, seats }) {
+  const fx = stageFixture(t, { seats: { ...seats, [hold]: hangNth(nth, seats[hold]) } });
   const runId = await fx.launch();
   await waitEvent(fx.paths, runId, at.predicate, at.label);
-  // The held seat has to stand before the stop: a stop that starts in front of
-  // the spawn ends nothing, and the seat it leaves behind belongs to no daemon.
-  await waitEvent(
+  // The held dispatch has to stand before the stop: a stop that starts in front
+  // of the spawn ends nothing, and the seat it leaves belongs to no daemon.
+  await waitRunEvents(
     fx.paths,
     runId,
-    (e) => e.event === 'seat-spawned' && e.seat.split(':')[0] === hold,
-    `${hold} spawned`,
+    (events) => events.filter((e) => e.event === 'seat-spawned' && baseSeat(e.seat) === hold)[nth - 1],
+    { label: `${hold} dispatch ${nth}`, attempts: 900 },
   );
   await fx.restart();
   const events = await waitClosed(fx.paths, runId);
   return { fx, events };
+}
+
+/** The seat behind a stamp's name: a slot suffix is not a seat. */
+function baseSeat(seat) {
+  return String(seat).split(':')[0];
 }
 
 test('a restart before the judge re-judges and nothing else', async (t) => {
@@ -1039,7 +1037,7 @@ test('a restart between the review and the verifier renders once, from the ledge
       'record-review': recordReview(
         Array(4).fill('the record claims a doubling the tree does not hold'),
       ),
-      'fury-verifier': hangFirst(refuteAll),
+      'fury-verifier': hangNth(1, refuteAll),
     },
   });
   const runId = await fx.launch();
@@ -1089,7 +1087,15 @@ test('a restart after the render never re-enters the verdict', async (t) => {
 });
 
 test('a restart inside a corrective round re-enters that round alone', async (t) => {
-  const fx = stageFixture(t, {
+  // The boundary stands past the red render and inside the round it bought, so
+  // the hold is the writer's second dispatch: the corrective one.
+  const { events } = await restartAt(t, {
+    at: {
+      predicate: (e) => e.event === 'reconcile-rendered' && e.verdict === 'red',
+      label: 'red render',
+    },
+    hold: 'reconcile-write',
+    nth: 2,
     seats: {
       'reconcile-judge': judgeOwed(),
       'reconcile-write': writeThenCorrect(),
@@ -1097,15 +1103,6 @@ test('a restart inside a corrective round re-enters that round alone', async (t)
       'fury-verifier': confirmAndResolve,
     },
   });
-  const runId = await fx.launch();
-  await waitEvent(
-    fx.paths,
-    runId,
-    (e) => e.event === 'reconcile-rendered' && e.verdict === 'red',
-    'red render',
-  );
-  await fx.restart();
-  const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   assert.equal(events.filter((e) => e.event === 'reconcile-round').length, 1);
   assert.equal(events.filter((e) => e.event === 'reconcile-rendered').at(-1).verdict, 'green');
