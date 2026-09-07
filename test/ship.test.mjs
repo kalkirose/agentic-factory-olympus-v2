@@ -19,6 +19,7 @@ import { postFreeze, repairLane, restoreAnchor } from '../src/lanes/verdict.mjs'
 import {
   admitted,
   certifiedTrees,
+  recordsLaneCiRed,
   checksByName,
   fastPathTaken,
   releasedForVerdict,
@@ -4750,5 +4751,69 @@ test('a replay that conflicts with the edit that beat it records the miss', asyn
   assert.equal(
     gitSync(['log', '-1', '--format=%s', 'main'], fx.origin).trim(),
     'a person edits a card',
+  );
+});
+
+// -- the records lane's own routes (ADR-0075) --------------------------------
+//
+// Seven routes of this stage used to return `{next: 'verdict'}`. The records
+// lane holds no verdict stage, so each of them is answered for that lane. The
+// three the update stage owns are pinned above on `releasedForVerdict` and
+// `certifiedTrees`; the CI red is this one, and the merge round's record arm is
+// its own scenario.
+
+/** A store stub that records what a route stamped. */
+function stamping() {
+  const events = [];
+  return {
+    events,
+    store: {
+      append(event, fields) {
+        const line = { seq: events.length + 1, event, ...fields };
+        events.push(line);
+        return line;
+      },
+    },
+    // No run id: the route reads the ledger for the run's cycle counter, and a
+    // stub with no ledger is a run whose counter opens at one.
+    paths: {},
+    runId: null,
+  };
+}
+
+test('a records-lane CI red on a record layer routes to the stage, and a code red parks', () => {
+  const base = { mode: 'records', recordLayers: ['adr-form'] };
+  const opened = { pr: 7 };
+  const sha = 'a'.repeat(40);
+
+  // Every failed check is a record layer: the stage answers its own red, and
+  // the render carries the layer in the open set.
+  const record = stamping();
+  const directive = recordsLaneCiRed(record, base, opened, sha, [{ name: 'adr-form' }]);
+  assert.deepEqual(directive, { next: 'reconcile' });
+  const rendered = record.events.find((e) => e.event === 'reconcile-rendered');
+  assert.equal(rendered.verdict, 'red');
+  assert.equal(rendered.source, 'ci');
+  assert.equal(rendered.sha, sha);
+  assert.deepEqual(rendered.open, ['adr-form']);
+  assert.deepEqual(rendered.layers, [{ layer: 'adr-form', status: 'red' }]);
+
+  // One check that is not a record layer is a code defect this lane holds no
+  // seat for, so it parks with the names.
+  const code = stamping();
+  const park = recordsLaneCiRed(code, base, opened, sha, [
+    { name: 'adr-form' },
+    { name: 'unit' },
+  ]);
+  assert.equal(park.park.type, 'ci-red');
+  assert.match(park.park.question, /red on unit/);
+  assert.deepEqual(park.park.detail.checks, ['adr-form', 'unit']);
+  assert.ok(!code.events.some((e) => e.event === 'reconcile-rendered'));
+  // A project that names no record layer has no record red at all.
+  const none = stamping();
+  assert.equal(
+    recordsLaneCiRed(none, { mode: 'records', recordLayers: [] }, opened, sha, [{ name: 'ci' }])
+      .park.type,
+    'ci-red',
   );
 });
