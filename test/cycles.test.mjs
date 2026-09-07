@@ -14,6 +14,8 @@ import {
   cycleRepeat,
   ciFlakes,
   deterministicRed,
+  harnessPinTs,
+  recordRenders,
   FLAKE_LIMIT,
   RERUN_BUDGET,
 } from '../src/ledger/cycles.mjs';
@@ -480,4 +482,124 @@ test('the evidence stamps of a check are no part of its flake count', () => {
   }
   assert.equal(ciFlakes(log.events, SHA, 'ci'), 1);
   assert.equal(deterministicRed(log.events, SHA, 'ci'), false);
+});
+
+// -- the two shapes of a record render ---------------------------------------
+//
+// The record renders of every ledger the harness has written, read as one
+// series. Before the reconcile stage a record render was a `verdict-rendered`
+// over a commit stamped `phase: 'reconcile'`; after it the stage stamps
+// `reconcile-rendered`. The boundary is the first daemon start that carries a
+// harness sha (ADR-0075).
+
+const PIN = '2026-09-07T00:00:00.000Z';
+const BEFORE = '2026-09-01T00:00:00.000Z';
+const AFTER = '2026-09-08T00:00:00.000Z';
+
+/** A ledger builder that states its own instants. */
+function dated() {
+  const events = [];
+  let seq = 0;
+  return {
+    events,
+    append(ts, event, fields = {}) {
+      events.push({ seq: ++seq, ts, event, ...fields });
+      return events[events.length - 1];
+    },
+  };
+}
+
+test('the pin is the first daemon start that carries a harness sha', () => {
+  assert.equal(harnessPinTs([]), null);
+  assert.equal(harnessPinTs(undefined), null);
+  const events = [
+    { seq: 1, ts: BEFORE, event: 'daemon-started', pid: 1, runsResumed: 0 },
+    { seq: 2, ts: PIN, event: 'daemon-started', pid: 2, runsResumed: 0, harnessSha: 'abc' },
+    { seq: 3, ts: AFTER, event: 'daemon-started', pid: 3, runsResumed: 0, harnessSha: 'def' },
+  ];
+  // The first with a sha, never the newest: the boundary is where the field
+  // appeared, and every start after it is a later pin of the same shape.
+  assert.equal(harnessPinTs(events), PIN);
+  // A start that carries an empty sha says nothing, exactly as one with none.
+  assert.equal(harnessPinTs([{ ts: BEFORE, event: 'daemon-started', harnessSha: '' }]), null);
+});
+
+test('an old-shape record render is the render over the record commit', () => {
+  const log = dated();
+  log.append(BEFORE, 'verdict-rendered', {
+    cycle: 1,
+    sha: 'c1',
+    verdict: 'green',
+    open: [],
+    // Every render carries this: it is the path of the verdict record file.
+    record: 'verdict-1.json',
+  });
+  log.append(BEFORE, 'implementation-committed', { phase: 'reconcile', sha: 'd1' });
+  log.append(BEFORE, 'verdict-rendered', {
+    cycle: 2,
+    sha: 'd1',
+    verdict: 'red',
+    open: ['F1'],
+    record: 'verdict-2.json',
+  });
+  const series = recordRenders(log.events, PIN);
+  assert.deepEqual(
+    series.map((r) => [r.cycle, r.sha, r.verdict, r.shape, r.event]),
+    [[2, 'd1', 'red', 'old', 'verdict-rendered']],
+  );
+  assert.deepEqual(series[0].findings, ['F1']);
+});
+
+test('a render before its own record commit is a code render', () => {
+  const log = dated();
+  log.append(BEFORE, 'verdict-rendered', { cycle: 1, sha: 'd1', verdict: 'green' });
+  log.append(BEFORE, 'implementation-committed', { phase: 'reconcile', sha: 'd1' });
+  assert.deepEqual(recordRenders(log.events, PIN), []);
+});
+
+test('after the pin the record renders are the stage stamps alone', () => {
+  const log = dated();
+  log.append(AFTER, 'verdict-rendered', { cycle: 1, sha: 'c1', verdict: 'green' });
+  log.append(AFTER, 'implementation-committed', { phase: 'reconcile', sha: 'd1' });
+  // A verdict render over a record commit after the pin is not a record render.
+  // The stage stamps its own event and never rewrites the verdict.
+  log.append(AFTER, 'verdict-rendered', { cycle: 2, sha: 'd1', verdict: 'green' });
+  log.append(AFTER, 'reconcile-rendered', {
+    cycle: 3,
+    sha: 'd1',
+    verdict: 'green',
+    open: [],
+    records: ['docs/adr/a.md'],
+    layers: ['adr-form'],
+  });
+  assert.deepEqual(
+    recordRenders(log.events, PIN).map((r) => [r.cycle, r.shape]),
+    [[3, 'new']],
+  );
+});
+
+test('a ledger that straddles the pin returns one series in ledger order', () => {
+  const log = dated();
+  log.append(BEFORE, 'implementation-committed', { phase: 'reconcile', sha: 'd1' });
+  log.append(BEFORE, 'verdict-rendered', { cycle: 1, sha: 'd1', verdict: 'red', open: ['F1'] });
+  log.append(AFTER, 'reconcile-rendered', { cycle: 2, sha: 'd2', verdict: 'green', open: [] });
+  assert.deepEqual(
+    recordRenders(log.events, PIN).map((r) => [r.cycle, r.shape]),
+    [
+      [1, 'old'],
+      [2, 'new'],
+    ],
+  );
+});
+
+test('with no pin every render reads as the old shape', () => {
+  const log = dated();
+  log.append(BEFORE, 'implementation-committed', { phase: 'reconcile', sha: 'd1' });
+  log.append(BEFORE, 'verdict-rendered', { cycle: 1, sha: 'd1', verdict: 'green' });
+  log.append(AFTER, 'reconcile-rendered', { cycle: 2, sha: 'd2', verdict: 'green' });
+  assert.deepEqual(
+    recordRenders(log.events).map((r) => [r.cycle, r.shape]),
+    [[1, 'old']],
+  );
+  assert.deepEqual(recordRenders(log.events, null), recordRenders(log.events));
 });

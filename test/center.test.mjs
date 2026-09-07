@@ -3,8 +3,8 @@
 // items, the queue, escapes, a breach, and a graph-backed project clone.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { scaffoldHome, runLedgerPath } from '../src/daemon/home.mjs';
 import {
   openRunStore,
@@ -251,9 +251,9 @@ test('snapshot reads registry and frontier from the clone, no fetch', async (t) 
   const s = await buildSnapshot(paths, { now: NOW });
   const health = s.health.byProject[0];
   assert.equal(health.tripwires.registryRead, true);
-  // The two the project wrote, plus the four counters the harness arms on every
+  // The two the project wrote, plus the six counters the harness arms on every
   // project: the levers an operator can pull on any run (ADR-0061, ADR-0062),
-  // and the two readings of the record rule (ADR-0007, ADR-0026).
+  // and the four readings of the record rule (ADR-0007, ADR-0026, ADR-0075).
   assert.deepEqual(
     health.tripwires.wires.map((w) => [w.id, w.state]),
     [
@@ -263,11 +263,202 @@ test('snapshot reads registry and frontier from the clone, no fetch', async (t) 
       ['run-reconfigures', 'armed'],
       ['record-refuted-share', 'armed'],
       ['reconcile-fallbacks', 'armed'],
+      ['record-cycles', 'armed'],
+      ['record-write-time', 'armed'],
     ],
   );
   // s-3 open, s-4 open, s-5 blocked by unshipped s-3 → width counts
   // blocker-free unshipped cards: s-3 and s-4.
   assert.deepEqual(health.frontier, { width: 2, unfinished: 3, launchable: 0 });
+});
+
+// -- the record tree ----------------------------------------------------------
+
+const REC = (minutes) =>
+  new Date(Date.parse('2026-02-01T00:00:00Z') + minutes * 60_000).toISOString();
+
+/** One run ledger, written whole, so a fixture can state its own history. */
+function writeRunLedger(paths, runId, lines) {
+  const path = runLedgerPath(paths, runId);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, lines.map((line) => JSON.stringify(line)).join('\n') + '\n');
+}
+
+/**
+ * A run that went through the record stage twice: two cycles to green, a
+ * re-run over a moved base, one recheck, and one write that missed a unit.
+ * Every number the section reports is stated here.
+ */
+function seedRecordRun(paths) {
+  let seq = 0;
+  const line = (minutes, event, fields = {}) => ({
+    seq: ++seq,
+    ts: REC(minutes),
+    event,
+    actor: ACTOR,
+    ...fields,
+  });
+  writeRunLedger(paths, 'r-rec', [
+    line(0, 'run-launched', { project: 'alpha', lane: 'story', storyKey: 's-rec' }),
+    line(5, 'reconciliation-judged', {
+      ok: true,
+      owed: true,
+      records: ['docs/adr/a.md', 'docs/adr/b.md'],
+      born: ['docs/adr/a.md'],
+      late: ['docs/adr/b.md'],
+    }),
+    line(60, 'stage-entered', { stage: 'reconcile' }),
+    line(65, 'seat-spawned', { seat: 'reconcile-write:1', model: 'model-a' }),
+    line(75, 'reconciliation-written', {
+      ok: true,
+      records: [{ record: 'docs/adr/a.md', seat: 'reconcile-write:1', cost: 1, attempts: 1 }],
+      active: 12,
+      supersededCount: 1,
+      split: 2,
+      merged: 0,
+    }),
+    line(76, 'record-units', {
+      seat: 'reconcile-write:1',
+      cycle: 4,
+      record: 'docs/adr/a.md',
+      units: [
+        { id: 'U1', kind: 'claim', verdict: 'holds', evidence: 'src/a.mjs' },
+        { id: 'U2', kind: 'claim', verdict: 'holds', evidence: 'src/b.mjs' },
+        { id: 'U3', kind: 'open', verdict: 'not-built' },
+      ],
+      counts: { claims: 2, holds: 2, fails: 0, notBuilt: 1 },
+      neighbours: 3,
+      neighboursDropped: 0,
+      cost: 1.2,
+    }),
+    line(80, 'layer-result', { cycle: 4, layer: 'adr-form', status: 'green', elapsedMs: 120_000 }),
+    line(85, 'finding', {
+      cycle: 4,
+      id: 'F1',
+      lens: 'record',
+      record: true,
+      file: 'docs/adr/a.md',
+      unit: 'U1',
+      head: 'the public surface is exactly two',
+      confirmed: true,
+    }),
+    line(86, 'finding', {
+      cycle: 4,
+      id: 'F2',
+      lens: 'record',
+      record: true,
+      file: 'docs/adr/a.md',
+      unit: 'U3',
+      head: 'the second route is not yet built',
+      confirmed: true,
+    }),
+    line(90, 'reconcile-rendered', {
+      cycle: 4,
+      sha: 'r1',
+      verdict: 'red',
+      open: ['F1', 'F2'],
+      records: ['docs/adr/a.md'],
+      layers: ['adr-form'],
+    }),
+    line(95, 'reconcile-round', { round: 1, records: ['docs/adr/a.md'], findings: ['F1', 'F2'] }),
+    line(100, 'seat-spawned', { seat: 'reconcile-write:1', model: 'model-a' }),
+    line(110, 'reconciliation-written', {
+      ok: true,
+      records: [{ record: 'docs/adr/a.md', seat: 'reconcile-write:1', cost: 1, attempts: 1 }],
+      active: 13,
+      supersededCount: 0,
+      split: 0,
+      merged: 0,
+    }),
+    line(115, 'layer-result', { cycle: 5, layer: 'adr-form', status: 'green', elapsedMs: 60_000 }),
+    line(120, 'reconcile-rendered', {
+      cycle: 5,
+      sha: 'r2',
+      verdict: 'green',
+      open: [],
+      records: ['docs/adr/a.md'],
+      layers: ['adr-form'],
+    }),
+    line(125, 'stage-entered', { stage: 'update' }),
+    line(130, 'pre-verdict-update', {
+      pass: 1,
+      ran: true,
+      code: { answer: 'kept', files: [] },
+      records: { answer: 'rerun', files: ['docs/adr/x.md'] },
+    }),
+    line(135, 'stage-entered', { stage: 'reconcile' }),
+    line(140, 'reconcile-rendered', {
+      cycle: 6,
+      sha: 'r3',
+      verdict: 'green',
+      open: [],
+      records: ['docs/adr/a.md'],
+      layers: [],
+    }),
+    line(150, 'reconcile-recheck', { delta: 'aaa..bbb', units: [], judge: 'none', result: 'kept' }),
+  ]);
+}
+
+test('the records section derives its eight measures from the ledger', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const paths = scaffoldHome(join(root, 'home'));
+  // The harness pin, stamped before the run. Every render after it is read in
+  // the new shape.
+  writeFileSync(
+    paths.instanceLedger,
+    JSON.stringify({
+      seq: 1,
+      ts: REC(-60),
+      event: 'daemon-started',
+      actor: 'daemon',
+      pid: 1,
+      runsResumed: 0,
+      harnessSha: 'abc',
+    }) + '\n',
+  );
+  seedRecordRun(paths);
+
+  const s = await buildSnapshot(paths, { now: NOW });
+  const r = s.stats.records;
+  assert.equal(r.runs, 1);
+  // Two stage runs: two cycles to green, then one for the re-run.
+  assert.deepEqual(r.cycles, { mean: 1.5, reconciliations: 2, worst: 2 });
+  // Two units the writer said hold; the review found one of them false.
+  assert.deepEqual(r.writerMiss, {
+    holds: 2,
+    missed: 1,
+    rate: 0.5,
+    records: ['docs/adr/a.md'],
+  });
+  assert.deepEqual(r.late, { born: 1, late: 1, share: 0.5 });
+  assert.deepEqual(r.movedTree, { updates: 1, rejudged: 0, rerun: 1, both: 0, neither: 0 });
+  assert.deepEqual(r.recheck, { rechecks: 1, answered: 0, yield: 0 });
+  // Two minutes of layers on the first render, one on the second; the third
+  // ran no layer and is no reading.
+  assert.deepEqual(r.gateMinutes, { renders: 2, mean: 1.5 });
+  // The first write seat to the last write stamp of that stage run.
+  assert.deepEqual(r.writeMinutes, { mean: 45, writes: 1, longest: 45 });
+  assert.deepEqual(
+    r.tree.map((e) => [e.active, e.superseded, e.split, e.merged]),
+    [
+      [12, 1, 2, 0],
+      [13, 0, 0, 0],
+    ],
+  );
+});
+
+test('a home with no record stamp reports the section empty, never zero', async (t) => {
+  const { paths } = seededHome(t);
+  const r = (await buildSnapshot(paths, { now: NOW })).stats.records;
+  assert.equal(r.runs, 0);
+  assert.equal(r.cycles.mean, null);
+  assert.equal(r.writerMiss.rate, null);
+  assert.equal(r.late.share, null);
+  assert.equal(r.recheck.yield, null);
+  assert.equal(r.gateMinutes.mean, null);
+  assert.equal(r.writeMinutes.mean, null);
+  assert.deepEqual(r.tree, []);
 });
 
 test('a seat chip carries the retry ordinal, a first spawn carries none', async (t) => {

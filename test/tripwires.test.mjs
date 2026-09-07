@@ -128,6 +128,8 @@ test('the fast path cannot be turned on without the counter that measures it', (
       'run-reconfigures-window',
       'record-refuted-share',
       'reconcile-fallbacks-window',
+      'record-cycles',
+      'record-write-time',
     ],
   );
   // Two counters ride the flag, and they measure the two halves of one trade:
@@ -145,6 +147,8 @@ test('the fast path cannot be turned on without the counter that measures it', (
       'run-reconfigures-window',
       'record-refuted-share',
       'reconcile-fallbacks-window',
+      'record-cycles',
+      'record-write-time',
     ],
   );
   assert.match(armed[0].answer, /gates\.fastPathShip to false/);
@@ -166,6 +170,8 @@ test('the fast path cannot be turned on without the counter that measures it', (
         breach: { op: '>=', value: 3 },
         answer: 'b',
       },
+      { id: 'cycles', metric: 'record-cycles', window: 3, breach: { op: '>', value: 4 }, answer: 'c' },
+      { id: 'clock', metric: 'record-write-time', window: 3, breach: { op: '>', value: 40 }, answer: 'd' },
     ],
   };
   assert.deepEqual(armedTripwires(own), own.tripwires);
@@ -184,7 +190,34 @@ test('the fast path cannot be turned on without the counter that measures it', (
       'run-reconfigures',
       'record-refuted-share',
       'reconcile-fallbacks',
+      'record-cycles',
+      'record-write-time',
     ],
+  );
+});
+
+test('the two record-stage bands are armed on every project and named in no config', () => {
+  // Decision 5: the bands live beside their two siblings in the harness. A ceq
+  // entry naming a metric the daemon does not implement refuses every launch of
+  // that project, so a band that landed ahead of its harness would take the
+  // project dark; and a band a project has to opt into is absent from exactly
+  // the projects nobody is watching (ADR-0075).
+  const armed = armedTripwires({ gates: { tier1: [] }, tripwires: [] });
+  const cycles = armed.find((e) => e.metric === 'record-cycles');
+  const clock = armed.find((e) => e.metric === 'record-write-time');
+  assert.deepEqual(cycles.breach, { op: '>', value: 2 });
+  assert.equal(cycles.window, 5);
+  assert.match(cycles.answer, /more than two/);
+  assert.deepEqual(clock.breach, { op: '>', value: 20 });
+  assert.equal(clock.window, 5);
+  assert.match(clock.answer, /parallel/);
+  // The windows count reconciliations, which is a state count and not a clock.
+  assert.equal(TRIPWIRE_METRICS['record-cycles'].unit, 'reconciliations');
+  assert.equal(TRIPWIRE_METRICS['record-write-time'].unit, 'reconciliations');
+  // Both validate as registry entries, so a project may write its own band.
+  assert.deepEqual(
+    validateProjectConfig({ version: 1, tripwires: [cycles, clock] }),
+    [],
   );
 });
 
@@ -592,14 +625,31 @@ test('fury-lens-yield leaves record findings out of the count', async (t) => {
   assert.equal(yielded.value, 1);
 });
 
-// -- the two readings of the record rule (ADR-0007, ADR-0026) -----------------
+// -- the four readings of the record rule (ADR-0007, ADR-0026, ADR-0075) ------
+//
+// Every reading over a record render reads both shapes. Before the reconcile
+// stage a record render was a `verdict-rendered` over a commit stamped
+// `phase: 'reconcile'`; after it the stage stamps `reconcile-rendered`. The
+// boundary is the first `daemon-started` that carries a harness sha.
 
-/** A run ledger holding one cycle's record findings, and its render. */
-function recordRun(paths, runId, project, ts, findings, { archived = true } = {}) {
-  const lines = [line(1, ts, 'run-launched', { project, lane: 'story' })];
+const PIN = '2026-08-15T00:00:00Z';
+
+/**
+ * A run ledger holding one cycle's record findings and the render that carried
+ * them, in either shape. The old shape is found by its commit and never by a
+ * field on the render.
+ */
+function recordRun(paths, runId, project, ts, findings, { archived = true, shape = 'new' } = {}) {
+  let seq = 1;
+  const lines = [line(seq, ts, 'run-launched', { project, lane: 'story' })];
+  if (shape === 'old') {
+    lines.push(line(++seq, ts, 'implementation-committed', { phase: 'reconcile', sha: 'rec1' }));
+  } else {
+    lines.push(line(++seq, ts, 'stage-entered', { stage: 'reconcile' }));
+  }
   findings.forEach((confirmed, i) => {
     lines.push(
-      line(2 + i, ts, 'finding', {
+      line(++seq, ts, 'finding', {
         cycle: 1,
         id: `F${i + 1}`,
         lens: 'record',
@@ -611,7 +661,16 @@ function recordRun(paths, runId, project, ts, findings, { archived = true } = {}
     );
   });
   lines.push(
-    line(2 + findings.length, ts, 'verdict-rendered', { cycle: 1, pass: 1, verdict: 'green' }),
+    shape === 'old'
+      ? line(++seq, ts, 'verdict-rendered', { cycle: 1, pass: 1, sha: 'rec1', verdict: 'green' })
+      : line(++seq, ts, 'reconcile-rendered', {
+          cycle: 1,
+          sha: 'rec1',
+          verdict: 'green',
+          open: [],
+          records: ['docs/adr/a.md'],
+          layers: ['adr-form'],
+        }),
   );
   writeLedger(archived ? archivedRunLedgerPath(paths, runId) : runLedgerPath(paths, runId), lines);
 }
@@ -619,14 +678,128 @@ function recordRun(paths, runId, project, ts, findings, { archived = true } = {}
 test('record-refuted-share reads the refusals over the record findings of the window', async (t) => {
   const paths = home(t);
   // Three findings, one confirmed: the seat is refuted two times in three.
-  recordRun(paths, 'r1', 'p', '2026-08-01T00:00:00Z', [true, false, false]);
-  const reading = await evaluateMetric('record-refuted-share', { paths, project: 'p', window: 10 });
+  recordRun(paths, 'r1', 'p', '2026-09-01T00:00:00Z', [true, false, false]);
+  const reading = await evaluateMetric('record-refuted-share', {
+    paths,
+    project: 'p',
+    window: 10,
+    pinTs: PIN,
+  });
   assert.equal(reading.eligible, true);
   assert.equal(reading.value, round3(2 / 3));
   assert.equal(reading.detail.findings, 3);
   assert.equal(reading.detail.refuted, 2);
   assert.equal(reading.detail.confirmed, 1);
   assert.deepEqual(reading.detail.runs, ['r1']);
+});
+
+test('the same window in the old shape reads the same number', async (t) => {
+  const paths = home(t);
+  recordRun(paths, 'r1', 'p', '2026-08-01T00:00:00Z', [true, false, false], { shape: 'old' });
+  const reading = await evaluateMetric('record-refuted-share', {
+    paths,
+    project: 'p',
+    window: 10,
+    pinTs: PIN,
+  });
+  assert.equal(reading.eligible, true);
+  assert.equal(reading.value, round3(2 / 3));
+  assert.equal(reading.detail.verdicts, 1);
+  assert.equal(reading.detail.findings, 3);
+});
+
+test('an old-shape render is found by its commit, never by the record field', async (t) => {
+  const paths = home(t);
+  // Every `verdict-rendered` carries `record`: it is the path of the verdict
+  // record file. A reader that took it for the marker would count every
+  // verdict ever rendered as a record render.
+  writeLedger(archivedRunLedgerPath(paths, 'r1'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-01T01:00:00Z', 'finding', {
+      cycle: 1,
+      id: 'F1',
+      lens: 'record',
+      severity: 'MED',
+      record: true,
+      criterion: 'truth',
+      confirmed: false,
+    }),
+    line(3, '2026-08-01T02:00:00Z', 'verdict-rendered', {
+      cycle: 1,
+      pass: 1,
+      sha: 'code1',
+      verdict: 'green',
+      record: 'C:/runs/r1/verdict-1.json',
+    }),
+  ]);
+  const reading = await evaluateMetric('record-refuted-share', {
+    paths,
+    project: 'p',
+    window: 10,
+    pinTs: PIN,
+  });
+  assert.equal(reading.eligible, false);
+});
+
+test('a ledger that straddles the pin reads as one series', async (t) => {
+  const paths = home(t);
+  recordRun(paths, 'r1', 'p', '2026-08-01T00:00:00Z', [true, false], { shape: 'old' });
+  recordRun(paths, 'r2', 'p', '2026-09-01T00:00:00Z', [false], { shape: 'new' });
+  const straddle = await evaluateMetric('record-refuted-share', {
+    paths,
+    project: 'p',
+    window: 10,
+    pinTs: PIN,
+  });
+  // Three findings over two record renders, two of them refused.
+  assert.equal(straddle.detail.verdicts, 2);
+  assert.equal(straddle.detail.findings, 3);
+  assert.equal(straddle.value, round3(2 / 3));
+  // The same window in one shape answers the same.
+  const single = home(t);
+  recordRun(single, 'r1', 'p', '2026-09-01T00:00:00Z', [true, false]);
+  recordRun(single, 'r2', 'p', '2026-09-02T00:00:00Z', [false]);
+  const one = await evaluateMetric('record-refuted-share', {
+    paths: single,
+    project: 'p',
+    window: 10,
+    pinTs: PIN,
+  });
+  assert.equal(one.value, straddle.value);
+  assert.equal(one.detail.verdicts, straddle.detail.verdicts);
+});
+
+test('a ledger with no harness stamp reads every render as the old shape', async (t) => {
+  const paths = home(t);
+  // No `daemon-started` carries a sha, so there is no boundary and the reading
+  // falls back to the shape those ledgers were written in.
+  recordRun(paths, 'r1', 'p', '2026-08-01T00:00:00Z', [true, false], { shape: 'old' });
+  const reading = await evaluateMetric('record-refuted-share', { paths, project: 'p', window: 10 });
+  assert.equal(reading.eligible, true);
+  assert.equal(reading.value, 0.5);
+});
+
+test('the pin comes from the first daemon start that carries a harness sha', async (t) => {
+  const paths = home(t);
+  const instance = openInstanceStore(paths);
+  instance.append('daemon-started', { actor: 'daemon', pid: 1, runsResumed: 0 });
+  instance.close();
+  // The stamp with no sha is older than the field and sets no boundary, so a
+  // new-shape render written after it still reads as one.
+  recordRun(paths, 'r1', 'p', '2020-01-01T00:00:00Z', [true, false]);
+  const noPin = await evaluateMetric('record-refuted-share', { paths, project: 'p', window: 10 });
+  assert.equal(noPin.eligible, false);
+  const withSha = openInstanceStore(paths);
+  withSha.append('daemon-started', { actor: 'daemon', pid: 2, runsResumed: 0, harnessSha: 'abc' });
+  withSha.close();
+  // The pin is now the second start, and the run is older than it, so its
+  // render reads as the old shape and it carries no record commit.
+  const pinned = await evaluateMetric('record-refuted-share', { paths, project: 'p', window: 10 });
+  assert.equal(pinned.eligible, false);
+  recordRun(paths, 'r2', 'p', new Date(Date.now() + 60_000).toISOString(), [false]);
+  const after = await evaluateMetric('record-refuted-share', { paths, project: 'p', window: 10 });
+  assert.equal(after.eligible, true);
+  assert.equal(after.value, 1);
 });
 
 test('a window with no record finding in it is no reading about the seat', async (t) => {
@@ -642,30 +815,33 @@ test('a window with no record finding in it is no reading about the seat', async
     }),
     line(3, '2026-08-01T02:00:00Z', 'verdict-rendered', { cycle: 1, pass: 1, verdict: 'red' }),
   ]);
-  const reading = await evaluateMetric('record-refuted-share', { paths, project: 'p', window: 10 });
+  const reading = await evaluateMetric('record-refuted-share', {
+    paths,
+    project: 'p',
+    window: 10,
+    pinTs: PIN,
+  });
   assert.equal(reading.eligible, false);
   assert.equal(reading.value, null);
 });
 
-/** A shipped run judged owed, with the fallback its record round took. */
+/** A shipped run judged owed, with the fallback its record write took. */
 function owedShip(paths, runId, project, ts, fallback) {
   const lines = [
     line(1, ts, 'run-launched', { project, lane: 'story' }),
     line(2, ts, 'reconciliation-judged', { ok: true, owed: true, records: ['docs/adr/1.md'] }),
   ];
-  if (fallback === 'partial') {
+  if (fallback === 'record-cap') {
     lines.push(
       line(3, ts, 'reconciliation-written', {
-        ok: true,
+        ok: false,
+        cause: 'record-cap',
         partial: true,
-        cause: 'record-findings',
         residual: ['F3'],
       }),
     );
-  } else if (fallback === 'discard') {
-    lines.push(
-      line(3, ts, 'reconciliation-written', { ok: false, cause: 'record-layer-red', reset: 'abc' }),
-    );
+  } else if (fallback !== null) {
+    lines.push(line(3, ts, 'reconciliation-written', { ok: false, cause: fallback }));
   } else {
     lines.push(line(3, ts, 'reconciliation-written', { ok: true, rewritten: ['docs/adr/1.md'] }));
   }
@@ -673,16 +849,18 @@ function owedShip(paths, runId, project, ts, fallback) {
   writeLedger(archivedRunLedgerPath(paths, runId), lines);
 }
 
-test('reconcile-fallbacks-window counts both fallbacks over the ships judged owed', async (t) => {
+test('reconcile-fallbacks-window counts every fallback cause over the ships judged owed', async (t) => {
   const paths = home(t);
   owedShip(paths, 's1', 'p', '2026-08-01T00:00:00Z', null);
-  owedShip(paths, 's2', 'p', '2026-08-02T00:00:00Z', 'partial');
-  owedShip(paths, 's3', 'p', '2026-08-03T00:00:00Z', 'discard');
-  // A ship nobody judged owed asked the rewrite nothing and is not in the
-  // window at all.
-  writeLedger(archivedRunLedgerPath(paths, 's4'), [
-    line(1, '2026-08-04T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
-    line(2, '2026-08-04T00:00:00Z', 'merged', { pr: 2, sha: 'bbb' }),
+  owedShip(paths, 's2', 'p', '2026-08-02T00:00:00Z', 'record-cap');
+  // The two causes a metric keyed on the cap alone would walk past. Both end
+  // with the work on a ticket, which is what the reading is about.
+  owedShip(paths, 's3', 'p', '2026-08-03T00:00:00Z', 'operator');
+  owedShip(paths, 's4', 'p', '2026-08-04T00:00:00Z', 'work-product-defect');
+  // A ship nobody judged owed asked the write nothing and is not in the window.
+  writeLedger(archivedRunLedgerPath(paths, 's5'), [
+    line(1, '2026-08-05T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-05T00:00:00Z', 'merged', { pr: 2, sha: 'bbb' }),
   ]);
   const reading = await evaluateMetric('reconcile-fallbacks-window', {
     paths,
@@ -690,11 +868,15 @@ test('reconcile-fallbacks-window counts both fallbacks over the ships judged owe
     window: 10,
   });
   assert.equal(reading.eligible, true);
-  assert.equal(reading.value, 2);
-  assert.equal(reading.detail.ships, 3);
+  assert.equal(reading.value, 3);
+  assert.equal(reading.detail.ships, 4);
+  assert.deepEqual(reading.detail.causes, {
+    'record-cap': 1,
+    operator: 1,
+    'work-product-defect': 1,
+  });
   assert.equal(reading.detail.partial, 1);
-  assert.equal(reading.detail.discarded, 1);
-  assert.deepEqual(reading.detail.runs, ['s2', 's3']);
+  assert.deepEqual(reading.detail.runs, ['s2', 's3', 's4']);
   // Two in ten is the band, and this window breaches it.
   const entry = standingTripwires().find((e) => e.metric === 'reconcile-fallbacks-window');
   assert.deepEqual(entry.breach, { op: '>=', value: 2 });
@@ -704,6 +886,114 @@ test('reconcile-fallbacks-window counts both fallbacks over the ships judged owe
     window: 10,
   });
   assert.equal(noOwedShips.eligible, false);
+});
+
+/**
+ * One run of the reconcile stage: its entry, a write dispatch that took
+ * `minutes`, and one render per cycle. The stage's cycle numbers continue the
+ * run's own counter.
+ */
+function stageRun(seq, at, { cycles, minutes = 10, first = 1 }) {
+  const lines = [line(seq++, at(0), 'stage-entered', { stage: 'reconcile' })];
+  lines.push(line(seq++, at(1), 'seat-spawned', { seat: 'reconcile-write:1', model: 'm' }));
+  lines.push(line(seq++, at(1 + minutes), 'reconciliation-written', { ok: true, active: 9 }));
+  for (let c = 0; c < cycles; c++) {
+    lines.push(
+      line(seq++, at(2 + minutes + c), 'reconcile-rendered', {
+        cycle: first + c,
+        sha: `r${c}`,
+        verdict: c === cycles - 1 ? 'green' : 'red',
+        open: [],
+        records: ['docs/adr/a.md'],
+        layers: ['adr-form'],
+      }),
+    );
+  }
+  return { lines, seq };
+}
+
+test('record-cycles reads the mean per stage run, and a re-entry opens a new one', async (t) => {
+  const paths = home(t);
+  const at = (m) => new Date(Date.parse('2026-09-01T00:00:00Z') + m * 60_000).toISOString();
+  let seq = 1;
+  const lines = [line(seq++, at(0), 'run-launched', { project: 'p', lane: 'story' })];
+  // Three cycles, then a second entry with one: a re-run over a moved base.
+  const one = stageRun(seq, (m) => at(10 + m), { cycles: 3 });
+  const two = stageRun(one.seq, (m) => at(100 + m), { cycles: 1, first: 4 });
+  writeLedger(runLedgerPath(paths, 'r1'), [...lines, ...one.lines, ...two.lines]);
+  const reading = await evaluateMetric('record-cycles', {
+    paths,
+    project: 'p',
+    window: 5,
+    pinTs: PIN,
+  });
+  assert.equal(reading.eligible, true);
+  assert.equal(reading.value, 2);
+  assert.equal(reading.detail.reconciliations, 2);
+  assert.equal(reading.detail.worst, 3);
+  assert.equal(reading.detail.run, 'r1');
+  // The window counts stage runs, so the newest one alone reads its own count.
+  const narrow = await evaluateMetric('record-cycles', {
+    paths,
+    project: 'p',
+    window: 1,
+    pinTs: PIN,
+  });
+  assert.equal(narrow.value, 1);
+  const cold = await evaluateMetric('record-cycles', {
+    paths,
+    project: 'none',
+    window: 5,
+    pinTs: PIN,
+  });
+  assert.equal(cold.eligible, false);
+  assert.equal(cold.value, null);
+});
+
+test('record-write-time reads the first write seat to the last write of the stage run', async (t) => {
+  const paths = home(t);
+  const at = (m) => new Date(Date.parse('2026-09-01T00:00:00Z') + m * 60_000).toISOString();
+  writeLedger(runLedgerPath(paths, 'r1'), [
+    line(1, at(0), 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, at(10), 'stage-entered', { stage: 'reconcile' }),
+    // A judge seat before the writers opens nothing: the reading is the write.
+    line(3, at(11), 'seat-spawned', { seat: 'reconcile-judge', model: 'm' }),
+    line(4, at(20), 'seat-spawned', { seat: 'reconcile-write:1', model: 'm' }),
+    line(5, at(30), 'reconciliation-written', { ok: true, active: 9 }),
+    line(6, at(35), 'seat-spawned', { seat: 'reconcile-write:2', model: 'm' }),
+    // The last write of the stage run closes the span: the writers run one
+    // record at a time and the reading is what the whole write cost.
+    line(7, at(50), 'reconciliation-written', { ok: true, active: 10 }),
+    line(8, at(55), 'stage-entered', { stage: 'update' }),
+  ]);
+  const reading = await evaluateMetric('record-write-time', { paths, project: 'p', window: 5 });
+  assert.equal(reading.eligible, true);
+  assert.equal(reading.value, 30);
+  assert.equal(reading.detail.writes, 1);
+  assert.equal(reading.detail.longest, 30);
+  const cold = await evaluateMetric('record-write-time', { paths, project: 'none', window: 5 });
+  assert.equal(cold.eligible, false);
+});
+
+test('a restart inside the write is one span, and a stage run that wrote nothing is none', async (t) => {
+  const paths = home(t);
+  const at = (m) => new Date(Date.parse('2026-09-01T00:00:00Z') + m * 60_000).toISOString();
+  writeLedger(runLedgerPath(paths, 'r1'), [
+    line(1, at(0), 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, at(10), 'stage-entered', { stage: 'reconcile' }),
+    line(3, at(20), 'seat-spawned', { seat: 'reconcile-write:1', model: 'm' }),
+    // The daemon stopped and started again inside the stage. The stage run is
+    // the one the writers were already in.
+    line(4, at(25), 'stage-entered', { stage: 'reconcile', resumed: true }),
+    line(5, at(40), 'reconciliation-written', { ok: true, active: 9 }),
+    line(6, at(45), 'stage-entered', { stage: 'update' }),
+    // A second entry with no writer: a re-run that found nothing to write.
+    line(7, at(60), 'stage-entered', { stage: 'reconcile' }),
+    line(8, at(70), 'stage-entered', { stage: 'ship' }),
+  ]);
+  const reading = await evaluateMetric('record-write-time', { paths, project: 'p', window: 5 });
+  assert.equal(reading.detail.writes, 1);
+  assert.equal(reading.value, 20);
 });
 
 // -- the memory forecast (ADR-0045) -------------------------------------------
@@ -931,6 +1221,46 @@ test('verdict-cycles reads the worst run of the window, not its average', async 
   const empty = await evaluateMetric('verdict-cycles', { paths, project: 'q', window: 5 });
   assert.equal(empty.eligible, false);
   assert.equal(empty.value, null);
+});
+
+test('verdict-cycles counts the code cycles alone, in both render shapes', async (t) => {
+  const paths = home(t);
+  // The old shape: three code cycles, then a record commit and two renders
+  // over it. Those two were record cycles and the band never judged records.
+  writeLedger(runLedgerPath(paths, 'r1'), [
+    line(1, '2026-08-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-01T01:00:00Z', 'verdict-rendered', { cycle: 1, sha: 'c1', verdict: 'red' }),
+    line(3, '2026-08-01T02:00:00Z', 'verdict-rendered', { cycle: 2, sha: 'c2', verdict: 'red' }),
+    line(4, '2026-08-01T03:00:00Z', 'verdict-rendered', { cycle: 3, sha: 'c3', verdict: 'green' }),
+    line(5, '2026-08-01T04:00:00Z', 'implementation-committed', { phase: 'reconcile', sha: 'd1' }),
+    line(6, '2026-08-01T05:00:00Z', 'verdict-rendered', { cycle: 4, sha: 'd1', verdict: 'red' }),
+    line(7, '2026-08-01T06:00:00Z', 'verdict-rendered', { cycle: 5, sha: 'd1', verdict: 'green' }),
+  ]);
+  const old = await evaluateMetric('verdict-cycles', {
+    paths,
+    project: 'p',
+    window: 5,
+    pinTs: PIN,
+  });
+  assert.equal(old.value, 3);
+  // The new shape: the same run, with the record cycles as their own event.
+  const after = home(t);
+  writeLedger(runLedgerPath(after, 'r1'), [
+    line(1, '2026-09-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-09-01T01:00:00Z', 'verdict-rendered', { cycle: 1, sha: 'c1', verdict: 'red' }),
+    line(3, '2026-09-01T02:00:00Z', 'verdict-rendered', { cycle: 2, sha: 'c2', verdict: 'red' }),
+    line(4, '2026-09-01T03:00:00Z', 'verdict-rendered', { cycle: 3, sha: 'c3', verdict: 'green' }),
+    line(5, '2026-09-01T04:00:00Z', 'stage-entered', { stage: 'reconcile' }),
+    line(6, '2026-09-01T05:00:00Z', 'reconcile-rendered', { cycle: 4, sha: 'd1', verdict: 'red' }),
+    line(7, '2026-09-01T06:00:00Z', 'reconcile-rendered', { cycle: 5, sha: 'd1', verdict: 'green' }),
+  ]);
+  const now = await evaluateMetric('verdict-cycles', {
+    paths: after,
+    project: 'p',
+    window: 5,
+    pinTs: PIN,
+  });
+  assert.equal(now.value, old.value);
 });
 
 // -- the carry share ---------------------------------------------------------
@@ -1883,6 +2213,88 @@ test('gate-rounds-window reads the worst story of the window, and the mean besid
   assert.equal(narrow.detail.run, 'g3');
   const cold = await evaluateMetric('gate-rounds-window', { paths, project: 'none', window: 5 });
   assert.equal(cold.eligible, false);
+});
+
+// -- the duration history a reset ends ----------------------------------------
+
+const MINUTE = 60_000;
+
+/** A shipped run whose `update` stage took ten minutes, on the stated day. */
+function updateHistory(paths, runId, day) {
+  const start = Date.parse(`2026-08-0${day}T00:00:00Z`);
+  const iso = (ms) => new Date(start + ms).toISOString();
+  writeLedger(runLedgerPath(paths, runId), [
+    line(1, iso(0), 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, iso(0), 'stage-entered', { stage: 'update' }),
+    line(3, iso(10 * MINUTE), 'stage-entered', { stage: 'ship' }),
+    line(4, iso(10 * MINUTE), 'run-closed', { state: 'shipped' }),
+  ]);
+}
+
+/** The heartbeat of a run that has stood in `update` for 150 minutes. */
+const updateBeat = {
+  seq: 3,
+  ts: '2026-09-01T02:30:00Z',
+  event: 'stage-heartbeat',
+  actor: 'daemon',
+  stage: 'update',
+  waitingOn: 'the merge',
+  elapsed: 150 * MINUTE,
+};
+
+function overrunHome(t) {
+  const paths = home(t);
+  for (let day = 1; day <= 5; day++) updateHistory(paths, `past-${day}`, day);
+  writeLedger(runLedgerPath(paths, 'live'), [
+    line(1, '2026-09-01T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-09-01T00:00:00Z', 'stage-entered', { stage: 'update' }),
+  ]);
+  return paths;
+}
+
+test('the update band holds until the reset, and reads nothing after it', async (t) => {
+  const paths = overrunHome(t);
+  const ledger = openInstanceStore(paths);
+  t.after(() => ledger.close());
+  const watcher = new TripwireWatcher({ paths, ledger });
+  watcher.setRegistry('p', []);
+  await watcher.notify('p', updateBeat, 'run:live');
+  const overruns = () =>
+    readEvents(paths.instanceLedger).filter((e) => e.event === 'stage-overrun');
+  assert.equal(overruns().length, 1, 'the five visits built a band and the run left it');
+  assert.equal(overruns()[0].band.samples, 5);
+
+  // The same history behind a reset. The record judgment and the record write
+  // left this stage, so its visits measure work it no longer does and there is
+  // nothing left to be outside of.
+  const after = overrunHome(t);
+  const reset = openInstanceStore(after);
+  t.after(() => reset.close());
+  reset.append('duration-reset', { actor: 'daemon', stage: 'update', reason: 'plan-35' });
+  const quiet = new TripwireWatcher({ paths: after, ledger: reset });
+  quiet.setRegistry('p', []);
+  await quiet.notify('p', updateBeat, 'run:live');
+  assert.deepEqual(
+    readEvents(after.instanceLedger).filter((e) => e.event === 'stage-overrun'),
+    [],
+  );
+});
+
+test('a reconcile round is no spec-gate round, and never reaches this reading', async (t) => {
+  const paths = home(t);
+  // The reading counts `spec-gate-round` and nothing else. A corrective round
+  // on a decision record is a `reconcile-round` under its own cap, and a repair
+  // round is the code ladder's; neither is a round the gate spent.
+  runWith(paths, 'g1', 'p', '2026-09-01T00:00:00Z', [
+    { event: 'spec-gate-round', round: 1, verdict: 'pass' },
+    { event: 'freeze', killCount: 1, sha: 'a'.repeat(7) },
+    { event: 'reconcile-round', round: 1, records: ['docs/adr/a.md'], findings: ['F1'] },
+    { event: 'reconcile-round', round: 2, records: ['docs/adr/a.md'], findings: ['F2'] },
+    { event: 'repair-round', pass: 1, round: 1, cap: 6 },
+  ]);
+  const reading = await evaluateMetric('gate-rounds-window', { paths, project: 'p', window: 5 });
+  assert.equal(reading.value, 1);
+  assert.deepEqual(reading.detail, { freezes: 1, run: 'g1', mean: 1 });
 });
 
 test('waits-window counts every span and the share whose ladder ended green', async (t) => {

@@ -201,6 +201,54 @@ test('a shipped repair is a ship the review counts, and the role block names its
   assert.match(prompt, /whether a maintenance repair should have\nbeen a story/);
 });
 
+test('the brief states the record stage as the harness now stamps it', async (t) => {
+  const paths = home(t);
+  const fixture = evalFixture(() => ({ report: { summary: 'ok', proposals: [] } }));
+  const { evals } = scheduler(t, paths, fixture);
+  for (let i = 1; i <= 5; i++) shipRun(paths, `s${i}`, 'p', `2026-08-0${i}T00:00:00Z`);
+  await evals.notify();
+  const prompt = fixture.calls[0].prompt;
+  // The stall the stage raises on its own, and the ticket that answers it.
+  assert.match(prompt, /`reconcile-stall`, with the\n`rounds` it spent/);
+  assert.match(prompt, /it parks\nnobody/);
+  // The two caps, each with the round that counts against it.
+  assert.match(prompt, /A corrective round on a decision\nrecord is a `reconcile-round`/);
+  assert.ok(!prompt.includes('phase: "reconcile"'));
+  // The fallback shapes: every cause counts, and the discard is gone.
+  assert.match(prompt, /`reconciliation-written` with `ok: false` and a `cause`/);
+  assert.ok(!prompt.includes('record-layer-red'));
+  // Eight metrics, with the two record-stage bands named.
+  assert.match(prompt, /Eight tripwire metrics read the same ledgers/);
+  assert.ok(!prompt.includes('Six tripwire metrics'));
+  for (const metric of [
+    'parks-window',
+    'gate-rounds-window',
+    'waits-window',
+    'allowlist-findings-window',
+    'record-refuted-share',
+    'reconcile-fallbacks-window',
+    'record-cycles',
+    'record-write-time',
+  ]) {
+    assert.ok(prompt.includes('`' + metric + '`'), metric);
+  }
+  // The eight measures the center derives, by name, so the eval reads them
+  // rather than re-deriving them.
+  assert.match(prompt, /The command center derives eight measures/);
+  for (const measure of [
+    'record cycles',
+    'writer miss rate',
+    'late share',
+    'moved-tree cost',
+    'recheck yield',
+    'record-diff gate time',
+    'write wall clock',
+    'tree series',
+  ]) {
+    assert.ok(prompt.includes(measure), measure);
+  }
+});
+
 test('the window starts after the newest ship the last review named, not at a count', async (t) => {
   const paths = home(t);
   const fixture = evalFixture(() => ({ report: { summary: 'ok', proposals: [] } }));

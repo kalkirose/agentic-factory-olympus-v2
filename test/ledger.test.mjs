@@ -7,9 +7,16 @@ import {
   DEFECT_KINDS,
   GATE_INTEGRITY_KINDS,
   OBSERVED_DEFECT_KINDS,
+  RECAPTURE_CLASSES,
+  RECORD_CAP,
+  RECORD_FINDINGS,
+  RECORD_LAYER_RED,
   RUN_EVENTS,
   INSTANCE_EVENTS,
+  LOUD_EVENTS,
   assertDefectKind,
+  assertRecaptureClass,
+  streamOf,
 } from '../src/ledger/registry.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
@@ -115,6 +122,54 @@ test('the vocabulary says which record carries each kind, and the two sets are d
     [...DEFECT_KINDS].sort(),
     [...GATE_INTEGRITY_KINDS, ...OBSERVED_DEFECT_KINDS].sort(),
   );
+  // The frozen surface a take-back names, beside the kind that classifies it.
+  // A dev seat that reached a test and one that reached a decision record are
+  // two defects with two repairs, and one word for both counts neither.
+  assert.deepEqual([...RECAPTURE_CLASSES].sort(), ['record', 'test']);
+  for (const cls of RECAPTURE_CLASSES) assert.equal(assertRecaptureClass(cls), cls);
+  assert.throws(() => assertRecaptureClass('adr'), /unknown recapture class/);
+  assert.throws(() => assertRecaptureClass(undefined), /unknown recapture class/);
+});
+
+test('the record stage stamps every fact it is asked for', (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const ledger = runLedger(dir);
+  // The events the record tree records. Every one is run-scoped: they belong
+  // to the run that wrote the records, and a reader of that run's ledger has
+  // the whole of the stage in front of it.
+  for (const event of [
+    'records-committed',
+    'record-units',
+    'reconcile-round',
+    'reconcile-rendered',
+    'reconcile-stall',
+    'reconcile-recheck',
+  ]) {
+    assert.ok(RUN_EVENTS.has(event), `${event} is not a run event`);
+    assert.ok(!INSTANCE_EVENTS.has(event), `${event} is an instance event too`);
+  }
+  // The reset is the one instance-scoped fact of the set: it is a statement
+  // about every ledger and about no run.
+  assert.ok(INSTANCE_EVENTS.has('duration-reset'));
+  assert.ok(!RUN_EVENTS.has('duration-reset'));
+  const stall = ledger.append('reconcile-stall', { actor: 'daemon', rounds: 5, open: ['F1'] });
+  ledger.close();
+  // The stall asks the owner to look, so it rides the loud stream.
+  assert.ok(LOUD_EVENTS.has('reconcile-stall'));
+  assert.equal(streamOf('reconcile-stall'), 'loud');
+  assert.equal(stall.stream, 'loud');
+});
+
+test('the fallback causes are closed, and two of them are retired', () => {
+  // The cap is the only way records with open findings leave a run: under the
+  // record rule a confirmed finding blocks, so the partial ship and the whole
+  // discard the other two named cannot happen. Both stay declared while a
+  // reader of an archived ledger still meets the word.
+  assert.equal(RECORD_CAP, 'record-cap');
+  assert.equal(RECORD_FINDINGS, 'record-findings');
+  assert.equal(RECORD_LAYER_RED, 'record-layer-red');
+  assert.equal(new Set([RECORD_CAP, RECORD_FINDINGS, RECORD_LAYER_RED]).size, 3);
 });
 
 test('payload keys cannot shadow the envelope', (t) => {

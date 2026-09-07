@@ -11,6 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join, basename, isAbsolute } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   openEscapesStore,
   openInstanceStore,
@@ -104,6 +105,31 @@ const FAULT_MAX = 600; // a stamp carries the head of a stack, not the stack
 const CARD_ERRORS_NAMED = 3;
 const CONTROL_READS = 2;
 const CONTROL_REREAD_MS = 50;
+// The code this daemon runs from. Nothing else in the process names it: the
+// home, the working directory and the config all belong to the operator, and a
+// pin is a checkout somebody made somewhere else.
+const CODE_DIR = fileURLToPath(new URL('../../', import.meta.url));
+// The one stage whose duration history the reconcile stage invalidates.
+const DURATION_RESET = { stage: 'update', reason: 'plan-35' };
+
+/**
+ * The head of the code directory this daemon runs from, or null where that
+ * directory is no git checkout.
+ *
+ * It dates every ledger the instance writes. A reader of an archived run has no
+ * other way to tell which harness wrote it, and a stamp shape that changed at a
+ * pin is readable only against the instant that pin started. Null is a true
+ * answer and never a failure: a daemon can run from an unpacked copy, and its
+ * ledgers read as ledgers that cannot name their harness.
+ */
+async function readHarnessSha() {
+  try {
+    const sha = (await git(['rev-parse', 'HEAD'], { cwd: CODE_DIR })).trim();
+    return sha.length > 0 ? sha : null;
+  } catch {
+    return null;
+  }
+}
 
 export class Daemon {
   /**
@@ -425,11 +451,14 @@ export class Daemon {
       // stop is the only trace an unstamped death leaves.
       this.stampCrashIfUnstopped();
       const runsResumed = this.engine.resumeOpenRuns();
+      const harnessSha = await readHarnessSha();
       this.ledger.append('daemon-started', {
         actor: ACTOR,
         pid: process.pid,
         runsResumed,
+        ...(harnessSha !== null && { harnessSha }),
       });
+      this.stampDurationReset(harnessSha);
       await this.stampSeatEnvironment();
       await this.stampCredentialFingerprints();
       await this.sweepOrphanWorkspaces();
@@ -1823,6 +1852,28 @@ export class Daemon {
    * a clean stop. The seq it carries is the last thing the dead instance
    * managed to write — where a reader starts looking.
    */
+  /**
+   * The duration history of the `update` stage, ended at this start.
+   *
+   * The stage used to judge the decision records and write them; the reconcile
+   * stage does that now, so every completed `update` visit in the ledgers
+   * measures work the stage no longer does, and a band built on them would
+   * hold a run against a stage that is gone (ADR-0034, ADR-0075).
+   *
+   * Once, and the record is its own marker: the reset is a statement about the
+   * ledgers, so a second one at the next restart would say nothing new. A
+   * daemon whose code directory is no checkout stamps nothing: it cannot name
+   * its harness, so it cannot say that this is the start that moved.
+   */
+  stampDurationReset(harnessSha) {
+    if (harnessSha === null) return;
+    const events = readEvents(this.paths.instanceLedger);
+    if (events.some((e) => e.event === 'duration-reset' && e.stage === DURATION_RESET.stage)) {
+      return;
+    }
+    this.ledger.append('duration-reset', { actor: ACTOR, ...DURATION_RESET });
+  }
+
   stampCrashIfUnstopped() {
     const events = readEvents(this.paths.instanceLedger);
     const last = events.at(-1);
