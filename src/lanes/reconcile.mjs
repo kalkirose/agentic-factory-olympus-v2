@@ -206,7 +206,7 @@ function cycleStepOf(events, written) {
   const stamped = new Set(
     events.filter((e) => e.event === 'record-units' && e.cycle === cycle).map((e) => e.record),
   );
-  if (records.some((record) => !stamped.has(record))) return 'review';
+  if (records.length === 0 || records.some((record) => !stamped.has(record))) return 'review';
   // The verifier is the boundary behind the review seats. A cycle whose seats
   // have reported and whose verifier has not answered resumes at the verifier,
   // and the round it re-enters re-uses every finding id it already assigned.

@@ -1,18 +1,24 @@
 // The ship step: the run ends at close-out, not at the green verdict.
-// `shipStep({forgeFor})` supplies the three stages after the verdict —
-// `update` (the reconciliation round, the ship token, then the branch update
-// that precedes the final verdict), `ship` (PR open carrying the diff's
-// labels, with auto-merge armed, the check watcher, the CI red route, the
-// competing-merge update, the merge round) and `close-out`
-// (red-merge breach conversion, merge-commit checks to terminal, the card
-// sweep, the reconciliation ticket for records that did not ride, the
-// configured learning artifact, the escape fix-back, ledger close).
+// `shipStep({forgeFor})` supplies the four stages after the verdict —
+// `reconcile` (the records, in a stage of its own, from `lanes/reconcile.mjs`),
+// `update` (the ship token, then the branch update that precedes the final
+// verdict), `ship` (PR open carrying the diff's labels, with auto-merge armed,
+// the check watcher, the CI red route, the competing-merge update, the merge
+// round) and `close-out` (red-merge breach conversion, merge-commit checks to
+// terminal, the card sweep, the reconciliation ticket for records that did not
+// ride, the configured learning artifact, the escape fix-back, ledger close).
 //
-// The reconciliation round is the head of the update stage, in front of the
-// token (ADR-0026). A story run judges its own diff against the decision
-// records, rewrites the records it owes onto its own branch, and lets the
-// verdict certify code and records together. So the default branch moves once
-// per shipped story, and none of that work holds another run out of its merge.
+// The reconciliation stands in front of the token, and it belongs to the stage
+// that owns it (ADR-0075). A run judges its own diff against the decision
+// records and writes the records it owes onto its own branch before it queues
+// for the merge. So the default branch moves once per shipped story, and none of
+// that work holds another run out of its merge.
+//
+// The admission gate reads two certifications, each at its own sha: a green
+// `verdict-rendered` at the last code commit and a green `reconcile-rendered` at
+// the last record commit. They are two facts about two trees and they are never
+// one, so a moved default branch is asked two questions and each answer is kept
+// or redone on its own.
 //
 // Ships are serial per project and everything before them is not. The update
 // stage holds the seam: a run takes the project's ship token there, merges the
