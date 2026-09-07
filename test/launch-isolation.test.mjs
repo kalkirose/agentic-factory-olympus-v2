@@ -189,7 +189,7 @@ test('a console launch carries the ticket into the repair payload', async (t) =>
         project: 'alpha',
         ticket: 'tickets/t1.md',
       }),
-    /ticket applies to the repair lane only \(lane: story\)/,
+    /ticket applies to the repair and records lanes only \(lane: story\)/,
   );
   assert.equal(payloads.length, 1);
 });

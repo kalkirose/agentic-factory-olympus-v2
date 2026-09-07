@@ -873,9 +873,11 @@ test('a write that cannot be made ships the certified sha and leaves the ticket'
   assert.match(ticket, /merge commit: [0-9a-f]{7}/);
   const owed = owedReconciliations(fx.paths, 'proj');
   assert.equal(owed.length, 1);
+  // The ticket names decision records and nothing else, so the sweep launches
+  // it on the lane that holds no dev seat (ADR-0074).
   assert.deepEqual(reconciliationLaunch(owed[0]), {
     project: 'proj',
-    lane: 'repair',
+    lane: 'records',
     ticket: ticketed.ticket,
     reconcilesRunId: runId,
   });
