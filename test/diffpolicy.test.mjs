@@ -456,6 +456,11 @@ test('a well-formed diffPolicy block validates', () => {
 test('diffPolicy rejects an unknown lane, an unknown tier, and a bad shape', () => {
   assert.deepEqual(errorPaths(baseConfig({ diffPolicy: [] })), ['diffPolicy']);
   assert.deepEqual(errorPaths(baseConfig({ diffPolicy: { ship: {} } })), ['diffPolicy.ship']);
+  // The records lane takes a budget and no policy: it runs no dev seat, so a
+  // policy over what that seat wrote polices nothing (ADR-0074).
+  const records = validateProjectConfig(baseConfig({ diffPolicy: { records: {} } }));
+  assert.deepEqual(records.map((e) => e.path), ['diffPolicy.records']);
+  assert.equal(records[0].message, 'must name a lane with a dev seat: story | repair');
   assert.deepEqual(errorPaths(baseConfig({ diffPolicy: { story: 'no' } })), ['diffPolicy.story']);
   assert.deepEqual(errorPaths(baseConfig({ diffPolicy: { story: { deniedPath: ['a'] } } })), [
     'diffPolicy.story.deniedPath',

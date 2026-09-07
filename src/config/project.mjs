@@ -923,18 +923,22 @@ function validateTripwires(tripwires, err) {
   });
 }
 
-// The diff policy the candidate capture enforces, per lane. Only the lanes
-// that run a dev seat take one; a name outside that set is a typo the launch
-// must not swallow, because a policy nobody reads protects nothing.
-// `recapturablePaths` and `sweptPaths` ride the same block and are not tiers:
-// they block nothing and admit nothing. `recapturablePaths` classes the writes
-// the capture takes back from frozen paths, so a take-back on an artifact a
-// re-freeze re-takes is recorded quietly rather than as an open loud item.
-// `sweptPaths` names where a red test run drops generated artifacts, so a file
-// the freeze never held is cleared instead of reported as a take-back
-// (ADR-0017).
-const LANES = ['story', 'repair'];
-const POLICED_LANES = new Set(LANES);
+// Every lane the daemon runs. A lane name in the config is a typo the launch
+// must not swallow, so each block that takes one is checked against a closed
+// set. The two sets differ: every lane spends seats, so every lane takes a
+// budget; only a lane with a dev seat takes a diff policy, because the policy
+// polices what that seat wrote. The records lane holds no dev seat (ADR-0074).
+const LANES = ['story', 'repair', 'records'];
+const BUDGETED_LANES = new Set(LANES);
+const POLICED_LANES = new Set(['story', 'repair']);
+
+// The diff policy the candidate capture enforces, per lane. `recapturablePaths`
+// and `sweptPaths` ride the same block and are not tiers: they block nothing and
+// admit nothing. `recapturablePaths` classes the writes the capture takes back
+// from frozen paths, so a take-back on an artifact a re-freeze re-takes is
+// recorded quietly rather than as an open loud item. `sweptPaths` names where a
+// red test run drops generated artifacts, so a file the freeze never held is
+// cleared instead of reported as a take-back (ADR-0017).
 const TIER_KEYS = [
   'deniedPaths',
   'declaredPaths',
@@ -952,7 +956,10 @@ function validateDiffPolicy(policy, err) {
   for (const [lane, tiers] of Object.entries(policy)) {
     const at = (key) => `diffPolicy.${lane}.${key}`;
     if (!POLICED_LANES.has(lane)) {
-      err(`diffPolicy.${lane}`, `must name a lane with a dev seat: ${LANES.join(' | ')}`);
+      err(
+        `diffPolicy.${lane}`,
+        `must name a lane with a dev seat: ${[...POLICED_LANES].join(' | ')}`,
+      );
       continue;
     }
     if (!isPlainObject(tiers)) {
@@ -992,7 +999,7 @@ function validateBudgets(budgets, err) {
     return;
   }
   for (const [lane, value] of Object.entries(budgets)) {
-    if (!POLICED_LANES.has(lane)) {
+    if (!BUDGETED_LANES.has(lane)) {
       err(`budgets.${lane}`, `must name a lane: ${LANES.join(' | ')}`);
       continue;
     }

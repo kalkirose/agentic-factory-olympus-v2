@@ -265,6 +265,13 @@ test('a budgets block takes positive dollars on a lane the daemon runs', () => {
   assert.deepEqual(validateProjectConfig({ ...base, budgets: { story: 160, repair: 50 } }), []);
   assert.deepEqual(validateProjectConfig({ ...base, budgets: {} }), []);
   assert.deepEqual(validateProjectConfig(base), []);
+  // The records lane is the third lane the daemon runs, and it spends seats
+  // like the other two, so it takes a budget (ADR-0074).
+  assert.deepEqual(validateProjectConfig({ ...base, budgets: { records: 25 } }), []);
+  assert.deepEqual(
+    validateProjectConfig({ ...base, budgets: { story: 160, repair: 50, records: 25 } }),
+    [],
+  );
 });
 
 test('a budgets block refuses an unknown lane and a figure that is not money', () => {
@@ -279,4 +286,13 @@ test('a budgets block refuses an unknown lane and a figure that is not money', (
   ]);
   assert.match(errors.find((e) => e.path === 'budgets.spec').message, /must name a lane/);
   assert.match(errors.find((e) => e.path === 'budgets.story').message, /positive number/);
+  // The set stays closed, and it names all three lanes.
+  const other = validateProjectConfig({ ...base, budgets: { other: 10 } });
+  assert.deepEqual(other.map((e) => e.path), ['budgets.other']);
+  assert.equal(other[0].message, 'must name a lane: story | repair | records');
+  // A records budget is money like any other.
+  assert.deepEqual(
+    validateProjectConfig({ ...base, budgets: { records: -1 } }).map((e) => e.path),
+    ['budgets.records'],
+  );
 });
