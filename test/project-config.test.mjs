@@ -125,6 +125,19 @@ test('repo.recordLifecycle is rewrite or supersede, and defaults to rewrite', ()
   }
 });
 
+// The style rule files a record seat reads beside the constitution: a list of
+// repo-relative paths, empty by default.
+test('repo.styleFiles is a string list and defaults to empty', () => {
+  assert.deepEqual(withProjectDefaults({ version: 1 }).repo.styleFiles, []);
+  const config = valid();
+  config.repo.styleFiles = ['docs/style/asd-ste100.md', 'docs/style/anti-slop.md'];
+  assert.deepEqual(validateProjectConfig(config), []);
+  assert.deepEqual(withProjectDefaults(config).repo.styleFiles, config.repo.styleFiles);
+  const bad = valid();
+  bad.repo.styleFiles = 'docs/style/asd-ste100.md';
+  assert.deepEqual(errorPaths(bad), ['repo.styleFiles']);
+});
+
 // The Tier-1 layers a changed record path is attributed to. A typo turns record
 // attribution into no layers at all, and a record-only render then greens with
 // nothing run, so the name is validated against the layer list (ADR-0026).

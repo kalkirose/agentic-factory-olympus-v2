@@ -124,6 +124,10 @@ export function defaultProjectConfig() {
       recordPaths: [...DEFAULT_RECORD_PATHS],
       // How a change to an accepted record is made: `rewrite` or `supersede`.
       recordLifecycle: DEFAULT_RECORD_LIFECYCLE,
+      // The style rule files that bind every sentence a record seat writes,
+      // repo-relative. The seats read them beside the constitution; a project
+      // that names none binds its records by the constitution alone.
+      styleFiles: [],
       routesRoot: 'apps/storefront/src/routes',
       componentsRoot: 'apps/storefront/src/lib/components',
     },
@@ -318,6 +322,7 @@ function validateRepo(repo, err) {
   // validated by one rule because they are one kind of value: a plain
   // repo-relative directory the lint reads the tree under, or null to turn
   // that lint rule off by name (ADR-0067).
+  validateStringList(repo.styleFiles, 'repo.styleFiles', err);
   validateTreeRoot(repo.routesRoot, 'repo.routesRoot', err);
   validateTreeRoot(repo.componentsRoot, 'repo.componentsRoot', err);
 }
