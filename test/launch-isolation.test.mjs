@@ -314,8 +314,21 @@ test('a line-ending rule a later line overrides does not launch', async (t) => {
     () => daemon.launchRun({ project: 'alpha', lane: 'solo' }),
     /declares no line-ending rule on main/,
   );
+  // `-text` turns every conversion off, so the rule above it holds nothing.
+  commitTree(origin, { '.gitattributes': '* text=auto eol=lf\n* -text\n' }, 'unset text');
+  await assert.rejects(
+    () => daemon.launchRun({ project: 'alpha', lane: 'solo' }),
+    /declares no line-ending rule on main/,
+  );
+  // `binary` is git's own macro for `-diff -merge -text`, and reads the same.
+  commitTree(origin, { '.gitattributes': '* text=auto eol=lf\n*.png binary\n* binary\n' }, 'binary');
+  await assert.rejects(
+    () => daemon.launchRun({ project: 'alpha', lane: 'solo' }),
+    /declares no line-ending rule on main/,
+  );
   // The same two lines the other way round is a project that declares the rule.
-  commitTree(origin, { '.gitattributes': '* eol=crlf\n* text=auto eol=lf\n' }, 'restore the rule');
+  // The value is read without case, as git reads its own.
+  commitTree(origin, { '.gitattributes': '* eol=crlf\n* text=auto EOL=LF\n' }, 'restore the rule');
   const { runId } = await daemon.launchRun({ project: 'alpha', lane: 'solo' });
   assert.match(runId, /^alpha-/);
 });

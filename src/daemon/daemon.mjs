@@ -909,18 +909,20 @@ export class Daemon {
    *
    * The rule is one line of the root `.gitattributes` on the default branch.
    * That line gives the pattern `*` the attribute `eol=lf`. An unreadable file
-   * is a refusal too: a project with no attributes has no rule.
+   * is a refusal too. A project with no attributes has no rule.
    *
    * The read is `readDoorFiles`, which the credential gate below reads from
    * as well. The refusal therefore costs no clone lock and no fetch of its
    * own, and it leaves nothing behind (ADR-0067, ADR-0068).
    */
   refuseUnnormalisedRepo(project, entry, read) {
-    if (read.error === undefined && declaresLfRule(read.text)) return;
-    const why =
-      read.error === undefined
-        ? `${GITATTRIBUTES} holds no line that gives * the attribute eol=lf.`
-        : `${GITATTRIBUTES} is not on ${entry.defaultBranch}: ${read.error}.`;
+    // The read is one entry of a set the caller asked for. A set that holds no
+    // answer for this path gives `undefined`, and an unread rule is no rule.
+    const held = read !== undefined && read.error === undefined;
+    if (held && declaresLfRule(read.text)) return;
+    const why = held
+      ? `${GITATTRIBUTES} holds no line that gives * the attribute eol=lf.`
+      : `${GITATTRIBUTES} is not on ${entry.defaultBranch}: ${read?.error ?? 'it was not read'}.`;
     const error = new Error(
       `the project ${project} declares no line-ending rule on ${entry.defaultBranch}. ` +
         `${why} The harness writes LF alone, and a gate reads the working tree while CI ` +
@@ -929,7 +931,7 @@ export class Daemon {
     );
     error.detail = {
       path: GITATTRIBUTES,
-      ...(read.error !== undefined && { read: read.error }),
+      ...(read?.error !== undefined && { read: read.error }),
     };
     throw error;
   }
@@ -968,9 +970,10 @@ export class Daemon {
   }
 
   /**
-   * One config read, parsed as a launch parses it, or null when it does not
-   * parse: provisioning reads the same blob next and refuses the launch with
-   * the config error itself.
+   * One config read, parsed as a launch parses it. Null when it does not
+   * parse. Provisioning reads the branch again next, under its own lock, and
+   * refuses the launch with the config error itself. A push between the two
+   * reads moves the blob, and provisioning judges the one it read.
    */
   parseLaunchConfig(entry, read) {
     if (read === undefined || read.error !== undefined) return null;
@@ -2058,9 +2061,14 @@ export class Daemon {
  * Comments and blank lines are skipped. A pattern narrower than `*` leaves the
  * rest of the tree unruled, which is what the door refuses.
  *
- * Git applies the last `eol` a path matches, so the answer is the last one
+ * Git applies the last attribute a path matches, so the answer is the last one
  * here and never the first. A file that says `* text=auto eol=lf` and then
  * `* eol=crlf` gives every path CRLF. The door reads it that way.
+ *
+ * Three tokens take the rule away again. `-text` turns every conversion off.
+ * `binary` is git's own macro for `-diff -merge -text`. `-eol` unsets the
+ * setting itself. A line that carries one of them after the rule leaves the
+ * tree unruled, and the door refuses it.
  * @param {string} text
  * @returns {boolean}
  */
@@ -2071,9 +2079,12 @@ function declaresLfRule(text) {
     if (trimmed.length === 0 || trimmed.startsWith('#')) continue;
     const [pattern, ...attributes] = trimmed.split(/\s+/);
     if (pattern !== '*') continue;
-    // The last `eol` on the line wins too, for the same reason.
+    // The last token on the line wins too, for the same reason. The comparison
+    // ignores case, because git's own attribute values do.
     for (const attribute of attributes) {
-      if (attribute.startsWith('eol=')) ruling = attribute;
+      const token = attribute.toLowerCase();
+      if (token === '-text' || token === 'binary' || token === '-eol') ruling = null;
+      else if (token.startsWith('eol=')) ruling = token;
     }
   }
   return ruling === 'eol=lf';
