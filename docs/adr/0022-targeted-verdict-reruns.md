@@ -1,6 +1,6 @@
 # ADR-0022: Targeted verdict re-runs, carried greens, the confirmation sweep, and progress-keyed cycling
 
-Status: accepted (2026-08-15)
+Status: accepted (2026-08-15, the record plan 2026-09-07)
 Superseded in part by ADR-0065: the flake filter is still one red-only re-run
 inside a cycle, and that re-run now asks for the parts and the files the
 replaced attempt failed on rather than for the layer.
@@ -24,14 +24,15 @@ Tier-1 spectrum, and no green verdict rests on a result the cycle did not earn.
   not-runnable layer to its root red. Repair rounds, re-freeze steps, and
   operational fixes all take this rule; their subject layers are red by
   definition, so the set is never empty by accident.
-- **A cycle that judges the reconciliation commit runs the ground-keyed set.**
-  That set is every layer whose declared ground the record commit reached,
-  every layer with no standing green, and every layer no source declared a
-  ground for, plus the same `needs` closure. It sweeps nothing before it turns
-  green, and that is the whole difference between the two carries: a targeted
-  carry stands on work this cycle did not reach, and a reconciliation carry
-  stands on the project's own statement of what each layer reads. Part-level
-  narrowing stays off there, so a layer that runs, runs whole (ADR-0026).
+- **A cycle whose whole diff is the record tree runs the record layers.** That
+  set is the layers of `gates.recordLayers`, their dependents through `needs`,
+  and the prerequisites they need that hold no green. Every other layer is
+  skipped rather than carried: the cycle earns them no green and claims none for
+  them. The branch runs before every other clause, on the first cycle of a pass
+  as much as on a later one, because the full sweep exists to prove what nothing
+  has proven yet and a record diff reaches no code layer. The reconcile stage is
+  the caller that hands such a diff over (ADR-0075); a project that names no
+  record layer keeps the three sets it always had.
 - **Every other green carries forward, marked.** The result carries the stamp
   of the cycle that earned it. It stamps nothing new, and the verdict record
   gives every layer a `mode` of `run` or `carried`. A layer stamped under this
@@ -201,14 +202,18 @@ not know. The sweep runs before green, so the worst case is a red found one
 cycle later than a full sweep would have found it. A false green is not
 reachable.
 
-The reconciliation cycle is the one cycle that turns green with layers it
-carried and no sweep behind them, and it is not an exception to the paragraph
-above. A targeted set is derived from reds and knows nothing about what an
-edit reached; the reconciliation set is derived from the commit's own files
-against each layer's declared ground, which is a statement about what the
-layer reads. Where no such statement exists the layer runs. So the sweep would
-prove a claim the plan already holds, at the price of the full spectrum this
-cycle exists to avoid (ADR-0026).
+A record cycle is the one cycle that turns green with layers it never ran and no
+sweep behind them, and it is not an exception to the paragraph above. A targeted
+set is derived from reds and knows nothing about what an edit reached. The record
+set is derived from the project's own statement of which layers read a record,
+and the code layers keep the greens they earned at their own sha, in a
+certification of their own (ADR-0075). So a sweep here would re-prove a tree that
+did not change, at the price of the full spectrum this branch exists to avoid.
+
+The skip is what makes that safe. A layer outside the record set with no standing
+green runs on an ordinary plan, so a cycle that only carried would buy the whole
+code spectrum back. The record branch names the layers it runs and skips the
+rest, and it claims a green for none of them.
 
 ## Why a CI verdict of out-of-tree findings is worth no local layers
 

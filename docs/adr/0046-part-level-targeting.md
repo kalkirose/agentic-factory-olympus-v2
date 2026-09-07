@@ -1,7 +1,7 @@
 # ADR-0046: Part-level targeting inside a gate layer
 
 Status: accepted (2026-08-28, the layer floor under a part that declares
-nothing 2026-09-05)
+nothing 2026-09-05, the record attribution 2026-09-07)
 
 ## Decision
 
@@ -33,6 +33,15 @@ mechanism knows which layer that is.
 - **A changed path no part's ground claims**, such as a lockfile, a shared
   package, a migration, a config file, or a path nobody thought about, makes
   every part of that layer affected. Doubt always re-runs.
+- **A decision record is the one path that doubt does not widen.** A project
+  states which Tier-1 layers read its records in `gates.recordLayers`. Outside
+  those layers a record path is groundless: it leaves the diff before anything is
+  attributed, so the blind clause never re-runs a code layer's parts for one, and
+  `layerGround` drops a record entry from the breadth list it unions in. Inside
+  them the record path is ordinary ground. A project that names no record layer
+  keeps the attribution it had before the key existed. `recordAttribution` in
+  `src/lanes/parts.mjs` is the one derivation, and the layer selection and the
+  ship fast path read the same one (ADR-0075).
 - **A part that was not proven green never carries.** A red part re-runs, and
   so does a part that said nothing about itself inside a failure. A part is
   green on its own `part-ok`, or on an exit code of zero for the whole command,
@@ -132,6 +141,12 @@ than a hole: it names ground the project states belongs to every suite whatever
 that suite declared. A change there reads as `touched` on a part that stands on
 the layer's floor rather than as `blind`, because `blind` names a hole in the
 mapping and declared shared ground is not one.
+
+A decision record is the second exception, and it is a positive claim too. The
+project has said which layers read a record, so a record path outside them is
+ground somebody spoke about rather than ground nobody described. Reading it as
+`blind` would re-run every part of every code layer for a markdown edit, which is
+the cost the record layers exist to remove.
 
 ## Why a part's green needs its own word inside a failure
 
@@ -272,6 +287,12 @@ part is green only on its own `part-ok`. Trigger: one carried part whose
 carried green was later contradicted by the sweep. Reversal cost: none, one
 clause in `recordedParts()`, and every adopting runner already prints the
 line the stricter rule needs.
+
+If the record attribution proves wrong, because a code layer really does read a
+decision record, the project empties `gates.recordLayers` and a record path is
+attributed exactly as any other path. Trigger: a red a record edit caused in a
+layer the attribution skipped. Reversal cost: none, one config field; the
+derivation stays and goes inert.
 
 If the per-part diff proves too coarse for a project whose parts share a
 source tree, so that every part declares the same directory and nothing ever

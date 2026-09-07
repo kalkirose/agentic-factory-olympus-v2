@@ -1,6 +1,6 @@
 # ADR-0066: A candidate diff is whole, bounded, filtered, and never a throw
 
-Status: accepted (2026-09-03)
+Status: accepted (2026-09-03, the record seat reads no diff 2026-09-07)
 
 ## Decision
 
@@ -20,8 +20,15 @@ The diff a judgment seat reads is produced by `reviewDiff()` in
   file, and one instruction: read the whole file before judging, and cite the
   file and hunk every finding comes from. Where the excerpt is the whole diff,
   one line says so and names the file anyway. `diffLines()` in
-  `src/lanes/review.mjs` builds both forms, and every review brief carries it:
-  every seat of the Fury panel, and the generalist seat.
+  `src/lanes/review.mjs` builds both forms, and every code review brief carries
+  it: every seat of the Fury panel, and the generalist seat.
+- **A record review seat gets no diff at all.** The seat that reads one decision
+  record is briefed with the file, the harness's unit list and the neighbourhood,
+  and with no diff text in any form (ADR-0026). A brief that ends with a diff
+  anchors the seat on the hunks, and a record is judged whole. The absolute-path
+  habit is the same one: that brief names `bin/olympus-units.mjs` by absolute
+  path, as this one names the patch file, because a seat runs in the run worktree
+  and reaches the harness's own files by the path it is given.
 - **The excerpt is a length in the project config.** `review.excerptChars`,
   default 12,000, validated in `src/config/project.mjs` as a positive integer.
   It sits beside `review.excludeFromDiff` and moves the same way. It bounds the
