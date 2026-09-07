@@ -16,6 +16,7 @@ import {
   declarationDigest,
   declarationSources,
   declaredGround,
+  fastPathDecision,
   fastPathFacts,
   fastPathVerdict,
   groundVerdict,
@@ -967,6 +968,32 @@ test('the certification a lane names is the render at that sha', () => {
   assert.equal(codeCertification(ledger, { ok: true, sha: 'ccc' }), null);
   assert.equal(codeCertification(ledger, { ok: false, sha: 'aaa' }), null);
   assert.equal(codeCertification(ledger, null), null);
+});
+
+test('no-certification is refused for a certification the lane has and for no other', async () => {
+  // Each of these ends before the first git read, so the routes are decided
+  // from the lane's own statement and the ledger alone.
+  const base = { worktree: '/nowhere', config: { gates: {} } };
+  const shas = { fromSha: 'f', toSha: 't', mainSha: 'm' };
+  const none = await fastPathDecision(base, [], shas, {
+    certification: { code: null, records: null },
+  });
+  assert.equal(none.refusal, 'no-certification');
+  // A lane that holds a code certification the ledger cannot show.
+  const unshown = await fastPathDecision(base, [], shas, {
+    certification: { code: { ok: true, sha: 'aaa' }, records: null },
+  });
+  assert.equal(unshown.refusal, 'no-certification');
+  assert.equal(unshown.code.answer, 'rejudge');
+  assert.equal(unshown.records, null);
+  // A records lane whose reconciliation is not green. The code certification
+  // it does not hold is asked about nowhere.
+  const red = await fastPathDecision(base, [], shas, {
+    certification: { code: null, records: { ok: false, sha: 'bbb' } },
+  });
+  assert.equal(red.refusal, 'no-certification');
+  assert.equal(red.records.answer, 'rerun');
+  assert.equal(red.code, null);
 });
 
 // -- a spectrum of forty layers, most of them silent --------------------------

@@ -1132,14 +1132,21 @@ export async function fastPathDecision(
 ) {
   const certification = codeCertification(events, certified?.code);
   const reconciled = certified?.records ?? null;
+  const scope = { code: certified?.code !== null, records: reconciled !== null };
+  if (!scope.code && !scope.records) {
+    return refusal('no-certification', 'the lane certifies nothing');
+  }
   // The lane holds this certification and cannot show a green for it. That is
   // the defensive route it always was, and it is now asked once per
   // certification instead of once for the run.
-  if (certified?.code !== null && !certification) {
-    return refusal('no-certification', 'no green verdict stands for this tree');
+  if (scope.code && !certification) {
+    return answered(refusal('no-certification', 'no green verdict stands for this tree'), scope);
   }
-  if (reconciled !== null && reconciled.ok !== true) {
-    return refusal('no-certification', 'no green reconciliation stands for this tree');
+  if (scope.records && reconciled.ok !== true) {
+    return answered(
+      refusal('no-certification', 'no green reconciliation stands for this tree'),
+      scope,
+    );
   }
   const records =
     reconciled === null
@@ -1148,9 +1155,6 @@ export async function fastPathDecision(
           neighbourhood: neighbourhood?.neighbourhood ?? [],
           recordPaths: neighbourhood?.recordPaths ?? base.config?.repo?.recordPaths ?? [],
         };
-  if (!certification && records === null) {
-    return refusal('no-certification', 'no green verdict stands for this tree');
-  }
   const facts = await fastPathFacts(base.worktree, { fromSha, toSha, mainSha });
   const verdict = fastPathVerdict({
     certification,
