@@ -109,9 +109,28 @@ export function readInheritance(paths, runId) {
     specPath,
     freezePath,
     record,
+    // The decision records the inherited freeze carries. They were born before
+    // the frozen sha, so the tree this run starts on holds them and this run
+    // owes none of them; a resumed run that stamped nothing would count every
+    // record it inherited as one the judge found late (ADR-0074).
+    records: inheritedRecords(events),
     openFindings: openFindingIds(events),
     openLoud: openLoudSeqs(events),
   };
+}
+
+/**
+ * The record commit of the prior run, as the paths and the decision behind it.
+ * A prior run from before the records stage stamped nothing, and inherits an
+ * empty set: the tree holds no born record and the count is right either way.
+ */
+function inheritedRecords(events) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.event !== 'records-committed') continue;
+    return { paths: e.paths ?? [], decided: e.decided === true };
+  }
+  return { paths: [], decided: false };
 }
 
 /** The finding ids the prior run's last verdict left open. */

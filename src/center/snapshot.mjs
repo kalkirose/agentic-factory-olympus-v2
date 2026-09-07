@@ -34,6 +34,7 @@ import { readGraphSource } from '../frontier/source.mjs';
 import { cloneDir, readBlobFromBranch } from '../isolation/clones.mjs';
 import { parseProjectConfig } from '../config/project.mjs';
 import { PRE_FREEZE_STAGES } from '../lanes/story.mjs';
+import { RECORDS_LANE_STAGES } from '../lanes/records-stage.mjs';
 
 // The design-given target for one shipped story, in hours of active time —
 // the run's own hours, with the waiting on a human taken out (ADR-0036). The
@@ -41,11 +42,15 @@ import { PRE_FREEZE_STAGES } from '../lanes/story.mjs';
 export const TARGET_HOURS = 4;
 
 // Stage lists per lane, for the pipeline display. They mirror the lane
-// composition (storyLane → postFreeze → shipStep; repairLane → shipStep).
-// A run on an unknown lane falls back to its observed stages.
+// composition (storyLane → postFreeze → shipStep; repairLane → shipStep;
+// recordsLane → shipStep). A run on an unknown lane falls back to its observed
+// stages.
 export const LANE_STAGES = {
   story: [...PRE_FREEZE_STAGES, 'implementation', 'verdict', 'update', 'ship', 'close-out'],
-  repair: ['fix', 'verdict', 'update', 'ship', 'close-out'],
+  repair: ['fix', 'verdict', 'reconcile', 'update', 'ship', 'close-out'],
+  // The records lane: a record-only ticket is the whole work, so there is no
+  // fix seat, no suite and no code verdict (ADR-0074).
+  records: [...RECORDS_LANE_STAGES, 'reconcile', 'update', 'ship', 'close-out'],
 };
 
 const ENVELOPE_KEYS = new Set(['seq', 'ts', 'event', 'actor', 'stream', 'refs']);

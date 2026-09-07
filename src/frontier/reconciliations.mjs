@@ -10,11 +10,19 @@
 // answered (the owed-repairs pattern, ADR-0024). A daemon that dies between
 // the ticket and the launch owes the same reconciliation after the restart.
 import { listRunEvents } from '../telemetry/readers.mjs';
+import { TICKETED_LANES } from '../lanes/records-stage.mjs';
 
-/** The story-run ids some reconciliation run already carries, open or closed. */
+/**
+ * The story-run ids some reconciliation run already carries, open or closed.
+ *
+ * Both ticketed lanes are read. A reconciliation launches on the records lane
+ * now, and the runs launched before it ran on the repair lane: an owed set that
+ * read one lane would owe every reconciliation the other lane answered.
+ */
 export function launchedReconciliations(paths) {
   const ids = new Set();
-  for (const { events } of listRunEvents(paths, { lane: 'repair' })) {
+  for (const { lane, events } of listRunEvents(paths)) {
+    if (!TICKETED_LANES.includes(lane)) continue;
     const launch = events.find((e) => e.event === 'run-launched');
     if (typeof launch?.reconcilesRunId === 'string') ids.add(launch.reconcilesRunId);
   }
@@ -46,11 +54,17 @@ export function owedReconciliations(paths, project) {
   return owed.sort((a, b) => (a.closedTs < b.closedTs ? -1 : a.closedTs > b.closedTs ? 1 : 0));
 }
 
-/** The launch payload of one owed reconciliation. The ticket is the lane's spec. */
+/**
+ * The launch payload of one owed reconciliation. The ticket is the lane's spec.
+ *
+ * The lane is `records`: the ticket names decision records and nothing else, so
+ * there is no code to fix, no suite to run and no code verdict to render, and
+ * the repair lane would refuse it at the door (ADR-0074).
+ */
 export function reconciliationLaunch(owed) {
   return {
     project: owed.project,
-    lane: 'repair',
+    lane: 'records',
     ticket: owed.ticket,
     reconcilesRunId: owed.runId,
   };

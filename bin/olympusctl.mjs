@@ -62,10 +62,12 @@
 // the hold that is actually stopping the run. `status` marks a held run with
 // the stage it did not enter, and names who held it and when when the hold is
 // the run's own.
-// The intake ticket is the repair lane's spec: --lane repair requires
-// --ticket, and no other lane accepts one. A repo-relative ticket path names
-// a ticket committed in the run worktree; an absolute path names a ticket in
-// the daemon home.
+// The intake ticket is the spec of the two ticketed lanes: --lane repair and
+// --lane records each require --ticket, and no other lane accepts one. A
+// repo-relative ticket path names a ticket committed in the run worktree; an
+// absolute path names a ticket in the daemon home. A ticket whose touched
+// paths are decision records and nothing else belongs to the records lane, and
+// the daemon refuses it on the repair lane with the lane to use.
 // A repair launch carries the escape it repairs, and the close-out stamps that
 // escape fixed when the repair merges. --escape names it; without the option
 // the daemon reads it off the ticket path when an open escape already names
@@ -91,6 +93,7 @@ import {
   renderFrontier,
   readInstanceConfig,
 } from '../src/console/status.mjs';
+import { TICKETED_LANES } from '../src/lanes/records-stage.mjs';
 import { readGraphSource } from '../src/frontier/source.mjs';
 import { computeFrontier } from '../src/frontier/graph.mjs';
 import { storyRunsByKey } from '../src/telemetry/readers.mjs';
@@ -195,7 +198,8 @@ if (!command) {
       '               a project release leaves a run held with --run held\n' +
       '       launch: --project <name> [--lane <name>] [--card <path>] [--ticket <path>]\n' +
       '               [--escape <n>] [--resume-from <runId>]\n' +
-      '       --lane repair requires --ticket; no other lane accepts one\n' +
+      '       --lane repair and --lane records require --ticket; no other lane\n' +
+      '               accepts one, and a record-only ticket runs on --lane records\n' +
       '       --escape is repair-lane only; without it the ticket path names\n' +
       '               the escape when an open escape record already names it\n' +
       '       --resume-from is story-lane only and takes no --card\n' +
@@ -290,13 +294,13 @@ if (command === 'status') {
     if (lane !== 'story') fail(`--resume-from applies to --lane story only (lane: ${lane})`);
     if (opts.card !== undefined) fail('--resume-from takes its card from the prior run; drop --card');
   }
-  // A repair run without its ticket has no spec, and a ticket on any other
+  // A ticketed run without its ticket has no spec, and a ticket on any other
   // lane is a typed intent the run would drop in silence.
-  if (lane === 'repair' && opts.ticket === undefined) {
-    fail('--lane repair requires --ticket <path>');
+  if (TICKETED_LANES.includes(lane) && opts.ticket === undefined) {
+    fail(`--lane ${lane} requires --ticket <path>`);
   }
-  if (lane !== 'repair' && opts.ticket !== undefined) {
-    fail(`--ticket applies to --lane repair only (lane: ${lane})`);
+  if (!TICKETED_LANES.includes(lane) && opts.ticket !== undefined) {
+    fail(`--ticket applies to --lane ${TICKETED_LANES.join(' and --lane ')} only (lane: ${lane})`);
   }
   // The escape rides the run payload, and the close-out stamps that escape
   // fixed when the repair merges. On any other lane nothing would read it.

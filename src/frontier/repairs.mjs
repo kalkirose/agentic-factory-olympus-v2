@@ -8,11 +8,18 @@
 import { resolve } from 'node:path';
 import { readEscapeSet } from '../telemetry/escapes.mjs';
 import { listRunEvents } from '../telemetry/readers.mjs';
+import { TICKETED_LANES } from '../lanes/records-stage.mjs';
 
-/** The escape seqs some repair run already carries, closed or still open. */
+/**
+ * The escape seqs some ticketed run already carries, closed or still open. The
+ * repair lane is where an escape is answered; the records lane is read beside
+ * it, because an escape somebody answered by hand on a record-only ticket is
+ * answered, and an owed set that read one lane would owe it again.
+ */
 export function repairedEscapes(paths) {
   const seqs = new Set();
-  for (const { events } of listRunEvents(paths, { lane: 'repair' })) {
+  for (const { lane, events } of listRunEvents(paths)) {
+    if (!TICKETED_LANES.includes(lane)) continue;
     const launch = events.find((e) => e.event === 'run-launched');
     if (Number.isInteger(launch?.escapeSeq)) seqs.add(launch.escapeSeq);
   }
