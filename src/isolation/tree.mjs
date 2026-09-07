@@ -49,7 +49,16 @@ export async function commitAll(tree, message) {
   const changed = await changedFiles(tree);
   if (changed.length > 0) {
     await git(['add', '-A'], { cwd: tree });
-    await git([...IDENTITY, 'commit', '-m', message], { cwd: tree });
+    // A change git reports and then stages nothing for: a seat rewrote a file
+    // with carriage returns and changed nothing else. `status` lists the path
+    // because the bytes moved; `add` normalises them back to the blob the
+    // index already holds. `commit` on an empty index exits non-zero. The
+    // commit is therefore asked for only when the index has something in it.
+    // The tree is put right either way, which is the point of that path.
+    const staged = await git(['diff', '--cached', '--name-only'], { cwd: tree });
+    if (staged.trim().length > 0) {
+      await git([...IDENTITY, 'commit', '-m', message], { cwd: tree });
+    }
     await takeIndexBytes(tree, changed);
   }
   return headSha(tree);
@@ -115,9 +124,9 @@ async function eolReport(tree, paths) {
  * the run judges bytes CI never sees (ADR-0076).
  *
  * A path whose index answer and working-tree answer differ is the whole of the
- * work. Git will not overwrite a file its own stat cache calls current, and
- * after `git add` that cache holds the seat's file. A plain checkout of the
- * path therefore returns and writes nothing. The file goes first, and the
+ * work. Git will not overwrite a file its own stat cache calls current. After
+ * `git add` that cache holds the seat's file, so a plain checkout of the path
+ * returns and writes nothing. The file goes first, and the
  * checkout writes the index bytes in its place. Nothing else in the tree is
  * touched, so a build cache keeps every file the commit agreed with.
  *
@@ -134,7 +143,12 @@ async function takeIndexBytes(tree, paths) {
     .filter((row) => row.worktree.length > 0 && row.worktree !== row.index)
     .map((row) => row.path);
   if (differing.length === 0) return;
-  for (const path of differing) rmSync(longPath(join(tree, path)), { force: true });
+  // The house form for a delete on Windows: the extended-length path, and the
+  // short retry ladder a virus scanner or an indexer holds a file against
+  // (`src/isolation/removal.mjs`).
+  for (const path of differing) {
+    rmSync(longPath(join(tree, path)), { force: true, maxRetries: 3, retryDelay: 50 });
+  }
   for (const batch of pathspecBatches(differing)) {
     await git(['checkout', '--', ...batch], { cwd: tree });
   }

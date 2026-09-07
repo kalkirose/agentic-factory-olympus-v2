@@ -62,7 +62,21 @@ test('a file a seat wrote with carriage returns leaves an LF tree', async (t) =>
   assert.deepEqual(await changedFiles(repo), []);
 });
 
-test('concludeMerge leaves the tree holding the bytes it committed', async (t) => {
+// A rewrite that moves the bytes and nothing else. `status` lists the path,
+// `add` normalises it back to the blob the index holds, and there is nothing
+// to commit. The tree is still put right, and no throw reaches the caller.
+test('a carriage-return rewrite alone commits nothing and still leaves an LF tree', async (t) => {
+  const repo = repoFixture(t);
+  const before = await headSha(repo);
+  writeFileSync(join(repo, 'src', 'a.mjs'), 'base src\r\n');
+  assert.deepEqual(await changedFiles(repo), ['src/a.mjs']);
+  assert.equal(await commitAll(repo, 'work'), before, 'a commit was made with nothing in it');
+  assert.equal(readFileSync(join(repo, 'src', 'a.mjs'), 'utf8'), 'base src\n');
+  assert.match(eolOf(repo, 'src/a.mjs'), /^i\/lf\s+w\/lf\b/);
+  assert.deepEqual(await changedFiles(repo), []);
+});
+
+test('concludeMerge leaves a tree that holds the bytes it committed', async (t) => {
   const repo = repoFixture(t);
   gitSync(['checkout', '-q', '-b', 'side'], repo);
   commitTree(repo, { 'src/a.mjs': 'side\n' }, 'side');
