@@ -325,19 +325,22 @@ export async function birthRecords(ctx, base) {
   if (recordEntries(base.recordPaths).length === 0) {
     return { stamp: await stampNothing(ctx, base) };
   }
+  // The neighbourhood the seat read, which the unit stamps report beside the
+  // answers. It is derived from the work's own touched paths, so a commit that
+  // resumes after a stop reports the same count as the dispatch would have.
+  const neighbours = birthNeighbours(base.worktree, base.spec.touchedPaths, base.recordPaths);
   if (step === 'commit') {
     const report = readJson(lastSeatReportEvent(runEvents(ctx), AUTHOR_SEAT)?.path);
     // The report is stamped before its checks run, so a stop between the two
     // leaves a report nothing judged. The checks run again over the tree the
     // seat left, and a report they refuse takes the dispatch route.
     if (report && (await birthChecks(base, report)).length === 0) {
-      return { stamp: await commitRecords(ctx, base, report, null) };
+      return { stamp: await commitRecords(ctx, base, report, null, neighbours) };
     }
   }
   // A seat that died mid-edit leaves whatever it had written, and the next
   // dispatch has to be the same dispatch as the first (ADR-0070).
   await resetHard(base.worktree, await headSha(base.worktree));
-  const neighbours = birthNeighbours(base.worktree, base.spec.touchedPaths, base.recordPaths);
   // What the last attempt of this dispatch left, so the retry brief carries the
   // harness's own enumeration of those files beside the defects.
   const written = [];

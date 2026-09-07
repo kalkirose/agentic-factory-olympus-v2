@@ -3174,6 +3174,7 @@ function devRole(base, brief = null) {
     `Implement the story spec at: ${base.specRef}`,
     'The frozen acceptance suite defines done. Do not edit or delete test files.',
     `Test paths (read-only): ${base.testPaths.join(', ')}`,
+    ...recordPathLines(base),
     ...gateCommandLines(base),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
@@ -3185,10 +3186,26 @@ function fixRole(base, brief = null) {
     `Fix the defect described by the intake ticket at: ${base.specRef}`,
     'The ticket is the spec. Stay inside its scope.',
     'Add a regression test when the defect class demands one.',
+    ...recordPathLines(base),
     ...gateCommandLines(base),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
   ].join('\n');
+}
+
+/**
+ * The record tree, as a seat that writes code is told about it: read-only, in
+ * every lane. A record is written by a record seat and by nothing else, and the
+ * capture takes a write to one back whatever the brief says, so the seat is
+ * told rather than left to discover it (ADR-0074).
+ */
+function recordPathLines(base) {
+  const entries = (base.recordPaths ?? []).filter((entry) => !entry.startsWith('!'));
+  if (entries.length === 0) return [];
+  return [
+    `Decision records (read-only): ${entries.join(', ')}. A record is written by a record ` +
+      'seat; the reconciliation stage owns every change to one.',
+  ];
 }
 
 /**

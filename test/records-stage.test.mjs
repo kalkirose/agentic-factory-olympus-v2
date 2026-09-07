@@ -544,6 +544,9 @@ test('the story dev seat is denied the record tree, and a write to one is taken 
   const dev = fx.calls.find((c) => c.seat === 'dev');
   assert.ok(dev.denyTools.includes('Edit(docs/adr/**)'), dev.denyTools.join(' '));
   assert.ok(dev.denyTools.includes('Edit(tests/**)'));
+  // The brief says it beside the test line, so the seat is told rather than
+  // left to discover the boundary at the capture.
+  assert.match(dev.prompt, /Decision records \(read-only\): docs\/adr\./);
   const recapture = events.find((e) => e.event === 'diff-policy-recapture');
   assert.equal(recapture.class, 'record');
   assert.equal(recapture.kind, 'capture-takeback');
