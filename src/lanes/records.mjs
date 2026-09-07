@@ -196,6 +196,7 @@ export function birthRole(base, spec, neighbours, brief) {
     'decides nothing the record tree does not already hold, write no file and say so in',
     '"unchanged" with the reason.',
     ...neighbourhoodLines(neighbours),
+    ...siblingLines(spec?.siblings),
     '',
     'Rules:',
     ...RECORD_RULES,
@@ -226,6 +227,7 @@ export function writeRole(base, judged, brief) {
     '',
     `Judged reason: ${judged.reason}`,
     ...neighbourhoodLines(judged.neighbours),
+    ...siblingLines(judged.siblings),
     '',
     'Rules:',
     ...RECORD_RULES,
@@ -266,6 +268,7 @@ export function correctiveRole(base, judged, { findings, divergences, brief }) {
     '',
     `Judged reason: ${judged.reason}`,
     ...neighbourhoodLines(judged.neighbours),
+    ...siblingLines(judged.siblings),
     ...(divergences.length > 0
       ? [
           '',
@@ -392,6 +395,26 @@ function neighbourhoodLines(neighbours) {
           `capped at ${NEIGHBOUR_CAP} by rank, and those are outside the cap.`,
         ]
       : []),
+  ];
+}
+
+/**
+ * The records that cite a record this write supersedes, by path.
+ *
+ * The harness computes them and the seat answers each one, so a supersession
+ * never leaves a record citing a decision that no longer stands. A record this
+ * run already writes is not in the list: it is answered as itself.
+ */
+function siblingLines(siblings) {
+  const list = siblings ?? [];
+  if (list.length === 0) return [];
+  return [
+    '',
+    'These active records cite a record you supersede. Read each one whole and answer it in',
+    '"siblings":',
+    ...list.map((path) => `- ${path}`),
+    '- "consistent" with the one-sentence reason it still stands, or "superseded" with the',
+    '  record that replaces it in this diff.',
   ];
 }
 

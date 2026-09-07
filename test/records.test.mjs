@@ -693,6 +693,16 @@ test('all three briefs carry the criteria, the unit duty, the neighbourhood and 
 
 test('the supersede rule stands in every brief the lifecycle binds', () => {
   const base = { worktree: '/tmp/run', defaultBranch: 'main', recordLifecycle: 'supersede' };
+  // The siblings the harness computed ride the brief by path, so the seat reads
+  // each one before it answers it.
+  const withSiblings = writeRole(
+    base,
+    { ...JUDGED, siblings: ['docs/adr/adr-004-cites.md'] },
+    null,
+  );
+  assert.ok(withSiblings.includes('These active records cite a record you supersede.'));
+  assert.ok(withSiblings.includes('- docs/adr/adr-004-cites.md'));
+  assert.ok(!writeRole(base, JUDGED, null).includes('These active records cite'));
   for (const [name, brief] of Object.entries(briefs(base))) {
     assert.ok(brief.includes('Lifecycle: this project supersedes its records.'), name);
     assert.ok(brief.includes('An accepted record is one that stands on main'), name);
