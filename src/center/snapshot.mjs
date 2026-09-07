@@ -456,6 +456,9 @@ function recordsView(allRuns, pinTs) {
     .map((r) => ({ ...r, ts: r.events[0]?.ts ?? '' }))
     .sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0))
     .slice(-RECORDS_WINDOW);
+  // The two readings a band also judges are the band's own function, over the
+  // window the band reads by default, so the tile and the breach cannot drift.
+  // The runs are handed over, so neither opens a ledger of its own.
   const cycles = recordCyclesReading(null, null, {
     runs,
     window: TRIPWIRE_METRICS['record-cycles'].defaultWindow,
@@ -468,7 +471,7 @@ function recordsView(allRuns, pinTs) {
   return {
     runs: runs.length,
     // The number that says the change works: a reconciliation green inside two
-    // cycles. The band beside it is the tripwire's.
+    // cycles.
     cycles: {
       mean: cycles.value,
       reconciliations: cycles.detail.reconciliations,
