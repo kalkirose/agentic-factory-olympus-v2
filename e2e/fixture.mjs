@@ -86,6 +86,10 @@ export const PROJECT_CONFIG = {
       // declaration reaches the reading in the ledger (ADR-0045).
       { name: 'smoke', command: 'smoke', needs: ['suite'], memoryCeilingMb: SMOKE_CEILING_MB },
     ],
+    // The layers a changed record path is attributed to, and no other. A
+    // record-only diff runs this one and skips the code suite, which is what
+    // the records lane proves end to end (ADR-0075).
+    recordLayers: ['lint'],
   },
   lanes: { story: { suiteCommand: 'suite', lintCommand: 'cardlint' } },
   conventions: ['One exported function per module.'],
