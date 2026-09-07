@@ -239,12 +239,21 @@ function laneFixture(t, { seats, files = {} } = {}) {
   const post = postFreeze({ afterVerdict: done });
   const repair = repairLane({ afterVerdict: done });
   const seam = async () => ({ next: 'done' });
+  // The reconcile stage is a seam here for the reason the verdict is: nothing in
+  // this file is about a reconciliation, and that stage has a suite of its own.
+  const records = recordsLane({ afterRecords: done });
   const lanes = {
     story: storyLane({
-      afterFreeze: { stages: post.stages, handlers: { ...post.handlers, verdict: seam } },
+      afterFreeze: {
+        stages: post.stages,
+        handlers: { ...post.handlers, verdict: seam, reconcile: seam },
+      },
     }),
-    repair: { stages: repair.stages, handlers: { ...repair.handlers, verdict: seam } },
-    records: recordsLane({ afterRecords: done }),
+    repair: {
+      stages: repair.stages,
+      handlers: { ...repair.handlers, verdict: seam, reconcile: seam },
+    },
+    records: { stages: records.stages, handlers: { ...records.handlers, reconcile: seam } },
   };
   let daemon = new Daemon(join(root, 'home'), { waitSleep: NO_WAIT, lanes });
   const fixture = seatFixture(seats);
@@ -422,8 +431,9 @@ test('the reconcile stage is named once, and the continuation own handler govern
   const ship = { stages: ['update', 'ship'], handlers: { update: () => {}, ship: () => {} } };
   const seamed = withReconcileStage(ship);
   assert.deepEqual(seamed.stages, ['reconcile', 'update', 'ship']);
-  // The seam hands the run to the stage the continuation opens with.
-  assert.deepEqual(await seamed.handlers.reconcile(), { next: 'update' });
+  // A continuation that names neither is composed one, and the handler is the
+  // stage's own.
+  assert.equal(typeof seamed.handlers.reconcile, 'function');
   // A continuation that carries the stage keeps its own place and its own
   // handler; the name is never doubled.
   const own = async () => ({ next: 'ship' });

@@ -46,7 +46,15 @@ export const TARGET_HOURS = 4;
 // recordsLane → shipStep). A run on an unknown lane falls back to its observed
 // stages.
 export const LANE_STAGES = {
-  story: [...PRE_FREEZE_STAGES, 'implementation', 'verdict', 'update', 'ship', 'close-out'],
+  story: [
+    ...PRE_FREEZE_STAGES,
+    'implementation',
+    'verdict',
+    'reconcile',
+    'update',
+    'ship',
+    'close-out',
+  ],
   repair: ['fix', 'verdict', 'reconcile', 'update', 'ship', 'close-out'],
   // The records lane: a record-only ticket is the whole work, so there is no
   // fix seat, no suite and no code verdict (ADR-0074).

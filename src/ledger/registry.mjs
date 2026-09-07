@@ -826,6 +826,10 @@ export const PARK_TYPES = new Set([
   // (ADR-0052).
   'card-decision',
   'provisioning-gate',
+  // A red pull-request check a records-lane run holds no seat for. That lane
+  // writes decision records and dispatches no dev seat, so a red on anything but
+  // a record layer is a code defect nobody in the run may repair (ADR-0075).
+  'ci-red',
   // Terminal-state discipline (ADR-0015): a recoverable failure parks with
   // `retry` / `abandon` instead of closing the run.
   'seat-failure', // a seat work product past its machine retry allowance
@@ -954,17 +958,28 @@ export function assertRecaptureClass(cls) {
  * ticket, or a records-lane run closes on the cap and the ticket names its
  * branch. It is the only way records with open findings leave a run.
  *
- * `record-findings` is retired. It said a rewrite may ship with confirmed
- * findings open, and under the record rule a confirmed finding blocks
- * (ADR-0007). It stays declared until its last reader is gone.
+ * `operator` is a person's answer at the write seat's failure park, and
+ * `work-product-defect` is a write that could not pass its own checks past its
+ * corrective attempt. Neither asks anybody twice: the code ships and the ticket
+ * carries the records.
  *
- * `record-layer-red` is retired the same way: a red record layer is now a red
- * render that a corrective round answers, and the whole-rewrite discard it
- * named no longer happens.
+ * `record-layer-red` is retired: a red record layer is now a red render that a
+ * corrective round answers, and the whole-rewrite discard it named no longer
+ * happens. It stays declared so an archived ledger still reads.
  */
 export const RECORD_CAP = 'record-cap';
-export const RECORD_FINDINGS = 'record-findings';
+export const OPERATOR = 'operator';
+export const WORK_PRODUCT_DEFECT = 'work-product-defect';
 export const RECORD_LAYER_RED = 'record-layer-red';
+
+/** The closed causes a `reconciliation-written` fallback carries. */
+export const RECONCILE_CAUSES = new Set([RECORD_CAP, OPERATOR, WORK_PRODUCT_DEFECT]);
+
+/** The cause, or a throw naming it. The only way one reaches a stamp. */
+export function assertReconcileCause(cause) {
+  if (!RECONCILE_CAUSES.has(cause)) throw new Error(`unknown reconcile cause: ${cause}`);
+  return cause;
+}
 
 /** The kind, or a throw naming it. The only way a kind reaches a stamp. */
 export function assertDefectKind(kind) {

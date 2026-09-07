@@ -28,6 +28,7 @@ import { parseTouchedPaths } from '../seats/diffpolicy.mjs';
 import { parseIntentCard } from './card.mjs';
 import { probeCredentials } from './probes.mjs';
 import { AUTHOR_SEAT, birthRole, reconcileWriteSchema, writeChecks } from './records.mjs';
+import { reconcileHandler } from './reconcile.mjs';
 import { birthNeighbours, citingRecords, readText, recordFiles, statusOf } from './units.mjs';
 import {
   ACTOR,
@@ -192,18 +193,18 @@ function lastSeq(events, name) {
 
 /**
  * The lane continuation with the reconcile stage named in it exactly once. The
- * stage's own handler lands with its module; where the continuation carries
- * one, that one governs and the seam here is never reached.
+ * ship step names the stage first and carries its handler, so every assembled
+ * lane already holds both; a continuation that names neither is composed one
+ * here, with the stage's own handler.
  */
 export function withReconcileStage(continuation) {
   const stages = continuation.stages.includes(RECONCILE_STAGE)
     ? [...continuation.stages]
     : [RECONCILE_STAGE, ...continuation.stages];
-  const next = stages.find((stage) => stage !== RECONCILE_STAGE);
   return {
     stages,
     handlers: {
-      [RECONCILE_STAGE]: async () => ({ next }),
+      [RECONCILE_STAGE]: reconcileHandler(),
       ...continuation.handlers,
     },
   };

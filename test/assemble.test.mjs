@@ -16,6 +16,7 @@ const STORY_STAGES = [
   ...PRE_FREEZE_STAGES,
   'implementation',
   'verdict',
+  'reconcile',
   'update',
   'ship',
   'close-out',
