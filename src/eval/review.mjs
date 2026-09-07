@@ -279,7 +279,7 @@ function roleBlock({ review, window, last, paths }) {
     'The command center derives eight measures of the record tree from these',
     'ledgers, and they are the names to cite for a record reading: record cycles',
     'per reconciliation; the writer miss rate, the review findings on units the',
-    'writer reported `holds`, joined by record and unit head; the late share,',
+    'writer reported `holds`, joined by record and unit id; the late share,',
     '`late` over `born` on `reconciliation-judged`; the moved-tree cost, the',
     're-judgments and re-runs of a `pre-verdict-update` whose tree moved; the',
     'recheck yield, the `reconcile-recheck` stamps that re-answered anything;',
