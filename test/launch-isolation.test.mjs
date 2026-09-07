@@ -301,6 +301,44 @@ test('a project that declares no line-ending rule does not launch', async (t) =>
   assert.deepEqual(existsSync(paths.worktrees) ? readdirSync(paths.worktrees) : [], []);
 });
 
+// Git applies the last `eol` a path matches. A rule a later line overrides is
+// no rule, and the door reads the file the way git reads it.
+test('a line-ending rule a later line overrides does not launch', async (t) => {
+  const lanes = {
+    solo: { stages: ['work'], handlers: { work: async () => ({ close: { state: 'shipped' } }) } },
+  };
+  const { origin, daemon } = fixture(t, { lanes, composeRunner: fakeComposeRunner() });
+  await daemon.start();
+  commitTree(origin, { '.gitattributes': '* text=auto eol=lf\n* eol=crlf\n' }, 'override the rule');
+  await assert.rejects(
+    () => daemon.launchRun({ project: 'alpha', lane: 'solo' }),
+    /declares no line-ending rule on main/,
+  );
+  // The same two lines the other way round is a project that declares the rule.
+  commitTree(origin, { '.gitattributes': '* eol=crlf\n* text=auto eol=lf\n' }, 'restore the rule');
+  const { runId } = await daemon.launchRun({ project: 'alpha', lane: 'solo' });
+  assert.match(runId, /^alpha-/);
+});
+
+// The door judges the project on two files of the default branch, and asks the
+// world for them once. A refusal with a fetch of its own would make every
+// launch pay twice for one read.
+test('the door reads the project config and the attributes in one clone pass', async (t) => {
+  const { daemon } = fixture(t, { lanes: {}, composeRunner: fakeComposeRunner() });
+  await daemon.start();
+  let passes = 0;
+  const withClone = daemon.isolation.withClone.bind(daemon.isolation);
+  daemon.isolation.withClone = (project, read) => {
+    passes += 1;
+    return withClone(project, read);
+  };
+  const entry = daemon.config.projects.alpha;
+  const door = await daemon.readDoorFiles('alpha', entry);
+  assert.equal(passes, 1, 'the door took more than one clone pass');
+  assert.equal(door['.gitattributes'].text, '* text=auto eol=lf\n');
+  assert.equal(JSON.parse(door[entry.projectConfigPath].text).version, 1);
+});
+
 // -- the run cache and the setup measurement ---------------------------------
 
 test('a run gets a cache directory git cannot see, and its commands are told where', async (t) => {

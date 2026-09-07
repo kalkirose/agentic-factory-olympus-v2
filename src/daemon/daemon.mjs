@@ -44,6 +44,7 @@ import {
   hasCommit,
   readBlobFromBranch,
   readBranchFile,
+  readBranchFiles,
 } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 import { parseProjectConfig } from '../config/project.mjs';
@@ -625,8 +626,11 @@ export class Daemon {
         await this.refuseForbiddenTicket(project, entry, payload.ticket);
         await this.refuseWrongLaneTicket(project, entry, lane, payload.ticket);
       }
-      await this.refuseUnnormalisedRepo(project, entry);
-      await this.refuseUnprovenCredentials(project, entry);
+      // The two files the door judges the project itself on, read together:
+      // one clone lock, one fetch, two blobs. The launch reads no file twice.
+      const door = await this.readDoorFiles(project, entry);
+      this.refuseUnnormalisedRepo(project, entry, door[GITATTRIBUTES]);
+      await this.refuseUnprovenCredentials(project, entry, door[entry.projectConfigPath]);
       const ws = await this.isolation.provision({
         runId,
         project,
@@ -785,8 +789,8 @@ export class Daemon {
    * provisioning, which reads the same blob next and refuses with the config
    * error itself.
    */
-  async refuseUnprovenCredentials(project, entry) {
-    const config = await this.readLaunchConfig(project, entry);
+  async refuseUnprovenCredentials(project, entry, configRead) {
+    const config = this.parseLaunchConfig(entry, configRead);
     if (!config || (config.credentials ?? []).length === 0) return;
     const directive = await probeCredentials(
       {
@@ -907,11 +911,11 @@ export class Daemon {
    * That line gives the pattern `*` the attribute `eol=lf`. An unreadable file
    * is a refusal too: a project with no attributes has no rule.
    *
-   * The refusal costs a read the door already pays for, and it leaves nothing
-   * behind (ADR-0067, ADR-0068).
+   * The read is `readDoorFiles`, which the credential gate below reads from
+   * as well. The refusal therefore costs no clone lock and no fetch of its
+   * own, and it leaves nothing behind (ADR-0067, ADR-0068).
    */
-  async refuseUnnormalisedRepo(project, entry) {
-    const read = await this.readFromDefaultBranch(project, entry, GITATTRIBUTES);
+  refuseUnnormalisedRepo(project, entry, read) {
     if (read.error === undefined && declaresLfRule(read.text)) return;
     const why =
       read.error === undefined
@@ -949,13 +953,27 @@ export class Daemon {
   }
 
   /**
-   * The project config as the default branch holds it, parsed as a launch
-   * parses it, or null when it does not parse: provisioning reads the same
-   * blob next and refuses the launch with the config error itself.
+   * The two files the door judges the project itself on, from the default
+   * branch: the project config and the attributes. One clone lock, one fetch,
+   * two blobs, keyed by path. Both refusals below read this answer, so neither
+   * asks the world a question the other already asked (ADR-0068).
    */
-  async readLaunchConfig(project, entry) {
-    const read = await this.readFromDefaultBranch(project, entry, entry.projectConfigPath);
-    if (read.error !== undefined) return null;
+  readDoorFiles(project, entry) {
+    return readBranchFiles(this.paths, project, {
+      branch: entry.defaultBranch,
+      files: [entry.projectConfigPath, GITATTRIBUTES],
+      repoUrl: entry.repoUrl,
+      withClone: (read) => this.isolation.withClone(project, read),
+    });
+  }
+
+  /**
+   * One config read, parsed as a launch parses it, or null when it does not
+   * parse: provisioning reads the same blob next and refuses the launch with
+   * the config error itself.
+   */
+  parseLaunchConfig(entry, read) {
+    if (read === undefined || read.error !== undefined) return null;
     try {
       return parseProjectConfig(read.text, `${entry.defaultBranch}:${entry.projectConfigPath}`, {
         launch: true,
@@ -963,6 +981,15 @@ export class Daemon {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * The project config as the default branch holds it. For a caller that has
+   * no read of its own in hand.
+   */
+  async readLaunchConfig(project, entry) {
+    const read = await this.readFromDefaultBranch(project, entry, entry.projectConfigPath);
+    return this.parseLaunchConfig(entry, read);
   }
 
   /**
@@ -2027,20 +2054,29 @@ export class Daemon {
 /**
  * True when a `.gitattributes` text gives every path an LF rule.
  *
- * The rule is one line whose pattern is `*` and whose attributes hold
- * `eol=lf`. Comments and blank lines are skipped. A pattern narrower than `*`
- * leaves the rest of the tree unruled, which is what the door refuses.
+ * The rule is a line whose pattern is `*` and whose attributes hold `eol=lf`.
+ * Comments and blank lines are skipped. A pattern narrower than `*` leaves the
+ * rest of the tree unruled, which is what the door refuses.
+ *
+ * Git applies the last `eol` a path matches, so the answer is the last one
+ * here and never the first. A file that says `* text=auto eol=lf` and then
+ * `* eol=crlf` gives every path CRLF. The door reads it that way.
  * @param {string} text
  * @returns {boolean}
  */
 function declaresLfRule(text) {
+  let ruling = null;
   for (const line of String(text).split('\n')) {
     const trimmed = line.trim();
     if (trimmed.length === 0 || trimmed.startsWith('#')) continue;
     const [pattern, ...attributes] = trimmed.split(/\s+/);
-    if (pattern === '*' && attributes.includes('eol=lf')) return true;
+    if (pattern !== '*') continue;
+    // The last `eol` on the line wins too, for the same reason.
+    for (const attribute of attributes) {
+      if (attribute.startsWith('eol=')) ruling = attribute;
+    }
   }
-  return false;
+  return ruling === 'eol=lf';
 }
 
 /**
