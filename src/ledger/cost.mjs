@@ -14,6 +14,13 @@
 // supersedes the snapshots, and an invocation with no terminal stamp
 // contributes its last snapshot. Every cost figure the harness shows is
 // derived here, so no two readers can disagree about what a run cost.
+//
+// An invocation is keyed by the seat identity the stamps carry, which is the
+// whole seat name with its slot suffix (ADR-0073). A stage that dispatches one
+// seat per record opens one invocation per slot, and each settles on its own
+// stamps; keyed by the base name instead, a second slot's spawn would settle
+// the first slot's snapshot while that seat still ran, and the run would pay
+// twice for one dispatch.
 import { SEAT_TERMINAL_EVENTS } from './registry.mjs';
 
 // Dollars, summed to the micro-dollar. The rounding removes binary-fraction
@@ -27,7 +34,8 @@ const SCALE = 1e6;
  */
 export function runCost(events) {
   let total = 0;
-  // seat id → the last snapshot of that seat's open invocation.
+  // seat identity, slot suffix and all → the last snapshot of its open
+  // invocation.
   const open = new Map();
   const settle = (seat) => {
     if (!open.has(seat)) return;

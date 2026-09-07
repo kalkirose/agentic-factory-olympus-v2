@@ -550,6 +550,39 @@ test('a fixture seat completes the contract loop end to end', async (t) => {
   assert.ok(!events.some((e) => e.event === 'seat-failure'));
 });
 
+// A stage that dispatches one seat per record gives each dispatch a slot. The
+// runner resolves the model and the tool policy from the seat, and every stamp
+// it leaves carries the whole identity, which is what the budget, the cost and
+// the failure record key on.
+test('a slotted seat runs on its seat policy and stamps its own identity', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'record-review-2');
+  const calls = [];
+  const result = await runSeat(store, {
+    sleep: NO_WAIT,
+    seat: 'record-review:2',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: (opts) => {
+      calls.push(opts);
+      return fixtureCommand({
+        report: { verdict: 'pass' },
+        reportPath,
+        lines: [{ meta: { model: DEFAULT_MODEL, sessionId: 's1' } }, { cost: 1, note: 'done' }],
+      });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.cost, 1);
+  assert.equal(calls[0].model, DEFAULT_MODEL);
+  assert.equal(calls[0].effort, 'xhigh');
+  assert.ok(calls[0].prompt.includes('You are the record-review:2 seat'));
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  assert.equal(events.find((e) => e.event === 'seat-spawned').seat, 'record-review:2');
+  assert.equal(events.find((e) => e.event === 'seat-report').seat, 'record-review:2');
+});
+
 // The machine names its secrets in instance config; the runner is what carries
 // them to the spawn, so the child of a session is where the strip is proven.
 test('a seat session spawns a child without the secrets the seat may not hold', async (t) => {
