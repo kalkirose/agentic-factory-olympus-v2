@@ -412,7 +412,7 @@ async function birthSiblings(base, report) {
  * status-line edit is a legal write that owes no units. The old list left it
  * out, so the reconcile stage read a set without it. `unreported` names the
  * paths the seat did not report, so a reader tells the two kinds apart
- * (ADR-0076).
+ * (ADR-0077).
  */
 async function commitRecords(ctx, base, report, cost, neighbours = null) {
   const reported = [...new Set(report.rewritten ?? [])];

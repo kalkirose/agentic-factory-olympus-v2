@@ -1,7 +1,7 @@
 # ADR-0075: Judge the records in a stage of their own
 
 Status: accepted (2026-09-07)
-Superseded in part by ADR-0076: the cycle anchors on the born record stamp,
+Superseded in part by ADR-0077: the cycle anchors on the born record stamp,
 and not on the write stamp alone. A judgment that owes nothing over a born
 set still buys the layers, the review seats and the render. The admission gate
 refuses a records-lane tree whose record certification is null.

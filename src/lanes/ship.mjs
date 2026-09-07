@@ -500,7 +500,7 @@ export function admitted(events, base) {
  * A null certification reads as a lane with nothing to certify. On every other
  * lane that is what it is. The records lane writes records and nothing else. A
  * null there says the stage rendered over none of them. The run is unjudged,
- * and the gate refuses it (ADR-0076).
+ * and the gate refuses it (ADR-0077).
  * @param {object[]} events the run's ledger, in order
  * @param {{mode?: string}} [base] the lane base
  */
@@ -562,7 +562,7 @@ async function preVerdictUpdate(ctx, base) {
   const certified = admitted(runEvents(ctx), base);
   // The records lane with no render at all. Every other uncertified tree goes
   // back to the stage that certifies it. This one would go back to a stage that
-  // already answered. It is the loud answer instead (ADR-0076).
+  // already answered. It is the loud answer instead (ADR-0077).
   if (unjudgedRecords(runEvents(ctx), base)) {
     return blocked(ctx, 'records-uncertified', UNJUDGED_RECORDS_QUESTION);
   }
@@ -833,7 +833,7 @@ function shipHandler({ forgeFor, pollMs }) {
  * The word a request's title opens with, by the lane the run holds. A card
  * names its own request, and a ticketed lane has only its lane to name it. The
  * records lane used to borrow the repair word. A reader of the default branch
- * could not tell a record change from a code fix (ADR-0076).
+ * could not tell a record change from a code fix (ADR-0077).
  */
 const LANE_TITLE_WORD = { records: 'records', repair: 'repair' };
 

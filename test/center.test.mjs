@@ -301,7 +301,7 @@ function seedRecordRun(paths) {
   writeRunLedger(paths, 'r-rec', [
     line(0, 'run-launched', { project: 'alpha', lane: 'story', storyKey: 's-rec' }),
     // The birth the judgment's born list names. `born` is every path the birth
-    // wrote, and `late` is the owed record it did not write (ADR-0076).
+    // wrote, and `late` is the owed record it did not write (ADR-0077).
     line(2, 'records-committed', { sha: 'a1', paths: ['docs/adr/a.md'], decided: true }),
     line(5, 'reconciliation-judged', {
       ok: true,
@@ -337,7 +337,7 @@ function seedRecordRun(paths) {
     line(80, 'layer-result', { cycle: 4, layer: 'adr-form', status: 'green', elapsedMs: 120_000 }),
     // The review's own answers over the same enumeration. The miss rate reads
     // the writer's holds against these. A hold no review answered says nothing
-    // about the writer (ADR-0076).
+    // about the writer (ADR-0077).
     line(84, 'record-units', {
       seat: 'record-review:1',
       cycle: 4,
@@ -483,7 +483,7 @@ test('a home with no record stamp reports the section empty, never zero', async 
 /**
  * A records-lane run whose birth wrote the records and whose judge owed
  * nothing. The born set took the cycle, so a review read it. The writer's
- * answers are then readable against that review (ADR-0076).
+ * answers are then readable against that review (ADR-0077).
  */
 function seedBornRun(paths) {
   let seq = 0;

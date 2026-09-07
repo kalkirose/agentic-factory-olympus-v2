@@ -620,7 +620,7 @@ const RECORD_LAYER_CONFIG = {
 test('a record-only ticket is judged to the end of the stage, and the render exists', async (t) => {
   // The whole diff of this run is the birth write, so the judge owes nothing.
   // The born record is still the run's record set, and it takes the cycle.
-  // That is the record layers, a review seat, and a render (ADR-0076).
+  // That is the record layers, a review seat, and a render (ADR-0077).
   const fx = laneFixture(t, {
     realReconcile: true,
     config: RECORD_LAYER_CONFIG,

@@ -732,4 +732,4 @@ never carries a project's specifics.
   writer's holds only where a review answered the same unit. An `owed: false`
   judgment carries its born and late lists, so the late share reads a
   records-lane run at all. A records-lane request is titled `records: <runId>`.
-  ADR-0076 is new and supersedes ADR-0075 in part.
+  ADR-0077 is new and supersedes ADR-0075 in part.

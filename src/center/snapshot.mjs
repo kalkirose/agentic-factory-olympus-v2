@@ -521,7 +521,7 @@ function recordsView(allRuns, pinTs) {
  * A unit no review ever answered is out of the denominator. The rate is the
  * share of the writer's `holds` a reader refuted. A hold nobody read reports
  * nothing about the writer. It would only make the rate look better
- * (ADR-0076).
+ * (ADR-0077).
  */
 function writerMissRate(runs) {
   let holds = 0;
@@ -545,7 +545,7 @@ function writerMissRate(runs) {
       const key = `${runId}|${e.file}|${e.unit}`;
       // The numerator takes the denominator's guard. A finding on a unit no
       // review stamp answered is outside the holds this rate reads. A count of
-      // it could put the share past one (ADR-0076).
+      // it could put the share past one (ADR-0077).
       if (answers.get(key) !== 'holds' || !read.has(key)) continue;
       missed += 1;
       records.add(e.file);
@@ -568,7 +568,7 @@ function reviewSeat(seat) {
  *
  * Every judgment carries the two lists, the ones that owe nothing included. A
  * records-lane run whose birth stated every decision reports a share of nought.
- * A reading that counted no such run reported nothing at all (ADR-0076).
+ * A reading that counted no such run reported nothing at all (ADR-0077).
  */
 function lateShare(runs) {
   let born = 0;

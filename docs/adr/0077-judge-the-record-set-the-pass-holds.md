@@ -1,4 +1,4 @@
-# ADR-0076: Judge the record set the pass holds, born or written
+# ADR-0077: Judge the record set the pass holds, born or written
 
 Status: accepted (2026-09-07)
 

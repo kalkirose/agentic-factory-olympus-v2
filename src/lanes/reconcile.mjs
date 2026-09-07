@@ -187,7 +187,7 @@ export function reconcileStep(events, { cap = DEFAULT_RECONCILE_ROUNDS } = {}) {
   const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written');
   // The write is owed for a judgment that names records and holds no write of
   // its own. Nothing else here asks what the judge owed. A pass that owes no
-  // write still owes the cycle over the set it holds (ADR-0076).
+  // write still owes the cycle over the set it holds (ADR-0077).
   if (judged.owed === true && (!written || written.seq < judged.seq)) return 'write';
   const anchor = cycleAnchor(events);
   if (!anchor) return 'done';
@@ -240,7 +240,7 @@ function cycleStepOf(events, anchor) {
  * of the lists the anchor holds. Those are the records it rewrote, the records
  * it left alone, and the paths a born stamp names. A record the round did not
  * change is still a record the pass touched. The review reads every one of them
- * on every cycle (ADR-0075, ADR-0076).
+ * on every cycle (ADR-0075, ADR-0077).
  */
 function reviewedRecords(anchor) {
   const entries = Array.isArray(anchor?.records) ? anchor.records.map((r) => r.record) : [];
@@ -257,7 +257,7 @@ function reviewedRecords(anchor) {
  * shipped with no layer, no review seat and no render.
  *
  * A born set is a record set the pass holds. It takes the cycle a written set
- * takes (ADR-0076).
+ * takes (ADR-0077).
  *
  * The born stamp takes the write stamp's shape, so every reader behind this
  * one reads one thing.
@@ -372,7 +372,7 @@ async function judgeStep(ctx, base) {
   // One definition of the two lists, on either answer. `born` is every record
   // this pass's own birth wrote. `late` is every owed record the birth did not
   // write. A judgment that owes nothing has no late record, and it still holds
-  // the born set (ADR-0074, ADR-0076).
+  // the born set (ADR-0074, ADR-0077).
   const born = recordsCommitted(runEvents(ctx))?.paths ?? [];
   if (!owed) {
     ctx.store.append('reconciliation-judged', {

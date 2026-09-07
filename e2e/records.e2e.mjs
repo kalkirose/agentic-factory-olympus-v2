@@ -80,7 +80,7 @@ ${RECORD}
 // The live shape of a records-lane judgment. The whole diff of the run is the
 // birth write. The judge leaves out a born record that still stands, so it owes
 // nothing. The born set is the run's record set all the same, and the stage
-// reads it (ADR-0076).
+// reads it (ADR-0077).
 const SCENARIO = {
   bornRecords: { [RECORD]: RECORD_TEXT },
   reconcileJudge: {
@@ -245,7 +245,7 @@ test('a record-only ticket ships through the records lane', async (t) => {
   assert.equal(review.named, 'record-review:1');
 
   // The request names the lane that opened it. The records lane used to
-  // borrow the repair word (ADR-0076).
+  // borrow the repair word (ADR-0077).
   const create = forgeCalls(fx).find((c) => c.handled === 'pr-create');
   assert.equal(create.argv[create.argv.indexOf('--title') + 1], `records: ${runId}`);
 

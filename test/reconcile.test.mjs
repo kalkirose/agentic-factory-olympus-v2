@@ -574,7 +574,7 @@ test('the stage derives every one of its steps from its own stamps', () => {
 test('a born record set anchors the cycle where the pass wrote nothing', () => {
   // The judge leaves out a born record that still stands. A pass whose whole
   // diff is the birth write is therefore judged "nothing owed". The born stamp
-  // is that pass's record set, and it takes the cycle (ADR-0076).
+  // is that pass's record set, and it takes the cycle (ADR-0077).
   const clean = { event: 'reconciliation-judged', ok: true, owed: false, born: [ADR], late: [] };
   assert.equal(reconcileStep(ledger(clean)), 'done');
   // A birth that decided nothing is no record set either.
@@ -722,7 +722,7 @@ test('no born record and nothing owed: no cycle, and the run is handed on', asyn
 test('a born record takes the cycle, and spends no writer', async (t) => {
   // The pass wrote its records before the stage, so the judge owes nothing.
   // No writer runs. The record set is the birth's, and the cycle reads it. That
-  // is the layers, one review seat per record, and a render (ADR-0076).
+  // is the layers, one review seat per record, and a render (ADR-0077).
   const fx = stageFixture(t, {
     seed: seedHandler((ctx, { sha }) => {
       ctx.store.append('records-committed', { actor: 'daemon', sha, paths: [ADR], decided: true });
