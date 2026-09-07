@@ -2,8 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   SEATS,
+  seatBase,
   seatDef,
   seatExecutesSuite,
+  seatSlot,
   DEFAULT_MODEL,
   CERTIFICATION_MODEL,
   FALLBACK_MODEL,
@@ -61,6 +63,71 @@ test('web tools and Explore subagents go to the named seats only', () => {
 
 test('an unknown seat is an error, never a default', () => {
   assert.throws(() => seatDef('minos'), /unknown seat/);
+});
+
+// The seat list is closed, so every name it holds is named here as a literal.
+// A seat that enters or leaves the harness is a design decision, and this list
+// is where a build has to state it.
+test('the seat list is exactly these names', () => {
+  assert.deepEqual(Object.keys(SEATS), [
+    'spec-birth',
+    'spec-gate',
+    'record-author',
+    'suite',
+    'adversary',
+    'dev',
+    'repair-dev',
+    'verdict-triage',
+    'fury-spec',
+    'fury-code-shape',
+    'fury-operational',
+    'fury-interface',
+    'fury-verifier',
+    'generalist-review',
+    'card-sweep',
+    'reconcile-judge',
+    'reconcile-write',
+    'record-review',
+    'learning',
+    'eval',
+  ]);
+});
+
+// Birth and correction must not share a budget, and a record review is not a
+// code review, so each takes a seat name of its own. The policy is copied from
+// the seat each one stands beside, and this pins the copy.
+test('the two record seats take the policy of the seats they stand beside', () => {
+  assert.deepEqual(SEATS['record-author'], SEATS['reconcile-write']);
+  assert.deepEqual(SEATS['record-review'], SEATS['generalist-review']);
+  assert.equal(seatDef('record-author').model, DEFAULT_MODEL);
+  assert.equal(seatDef('record-author').effort, DEFAULT_EFFORT);
+  assert.equal(seatDef('record-review').model, DEFAULT_MODEL);
+  assert.equal(seatDef('record-review').effort, DEFAULT_EFFORT);
+});
+
+// A stage that dispatches one seat per record gives each dispatch a slot, and
+// the slotted name is the seat identity everywhere the ledger keys on a seat.
+// The map itself is keyed by the base name: the model and the tool policy are
+// the seat's, not the slot's.
+test('a slotted seat name resolves to its seat, and its slot reads as a number', () => {
+  assert.equal(seatBase('record-review:3'), 'record-review');
+  assert.equal(seatBase('record-review'), 'record-review');
+  assert.equal(seatSlot('record-review:3'), 3);
+  assert.equal(seatSlot('record-review:12'), 12);
+  assert.equal(seatSlot('record-review'), null);
+  assert.equal(seatDef('record-review:3'), SEATS['record-review']);
+  assert.equal(seatDef('reconcile-write:2'), SEATS['reconcile-write']);
+  assert.equal(seatExecutesSuite('dev:2'), true);
+  assert.equal(seatExecutesSuite('record-author:2'), false);
+});
+
+test('a slot that is not a number, and a slotted unknown seat, are both errors', () => {
+  assert.throws(() => seatDef('record-review:'), /unknown seat/);
+  assert.throws(() => seatDef('record-review:0'), /unknown seat/);
+  assert.throws(() => seatDef('record-review:x'), /unknown seat/);
+  assert.throws(() => seatDef('record-review:1:2'), /unknown seat/);
+  assert.throws(() => seatDef('minos:1'), /unknown seat/);
+  assert.equal(seatSlot('record-review:x'), null);
 });
 
 // The machine's secrets follow this flag and nothing else, so the seats that
