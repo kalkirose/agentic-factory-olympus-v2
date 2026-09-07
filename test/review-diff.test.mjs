@@ -13,6 +13,10 @@
 // the excerpt is a configured length and not a cut, the lockfile is kept out of
 // the patch and named beside it instead, and the read cap is the only thing
 // that can leave work nowhere.
+//
+// Beside them sits the round that takes no diff at all: the record review, one
+// seat per record, and the code lenses that hold no record any more
+// (ADR-0073).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
