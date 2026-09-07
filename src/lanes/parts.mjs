@@ -38,13 +38,68 @@
 // is the two environment variables, the merge, and the shapes a kept part and
 // a carried part hold.
 //
+// One class of path is attributed by the project and not by a declaration. A
+// record of a decision is read by the record layers the project names in
+// `gates.recordLayers` and by no other layer, whatever any ground says. So a
+// record path leaves the diff of every other layer exactly as a groundless
+// path does, and the shared breadth list never carries one to a layer at all.
+// The rule is one derivation here (`recordAttribution`) and three readers: the
+// mapping below, the layer selection in spectrum.mjs, and the ship fast path.
+//
 // Nothing here knows what a workspace is, what a suite is, or what any
 // project calls its trees. A layer's ground has two sources and this module
 // owns the one derivation both readers use: the command states it part by part
 // in the marker protocol (exec.mjs), and the project states it on the layer
 // entry of its own config. Both are written in the same path vocabulary as
 // every other path list — a plain prefix or a glob.
-import { groundEntries, underEntry } from '../config/project.mjs';
+import { groundEntries, groundEntry, underEntry } from '../config/project.mjs';
+
+/**
+ * Whether one repo-relative path is a record of this tree, from
+ * `repo.recordPaths`. Null for a project that names none, so every reader
+ * below keeps the behaviour it had before the key existed.
+ *
+ * An entry that begins `!` is an exclusion: a path is a record when an
+ * inclusion holds it and no exclusion does. That is how a project keeps one
+ * file of its record tree — a template — outside the rule.
+ *
+ * @param {string[]} [recordPaths]
+ * @returns {((file: string) => boolean)|null}
+ */
+export function recordMatch(recordPaths = []) {
+  const include = [];
+  const exclude = [];
+  for (const entry of recordPaths) {
+    if (typeof entry !== 'string') continue;
+    const excluded = entry.startsWith('!');
+    const norm = groundEntry(excluded ? entry.slice(1) : entry);
+    if (norm === null) continue;
+    (excluded ? exclude : include).push(norm);
+  }
+  if (include.length === 0) return null;
+  return (file) =>
+    include.some((entry) => underEntry(file, entry)) &&
+    !exclude.some((entry) => underEntry(file, entry));
+}
+
+/**
+ * How this project attributes a record path, or null where it states no such
+ * rule. `isRecord` is the matcher above; `layers` is the closed set of Tier-1
+ * layers a record path may reach.
+ *
+ * Both halves must be stated for the rule to exist. A project that names no
+ * record layer has not said which layer reads its records, and a project that
+ * names no record path has not said what a record is; either way the layer
+ * question is answered exactly as it was before this existed.
+ *
+ * @param {{recordPaths?: string[], recordLayers?: string[]}} [declaration]
+ * @returns {{isRecord: (file: string) => boolean, layers: Set<string>}|null}
+ */
+export function recordAttribution({ recordPaths = [], recordLayers = [] } = {}) {
+  if (recordLayers.length === 0) return null;
+  const isRecord = recordMatch(recordPaths);
+  return isRecord === null ? null : { isRecord, layers: new Set(recordLayers) };
+}
 
 /**
  * One layer's whole ground: every path entry that could change what the layer
@@ -80,22 +135,38 @@ import { groundEntries, underEntry } from '../config/project.mjs';
  * the run's own tree and a story may not narrow its own inputs; a config
  * ground is produced in no tree at all (ADR-0056).
  *
+ * The breadth list never carries a record. It is the one list that belongs to
+ * every layer whatever that layer declared, so a record entry inside it would
+ * give every suite in the project ground over the record tree and undo the
+ * attribution above in one line of config. A breadth entry that lies under a
+ * record path is dropped from both sets; every other entry joins as it always
+ * did, and a project that declares no record path loses nothing.
+ *
  * @param {{ground?: string[]}} layer the project's Tier-1 layer entry
  * @param {{parts?: Array<{inputs?: string[]}>}} record the layer's standing
  *   `layer-result`
  * @param {string[]} [breadth] `gates.breadthGround`
+ * @param {string[]} [recordPaths] `repo.recordPaths`
  * @returns {{entries: string[], floor: string[],
  *   sources: {declared: boolean, config: boolean}}}
  */
-export function layerGround(layer, record, breadth = []) {
+export function layerGround(layer, record, breadth = [], recordPaths = []) {
   const config = groundEntries(layer?.ground ?? []);
   const stated = groundEntries((record?.parts ?? []).flatMap((part) => part.inputs ?? []));
-  const floor = config.length > 0 ? groundEntries([...config, ...breadth]) : [];
+  const wide = recordFreeBreadth(breadth, recordPaths);
+  const floor = config.length > 0 ? groundEntries([...config, ...wide]) : [];
   return {
-    entries: groundEntries([...config, ...stated, ...breadth]),
+    entries: groundEntries([...config, ...stated, ...wide]),
     floor,
     sources: { declared: stated.length > 0, config: config.length > 0 },
   };
+}
+
+/** The breadth entries that name no record of this tree. */
+function recordFreeBreadth(breadth, recordPaths) {
+  const isRecord = recordMatch(recordPaths);
+  if (isRecord === null) return breadth;
+  return breadth.filter((entry) => typeof entry !== 'string' || !isRecord(entry));
 }
 
 /**
@@ -211,13 +282,22 @@ const BLIND_PATHS_NAMED = 3;
  * falls through to the next true clause, until what is left is the floor this
  * layer costs whatever anybody declares.
  *
+ * A record path is groundless for every layer outside `recordLayers`. The
+ * project states which layers read its records, so a record path that reached
+ * another layer's parts would be attributed against that statement, and a
+ * record path no part of that layer claims would blind the layer and re-run
+ * every part of it. Inside a record layer the path is attributed like any
+ * other, so a record its parts do not claim still re-runs the whole layer.
+ *
  * @param {{parts?: Array<{name: string, status?: string, inputs?: string[]}>}} prior
  *   the layer's standing `layer-result`
  * @param {string[]} changed repo-relative paths that moved since it was earned
- * @param {{groundless?: string[], layer?: object, breadth?: string[]}} [options]
+ * @param {{groundless?: string[], layer?: object, breadth?: string[],
+ *   recordPaths?: string[], recordLayers?: string[]}} [options]
  *   `groundless` is the ground the project states no suite of it reads
  *   (ADR-0059); `layer` is the project's Tier-1 entry, which carries the
- *   config half of this layer's ground; `breadth` is `gates.breadthGround`
+ *   config half of this layer's ground; `breadth` is `gates.breadthGround`;
+ *   `recordPaths` and `recordLayers` are the record attribution above
  * @returns {{reasons: Map<string, string>, blindPaths: string[],
  *   groundFrom: Map<string, string>}} two Maps and not objects, because a part
  *   name is whatever a command printed after `::olympus part`. A part called
@@ -225,18 +305,30 @@ const BLIND_PATHS_NAMED = 3;
  *   part called `__proto__` silently keeps none at all, which would carry a
  *   part that has to run.
  */
-export function partReasons(prior, changed, { groundless = [], layer, breadth = [] } = {}) {
+export function partReasons(
+  prior,
+  changed,
+  { groundless = [], layer, breadth = [], recordPaths = [], recordLayers = [] } = {},
+) {
   const parts = prior?.parts ?? [];
   // With no part table there is no mapping, so there is nothing to be blind
   // against: every path is unattributed and naming three of them would report
   // a hole that is not there. The absent parts answer for themselves, in
   // `withPartReasons`, where the names are known.
   if (parts.length === 0) return { reasons: new Map(), blindPaths: [], groundFrom: new Map() };
-  const ground = layerGround(layer, prior, breadth);
+  const ground = layerGround(layer, prior, breadth, recordPaths);
+  // A record path outside this layer's attribution is groundless here, for the
+  // same reason and by the same filter: the project says this layer does not
+  // read it, so it must neither blind the cycle nor reach a part.
+  const records = recordAttribution({ recordPaths, recordLayers });
+  const foreign =
+    records !== null && !records.layers.has(layer?.name) ? records.isRecord : () => false;
   // The groundless list leaves the diff first, before anything is attributed:
   // a path the project swears no suite reads must neither blind the cycle nor
   // reach a part (ADR-0059).
-  const moved = changed.filter((file) => !groundless.some((entry) => underEntry(file, entry)));
+  const moved = changed.filter(
+    (file) => !foreign(file) && !groundless.some((entry) => underEntry(file, entry)),
+  );
   // Each part's effective ground, derived once. A part that declared its own
   // inputs keeps them; a part that declared none takes the layer's.
   const groundOf = new Map(parts.map((part) => [part.name, partGround(part, ground)]));
@@ -279,7 +371,8 @@ export function partReasons(prior, changed, { groundless = [], layer, breadth = 
  *   `layer-result`, from the cycles before this one
  * @param {string[]} changed repo-relative paths that moved between the sha
  *   `prior` was earned at and the sha this cycle judges
- * @param {{groundless?: string[], layer?: object, breadth?: string[]}} [options]
+ * @param {{groundless?: string[], layer?: object, breadth?: string[],
+ *   recordPaths?: string[], recordLayers?: string[]}} [options]
  *   as `partReasons`
  * @returns {{reasons: Map<string, string>, blindPaths: string[],
  *   groundFrom: Map<string, string>,
