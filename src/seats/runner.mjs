@@ -88,7 +88,7 @@ const RETRYABLE = new Set(['exit', 'silence']);
  * Runs one seat session end to end.
  * @param {import('../telemetry/stores.mjs').TelemetryStore} store
  * @param {{seat: string, roleBlock: string, reportPath: string, schema: object,
- *   constitution?: string|null,
+ *   constitution?: string|null, styleFiles?: string[]|null,
  *   substitute?: {model: string, reason: string},
  *   semaphores?: import('./semaphore.mjs').ModelSemaphores,
  *   cwd?: string, env?: object, secretEnv?: string[], costCeiling?: number,
@@ -109,6 +109,7 @@ export async function runSeat(store, opts) {
     reportPath,
     schema,
     constitution,
+    styleFiles,
     substitute,
     semaphores,
     cwd,
@@ -202,7 +203,15 @@ export async function runSeat(store, opts) {
   }
   let release = semaphores ? await semaphores.acquire(model, { store, seat }) : () => {};
   try {
-    let prompt = assembleSeatPrompt({ seat, def, reportPath, schema, roleBlock, constitution });
+    let prompt = assembleSeatPrompt({
+      seat,
+      def,
+      reportPath,
+      schema,
+      roleBlock,
+      constitution,
+      styleFiles,
+    });
     let resume;
     // One dispatch: build the argv for the model in force and supervise the
     // child. `seat-spawned` carries the model actually spawned, so a degraded

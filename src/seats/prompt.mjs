@@ -7,9 +7,12 @@
 //
 // A third block sits between them when the project ships a constitution: the
 // policy text as its own delimited block, plus the authority order for the
-// seats that judge. The seat sets below are closed like the seat map. A
-// project with no constitution file gets no third block, and its prompts are
-// byte for byte what they were.
+// seats that judge, and beside it the style files the project binds its written
+// work to. The seat sets below are closed like the seat map, and they are read
+// by the seat's base name, so a slotted dispatch takes what its seat takes. A
+// project with no constitution file and no style files gets no third block, and
+// its prompts are byte for byte what they were.
+import { seatBase } from './seatmap.mjs';
 
 // A seat is a headless session: it ends when the model stops, and the machine
 // kills every child command the seat left behind. A seat that starts a long
@@ -30,6 +33,10 @@ export const ONE_TURN_RULE = [
  * text only dilutes that brief. The card sweep is out because it edits intent
  * cards rather than the tree. The eval seat is instance-scoped and holds no
  * worktree to read a constitution from.
+ *
+ * The four record seats are in. The constitution is where a project writes the
+ * standard its decision records are held to, so a seat that writes a record or
+ * judges one reads it, and a writer that did not read it wrote to nothing.
  */
 export const CONSTITUTION_SEATS = new Set([
   'spec-birth',
@@ -44,11 +51,18 @@ export const CONSTITUTION_SEATS = new Set([
   'fury-interface',
   'fury-verifier',
   'generalist-review',
+  'record-author',
+  'record-review',
+  'reconcile-judge',
+  'reconcile-write',
 ]);
 
 /**
  * The judging seats. Each one weighs the tree against a document, so each one
- * needs to know which document wins when two of them disagree.
+ * needs to know which document wins when two of them disagree. The record judge
+ * is one: it weighs the run's diff against the record tree and reports what the
+ * tree owes. The record review is not, because it judges a record against the
+ * code and against its criteria, and neither is an authority over the other.
  */
 export const AUTHORITY_SEATS = new Set([
   'spec-gate',
@@ -59,6 +73,7 @@ export const AUTHORITY_SEATS = new Set([
   'fury-verifier',
   'generalist-review',
   'verdict-triage',
+  'reconcile-judge',
 ]);
 
 const CONSTITUTION_HEAD =
@@ -85,19 +100,50 @@ export const VERIFIER_AUTHORITY = [
  */
 function constitutionBlock(seat, constitution) {
   if (typeof constitution !== 'string' || constitution.trim().length === 0) return null;
-  if (!CONSTITUTION_SEATS.has(seat)) return null;
+  const base = seatBase(seat);
+  if (!CONSTITUTION_SEATS.has(base)) return null;
   const lines = [CONSTITUTION_HEAD, CONSTITUTION_OPEN, constitution.trim(), CONSTITUTION_CLOSE];
-  if (AUTHORITY_SEATS.has(seat)) lines.push(AUTHORITY_ORDER);
-  if (seat === 'fury-verifier') lines.push(VERIFIER_AUTHORITY);
+  if (AUTHORITY_SEATS.has(base)) lines.push(AUTHORITY_ORDER);
+  if (base === 'fury-verifier') lines.push(VERIFIER_AUTHORITY);
   return lines.join('\n');
+}
+
+const STYLE_HEAD = 'Binding style rules. Read each file in your worktree before you write:';
+
+/**
+ * The style block, or null where the project names no style file and where the
+ * seat takes no policy text.
+ *
+ * A project that binds its written work to a rule set versions the rules in its
+ * own repository, and the seat is told the path rather than the rules: a copy
+ * of a rule set inside a prompt is a second rule set the day the first one
+ * changes. The block sits with the constitution because a style file is policy
+ * of the same kind, and it reaches the same seats.
+ */
+function styleBlock(seat, styleFiles) {
+  if (!Array.isArray(styleFiles)) return null;
+  const paths = styleFiles.filter((p) => typeof p === 'string' && p.trim().length > 0);
+  if (paths.length === 0 || !CONSTITUTION_SEATS.has(seatBase(seat))) return null;
+  return [
+    STYLE_HEAD,
+    ...paths.map((path) => `The rules in ${path.trim()} bind every sentence you write.`),
+  ].join('\n');
 }
 
 /**
  * @param {{seat: string, def: {web: boolean, explore: number},
  *   reportPath: string, schema: object, roleBlock: string,
- *   constitution?: string|null}} opts
+ *   constitution?: string|null, styleFiles?: string[]|null}} opts
  */
-export function assembleSeatPrompt({ seat, def, reportPath, schema, roleBlock, constitution = null }) {
+export function assembleSeatPrompt({
+  seat,
+  def,
+  reportPath,
+  schema,
+  roleBlock,
+  constitution = null,
+  styleFiles = null,
+}) {
   if (typeof roleBlock !== 'string' || roleBlock.length === 0) {
     throw new Error('a seat prompt requires a role block');
   }
@@ -121,8 +167,8 @@ export function assembleSeatPrompt({ seat, def, reportPath, schema, roleBlock, c
     JSON.stringify(schema, null, 2),
     'The written report is your completion signal. Keep every free-text field extremely concise.',
   ].join('\n');
-  const policy = constitutionBlock(seat, constitution);
-  return policy ? `${core}\n\n${policy}\n\n${roleBlock}` : `${core}\n\n${roleBlock}`;
+  const blocks = [core, constitutionBlock(seat, constitution), styleBlock(seat, styleFiles), roleBlock];
+  return blocks.filter((block) => block !== null).join('\n\n');
 }
 
 /**
