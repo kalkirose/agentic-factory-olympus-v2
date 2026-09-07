@@ -112,12 +112,13 @@ import { askProbe } from './probes.mjs';
 import { configuredGroups } from './schedule.mjs';
 import { PARTS_ENV, partPlan, carryTally, confirmationTally } from './parts.mjs';
 import { substrateGate } from './substrate.mjs';
-import { furyRound, generalistReview, recordScope } from './review.mjs';
+import { furyRound, generalistReview, recordFields } from './review.mjs';
 import { panelLenses } from './lenses.mjs';
 import {
   WRITE_SEAT,
   correctiveRole,
   reconcileWriteSchema,
+  recordScope,
   writeChecks,
 } from './records.mjs';
 import { freezeAnchor } from './resume.mjs';
@@ -200,8 +201,10 @@ const TRIAGE_CLASSES = ['code-defect', 'suite-defect', 'env', 'harness'];
 async function repairCap(base, events) {
   const impl = lastImplementation(events);
   if (!impl?.baseSha || !impl?.sha) return REPAIR_CAP;
-  const files = await changedInRange(base.worktree, impl.baseSha, impl.sha).catch(() => null);
-  if (files === null || !recordScope(base, { diffFiles: files }).only) return REPAIR_CAP;
+  const scope = await recordScope(base.worktree, impl.baseSha, impl.sha, base.recordPaths, {
+    lifecycle: base.recordLifecycle,
+  }).catch(() => null);
+  if (scope === null || !scope.only) return REPAIR_CAP;
   return base.config?.gates?.reconcileRounds ?? DEFAULT_RECONCILE_ROUNDS;
 }
 
@@ -3676,8 +3679,11 @@ function findingFromEvent(e) {
     // The record word and the criterion travel with the finding, because the
     // ladder reads them: they select the seat that repairs a record, and they
     // are what the corrective brief and the residual ticket state (ADR-0007).
+    // The unit and the second place travel with them, because a record finding
+    // is about one sentence and both briefs state it (ADR-0073).
     ...(e.record && { record: true }),
     ...(e.criterion && { criterion: e.criterion }),
+    ...recordFields(e),
     summary: e.summary,
     evidence: e.evidence,
     ...(e.confirmed !== undefined && { confirmed: e.confirmed }),

@@ -1,24 +1,23 @@
 // The judgment review machinery: the Fury round (the panel's lenses over the
 // seats that carry them, interface conditional on UI diffs, fully parallel),
 // the generalist review seat (the same lenses on one seat, diff-scoped —
-// repair cycles and the repair lane), and the verifier. Confirm-to-block: a
-// lane finding never blocks alone; the verifier confirms or refutes each item
-// against the code, and only confirmed items enter the verdict.
+// repair cycles and the repair lane), the record review (one seat per record),
+// and the verifier. Confirm-to-block: a lane finding never blocks alone; the
+// verifier confirms or refutes each item against the code, and only confirmed
+// items enter the verdict.
 //
 // The verifier's item list is severity OR record. A sub-HIGH finding on code
 // never blocks and is never verified: it lands in the run ledger as advisory
 // material. A finding on a decision record is verified at every grade and is
 // never advisory: a record states how the product works, so a sentence of it
-// that the tree contradicts is a defect and not a remark (ADR-0007). Which
-// findings those are is the diff's answer, not the seat's: a review of a
-// record-only diff raises record findings and nothing else, and a mixed diff
-// answers per finding from the path the seat named (ADR-0026).
+// that the tree contradicts is a defect and not a remark (ADR-0007).
 //
-// A record in the diff is judged whole. The seat is given the path of every
-// record the change moved and reads each file from the working tree, and a
-// finding may cite any sentence of it. The diff says what moved; it is not the
-// boundary of the review, and the verifier is given the same scope. Only the
-// code lenses keep "do not widen into unchanged code" (ADR-0026).
+// A record is judged by a round of its own. One seat reads one record, whole,
+// with the units the harness enumerated, the neighbourhood, the criteria and no
+// diff; a finding names the unit it is about. A brief that ends with a diff
+// anchors the seat on the hunks and leaves the rest of the document sampled,
+// which is the defect this round removes. So the code lenses keep the diff and
+// the "judge the diff only" line, and they hold no record (ADR-0073).
 //
 // The panel is the project's `review.lenses`, resolved at the lane base; the
 // seat a lens rides and the default set live in the lens registry (ADR-0038).
@@ -31,7 +30,9 @@
 // for a Tier-1 layer of its own run to be run again and read the output, where
 // a finding turns on what the code does under this host's credentials. The
 // lane seats never reach it — they judge a diff (ADR-0042).
+import { join } from 'node:path';
 import { runReportPath } from '../daemon/home.mjs';
+import { recordPathIncludes } from '../config/project.mjs';
 import {
   LENS_CRITERIA,
   RECORD_CRITERION_KEYS,
@@ -39,6 +40,16 @@ import {
   furyPanel,
   recordCriteriaLines,
 } from './lenses.mjs';
+import { REVIEW_SEAT, UNITS_BIN, unitChecks } from './records.mjs';
+import {
+  NEIGHBOUR_CAP,
+  UNIT_KINDS,
+  UNIT_VERDICTS,
+  isActiveRecord,
+  readText,
+  recordNeighbours,
+  recordUnits,
+} from './units.mjs';
 import { authorizedSupersedes, supersedeLines } from './supersede.mjs';
 import {
   PROBE_REQUEST_PROPERTY,
@@ -54,57 +65,23 @@ import {
   boughtRetry,
   failureBrief,
   seatFail,
+  seatWithChecks,
   underAny,
   briefLines,
   gist,
 } from './shared.mjs';
 
-/**
- * The scope a review's findings are judged in: whether every one of them is
- * about a decision record, and the paths that decide it for the rest.
- *
- * Three rules answer it, in order, and the first two need no config.
- *
- * A reconciliation cycle judges a record commit whose own containment check
- * refused any other file, so every finding of that review is a record finding
- * whatever any path list says. Its files are the diff's own for the same
- * reason: the brief names each record the seat must read whole, and a path list
- * that missed the tree would name none of them. A review whose diff touches at
- * least one file and no file outside the project's record paths is the same
- * case reached from the diff, which is what covers the repair lane's
- * reconciliation run. A mixed diff is answered per finding, from the path the
- * seat named (ADR-0026).
- *
- * @param {{recordPaths?: string[]}} base the lane base
- * @param {{diffFiles?: string[]|null, reconcile?: boolean}} [opts]
- * @returns {{only: boolean, paths: string[], files: string[]}}
- */
-export function recordScope(base, { diffFiles = null, reconcile = false } = {}) {
-  const paths = base?.recordPaths ?? [];
-  const files = Array.isArray(diffFiles) ? diffFiles : [];
-  if (reconcile) return { only: true, paths, files };
-  const records = files.filter((f) => underAny(f, paths));
-  const only = files.length > 0 && records.length === files.length;
-  return { only, paths, files: records };
-}
-
-/** A review with no record scope: every finding takes the severity ladder. */
-export const NO_RECORDS = Object.freeze({ only: false, paths: [], files: [] });
+/** What a finding may be graded, on every review seat. */
+const SEVERITIES = Object.freeze(['HIGH', 'MED', 'LOW']);
 
 /**
- * The report shape one review seat answers in.
+ * The report shape one code review seat answers in.
  *
- * A record-only review carries the record lens and no code lens, and it
- * requires the two fields the rule downstream reads: the file, because a
- * finding about no file is about no record, and the criterion, because the
- * verifier refutes a finding whose evidence does not reach the one it cites.
- * A mixed review carries the panel's lenses plus the record lens, and both
- * fields stay optional there. The brief asks for them on a record file, and a
- * finding that leaves the path out is graded as it always was.
+ * No record enters it. A record is judged by the record round, which has its
+ * own seat, its own brief and its own schema, so a code lens carries the
+ * panel's lenses and nothing else (ADR-0073).
  */
-export function reviewSchema(lenses, records = NO_RECORDS) {
-  const carries = records.only || records.files.length > 0;
-  const names = records.only ? [RECORD_LENS] : carries ? [...lenses, RECORD_LENS] : [...lenses];
+export function reviewSchema(lenses) {
   return {
     type: 'object',
     additionalProperties: false,
@@ -115,22 +92,97 @@ export function reviewSchema(lenses, records = NO_RECORDS) {
           type: 'object',
           additionalProperties: false,
           properties: {
-            lens: { type: 'string', enum: names },
-            severity: { type: 'string', enum: ['HIGH', 'MED', 'LOW'] },
+            lens: { type: 'string', enum: [...lenses] },
+            severity: { type: 'string', enum: [...SEVERITIES] },
             file: { type: 'string' },
             finding: { type: 'string' },
             evidence: { type: 'string' },
             approach: { type: 'boolean' },
-            ...(carries && { criterion: { type: 'string', enum: [...RECORD_CRITERION_KEYS] } }),
           },
-          required: records.only
-            ? ['lens', 'severity', 'file', 'finding', 'evidence', 'criterion']
-            : ['lens', 'severity', 'finding', 'evidence'],
+          required: ['lens', 'severity', 'finding', 'evidence'],
         },
       },
       summary: { type: 'string' },
     },
     required: ['findings', 'summary'],
+  };
+}
+
+/**
+ * The report shape one record review seat answers in: the findings it raised,
+ * and one entry per unit of the record it read.
+ *
+ * It is a schema of its own rather than a subset of the code one. The flat
+ * schema holds one `required` list per item and no conditional, so a `unit`
+ * required on a record finding could not be optional on a code finding beside
+ * it, and a record finding that names no unit is a finding about no sentence
+ * (ADR-0073).
+ *
+ * The second place is optional in the shape and owed on a `consistent`
+ * finding, which the deterministic check states because the shape cannot.
+ */
+export function recordReviewSchema() {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      findings: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            // The seat's own label, so the unit checks and the brief can name
+            // one finding. The ledger id is the harness's, assigned at the
+            // stamp, because ids are unique across a run and not across a seat.
+            id: { type: 'string' },
+            criterion: { type: 'string', enum: [...RECORD_CRITERION_KEYS] },
+            severity: { type: 'string', enum: [...SEVERITIES] },
+            file: { type: 'string' },
+            unit: { type: 'string' },
+            head: { type: 'string' },
+            line: { type: 'integer' },
+            summary: { type: 'string' },
+            evidence: { type: 'string' },
+            // The second place: the unit of the other record a `consistent`
+            // finding says this one contradicts.
+            file2: { type: 'string' },
+            unit2: { type: 'string' },
+            head2: { type: 'string' },
+          },
+          required: [
+            'id',
+            'criterion',
+            'severity',
+            'file',
+            'unit',
+            'head',
+            'line',
+            'summary',
+            'evidence',
+          ],
+        },
+      },
+      // One entry per unit of the record, in the shape every record seat
+      // answers in: the harness enumerates the file and counts the answers.
+      units: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            record: { type: 'string' },
+            id: { type: 'string' },
+            kind: { type: 'string', enum: [...UNIT_KINDS] },
+            verdict: { type: 'string', enum: [...UNIT_VERDICTS] },
+            evidence: { type: 'string' },
+          },
+          required: ['record', 'id', 'kind', 'verdict', 'evidence'],
+        },
+      },
+      summary: { type: 'string' },
+    },
+    required: ['findings', 'units', 'summary'],
   };
 }
 
@@ -169,30 +221,27 @@ export const VERIFIER_SCHEMA = {
  * seats run in parallel. HIGHs and record findings go to the verifier; findings
  * stamp once per cycle. Returns the confirmed findings.
  *
- * A pass whose whole diff is decision records is judged by the record lens and
- * by no code lens, and the record lens rides one seat (ADR-0038). So that round
- * is the generalist seat: the panel would spawn several seats to read a
- * markdown tree through criteria none of them carries.
+ * The panel is the code panel. A record path leaves its file list, because a
+ * record is judged in the record round and nowhere else, and a code lens that
+ * read one would report on a document through criteria it does not carry
+ * (ADR-0073).
  */
 export async function furyRound(ctx, base, { cycle, diff, diffFiles }) {
-  const records = recordScope(base, { diffFiles });
-  if (records.only) {
-    return generalistReview(ctx, base, { cycle, diff, priorConfirmed: [], diffFiles });
-  }
+  const codeFiles = codeOnly(base, diffFiles);
   const panel = furyPanel(base.lenses);
   const supersedes = authorizedSupersedes(runEvents(ctx));
   const seats = Object.keys(panel).filter(
     (seat) =>
       seat !== 'fury-interface' ||
-      (base.uiPaths.length > 0 && diffFiles.some((f) => underAny(f, base.uiPaths))),
+      (base.uiPaths.length > 0 && codeFiles.some((f) => underAny(f, base.uiPaths))),
   );
   const outcomes = await Promise.all(
     seats.map((seat) =>
       reviewSeat(ctx, {
         seat,
         label: `${seat}-c${cycle}`,
-        schema: reviewSchema(panel[seat], records),
-        roleBlock: furyRole(panel[seat], base, diff, supersedes, records),
+        schema: reviewSchema(panel[seat]),
+        roleBlock: furyRole(panel[seat], base, diff, supersedes),
         cwd: base.worktree,
         env: base.env,
         constitution: base.constitution,
@@ -209,30 +258,30 @@ export async function furyRound(ctx, base, { cycle, diff, diffFiles }) {
     collected,
     priorConfirmed: [],
     diffTruncated: diff.truncated === true,
-    records,
   });
+}
+
+/** The files of a diff a code lens is answerable for: the record paths leave. */
+function codeOnly(base, diffFiles) {
+  const files = Array.isArray(diffFiles) ? diffFiles : [];
+  const paths = base?.recordPaths ?? [];
+  if (paths.length === 0) return files;
+  return files.filter((file) => !recordPathIncludes(file, paths));
 }
 
 /**
  * The generalist review seat: the panel's whole lens set over one diff. Used on
- * repair cycles (story lane), on the reconciliation cycle, and as the only
- * judgment seat of the repair lane. The verifier fires only when the round has
- * something for it: a HIGH, a record finding, or a prior confirmed finding
- * needing a resolution-check. So a clean small fix costs one review agent.
- *
- * `reconcile` says the diff is a record commit whatever its paths look like.
+ * repair cycles (story lane) and as the only judgment seat of the repair lane.
+ * The verifier fires only when the round has something for it: a HIGH, a record
+ * finding, or a prior confirmed finding needing a resolution-check. So a clean
+ * small fix costs one review agent.
  */
-export async function generalistReview(
-  ctx,
-  base,
-  { cycle, diff, priorConfirmed, diffFiles = null, reconcile = false },
-) {
-  const records = recordScope(base, { diffFiles, reconcile });
+export async function generalistReview(ctx, base, { cycle, diff, priorConfirmed }) {
   const outcome = await reviewSeat(ctx, {
     seat: 'generalist-review',
     label: `generalist-review-c${cycle}`,
-    schema: reviewSchema(base.lenses, records),
-    roleBlock: generalistRole(base, diff, authorizedSupersedes(runEvents(ctx)), records),
+    schema: reviewSchema(base.lenses),
+    roleBlock: generalistRole(base, diff, authorizedSupersedes(runEvents(ctx))),
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
@@ -244,8 +293,230 @@ export async function generalistReview(
     collected,
     priorConfirmed,
     diffTruncated: diff.truncated === true,
-    records,
   });
+}
+
+/**
+ * The record review: one seat per record file, all of them in parallel.
+ *
+ * Review seats only read, so parallel is safe, and one record per seat is what
+ * makes the unit duty answerable: the seat holds one document, the harness's
+ * own enumeration of it, and the neighbourhood it may not contradict. Each seat
+ * runs under the unit checks, so a report that leaves a unit unanswered, names
+ * a unit the file does not hold, or files a claim as rationale buys the seat
+ * its one corrective attempt and never reaches the verifier (ADR-0073).
+ *
+ * `units`, `neighbours` and `moved` are keyed by record path. The stage holds
+ * them: it enumerated each record to judge the write, and it matched the units
+ * across that write. Where it passes none, the round reads the record from the
+ * worktree, which is the same enumeration from the same file.
+ * @param {{records: string[], units?: Map|object, neighbours?: Map|object,
+ *   moved?: Map|object, spec?: object|string|null, cycle: number,
+ *   priorConfirmed?: object[]}} opts
+ */
+export async function recordReviewRound(
+  ctx,
+  base,
+  {
+    records,
+    units = null,
+    neighbours = null,
+    moved = null,
+    spec = null,
+    cycle,
+    priorConfirmed = [],
+  },
+) {
+  const list = records ?? [];
+  const outcomes = await Promise.all(
+    list.map((record, i) =>
+      recordReviewSeat(ctx, base, {
+        record,
+        slot: i + 1,
+        cycle,
+        units: unitsOf(base, units, record),
+        neighbours: neighboursOf(base, neighbours, record),
+        moved: byRecord(moved, record) ?? [],
+        spec,
+      }),
+    ),
+  );
+  const failed = outcomes.find((o) => o.fail);
+  if (failed) return { fail: failed.fail };
+  const collected = [];
+  for (const outcome of outcomes) {
+    stampRecordUnits(ctx, cycle, outcome);
+    collected.push(
+      ...outcome.report.findings.map((f) => ({
+        ...f,
+        source: outcome.seat,
+        lens: RECORD_LENS,
+        record: true,
+      })),
+    );
+  }
+  return settleFindings(ctx, base, { cycle, collected, priorConfirmed });
+}
+
+/** One record, one seat, one check loop. The slot keeps the seat's own budget. */
+async function recordReviewSeat(
+  ctx,
+  base,
+  { record, slot, cycle, units, neighbours, moved, spec },
+) {
+  const seat = `${REVIEW_SEAT}:${slot}`;
+  const outcome = await seatWithChecks(ctx, {
+    seat,
+    label: `${REVIEW_SEAT}-${slot}-c${cycle}`,
+    schema: recordReviewSchema(),
+    cwd: base.worktree,
+    env: base.env,
+    constitution: base.constitution,
+    styleFiles: base.styleFiles ?? [],
+    buildRole: (brief) => recordReviewRole(base, { record, units, neighbours, moved, spec }, brief),
+    checks: (report) => recordSeatDefects(base, record, report),
+  });
+  if (outcome.fail) return { fail: outcome.fail };
+  return { seat, record, units, neighbours, report: outcome.report, cost: outcome.cost };
+}
+
+/**
+ * What one record review report is refused for: the eight unit rules, and the
+ * two refusals a record finding carries with it.
+ *
+ * The findings are brought to the repository's own path form first, because
+ * rules 7 and 8 join a finding to a unit by the file and the id, and a seat
+ * writes the path it was reading.
+ */
+function recordSeatDefects(base, record, report) {
+  const findings = (report.findings ?? []).map((f) => ({
+    ...f,
+    file: repoRelative(f.file, base.worktree) ?? record,
+    ...(f.file2 && { file2: repoRelative(f.file2, base.worktree) ?? f.file2 }),
+  }));
+  return [
+    ...unitChecks(base, [record], report, { seat: 'review', findings }),
+    ...findingRefusals(base, findings).map((r) => r.defect),
+  ];
+}
+
+/**
+ * The findings a review seat may not raise, with the reason it reads.
+ *
+ * A `consistent` finding says two records decide one unbuilt part two ways, so
+ * a `consistent` finding that names one record states half a claim and the
+ * verifier has nothing to read. A closed record is out of every seat's scope
+ * under the supersede lifecycle: it states what was known then, and a finding
+ * against today's tree is a finding against a document nobody may edit
+ * (ADR-0073).
+ *
+ * Both are work-product defects and not findings. They are returned to the seat
+ * through its check loop, and `settleFindings` drops them before the verifier
+ * for the seats that have no such loop.
+ * @returns {Array<{finding: object, defect: string}>}
+ */
+function findingRefusals(base, findings) {
+  const refusals = [];
+  for (const finding of findings) {
+    const id = finding.id ?? finding.unit ?? recordPathOf(finding) ?? 'a finding';
+    if (finding.criterion === 'consistent' && !secondRecordOf(finding)) {
+      refusals.push({
+        finding,
+        defect:
+          `finding ${id} cites "consistent" and names one record. That criterion is about two ` +
+          'records: name the second record in "file2", with the unit it decides otherwise in ' +
+          '"unit2" and that unit\'s head in "head2".',
+      });
+      continue;
+    }
+    const closed = [recordPathOf(finding), secondRecordOf(finding)].find((path) =>
+      closedRecord(base, path),
+    );
+    if (closed === undefined) continue;
+    refusals.push({
+      finding,
+      defect:
+        `finding ${id} is about ${closed}, whose status line reads superseded or retired. A ` +
+        'closed record states what was known then and is out of this review. Raise the finding ' +
+        'against the active record that replaced it, or leave it.',
+    });
+  }
+  return refusals;
+}
+
+/** Whether a path is a record this lifecycle has closed. */
+function closedRecord(base, path) {
+  if (typeof path !== 'string' || path.length === 0) return false;
+  if (lifecycleOf(base) !== 'supersede') return false;
+  const text = readText(join(base.worktree ?? '', path));
+  return text !== null && !isActiveRecord(text);
+}
+
+/** How this project changes an accepted record. The base carries it; config is the fallback. */
+function lifecycleOf(base) {
+  return base?.recordLifecycle ?? base?.config?.repo?.recordLifecycle ?? null;
+}
+
+/**
+ * What one record review seat answered, unit by unit, with what it cost.
+ *
+ * The per-unit list is the fact the writer's miss rate joins on: a review that
+ * fails a unit the writer reported `holds` is the one reading that catches a
+ * seat which answered without reading. The cost is the dispatch's own, because
+ * the ledger's per-seat total cannot say which slot spent it (ADR-0073).
+ *
+ * One stamp per seat per cycle. A restart that re-runs the round finds its own
+ * stamp and leaves it, as the finding stamp does.
+ */
+function stampRecordUnits(ctx, cycle, { seat, record, report, neighbours, cost }) {
+  const stamped = runEvents(ctx).some(
+    (e) => e.event === 'record-units' && e.seat === seat && e.cycle === cycle,
+  );
+  if (stamped) return;
+  const units = (report.units ?? []).map((u) => ({
+    id: u.id,
+    kind: u.kind,
+    verdict: u.verdict,
+    ...(u.evidence !== undefined && { evidence: u.evidence }),
+  }));
+  ctx.store.append('record-units', {
+    actor: ACTOR,
+    seat,
+    ...(cycle !== undefined && { cycle }),
+    record,
+    units,
+    counts: {
+      claims: units.filter((u) => u.kind === 'claim').length,
+      holds: units.filter((u) => u.verdict === 'holds').length,
+      fails: units.filter((u) => u.verdict === 'fails').length,
+      notBuilt: units.filter((u) => u.verdict === 'not-built').length,
+    },
+    neighbours: neighbours.neighbours.length,
+    neighboursDropped: neighbours.dropped,
+    ...(cost !== undefined && { cost }),
+  });
+}
+
+/** The units of one record: the stage's enumeration, or the file's own. */
+function unitsOf(base, units, record) {
+  const given = byRecord(units, record);
+  if (Array.isArray(given)) return given;
+  const text = readText(join(base.worktree ?? '', record));
+  return text === null ? [] : recordUnits(text);
+}
+
+/** The neighbourhood of one record: the stage's, or the tree's own. */
+function neighboursOf(base, neighbours, record) {
+  const given = byRecord(neighbours, record);
+  if (given) return { neighbours: given.neighbours ?? [], dropped: given.dropped ?? 0 };
+  return recordNeighbours(base.worktree, record, base.recordPaths ?? []);
+}
+
+/** One record's entry of a per-record map, however the caller keyed it. */
+function byRecord(value, record) {
+  if (value instanceof Map) return value.get(record) ?? null;
+  if (value && typeof value === 'object') return value[record] ?? null;
+  return null;
 }
 
 /**
@@ -260,23 +531,35 @@ export async function generalistReview(
  * claim: it is put to that seat at every grade, a confirmed one blocks, and a
  * refuted one carries the verifier's evidence under its own id and no advisory
  * word (ADR-0007).
+ *
+ * A finding a record seat may not raise is refused before the verifier runs and
+ * is stamped nowhere. It is a defect in the work product, not a claim about the
+ * tree, and the verifier seat is the run's most expensive reader (ADR-0073).
+ * The record round returns those refusals to the seat through its check loop;
+ * every other round drops them and reports them to its caller.
  */
 async function settleFindings(
   ctx,
   base,
-  { cycle, collected, priorConfirmed, diffTruncated = false, records = NO_RECORDS },
+  { cycle, collected, priorConfirmed, diffTruncated = false },
 ) {
   const allowlist = base.allowlistPaths ?? [];
+  const recordPaths = base.recordPaths ?? [];
   const marked = collected.map((f) => {
-    const place = findingPlace(f.file, allowlist, base.worktree);
+    const place = findingPlace(f, allowlist, base.worktree);
     return {
       ...f,
       place,
-      record: records.only || (place.file !== undefined && underAny(place.file, records.paths)),
+      record:
+        f.record === true ||
+        (place.file !== undefined && recordPathIncludes(place.file, recordPaths)),
     };
   });
-  const verifiable = marked.filter((f) => f.severity === 'HIGH' || f.record);
-  const advisory = marked.filter((f) => !(f.severity === 'HIGH' || f.record));
+  const refusals = findingRefusals(base, marked);
+  const refused = new Set(refusals.map((r) => r.finding));
+  const judged = marked.filter((f) => !refused.has(f));
+  const verifiable = judged.filter((f) => f.severity === 'HIGH' || f.record);
+  const advisory = judged.filter((f) => !(f.severity === 'HIGH' || f.record));
   const items = [
     ...verifiable.map((f, i) => ({ id: `new-${i + 1}`, mode: 'confirm', finding: f })),
     ...priorConfirmed.map((f) => ({ id: f.id, mode: 'resolution-check', finding: f })),
@@ -306,12 +589,21 @@ async function settleFindings(
         ...(e.file && { file: e.file }),
         ...(e.record && { record: true }),
         ...(e.criterion && { criterion: e.criterion }),
+        // The place a record finding names, both sides of it. A corrective
+        // brief states the unit and the verifier's item line quotes its head,
+        // so a finding rebuilt from the ledger without them names a file and
+        // no sentence.
+        ...recordFields(e),
         ...(e.approach && { approach: true }),
       }));
     const resolved = priorConfirmed
       .filter((f) => results.get(f.id)?.verdict === 'resolved')
       .map((f) => f.id);
-    return { confirmed, resolved };
+    return {
+      confirmed,
+      resolved,
+      ...(refusals.length > 0 && { refused: refusals.map((r) => r.defect) }),
+    };
   }
   let nextId = 1 + events.filter((e) => e.event === 'finding').length;
   const confirmed = [];
@@ -359,13 +651,41 @@ async function settleFindings(
   const resolved = priorConfirmed
     .filter((f) => results.get(f.id)?.verdict === 'resolved')
     .map((f) => f.id);
-  return { confirmed, resolved };
+  return {
+    confirmed,
+    resolved,
+    ...(refusals.length > 0 && { refused: refusals.map((r) => r.defect) }),
+  };
+}
+
+/**
+ * The unit a finding is about, and the second place a `consistent` one names.
+ *
+ * One definition, three readers: the place assigned at the stamp, the stamp
+ * itself, and the ladder's rebuild of a finding from the ledger. A finding
+ * rebuilt without them names a file and no sentence, and the corrective brief
+ * and the verifier's item line both state the sentence (ADR-0073).
+ */
+export function recordFields(f) {
+  return {
+    ...(f.unit && { unit: f.unit }),
+    ...(f.head && { head: f.head }),
+    ...(typeof f.line === 'number' && Number.isFinite(f.line) && { line: f.line }),
+    ...(f.file2 && { file2: f.file2 }),
+    ...(f.unit2 && { unit2: f.unit2 }),
+    ...(f.head2 && { head2: f.head2 }),
+  };
 }
 
 /**
  * Where a finding sits, as far as the ledger is concerned: the file the lens
- * named, and whether that file is one of the project's cross-cutting gate
- * allowlists.
+ * named, whether that file is one of the project's cross-cutting gate
+ * allowlists, the unit of the record it is about, and the second record a
+ * `consistent` finding weighs it against.
+ *
+ * The unit rides the place because a record finding is about one sentence, and
+ * the id alone does not survive a rewrite: the head and the line beside it are
+ * what match the finding to a unit after a write moved the numbers (ADR-0073).
  *
  * The allowlist word is assigned here and never read back out of the seat's
  * sentence, for the reason every closed vocabulary in the ledger is: a fact
@@ -382,12 +702,15 @@ async function settleFindings(
  * silently answers no, and a silent no is exactly what this field exists to
  * stop.
  */
-function findingPlace(file, allowlist, worktree) {
-  const path = repoRelative(file, worktree);
-  if (path === null) return {};
+function findingPlace(finding, allowlist, worktree) {
+  const path = repoRelative(finding.file, worktree);
+  const second = repoRelative(finding.file2, worktree);
   return {
-    file: path,
-    ...(underAny(path, allowlist) && { allowlist: true }),
+    ...(path !== null && {
+      file: path,
+      ...(underAny(path, allowlist) && { allowlist: true }),
+    }),
+    ...recordFields({ ...finding, file2: second }),
   };
 }
 
@@ -418,12 +741,18 @@ function stampReviewFinding(ctx, cycle, finding, { advisory, diffTruncated = fal
     ...(finding.file && { file: finding.file }),
     ...(finding.allowlist && { allowlist: true }),
     // The record word and the criterion it fails, assigned here against the
-    // project's declared record paths and the diff's own shape, and never read
-    // back out of the sentence the seat wrote. Every reader of the ledger counts
-    // these fields: the ladder, the two tripwires, the lens-yield metric and the
-    // close's own scan (ADR-0010).
+    // project's declared record paths and the seat that raised it, and never
+    // read back out of the sentence the seat wrote. Every reader of the ledger
+    // counts these fields: the ladder, the two tripwires, the lens-yield metric
+    // and the close's own scan (ADR-0010).
     ...(finding.record && { record: true }),
     ...(finding.criterion && { criterion: finding.criterion }),
+    // The unit the finding is about, and the second place a `consistent`
+    // finding weighs it against. The writer's miss rate joins the review's
+    // findings to the writer's answers on the record and the unit id, so a
+    // finding stamped without them is a finding no reading can count
+    // (ADR-0073).
+    ...recordFields(finding),
     ...(advisory ? { advisory: true } : {}),
     ...(finding.confirmed !== undefined && { confirmed: finding.confirmed }),
     ...(finding.approach && { approach: true }),
@@ -530,13 +859,12 @@ function verifierCoverageDefects(items, results) {
 
 // -- role blocks -------------------------------------------------------------
 
-function furyRole(lenses, base, diff, supersedes = [], records = NO_RECORDS) {
+function furyRole(lenses, base, diff, supersedes = []) {
   return [
     `Review the candidate implementation diff through these lenses, and label every finding with its lens:`,
     ...lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
-    ...recordLensLines(records),
     `The spec: ${base.specRef}`,
-    judgeScopeLine(records),
+    JUDGE_SCOPE,
     'Severity HIGH means the finding must block the ship. Cite evidence (file and line, or spec section) for every finding.',
     'Set "approach": true only when the finding names the implementation structure as wrong against the spec.',
     'Put the repo-relative path of the one file a finding is about in "file"; leave it out for a finding about no single file.',
@@ -545,14 +873,12 @@ function furyRole(lenses, base, diff, supersedes = [], records = NO_RECORDS) {
   ].join('\n');
 }
 
-function generalistRole(base, diff, supersedes = [], records = NO_RECORDS) {
-  if (records.only) return recordRole(base, diff, records);
+function generalistRole(base, diff, supersedes = []) {
   return [
     'Review the diff below through these lenses, and label every finding with its lens:',
     ...base.lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
-    ...recordLensLines(records),
     `The spec: ${base.specRef}`,
-    judgeScopeLine(records),
+    JUDGE_SCOPE,
     'Severity HIGH means the finding must block the ship. Cite evidence (file and line, or spec section) for every finding.',
     'Set "approach": true only when the finding names the implementation structure as wrong against the spec.',
     'Put the repo-relative path of the one file a finding is about in "file"; leave it out for a finding about no single file.',
@@ -562,103 +888,158 @@ function generalistRole(base, diff, supersedes = [], records = NO_RECORDS) {
 }
 
 /**
- * The record lens on a mixed diff: the criteria, the record files the diff
- * holds, the duty to read each of them whole, and the two fields a finding
- * about one of them carries.
- *
- * The files are named because the path decides the route here, and because the
- * file is the unit of the review. A finding about a record file that carries no
- * path is graded on severity like any other finding, and the seat is the only
- * reader that knows which file it meant.
+ * The line every code lens takes about its scope. The diff is the work, and a
+ * seat that reviews the repository around it reports on decisions nobody made
+ * this time. It takes no qualification any more: a record is not in this diff's
+ * file list and is judged by a seat of its own (ADR-0073).
  */
-function recordLensLines(records) {
-  if (records.only || records.files.length === 0) return [];
-  return [
-    `- ${RECORD_LENS}: the decision records this diff changes, against these criteria:`,
-    ...recordCriteriaLines().map((line) => `  ${line}`),
-    ...wholeRecordLines(records.files),
-    `A finding about one of those files carries "lens": "${RECORD_LENS}", its "file", and the ` +
-      '"criterion" it fails.',
-  ];
-}
+const JUDGE_SCOPE = 'Judge the diff only. Do not fix anything; do not widen into unchanged code.';
 
 /**
- * The scope of a record review: the records by path, and the duty to read each
- * of them whole.
+ * The whole brief of one record review seat: one record, the units the harness
+ * counted in it, the criteria, the neighbourhood, and no diff.
  *
- * A record is a set of claims about the code, and it is judged as a document.
- * A seat handed the changed hunks alone reads the hunks, opens the code they
- * name, and reports what it finds there; a stale claim three paragraphs above
- * the change is invisible to it until a later round happens to move that
- * paragraph. One live reconciliation spent four review cycles that way, each
- * one raising four or five confirmed findings on the layer the round before it
- * had just touched, and the pass ended on the round cap rather than on a clean
- * record. So the diff says what moved and the file is what is judged.
+ * No diff, on the evidence of a live reconciliation: a seat whose brief ends
+ * with the diff starts at the hunks, re-checks what the verifier already
+ * checked, and samples the rest of the document. The record is the work here,
+ * and the unit list is what makes "every sentence" a countable duty rather than
+ * a word in a brief (ADR-0073).
  *
- * The paths are named where the caller knows them. A reconciliation cycle whose
- * diff read failed knows none, and the duty is stated against the diff instead:
- * a brief that named no file and asked for none would leave the seat with the
- * hunks again.
+ * The moved units are named because they are the sentences this round wrote,
+ * and a seat that knows which sentence moved reads the rest as well: the line
+ * says what moved, and the unit list says what is owed.
  */
-function wholeRecordLines(files) {
-  const named = files.length > 0;
+function recordReviewRole(base, { record, units, neighbours, moved, spec }, brief) {
   return [
-    ...(named ? ['The decision records this change moved:', ...files.map((f) => `- ${f}`)] : []),
-    named
-      ? 'Read every one of those files whole, from the working tree, before you write a finding.'
-      : 'Read every decision record in the diff whole, from the working tree, before you write a finding.',
-    'Judge every claim in each record, changed in this diff or not. The diff below shows what this',
-    'change moved. It is context, and it is not the boundary of the review: a finding may cite any',
-    'sentence of the record.',
-  ];
-}
-
-/**
- * The line every code lens takes about its scope, and the qualification a
- * record file in the same diff earns.
- *
- * "Do not widen into unchanged code" is right for a code lens: the diff is the
- * work, and a seat that reviews the repository around it reports on decisions
- * nobody made this time. It is wrong for a record. So the sentence stays and
- * says which files it is about (ADR-0026).
- */
-function judgeScopeLine(records) {
-  const line = 'Judge the diff only. Do not fix anything; do not widen into unchanged code.';
-  if (records.only || records.files.length === 0) return line;
-  return (
-    `${line} That rule is about the code files: a decision record in this diff is read whole, ` +
-    'from the working tree, and judged whole.'
-  );
-}
-
-/**
- * The whole brief of a record-only review: the six criteria, the records to
- * read whole, and nothing from the code lenses.
- *
- * A code lens reading a markdown document raises findings about failure paths
- * and input trust, and after the record rule those findings block a ship. A
- * seat that is not asked to read a record that way does not report it, which is
- * the whole answer to that noise (ADR-0038).
- */
-function recordRole(base, diff, records = NO_RECORDS) {
-  return [
-    'Every file in the diff below is a decision record. Review the records against these',
-    'criteria, and label every finding with the criterion it fails:',
+    `Review one decision record: ${record}`,
+    'Read it whole, from the working tree. Read the code it describes before you write a finding.',
+    'You are given no diff. The record is the work, and every unit of it is yours.',
+    ...recordSpecLines(base, spec),
+    '',
+    'The criteria this record is held to:',
     ...recordCriteriaLines(),
-    `The spec: ${base.specRef}`,
-    ...wholeRecordLines(records.files),
-    'Judge the records against the tree they describe. Read the code before you write a finding.',
-    'Do not fix anything. Do not judge the code: the code is judged elsewhere.',
-    `Every finding carries "lens": "${RECORD_LENS}", the repo-relative path of the one record it ` +
-      'is about in "file", and the "criterion" it fails.',
-    'Cite the sentence of the record your finding is about, and the file and line of the tree that',
-    'answers it. A finding that names no sentence of the record is refused by the verifier for',
-    'want of evidence. Taste is not a criterion.',
-    'Grade every finding HIGH, MED or LOW. Every grade is verified and a confirmed finding of any',
-    'grade blocks the ship, so grade what the finding is worth and nothing else.',
-    ...diffLines(diff),
+    ...unitListLines(record, units),
+    ...movedLines(moved, units),
+    ...neighbourhoodLines(neighbours),
+    ...unitAnswerLines(),
+    ...recordFindingLines(record),
+    ...CONSTITUTION_DUTY,
+    ...briefLines(brief),
   ].join('\n');
 }
+
+/** The work the record decides, as the stage states it, or the run's own spec. */
+function recordSpecLines(base, spec) {
+  if (typeof spec === 'string' && spec.trim().length > 0) {
+    return ['', `The specification: ${spec}. Read it whole.`];
+  }
+  if (!spec) {
+    return base.specRef ? ['', `The specification: ${base.specRef}. Read it whole.`] : [];
+  }
+  const lines = [''];
+  if (spec.key) lines.push(`Work: ${spec.key}`);
+  if (spec.path) lines.push(`The specification: ${spec.path}. Read it whole.`);
+  if (spec.reason) lines.push(`Reason: ${spec.reason}`);
+  if (spec.text) lines.push('', spec.text);
+  return lines;
+}
+
+/** The harness's own enumeration of the record, which the report answers. */
+function unitListLines(record, units) {
+  return [
+    '',
+    `The units of ${record}, as the harness counts them:`,
+    ...units.map((unit) => {
+      const kind = unit.kind ? `, ${unit.kind}` : '';
+      return `- ${unit.id} (line ${unit.line}${kind}): ${unit.head}`;
+    }),
+    `Count them yourself against the file: node ${UNITS_BIN} ${record}`,
+  ];
+}
+
+/** One line naming the sentences this round moved. */
+function movedLines(moved, units) {
+  const heads = (moved ?? []).map((id) => units.find((unit) => unit.id === id)?.head ?? id);
+  if (heads.length === 0) return ['', 'No unit of this record moved in this round.'];
+  return ['', `The units this round moved: ${heads.map((head) => `"${head}"`).join(', ')}.`];
+}
+
+/**
+ * The neighbourhood, by path, and what the cap left out.
+ *
+ * The `consistent` criterion is answerable only against a list, and the list is
+ * capped: a seat that reads twelve records and is told eight more exist knows
+ * what its answer covers (ADR-0073).
+ */
+function neighbourhoodLines(neighbours) {
+  const list = neighbours.neighbours ?? [];
+  if (list.length === 0) {
+    return ['', 'Neighbourhood: no active record cites this record, and it cites none.'];
+  }
+  return [
+    '',
+    'The neighbourhood. Read each one whole. An open part of this record may not contradict an',
+    'open part of any of them:',
+    ...list.map((path) => `- ${path}`),
+    ...(neighbours.dropped > 0
+      ? [
+          `${neighbours.dropped} more active records cite this one or are cited by it. The`,
+          `neighbourhood is capped at ${NEIGHBOUR_CAP} by rank, and those are outside the cap.`,
+        ]
+      : []),
+  ];
+}
+
+/** The unit duty, stated where the seat answers it. */
+function unitAnswerLines() {
+  return [
+    '',
+    '"units" takes one entry per unit above, and the harness refuses a report that misses one,',
+    'names a unit the file does not hold, or answers one twice:',
+    '- "record": the record path. "id": the unit id above.',
+    '- "kind": "title", "status", "claim", "open" or "rationale". A claim is a present-tense',
+    '  statement about the tree. An open unit states a part the tree does not hold. Rationale is',
+    '  why the decision was taken, what it rejected, what would reverse it, and plain structure.',
+    '  A unit whose text names a repository path, a symbol in backticks, or one of the verbs is,',
+    '  are, reads, returns, runs, writes, serves or exposes is a claim. Filing it as rationale is',
+    '  a defect.',
+    '- "verdict": "holds", "fails" or "not-built". A title, a status and a rationale unit take',
+    '  "holds".',
+    '- "evidence": on a claim, the repo-relative path that answers it, and the line where one',
+    '  exists. The worktree has to hold that path. On any other kind, one short sentence.',
+    'A unit you report "fails" carries a finding that names it. A unit you report "holds" carries',
+    'none. The two say one thing.',
+  ];
+}
+
+/** What a finding on this record carries, and what it may not be about. */
+function recordFindingLines(record) {
+  return [
+    '',
+    'Every finding carries:',
+    '- "id": your own label for it, unique in this report.',
+    '- "criterion": the one criterion above it fails.',
+    '- "severity": "HIGH", "MED" or "LOW". Every grade is verified and a confirmed finding of any',
+    '  grade blocks the ship, so grade what the finding is worth and nothing else.',
+    `- "file": ${record}. "unit", "head" and "line": the unit it is about, as the list above`,
+    '  states them.',
+    '- "summary": what is wrong. "evidence": the file and line of the tree that answers it.',
+    '- On "consistent" alone: "file2", "unit2" and "head2", the unit of the other record this one',
+    '  contradicts. A "consistent" finding that names one record is refused.',
+    'A finding about a superseded or a retired record is refused: a closed record states what was',
+    'known then.',
+    'Cite the unit your finding is about. Taste is not a criterion.',
+    'Do not fix anything. Do not judge the code: the code is judged elsewhere.',
+  ];
+}
+
+/** Where the seat reads the standard the record's sentences are written to. */
+const CONSTITUTION_DUTY = [
+  '',
+  'A constitution block above this brief states the standard this project holds a record to, and',
+  'a style block names the rule files that bind its sentences. Both are binding text. They state',
+  'the form of a record; the criteria above state the truth of one.',
+];
 
 /**
  * The diff the seat is given: how much of it is in the brief, how much of it
@@ -734,13 +1115,27 @@ function verifierRole(base, items, brief, probe = null) {
   ].join('\n');
 }
 
+/**
+ * One item as the verifier reads it: the grade, the place, and the sentence.
+ *
+ * The unit rides the line beside the file, with its head quoted. A record item
+ * is about one sentence of one document, and a verifier given the file alone
+ * reads the file for a sentence that matches the claim, which is the sampling
+ * this plan removes. A `consistent` item names the second unit as well, because
+ * the claim is that two records decide one part two ways (ADR-0073).
+ */
 function verifierItemLine(item) {
   const f = item.finding;
   const grade = [f.lens ?? f.source ?? '', f.severity ?? ''].filter(Boolean).join(' ');
   const where = f.record ? ` [record: ${recordPathOf(f) ?? '(none cited)'}]` : '';
+  const unit = f.unit ? ` [unit: ${f.unit}${f.head ? ` "${f.head}"` : ''}]` : '';
   const criterion = f.record ? ` [criterion: ${f.criterion ?? '(none cited)'}]` : '';
+  const second = secondRecordOf(f);
+  const against = second
+    ? ` [against: ${second}${f.unit2 ? ` ${f.unit2}` : ''}${f.head2 ? ` "${f.head2}"` : ''}]`
+    : '';
   return (
-    `[${item.id}] (${item.mode}) ${grade}${where}${criterion}: ` +
+    `[${item.id}] (${item.mode}) ${grade}${where}${unit}${criterion}${against}: ` +
     `${f.finding ?? f.summary} (evidence: ${f.evidence})`
   );
 }
@@ -757,6 +1152,11 @@ function recordPathOf(finding) {
   return finding?.place?.file ?? finding?.file ?? null;
 }
 
+/** The other record of a `consistent` finding, by the same two roads. */
+function secondRecordOf(finding) {
+  return finding?.place?.file2 ?? finding?.file2 ?? null;
+}
+
 /**
  * What the verifier is told about the record items, where the round holds any.
  *
@@ -767,16 +1167,23 @@ function recordPathOf(finding) {
  * remark about taste from blocking a ship (ADR-0007).
  *
  * The records themselves are named, and read whole. This seat is given the same
- * scope the review that raised the finding had: the review judges every claim
- * of a record and not the changed hunks alone, so a finding about a sentence
- * this diff never moved is an ordinary finding, and a verifier that refuted it
- * for sitting outside the diff would refuse the work the review exists to do
- * (ADR-0026).
+ * scope the review that raised the finding had: the review judges every unit of
+ * a record and not the changed hunks alone, so a finding about a sentence this
+ * pass never moved is an ordinary finding, and a verifier that refuted it for
+ * sitting outside the diff would refuse the work the review exists to do
+ * (ADR-0026). The second record of a `consistent` item is named beside it, for
+ * the same reason: the claim is about both.
  */
 function recordVerifierLines(items) {
   const records = items.filter((item) => item.finding.record);
   if (records.length === 0) return [];
-  const paths = [...new Set(records.map((item) => recordPathOf(item.finding)).filter(Boolean))];
+  const paths = [
+    ...new Set(
+      records
+        .flatMap((item) => [recordPathOf(item.finding), secondRecordOf(item.finding)])
+        .filter(Boolean),
+    ),
+  ];
   return [
     'Some items below are about a decision record. A record states how the product works, so the',
     'question is whether the record and the tree disagree as the finding states.',
