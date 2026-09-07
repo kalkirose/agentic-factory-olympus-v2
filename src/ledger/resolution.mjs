@@ -173,6 +173,20 @@ export const LOUD_OWNERSHIP = {
   'external-outage': [
     { name: 'outage', by: 'the green probe that ends the wait, or the human from a console' },
   ],
+  // The reconcile stage spent its rounds with findings still open. Nothing
+  // parks: the run takes the fallback on its own, and what answers the record
+  // is the ticket that carries the open findings out of it. The close-out
+  // `reconciliation-judged` is the stamp that names that ticket, in both
+  // fallback shapes, so it is the owner (ADR-0075). A stall whose ticket could
+  // not be written leaves this open, which is the true report: the work is
+  // owed and nothing holds it.
+  'reconcile-stall': [
+    {
+      name: 'cap',
+      owner: 'reconciliation-judged',
+      owns: (item, judged) => typeof judged.ticket === 'string',
+    },
+  ],
   // Instance-scoped, and both are conditions rather than records: the frontier
   // re-evaluates them on every sweep and pairs the resolution when the
   // condition lifts.
