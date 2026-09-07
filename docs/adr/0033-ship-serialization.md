@@ -1,6 +1,6 @@
 # ADR-0033: Ship serialization and the pre-verdict update
 
-Status: accepted (2026-08-16)
+Status: accepted (2026-08-16, the two certifications 2026-09-07)
 
 ## The condition
 
@@ -20,15 +20,27 @@ which run paid for which merge was an accident of timing.
 
 ## Decision
 
-**One `update` stage, between the verdict and the ship.** `shipStep` supplies
-three stages: `update`, `ship`, `close-out`. A green verdict hands the run to
-`update`, which takes the project's ship token, merges the default branch into
-the run tree under it, and hands the run on: to `verdict` when the merge moved
-the tree, to `ship` when it did not. The verdict loop treats a
-`pre-verdict-update` that ran as it treats an implementation commit: the tree
-changed, so the render behind it is stale and a new cycle runs. The tree that
-opens a request is therefore a tree a verdict certified, and no run of the
-project merges between the two.
+**One `update` stage, behind the reconciliation and in front of the ship.**
+`shipStep` supplies four stages: `reconcile`, `update`, `ship`, `close-out`. A
+green verdict hands the run to `reconcile`, which judges the decision records
+(ADR-0075), and the stage hands it to `update`. The update takes the project's
+ship token, merges the default branch into the run tree under it, and hands the
+run on: to `verdict` when the incoming work re-opens the code question, to
+`reconcile` when it re-opens the record question, and to `ship` when it opens
+neither. The verdict loop treats a `pre-verdict-update` that ran as it treats an
+implementation commit: the tree changed, so the render behind it is stale and a
+new cycle runs. The tree that opens a request is therefore a tree a verdict
+certified, and no run of the project merges between the two.
+
+**The admission gate reads two certifications, each at its own sha.**
+`certifiedTrees` returns the code tree at the run's last code commit and the
+record tree at its last record commit, and `admitted` requires every one the lane
+holds to be green. A green `verdict-rendered` at the head sha is not the
+question, because the reconcile stage commits records after the verdict's final
+green and no code render ever stands at that head again. A lane that owes no
+reconciliation certifies no records, and a records-lane run renders no code
+verdict; `null` says the lane holds no such certification and never that one
+failed.
 
 **The ship token is derived from the run ledgers.** One token per project. A run
 holds it from its `ship-token` (acquired) or `pr-opened` stamp until it releases
@@ -44,16 +56,19 @@ run that is over can neither merge nor wait.
 from the update stage's merge of the default branch to the merge of the request.
 Every exit from the update stage that is not the ship stage gives the token back
 first: a fast path that refused, a project that runs no fast path, a tree no
-verdict certified, a merge conflict that buys a fresh pass, and a park. The
-reconciliation round at the head of the stage runs in front of the token
-altogether, and its own exits release on the same rule (ADR-0026). None of that
-work reads the default branch, and a run that held the token through it charged
-every other run of the project the whole of it. The merge round that
-resolves a conflict is the one piece of work before the request that keeps the
-token, for the reason stated under the conflict route below. The release stamps
-`ship-token` (released) with a reason out of a closed set of two, `re-verdict`
-and `park`, because a machine cycle and a wait on a person are different costs
-and a count that mixes them is a count of nothing.
+certification covers, a merge conflict that buys a fresh pass, and a park. The
+reconcile stage runs in front of the token altogether, so a whole reconciliation
+holds no other run of the project out of its merge. None of that work reads the
+default branch, and a run that held the token through it charged every other run
+the whole of it. The merge round that resolves a conflict is the one piece of
+work before the request that keeps the token, for the reason stated under the
+conflict route below. The release stamps `ship-token` (released) with a reason
+out of a closed set, because a machine cycle and a wait on a person are different
+costs and a count that mixes them is a count of nothing.
+`SHIP_TOKEN_RELEASE_REASONS` in `src/ship/token.mjs` holds `re-verdict` and
+`park`. The record re-run's own reason, `re-reconcile`, is not yet implemented:
+the update stage names it at the release and the closed set refuses it, so that
+release throws.
 
 **A released run queues again at the back.** The release clears the run's
 `queuedAt` as well as its hold, so its next wait stamp is a new position. The run
@@ -83,7 +98,17 @@ derives the order it derived before.
 updates one implementation pass takes before its final verdict. Past the bound
 the stage stamps `pre-verdict-update` with `capped` and hands the run to `ship`,
 where the branch update behaves exactly as it did before this stage existed. The
-capped run keeps the token, because it is on its way to the request.
+capped run keeps the token, because it is on its way to the request. A record
+re-run spends that cap as a code re-judgment does: the run has merged twice under
+one pass either way.
+
+**One merge, two questions, one stamp.** `groundVerdict` lists the incoming files
+once and answers each certification on its own ground (ADR-0056). The stamp lands
+after both answers are known, because the answers are what it carries: `code` is
+`kept` or `rejudge`, `records` is `kept` or `rerun`, and each carries the files
+that decided it. The code answer routes first where both were redone, because the
+reconcile stage stands behind the verdict in every lane graph and reads its own
+re-run off this stamp.
 
 **Conflicts take the route they always took, one stage earlier.** The
 pre-verdict update calls the same `branchUpdate`, the same merge round, the same
@@ -104,10 +129,11 @@ stall parks and the park releases.
 
 **Two run events.** `ship-token` (`state`: `waiting` with the holder and the
 number of runs ahead, `acquired`, or `released` with its reason) and
-`pre-verdict-update` (`pass`, `ran`, `mainSha`, the shas when it ran, `capped`
-when the bound refused it). One wait stamp per wait, not one per poll. The update
-stamps whether it ran or found the base where the run left it: a run that merges
-the default branch into its own tree on its own authority says so either way.
+`pre-verdict-update` (`pass`, `ran`, `mainSha`, the shas when it ran, `code` and
+`records` with the files that decided each, `capped` when the bound refused it).
+One wait stamp per wait, not one per poll. The update stamps whether it ran or
+found the base where the run left it: a run that merges the default branch into
+its own tree on its own authority says so either way.
 
 **The suite restore anchors on the merged tree.** Every story-mode restore of the
 test paths checks out from `restoreAnchor`: the freeze commit until the tree
@@ -146,6 +172,12 @@ rather than decorative. A release for a park stopped the run AT this stage, and
 the answer resumes the stage to finish the update it could not finish. Reading
 that release as a re-verdict would send the answered run to judge a tree it never
 merged, and buy a whole cycle to arrive back here with the same merge still owed.
+
+The reason also names which journey the run left for. `releasedForVerdict`
+answers `verdict` for a `re-verdict` release with no green code render behind it,
+and `reconcile` for a `re-reconcile` release with no green record render behind
+it. The two certifications stand on two trees, so a green of the wrong kind
+answers neither release (ADR-0075).
 
 A daemon stop is not an exit from the stage. The handler returns no directive,
 the run keeps the token, and the restart hands it the same token back.

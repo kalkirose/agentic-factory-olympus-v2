@@ -1,7 +1,7 @@
 # ADR-0007: Verdict, repair, and review shapes
 
 Status: accepted (2026-08-10, the approach finding and the repair heading
-2026-09-04)
+2026-09-04, the records out of the verdict 2026-09-07)
 
 ## Decision
 
@@ -54,15 +54,16 @@ review — gets these concrete shapes:
   confirmed HIGH blocks. A sub-HIGH review finding that is not about a decision
   record stamps `advisory` and is never verified or blocked on. A finding about
   a decision record goes to the verifier at every grade. It carries
-  `record: true` and the `criterion` it cites, and it never carries `advisory`:
-  a confirmed one enters the open set and turns the verdict red exactly as a
-  confirmed HIGH does, and a refuted one blocks nothing and carries
-  `confirmed: false` beside the verifier's evidence. Which findings are record
-  findings is decided by the diff and by the project's `repo.recordPaths`, in
-  ADR-0026. The open set travels in `verdict-rendered.open`. The record file
+  `record: true`, the `criterion` it cites, and the unit it is about (`unit`,
+  `head`, `line`, and a second place on a `consistent` finding), and it never
+  carries `advisory`: a confirmed one enters the open set of the render it
+  belongs to, and a refuted one blocks nothing and carries `confirmed: false`
+  beside the verifier's evidence. A record finding is raised by the record review
+  of the reconcile stage and by no code lens (ADR-0026, ADR-0075). The verdict's
+  own open set travels in `verdict-rendered.open`. The record file
   (`runs/<id>/verdict-<cycle>.json`) carries the spectrum, the open and
   just-resolved findings, and the flake list. It holds confirmed findings only;
-  advisory material and refuted record findings stay in the ledger.
+  advisory material stays in the ledger.
 - **Review composition per cycle.** First cycle of an implementation pass:
   the Fury fan-out over the panel the project declares (`review.lenses`),
   fully parallel, then the verifier on that round's items. The default panel
@@ -73,42 +74,36 @@ review — gets these concrete shapes:
   findings; new items go through confirm-to-block. Cycles after only a
   re-freeze or an operational fix fire no judgment seats, because the tree did
   not change. No re-fan-out over a judged tree, in either lane. The repair lane
-  uses the generalist seat from cycle one and never the fan-out. A round whose
-  whole diff is decision records is the generalist seat too, under the record
-  lens alone (ADR-0038).
+  uses the generalist seat from cycle one and never the fan-out. No review of
+  this stage reads a decision record: the code review's file list drops every
+  record path at the caller, and the record round of the reconcile stage is the
+  one reader of one (ADR-0026).
 - **Response ladder.** Order per red verdict: intent conflicts park
   (`intent-conflict`); env/harness findings get one `operational-fix` stamp
   each, and a finding that persists past its fix climbs the substrate ladder
   and parks `provisioning-gate` only when the waiting is spent (ADR-0069);
   suite defects re-freeze; code-defect and confirmed review findings take a
-  repair round. A red rendered over a run's reconciliation commit takes the
-  reconcile arm below instead of the repair round. A batch may combine routes;
-  every route re-enters through a fresh cycle.
+  repair round. A batch may combine routes; every route re-enters through a
+  fresh cycle.
 - **Repair rounds.** The repair-dev seat fixes the candidate tree in place
   with the verdict and open findings as brief. Progress rule: a round is a
   stall (`no-progress`) when it closed none of the findings the render before
   it left open, measured on finding identity (ADR-0022). Open findings past the
   cap stall (`cap-exhausted`). State-based, never wall-clock.
-- **The cap follows the diff the render judged.** The arm asks the derivation
-  the review asks: whether every file of that diff sits under
-  `repo.recordPaths` (ADR-0026). A diff of decision records and nothing else
-  takes `gates.reconcileRounds`; every other diff takes the code cap of 3.
-  The diff is the last implementation's own, and a range git cannot answer
-  takes the code cap. Every `repair-round` stamp carries the `cap` it counted
-  against, so the ledger says which of the two a run was under.
-- **The reconcile arm.** A red rendered over the reconciliation commit is
-  answered by the seat that wrote the records. The ladder dispatches a
-  corrective `reconcile-write` in the run worktree, briefed with the open
-  findings, each with its criterion, its evidence and the verifier's
-  confirmation. It stamps `repair-round` with `phase: 'reconcile'`,
-  `seat: 'reconcile-write'` and its `cap`, commits `implementation-committed`
-  with `phase: 'reconcile'`, and the cycle behind it is the reconciliation cycle
-  again. The cap is `gates.reconcileRounds`, default 5, counted over the
-  `repair-round` stamps of the pass that carry `phase: 'reconcile'`. The two
-  counts stay apart: a pass that spent code rounds keeps its record rounds, and
-  a pass that spent record rounds keeps its code rounds. The progress rule is
-  the ladder's own. A stall of these rounds, by no progress or by the cap, takes
-  one of the two fallbacks in ADR-0026 and never the fresh pass.
+  `repairStalled` is exported, because the reconcile stage counts its own rounds
+  under the same rule.
+- **One cap, and it is the code cap of 3.** No diff this stage judges is a record
+  diff. A record is judged in the reconcile stage and nowhere else, and that
+  stage counts its own `reconcile-round` stamps against `gates.reconcileRounds`
+  (ADR-0075). The two counts never read each other's rounds: a pass that spent
+  code rounds keeps its record rounds, and a pass that spent record rounds keeps
+  its code rounds. Every `repair-round` stamp carries the `cap` it counted
+  against.
+- **A record round never reaches this ladder.** The verdict reads no record
+  stamp at all. It stamps no `implementation-committed` with `phase:
+  'reconcile'`, it derives its `moved` clause without a record read, and it holds
+  no reconcile arm. A corrective record round therefore buys no code cycle, and a
+  repair round leaves the record certification to the recheck the stage owes it.
 - **A finding about the shape rides the repair brief.** A confirmed finding
   that names the implementation structure as wrong against the spec
   (`approach: true`) is a code finding like any other on the ladder. It rides
@@ -154,10 +149,11 @@ review — gets these concrete shapes:
   stamps `gate-integrity` under the `record-finding-shipped` kind: loud, and
   owned by a person. It says the split above stopped classifying, or that the
   project's record paths name a tree its reviews do not read.
-- **Test-edit boundary, both directions.** Story-lane dev seats carry the
-  deny rules and the evaluation path restores the test paths from the
-  frozen sha before every commit and every spectrum run. The repair-lane
-  fix seat gets no deny rules — the regression test is its work.
+- **Test-edit boundary, both directions.** Story-lane dev seats carry the deny
+  rules over the test paths and the record paths, and the evaluation path
+  restores the test paths from the frozen sha before every commit and every
+  spectrum run. The repair-lane fix seat carries the record paths alone: the
+  regression test is its work, and no decision record is (ADR-0074).
 - **Parallel seats.** The engine tracks a run's in-flight seats as a set:
   the liveness invariant, kill, and stop cover every child of a parallel
   fan-out.
@@ -191,41 +187,32 @@ ADR-0010 read that: a window in which most record findings are refuted says the
 review seat is noisy about documents, and the answer is the criteria and the
 brief.
 
-## Why the cap follows the diff and not the lane
+## Why this ladder counts one cap
 
 A round that rewrites a document and a round that rewrites code are two kinds of
-work under one name, and each has its own number.
+work under one name, and each has its own number. The cap used to read the diff
+of the render it judged, because both rounds ran on this ladder. They do not any
+more: the record rounds run in a stage of their own, over a tree of their own, at
+a sha of their own (ADR-0075). So this ladder judges code and counts one cap.
 
-A record round is one seat and the layers a record diff reaches. On a project
-whose layers declare their grounds that is one layer, which takes seconds. What
-stands behind the cap is expensive: a whole repair run with a full spectrum, or
-a fresh pass over code a verdict already certified. So five rounds cost less
-than one of those endings, and the progress rule stops a round that is going
-nowhere at once.
+Three is the number for that work. A code round buys a dev seat over a candidate
+tree and a full cycle behind it, and a fourth round that has closed nothing says
+the tree is the suspect rather than the brief.
 
-Three is the number for the other work. A code round buys a dev seat over a
-candidate tree and a full cycle behind it, and a fourth round that has closed
-nothing says the tree is the suspect rather than the brief.
+Five is the number for the other work, and the reconcile stage holds it. A record
+round is one seat per record and the record layers behind it. On a project whose
+layers declare their grounds that is one layer, which takes seconds. What stands
+behind that cap is expensive: a ticketed rewrite in a run of its own. So five
+rounds cost less than the ending, and the progress rule stops a round that is
+going nowhere at once.
 
-Which of the two a round is doing is the diff's answer and never the lane's.
-The story lane reaches a record round through its own reconciliation commit. The
-repair lane reaches one through a ticket, and that is the route every record
-written before the in-run rewrite is cleaned by: the ticket is the spec, the fix
-seat edits the record tree, and the diff is decision records and nothing else. A
-cap keyed on the lane gives that work three rounds in one lane and five in the
-other for no reason a reader of the ledger could state. A cap keyed on the diff
-gives it one number in both.
+The counts stay apart by construction rather than by a derivation. A story that
+spent two code rounds keeps its record rounds, because the two arms read two
+event names.
 
-The counts still stay apart. A story that spent two code rounds must not find
-its record rounds gone, so the reconcile arm counts the `repair-round` stamps
-that carry `phase: 'reconcile'` and the code arm counts the rest.
-
-The reconcile arm never buys a fresh pass. A pass resets the tree to the commit
-it was born on, which throws away an implementation a verdict already certified,
-over a document, so both endings of that arm keep the certified code. The repair
-lane is the other case: the ticket is the whole of the work, no certified
-implementation of a story stands under the tree, and the ordinary ladder applies
-to it.
+A record round never buys a fresh pass. A pass resets the tree to the commit it
+was born on, which throws away an implementation a verdict already certified,
+over a document. The stage's own fallback keeps the certified code instead.
 
 ## Why an approach finding buys a repair round and not the pass
 
@@ -284,18 +271,11 @@ a window whose criteria and brief were already tightened once. Reversal cost:
 low, one condition in the split, and the `record` word stays on the finding
 either way.
 
-If the reconcile arm proves too expensive for the story that pays it, set
+If the reconcile stage proves too expensive for the story that pays it, set
 `gates.reconcileRounds` to 1: one corrective round, then the fallback and the
-ticket. The same value bounds a record-only repair, which then takes one round
-and stalls. Trigger: an owner who wants the shorter arm. Reversal cost: one
-config value.
-
-If the record cap proves wrong for a repair-lane ticket while it stays right for
-the reconciliation commit, key the derivation on the lane as well as the diff:
-the arm already holds the mode. Trigger: record-only repairs that reach the
-fifth round without closing anything the third round left open. Reversal cost:
-low, one condition in the cap derivation, and the stamp carries the number
-either way.
+ticket. The same value bounds a records-lane run, which then takes one round and
+stalls. Trigger: an owner who wants the shorter arm. Reversal cost: one config
+value.
 
 If the repair round proves unable to answer structural findings — rounds that
 close every finding but the approach one, cycle after cycle — the immediate

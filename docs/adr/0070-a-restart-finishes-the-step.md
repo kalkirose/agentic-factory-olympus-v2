@@ -1,6 +1,6 @@
 # ADR-0070: A restart finishes the step it interrupted, and a hold governs the start
 
-Status: accepted (2026-09-04)
+Status: accepted (2026-09-04, the two record stages 2026-09-07)
 
 ## Decision
 
@@ -60,6 +60,31 @@ spectrum, inside triage, inside a review seat: those are judgments of a tree
 that exists, the cycle re-runs, and the layers with judged results are skipped
 (ADR-0034). The implementation stage already behaved this way for its own
 seat, and the resume rules above give the verdict stage the same reading.
+
+### The two record stages derive their own steps, from their own stamps
+
+`interruptedStep` reads the verdict's ladder and nothing else. Each of the two
+stages that writes or judges a decision record answers the same question for
+itself, out of the stamps it made.
+
+- **The records stage** (`recordsStep` in `src/lanes/records-stage.mjs`) is
+  `dispatch`, `redispatch`, `commit` or `done`. No `record-author` spawn since
+  the stage was entered means dispatch; a spawn with no report means the seat
+  died mid-write, so the tree resets to its own last commit and the same dispatch
+  is made again; a report with no `records-committed` means commit, behind the
+  same checks; the commit stamp is the end (ADR-0074).
+- **The reconcile stage** (`reconcileStep` in `src/lanes/reconcile.mjs`) is one
+  of ten words, derived from the stage's own stamps since the last `fresh-pass`
+  (ADR-0075). A restart at any boundary resumes that step. Two of the ten are
+  cheap on a resume rather than skipped: the spectrum re-uses every
+  `layer-result` the cycle stamped, and the review re-uses every finding id it
+  assigned. The per-record write is the one step that must never repeat itself,
+  so each dispatch signs its commit with the run, the seat and the round's ledger
+  position, and the resume reads that message off `git log`.
+
+Both stages take the reset rule above for the same reason the verdict does. A
+seat that died mid-edit leaves what it had written, and the next dispatch has to
+be the dispatch the first one was.
 
 The re-dispatch is a fresh seat session. A restart resumes into no transcript,
 and the seat's own ladder position is read from the ledger per seat, so a
@@ -124,6 +149,13 @@ the interrupted `seat-spawned` instead of opening a new one. Trigger: a
 measured cost of re-dispatched steps above the cost of the interrupted ones
 across five restarts. Reversal cost: low — the session id is already on the
 spawn stamp.
+
+If the commit message proves an unsafe resume key for the record write, because
+a project rewrites history under a live run and the message goes with it, the
+stage reads its own `record-units` stamp alone and re-dispatches a write whose
+stamp is missing. Trigger: one record written twice in one round. Reversal cost:
+low, one condition in the write loop; the stamp is already the first half of the
+reading.
 
 If holding a resumed run at its stage proves too coarse — an operator wants a
 run that was mid-stage to finish that stage and stop at its boundary, the way

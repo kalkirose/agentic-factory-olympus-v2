@@ -1,6 +1,6 @@
 # ADR-0038: The judgment panel is a configured lens set
 
-Status: accepted (2026-08-26)
+Status: accepted (2026-08-26, the record seat 2026-09-07)
 
 ## Decision
 
@@ -14,40 +14,50 @@ is smaller than the vocabulary.
   the review machinery builds the panel from it and the project-config
   validator refuses a lens name against it, and neither module imports the
   other.
-- **The record lens sits beside the code lenses and outside the panel.** The
+- **The record criteria sit beside the code lenses and outside the panel.** The
   same registry holds `record` and its criteria, `RECORD_CRITERIA`: a keyed list
-  of six, data only. A record is held to standalone present-tense fact for the
+  of seven, data only. A record is held to standalone present-tense fact for the
   implemented parts, to truth against the tree as it stands for every
   present-tense claim in it, to a plain statement that a part is not implemented
   where the tree does not implement it, to a divergence named in the record and
   never absorbed, to every name and path and symbol it cites existing in the
-  tree, and to reading as one document rather than a trail of amendments. The
-  list is the harness's own and holds no project rule.
-- **The criteria carry the rule they serve.** `RECORD_RULE` sits above the six
+  tree, to reading as one document rather than a trail of amendments, and to no
+  open part of it contradicting an open part of an active record in its
+  neighbourhood. The list is the harness's own and holds no project rule.
+- **The criteria carry the rule they serve.** `RECORD_RULE` sits above the seven
   wherever they are stated: a record never conflicts with the code, everything
-  it states is either true of the tree now or marked as not yet built, and there
-  is no third kind of sentence. The two criteria that share the boundary say
-  which side each case falls on. A claim the tree contradicts fails `truth`,
-  whether or not the sentence changed in the diff under review. A part the tree
-  does not implement satisfies `open` when the record says it is not
-  implemented, and a part not yet built that is written as present fact fails
-  `truth` rather than `open`.
-- **One definition of the criteria, four readers.** The record-only review
-  brief, the record lens on a mixed diff, the verifier's brief for a record item
-  and the record write seat's brief all state the list from the registry. The
-  write seat is a reader because it is judged against it: a paraphrase in the
-  brief that writes the records and the list in the brief that reviews them are
-  two statements of one rule, and the writer would meet a criterion at the
-  review that its own brief never named.
-- **The record lens is not a panel choice.** It is outside `ALL_LENSES`, so
-  `review.lenses` cannot name it and the project-config validator refuses it
-  there. It has no entry in the seat table, so `furyPanel` never seats it: it
-  rides the generalist seat, which is the seat every record diff is reviewed by.
-  What puts it on a review is the diff. A review whose whole diff is decision
-  records carries the lens set `['record']` and no code lens, and a Fury round
-  over such a diff is that one seat rather than the fan-out. A mixed diff
-  carries the panel's lenses plus `record`, and the brief names the record files
-  in the diff (ADR-0026).
+  it states is either true of the tree now or marked as not yet built, there
+  is no third kind of claim, and a sentence that states why, or what was
+  rejected, or what would trigger a reversal, is rationale and is neither. The
+  last sentence is what makes the rule and the unit schema agree, because that
+  schema calls such a sentence `rationale` (ADR-0073). The two criteria that
+  share the boundary say which side each case falls on. A claim the tree
+  contradicts fails `truth`, whether or not the sentence changed in the diff
+  under review. A part the tree does not implement satisfies `open` when the
+  record says it is not implemented, and a part not yet built that is written as
+  present fact fails `truth` rather than `open`.
+- **The seventh criterion is about two records.** `consistent` asks whether an
+  open part of this record contradicts an open part of an active record in its
+  neighbourhood. The tree settles what is built and settles nothing about what is
+  not, so two active records can decide one unbuilt part two ways and no code
+  reading finds it. A `consistent` finding therefore carries a second place,
+  `file2`, `unit2` and `head2`, and a finding that names one record is a
+  work-product defect rather than a finding.
+- **One definition of the criteria, four readers.** The record review seat's
+  brief, the verifier's brief for a record item, and the birth, reconciliation
+  and corrective briefs of the seats that write records all state the list from
+  the registry. A writer is a reader because it is judged against it: a
+  paraphrase in the brief that writes the records and the list in the brief that
+  reviews them are two statements of one rule, and the writer would meet a
+  criterion at the review that its own brief never named.
+- **A record is judged by a seat of its own, and never by a lens.** `record` is
+  outside `ALL_LENSES`, so `review.lenses` cannot name it and the project-config
+  validator refuses it there. `furyPanel` never seats it. What reads a record is
+  `recordReviewRound`, one `record-review:<n>` seat per record file, and the code
+  lenses hold no record path at all: `furyRound` drops them from its fan-out and
+  the verdict drops them from the file list it hands over (ADR-0026). The lens
+  name survives as the word a record finding carries into the ledger, so a
+  reading that counts by lens still tells the two populations apart.
 - **The panel is `review.lenses`.** An absent entry takes the default panel. A
   declared entry replaces it — that is the whole flip. A name outside the
   vocabulary, a duplicate, or an empty list fails the launch; nothing is
@@ -77,8 +87,8 @@ is smaller than the vocabulary.
   project that drops the security lens from its panel still gets the dimensions
   in its waves and in its maps.
 
-The default panel is three seats where it was five, and the fan-out is the
-only place in a run where seats spawn in parallel.
+The default panel is three seats where it was five. Two rounds spawn seats in
+parallel: this fan-out, and the record review's one seat per record.
 
 ## Why the two lenses go and security stays
 
@@ -127,23 +137,23 @@ the story's own surface along the same four dimensions, and the map is checked
 before the write commits (ADR-0072). The wave stays the measure of whether the
 map is the surface, and it is never shown the map.
 
-## Why the record lens is not on the panel
+## Why the record criteria are not on the panel
 
 The panel is what a project judges its code with, and a project restores a cut
-lens by naming it. The record lens is neither of those. It judges a document
-against the tree the document describes, and which reviews carry it is not a
-project's decision: it follows from the diff, and one of the diffs that carries
-it is a commit the harness makes itself.
+lens by naming it. The record criteria are neither of those. They judge a
+document against the tree the document describes, and which reviews carry them is
+not a project's decision: the reconcile stage carries them and nothing else does.
 
-It seats nowhere of its own for the reason security does not. A seat spawned to
-read a markdown tree through six criteria costs a seat, and the generalist seat
-is already the seat that reads a record diff. A record finding it raises takes
-the same route to a block that any other finding takes, minus the seat.
+They also seat for the opposite reason security folds. A code lens shares a seat
+because the seats read one diff. A record seat reads one document whole, with the
+harness's enumeration of it and a neighbourhood beside it, and one seat over four
+records samples them (ADR-0073). So the record review pays a seat per record and
+the panel pays a seat per group of lenses.
 
-Keeping it out of `ALL_LENSES` also keeps two readings honest. The lens-yield
-metric zero-fills every lens in that list and counts confirmations, and a lens
-that is always excluded from the count would read as a permanent cut candidate.
-Record findings have their own reading (ADR-0010).
+Keeping `record` out of `ALL_LENSES` also keeps two readings honest. The
+lens-yield metric zero-fills every lens in that list and counts confirmations,
+and a name that is always excluded from the count would read as a permanent cut
+candidate. Record findings have their own reading (ADR-0010).
 
 ## Why config and not a code deletion
 
@@ -170,17 +180,17 @@ that the operational seat saw the diff for and did not raise. Reversal cost:
 low, and the panel config does not change.
 
 If the record criteria prove too narrow, and real record defects fall outside all
-six, a criterion joins `RECORD_CRITERIA` with its line. The key is what the
+seven, a criterion joins `RECORD_CRITERIA` with its line. The key is what the
 verifier judges against, so a defect nobody can key is a defect nobody can
 confirm. Trigger: refutations for want of evidence on findings a reader agrees
-with. Reversal cost: one entry in the registry; the schema enum and all four
-briefs read the list.
+with. Reversal cost: one entry in the registry; the schema enum and every brief
+read the list.
 
-If the record lens on a mixed diff proves to crowd the code lenses on the same
-seat, give the record files their own generalist invocation: the diff is already
-split by path at the brief, and the two reviews settle into one finding set.
-Trigger: a mixed diff whose code findings fall while its record findings rise.
-Reversal cost: moderate, one more seat invocation per mixed cycle.
+If the seat per record proves too expensive on a wide reconciliation, the round
+batches: one seat over several records, with the unit lists of all of them.
+Trigger: a stage whose review seats cost more than the ship they hold.
+Reversal cost: moderate, one loop in `recordReviewRound`, and the unit checks
+already take a list of records.
 
 If the security dimensions crowd the adversary's spec-behavior probing instead
 of adding to it — kill rates fall while survivors cluster on security wrongness
