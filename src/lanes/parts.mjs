@@ -61,7 +61,7 @@ import { groundEntries, groundEntry, underEntry } from '../config/project.mjs';
  *
  * An entry that begins `!` is an exclusion: a path is a record when an
  * inclusion holds it and no exclusion does. That is how a project keeps one
- * file of its record tree — a template — outside the rule.
+ * file of its record tree, a template, outside the rule.
  *
  * @param {string[]} [recordPaths]
  * @returns {((file: string) => boolean)|null}

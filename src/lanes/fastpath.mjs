@@ -660,8 +660,7 @@ function codeAnswer(
   },
   records,
 ) {
-  const isRecord = records === null ? null : recordMatch(records.recordPaths ?? []);
-  const mine = (file) => isRecord !== null && isRecord(file);
+  const isRecord = (records === null ? null : recordMatch(records.recordPaths ?? [])) ?? never;
   // A change this module cannot read is never a record: the second question
   // reads a path and this one reads a file, and a name neither can classify
   // belongs to the question that refuses on doubt.
@@ -692,7 +691,7 @@ function codeAnswer(
   ];
   const unclaimed = [];
   for (const file of incoming.files) {
-    if (mine(file)) continue;
+    if (isRecord(file)) continue;
     for (const [name, hit] of sets) {
       if (hit(file)) return rejudge('ground-intersects', `${file} is ${name}`, [file]);
     }
@@ -747,6 +746,9 @@ function recordsAnswer(incoming, { neighbourhood = [], own = [] }) {
 function rejudge(reason, detail, files) {
   return { answer: 'rejudge', reason: assertFastPathRefusal(reason), detail, files };
 }
+
+/** The matcher a lane with no record tree behind it stands on. */
+const never = () => false;
 
 /**
  * The version of the declarations this decision was checked against. It moves

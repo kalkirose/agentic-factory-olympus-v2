@@ -1292,11 +1292,17 @@ export function cyclePlan(
 ) {
   const records = recordAttribution({ recordPaths, recordLayers });
   const prior = priorStatus(events, cycle);
-  if (records !== null && Array.isArray(changed) && changed.length > 0) {
-    if (changed.every((file) => records.isRecord(file))) {
-      const run = recordLayerSet(layers, prior, records.layers);
-      return { sweep: 'records', run, skip: skippedLayers(layers, run, prior), prior };
-    }
+  // An empty diff is not a record diff. Every path of nothing is a record on a
+  // vacuous reading, and a cycle that judged no change would skip its spectrum
+  // on it.
+  const recordOnly =
+    records !== null &&
+    Array.isArray(changed) &&
+    changed.length > 0 &&
+    changed.every((file) => records.isRecord(file));
+  if (recordOnly) {
+    const run = recordLayerSet(layers, prior, records.layers);
+    return { sweep: 'records', run, skip: skippedLayers(layers, run, prior), prior };
   }
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   const previous = renders[renders.length - 1];
