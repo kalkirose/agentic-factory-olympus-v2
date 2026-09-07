@@ -21,7 +21,7 @@ export function cloneDir(paths, project) {
  *
  * The line-ending settings are written on every call for the same reason. A
  * seat's own git and every gate command the project runs read the clone's
- * config, and neither takes an argument from the harness. A clone that
+ * config. Neither takes an argument from the harness. A clone that
  * inherited `core.autocrlf=true` from the machine hands them carriage returns
  * the harness never writes (ADR-0076). A clone made before this rule heals at
  * its next launch. `src/daemon/environment.mjs` states the same class for
@@ -119,10 +119,32 @@ export async function readBlobFromBranch(dir, branch, path) {
  *   fetch?: 'require'|'best-effort'}} opts
  * @returns {Promise<{text: string, blob: string}|{error: string}>}
  */
-export async function readBranchFile(
+export async function readBranchFile(paths, project, { path, ...opts }) {
+  const answers = await readBranchFiles(paths, project, { files: [path], ...opts });
+  return answers[path];
+}
+
+/**
+ * The same read for a set of files: one clone lock, one fetch, one blob per
+ * file. A reader that judges a project on more than one file asks the world
+ * once, rather than once per file.
+ *
+ * The answer is keyed by path, and each entry is `{text, blob}` or `{error}`.
+ * A file the branch does not hold leaves the other answers standing. A clone or
+ * a fetch that fails gives every file the same error, as a one-file read
+ * always did.
+ *
+ * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ * @param {string} project
+ * @param {{branch: string, files: string[], repoUrl?: string|null,
+ *   withClone?: ((fn: Function) => Promise<unknown>)|null,
+ *   fetch?: 'require'|'best-effort'}} opts
+ * @returns {Promise<Record<string, {text: string, blob: string}|{error: string}>>}
+ */
+export async function readBranchFiles(
   paths,
   project,
-  { branch, path, repoUrl = null, withClone = null, fetch = 'require' },
+  { branch, files, repoUrl = null, withClone = null, fetch = 'require' },
 ) {
   const read = async () => {
     const dir = repoUrl
@@ -130,11 +152,19 @@ export async function readBranchFile(
       : cloneDir(paths, project);
     if (fetch === 'require') await fetchClone(dir);
     else await fetchClone(dir).catch(() => {});
-    return readBlobFromBranch(dir, branch, path);
+    const answers = {};
+    for (const path of files) {
+      try {
+        answers[path] = await readBlobFromBranch(dir, branch, path);
+      } catch (error) {
+        answers[path] = { error: error.message };
+      }
+    }
+    return answers;
   };
   try {
     return await (withClone ? withClone(read) : read());
   } catch (error) {
-    return { error: error.message };
+    return Object.fromEntries(files.map((path) => [path, { error: error.message }]));
   }
 }

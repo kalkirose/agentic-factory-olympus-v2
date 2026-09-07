@@ -4,7 +4,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homePaths, scaffoldHome } from '../src/daemon/home.mjs';
-import { cloneDir, ensureBareClone, fetchClone, branchSha, readBlobFromBranch } from '../src/isolation/clones.mjs';
+import { cloneDir, ensureBareClone, fetchClone, branchSha, readBlobFromBranch, readBranchFiles } from '../src/isolation/clones.mjs';
 import { gitPlain } from '../src/isolation/git.mjs';
 import {
   addRunWorktree,
@@ -90,6 +90,28 @@ test('a clone carries the line-ending settings, and one made without them heals'
   await ensureBareClone(paths, 'alpha', origin, 'main');
   assert.equal(await local(clone, 'core.autocrlf'), 'false');
   assert.equal(await local(clone, 'core.eol'), 'lf');
+});
+
+// A reader that judges a project on more than one file asks the world once.
+// One lock, one fetch, one blob per file (ADR-0068).
+test('a multi-file branch read takes one clone pass and answers each file', async (t) => {
+  const { origin, paths } = fixture(t);
+  await ensureBareClone(paths, 'alpha', origin, 'main');
+  let passes = 0;
+  const answers = await readBranchFiles(paths, 'alpha', {
+    branch: 'main',
+    files: [CONFIG_PATH, 'src/app.txt', 'nowhere.txt'],
+    withClone: (read) => {
+      passes += 1;
+      return read();
+    },
+  });
+  assert.equal(passes, 1, 'the read took more than one clone pass');
+  assert.equal(JSON.parse(answers[CONFIG_PATH].text).version, 1);
+  assert.equal(answers['src/app.txt'].text, 'v1\n');
+  // A file the branch does not hold leaves the other answers standing.
+  assert.match(answers['nowhere.txt'].error, /nowhere\.txt/);
+  assert.equal(answers[CONFIG_PATH].error, undefined);
 });
 
 test('fetch with prune never deletes a live run branch', async (t) => {
