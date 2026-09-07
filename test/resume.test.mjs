@@ -19,6 +19,7 @@ import {
   tempDir,
   removeDir,
   waitFor,
+  waitRunEvents,
   gitSync,
   writeTree,
   commitTree,
@@ -209,10 +210,11 @@ async function waitClosed(paths, runId) {
 }
 
 function waitParked(paths, runId, type) {
-  return waitFor(
-    () =>
-      readEvents(runLedgerPath(paths, runId)).find((e) => e.event === 'park' && e.type === type),
-    { label: `park ${type}`, attempts: 400, intervalMs: 100 },
+  return waitRunEvents(
+    paths,
+    runId,
+    (events) => events.find((e) => e.event === 'park' && e.type === type),
+    { label: `park ${type}`, attempts: 400 },
   );
 }
 

@@ -18,6 +18,7 @@ import {
   tempDir,
   removeDir,
   waitFor,
+  waitRunEvents,
   initOriginRepo,
   projectConfigJson,
   FIXTURE_ACCEPTANCE,
@@ -287,14 +288,11 @@ function fixture(t, { seats = {}, card = CARD, config = {}, originFiles = {} } =
 }
 
 function waitParked(paths, runId, type, nth = 1) {
-  return waitFor(
-    () => {
-      const parks = readEvents(runLedgerPath(paths, runId)).filter(
-        (e) => e.event === 'park' && e.type === type,
-      );
-      return parks.length >= nth ? parks[nth - 1] : undefined;
-    },
-    { label: `park ${type} #${nth}`, attempts: 400, intervalMs: 100 },
+  return waitRunEvents(
+    paths,
+    runId,
+    (events) => events.filter((e) => e.event === 'park' && e.type === type)[nth - 1],
+    { label: `park ${type} #${nth}`, attempts: 400 },
   );
 }
 
@@ -308,12 +306,11 @@ async function waitClosed(paths, runId) {
 }
 
 function waitStage(paths, runId, stage) {
-  return waitFor(
-    () =>
-      readEvents(runLedgerPath(paths, runId)).find(
-        (e) => e.event === 'stage-entered' && e.stage === stage,
-      ),
-    { label: `stage ${stage}`, attempts: 400, intervalMs: 100 },
+  return waitRunEvents(
+    paths,
+    runId,
+    (events) => events.find((e) => e.event === 'stage-entered' && e.stage === stage),
+    { label: `stage ${stage}`, attempts: 400 },
   );
 }
 
@@ -499,10 +496,10 @@ test('a spec-lint park replays across a restart, and one retry buys one invocati
   );
   // One answer, one invocation, carrying the lint failures by name.
   fx.answer(runId, { option: 'retry' });
-  await waitFor(
-    () => readEvents(runLedgerPath(fx.paths, runId)).find((e) => e.event === 'spec-born'),
-    { label: 'spec born', attempts: 400, intervalMs: 100 },
-  );
+  await waitRunEvents(fx.paths, runId, (events) => events.find((e) => e.event === 'spec-born'), {
+    label: 'spec born',
+    attempts: 400,
+  });
   assert.equal(specCalls().length, 3);
   assert.match(specCalls()[2].prompt, /Correction brief/);
   assert.match(specCalls()[2].prompt, /touched-paths/);

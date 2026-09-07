@@ -51,6 +51,8 @@ import {
   tempDir,
   removeDir,
   waitFor,
+  runEventsOf,
+  waitRunEvents,
   NO_WAIT,
   gitSync,
   initOriginRepo,
@@ -550,14 +552,13 @@ async function waitClosed(paths, runId, attempts = 600) {
 }
 
 function waitEvent(paths, runId, predicate, label, attempts = 600) {
-  return waitFor(() => readEvents(runLedgerPath(paths, runId)).find(predicate), {
+  return waitRunEvents(paths, runId, (events) => events.find(predicate), {
     label,
     attempts,
-    intervalMs: 100,
   }).catch((error) => {
     // The tail of what the run did reach. A wait that ends with no event is a
     // route nobody can read from the label alone.
-    const tail = readEvents(runLedgerPath(paths, runId))
+    const tail = runEventsOf(paths, runId)
       .filter((e) => e.event !== 'stage-heartbeat')
       .slice(-20)
       .map((e) =>
