@@ -1183,6 +1183,12 @@ test('a corrective round spends a seat on the records that owe one (W15)', async
     { record: ADR_TWO, cycle: 2 },
     { record: ADR_THREE, cycle: 2 },
   ]);
+  // The render names the whole set it stood over: what a seat read, and what
+  // its last green review answers for.
+  const second = events.filter((e) => e.event === 'reconcile-rendered')[1];
+  assert.deepEqual(second.records, [ADR]);
+  assert.deepEqual(second.kept, [ADR_TWO, ADR_THREE]);
+  assert.equal(events.filter((e) => e.event === 'reconcile-rendered')[0].kept, undefined);
   // A kept record takes no seat, and the render names the dispatched set.
   assert.equal(fx.calls.filter((c) => c.seat === 'record-review').length, 4);
   assert.deepEqual(events.filter((e) => e.event === 'reconcile-rendered').at(-1).records, [ADR]);

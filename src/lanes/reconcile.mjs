@@ -1081,7 +1081,7 @@ async function cycleStep(ctx, base) {
     );
   }
   const reds = persistentReds(spectrum.results ?? []);
-  const records = await reviewSet(ctx, base, { cycle, sha, window, changed });
+  const { records, kept } = await reviewSet(ctx, base, { cycle, sha, window, changed });
   const priorRender = lastRendered(events);
   const index = findingIndex(events);
   // What the last render of this stage left open, as findings. A layer name in
@@ -1119,6 +1119,10 @@ async function cycleStep(ctx, base) {
     verdict: open.length === 0 ? 'green' : 'red',
     open,
     records,
+    // The records this cycle stood over and did not read again. The render is
+    // the whole set: what a seat read, and what its last green review answers
+    // for (ADR-0079).
+    ...(kept.length > 0 && { kept }),
     layers: (spectrum.results ?? []).map((r) => ({ layer: r.layer, status: r.status })),
     ...(open.length > 0 && { gist: gist(`records red: ${open.join(', ')}`) }),
   });
@@ -1163,12 +1167,19 @@ async function runRecordLayers(ctx, base, { cycle, sha, changed }) {
  * One seat runs per record and its name is the index in this list, so a list
  * the tree shrinks between two entries of one cycle would rename the seats and
  * lose the answers behind the record it dropped (ADR-0078).
- * @returns {Promise<string[]>}
+ *
+ * The kept records ride the answer beside the dispatched ones. The render names
+ * both, because the set a cycle stood over is the reading, and a reader of the
+ * dispatched list alone would count a kept record as a record nobody holds
+ * (ADR-0079).
+ * @returns {Promise<{records: string[], kept: string[]}>}
  */
 async function reviewSet(ctx, base, { cycle, sha, window, changed }) {
   const events = runEvents(ctx);
   const stamped = events.find((e) => e.event === 'reconcile-review-set' && e.cycle === cycle);
-  if (stamped) return stamped.records ?? [];
+  if (stamped) {
+    return { records: stamped.records ?? [], kept: (stamped.kept ?? []).map((k) => k.record) };
+  }
   const scope = await stageScope(base, window, changed);
   const split = await reviewSplit(base, events, { records: scope.records, sha });
   ctx.store.append('reconcile-review-set', {
@@ -1178,7 +1189,7 @@ async function reviewSet(ctx, base, { cycle, sha, window, changed }) {
     skipped: scope.skipped,
     ...(split.kept.length > 0 && { kept: split.kept }),
   });
-  return split.records;
+  return { records: split.records, kept: split.kept.map((k) => k.record) };
 }
 
 /**

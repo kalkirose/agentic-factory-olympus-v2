@@ -546,9 +546,10 @@ export const RUN_EVENTS = new Set([
   // One cycle of the reconcile stage, rendered: the `cycle`, which continues
   // the run's own counter so `runId#cycle` stays unique across both renders,
   // the `sha` of the record commit it judged, the `base` of the window it read
-  // that sha through, the `verdict`, what it left `open`, the `records` it read
-  // and the `layers` it ran. An `open` entry is a finding id, a red layer name,
-  // or `unwritten:<record>` for a record no write of the round answered. It is
+  // that sha through, the `verdict`, what it left `open`, the `records` it read,
+  // the `kept` it stood over and did not read again, and the `layers` it ran.
+  // An `open` entry is a finding id, a red layer name, or `unwritten:<record>`
+  // for a record no write of the round answered. It is
   // the record certification, and it is never a `verdict-rendered`: two
   // certifications with two grounds and two shas cannot share one stamp, and
   // the admission gate reads each against its own tree (ADR-0075).
