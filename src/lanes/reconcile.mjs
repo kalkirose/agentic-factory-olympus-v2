@@ -1016,18 +1016,102 @@ async function runRecordLayers(ctx, base, { cycle, sha, changed }) {
  * @returns {Promise<string[]>}
  */
 async function reviewSet(ctx, base, { cycle, sha, window, changed }) {
-  const stamped = runEvents(ctx).find(
-    (e) => e.event === 'reconcile-review-set' && e.cycle === cycle,
-  );
+  const events = runEvents(ctx);
+  const stamped = events.find((e) => e.event === 'reconcile-review-set' && e.cycle === cycle);
   if (stamped) return stamped.records ?? [];
   const scope = await stageScope(base, window, changed);
+  const split = await reviewSplit(base, events, { records: scope.records, sha });
   ctx.store.append('reconcile-review-set', {
     actor: ACTOR,
     cycle,
-    records: scope.records,
+    records: split.records,
     skipped: scope.skipped,
+    ...(split.kept.length > 0 && { kept: split.kept }),
   });
-  return scope.records;
+  return split.records;
+}
+
+/**
+ * What one cycle reads, and what it keeps.
+ *
+ * The first cycle of a pass reads every active record of the window, and so
+ * does the cycle a moved default branch buys: neither has a green review of
+ * this tree to stand on. Every later cycle reads the records the last round
+ * changed and the records an open finding names, and keeps every other record
+ * whose text has not moved since its last green review.
+ *
+ * A fresh seat over an unchanged green record raises findings on unchanged
+ * sentences and spends the cap on them. The `consistent` criterion is still
+ * read from the moved side, and a kept record a finding names is dispatched by
+ * the round that answers it (ADR-0079).
+ * @returns {Promise<{records: string[], kept: Array<{record: string, cycle: number}>}>}
+ */
+async function reviewSplit(base, events, { records, sha }) {
+  const rendered = lastRendered(events);
+  const rerun = rendered
+    ? events.some(
+        (e) =>
+          e.event === 'pre-verdict-update' && e.records?.answer === 'rerun' && e.seq > rendered.seq,
+      )
+    : false;
+  if (!rendered || rerun) return { records, kept: [] };
+  const written = writtenSince(events, rendered.seq);
+  const open = openRecords(events, rendered);
+  const dispatched = [];
+  const kept = [];
+  for (const record of records) {
+    const green = written.has(record) || open.has(record) ? null : lastGreenReview(events, record);
+    const before = green === null ? null : await showAt(base.worktree, green.sha, record);
+    const after = green === null ? null : await showAt(base.worktree, sha, record);
+    if (before === null || after === null || before !== after) {
+      dispatched.push(record);
+      continue;
+    }
+    kept.push({ record, cycle: green.cycle });
+  }
+  return { records: dispatched, kept };
+}
+
+/** The records the rounds since one render wrote, replacements included. */
+function writtenSince(events, seq) {
+  const out = new Set();
+  for (const e of events) {
+    if (e.event !== 'reconciliation-written' || e.seq < seq) continue;
+    for (const record of e.rewritten ?? []) out.add(record);
+    for (const entry of e.records ?? []) out.add(entry.record);
+  }
+  return out;
+}
+
+/** The records the open findings of one render name, on either side. */
+function openRecords(events, rendered) {
+  const index = findingIndex(events);
+  const out = new Set();
+  for (const id of rendered?.open ?? []) {
+    const finding = index.get(id);
+    if (!finding) continue;
+    if (finding.file) out.add(finding.file);
+    if (finding.file2) out.add(finding.file2);
+  }
+  return out;
+}
+
+/**
+ * The newest render that read one record and raised nothing against it, with
+ * the sha it judged. Null where no cycle of this pass has read it green.
+ */
+function lastGreenReview(events, record) {
+  const index = findingIndex(events);
+  let found = null;
+  for (const e of events) {
+    if (e.event !== 'reconcile-rendered' || !(e.records ?? []).includes(record)) continue;
+    const against = (e.open ?? []).some((id) => {
+      const finding = index.get(id);
+      return finding && (finding.file === record || finding.file2 === record);
+    });
+    if (!against) found = { sha: e.sha, cycle: e.cycle };
+  }
+  return found;
 }
 
 /**

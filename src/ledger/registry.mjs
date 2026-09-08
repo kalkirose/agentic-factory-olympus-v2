@@ -514,11 +514,15 @@ export const RUN_EVENTS = new Set([
   // record's commit already holds. So the list is a fact of the ledger, and a
   // re-entry dispatches the list it names (ADR-0078).
   'reconcile-write-set',
-  // The set one cycle reviewed: the `cycle`, the `records` in dispatch order
-  // and the `skipped` the active filter dropped. It is the write set's rule on
-  // the review side: one seat per record, named by its index, and one
-  // `record-units` stamp per seat per cycle. A cycle re-entered after the tree
-  // closed a record reviews the set it stamped (ADR-0078).
+  // The set one cycle reviewed: the `cycle`, the `records` in dispatch order,
+  // the `skipped` the active filter dropped, and the `kept` this cycle did not
+  // read again, each with the cycle whose review it stands on. It is the write
+  // set's rule on the review side: one seat per record, named by its index, and
+  // one `record-units` stamp per seat per cycle. A cycle re-entered after the
+  // tree closed a record reviews the set it stamped (ADR-0078). A cycle after
+  // the first reads the records the last round changed and the records an open
+  // finding names; a fresh seat over an unchanged green record raises findings
+  // on unchanged sentences and spends the cap (ADR-0079).
   'reconcile-review-set',
   // reconciliation (the stage, ADR-0075)
   // What one record seat answered, for one record, unit by unit: the `seat`

@@ -200,6 +200,7 @@ function stageFixture(
     records = true,
     holdUpdate = false,
     repairOnce = false,
+    rerunOnce = null,
   } = {},
 ) {
   const root = tempDir();
@@ -230,6 +231,7 @@ function stageFixture(
   // for the stop, and the daemon that comes back closes.
   let held = false;
   let repaired = false;
+  let reran = false;
   // What the run's tree held at the last stage before the close. The close
   // schedules the workspace teardown, and that delete runs while the caller
   // reads, so every tree reading a scenario needs is taken here (ADR-0051).
@@ -248,6 +250,19 @@ function stageFixture(
         if (repairOnce && !repaired) {
           repaired = true;
           return { next: 'seed' };
+        }
+        // A scenario about a moved default branch: the update merged records
+        // this run's own ground names, so the reconciliation is asked again.
+        if (rerunOnce && !reran) {
+          reran = true;
+          ctx.store.append('pre-verdict-update', {
+            actor: 'daemon',
+            pass: 1,
+            ran: true,
+            mainSha: 'main-moved',
+            records: { answer: 'rerun', files: rerunOnce },
+          });
+          return { next: 'reconcile' };
         }
         return { close: { state: 'shipped' } };
       },
@@ -1037,6 +1052,62 @@ test('a corrective round spends a seat on the records that owe one (W15)', async
   assert.equal(writers.length, 4);
   assert.ok(writers[3].prompt.includes('Confirmed findings:'));
   assert.ok(writers[3].prompt.includes(`- ${ADR}`), writers[3].prompt);
+
+  // The second cycle reads the record the round changed and keeps the two the
+  // round left alone, each with the cycle of its green review (D1).
+  const cycles = events.filter((e) => e.event === 'reconcile-review-set');
+  assert.equal(cycles.length, 2);
+  assert.deepEqual(cycles[0].records, Object.keys(three));
+  assert.equal(cycles[0].kept, undefined);
+  assert.deepEqual(cycles[1].records, [ADR]);
+  // The cycle counter is the run's own, and the seed's code verdict is its
+  // first, so the first record cycle is 2.
+  assert.deepEqual(cycles[1].kept, [
+    { record: ADR_TWO, cycle: 2 },
+    { record: ADR_THREE, cycle: 2 },
+  ]);
+  // A kept record takes no seat, and the render names the dispatched set.
+  assert.equal(fx.calls.filter((c) => c.seat === 'record-review').length, 4);
+  assert.deepEqual(events.filter((e) => e.event === 'reconcile-rendered').at(-1).records, [ADR]);
+  // The pin: no round since a kept record's green review wrote that record. A
+  // kept record whose text moved is a derivation defect, and this is the
+  // reading that catches one.
+  const renders = events.filter((e) => e.event === 'reconcile-rendered');
+  for (const entry of cycles[1].kept) {
+    const green = renders.find((r) => r.cycle === entry.cycle);
+    const since = new Set(
+      events
+        .filter((e) => e.event === 'reconciliation-written' && e.seq > green.seq)
+        .flatMap((e) => e.rewritten ?? []),
+    );
+    assert.ok(!since.has(entry.record), entry.record);
+  }
+});
+
+test('a re-run a moved default branch buys reads the whole set again (D1)', async (t) => {
+  const two = {
+    [ADR]: ADR_REWRITTEN,
+    [ADR_TWO]: ADR_TWO_TEXT + '\nThe module src/base.mjs is read by the feature.\n',
+  };
+  const fx = stageFixture(t, {
+    files: { [ADR_TWO]: ADR_TWO_TEXT },
+    rerunOnce: [ADR],
+    seats: {
+      'reconcile-judge': judgeOwed(Object.keys(two)),
+      'reconcile-write': writeCorrecting(two),
+      'record-review': reviewClean,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // Two cycles, and the second reads every record of the set: a merge of the
+  // default branch is a tree no green review of this run has read.
+  const cycles = events.filter((e) => e.event === 'reconcile-review-set');
+  assert.equal(cycles.length, 2);
+  assert.deepEqual(cycles[1].records, Object.keys(two));
+  assert.equal(cycles[1].kept, undefined);
+  assert.equal(events.filter((e) => e.event === 'reconcile-rendered').length, 2);
 });
 
 test('a corrective round dispatches a born record the judge never owed (W6)', async (t) => {
