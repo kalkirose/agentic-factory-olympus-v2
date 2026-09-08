@@ -511,3 +511,39 @@ test('activeOf keeps the active records of a list and names what it dropped', (t
   assert.deepEqual(activeOf(dir, []), { records: [], skipped: [] });
   assert.deepEqual(activeOf(dir, [list[2], list[0]]).records, [list[0]]);
 });
+
+// The harness supersedes a record of its own in one form: the accepted line
+// stays where it stands and a supersession line is added under it. The form is
+// pinned here, and so is what the status reader answers for it (ADR-0078).
+test('the harness supersession form keeps the accepted line under the record', () => {
+  const closed = harness('0078-ask-nothing-of-a-closed-record');
+  const lines = (name) => harness(name).split('\n');
+  for (const name of [
+    '0075-judge-the-records-in-a-stage-of-their-own',
+    '0077-judge-the-record-set-the-pass-holds',
+  ]) {
+    const text = harness(name);
+    const head = lines(name);
+    assert.match(head[2], /^Status: accepted \(\d{4}-\d{2}-\d{2}\)$/, name);
+    assert.ok(
+      head.slice(3).some((line) => line.startsWith('Superseded in part by ADR-0078:')),
+      `${name} names no supersession by ADR-0078`,
+    );
+    // The reader answers the status line, and the accepted line is the status
+    // line. So the record stays active for every reader of this tree, and the
+    // supersession under it is prose a person reads.
+    assert.equal(statusOf(text).word, 'accepted', name);
+    assert.equal(isActiveRecord(text), true, name);
+    // The status line is the second unit, as it is in every record here.
+    assert.equal(recordUnits(text)[1].line, statusOf(text).line, name);
+  }
+  // The record that supersedes them stands accepted and names them back.
+  assert.equal(statusOf(closed).word, 'accepted');
+  assert.ok(closed.includes('- ADR-0073, ADR-0074, ADR-0075, ADR-0077'));
+  // A decision record is standalone fact: no em dash, and no reference to the
+  // work that produced it.
+  assert.ok(!closed.includes('—'));
+  for (const word of ['fix plan', 'the plan', 'revision']) {
+    assert.ok(!closed.toLowerCase().includes(word), word);
+  }
+});

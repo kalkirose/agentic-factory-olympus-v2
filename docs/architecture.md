@@ -799,7 +799,11 @@ suite authoring (seat) → adversary → freeze (process).
   certifications over two trees at two shas. The cycle stands on the record set
   the pass holds. That set comes from its `reconciliation-written` stamp, or
   from its `records-committed` stamp where it wrote none. So a born record is
-  judged even where the judge owes nothing (ADR-0077).
+  judged even where the judge owes nothing (ADR-0077). No seat is asked for a
+  unit, a finding or a report entry on a record whose status line reads
+  superseded or retired, and the filtered set a round or a cycle dispatched
+  over is stamped before its first seat spawns, so a restart dispatches the
+  list the ledger names and never the tree a seat has moved since (ADR-0078).
 - **The update stage** (ADR-0033) sits between the reconciliation and the ship.
   The run takes the project's ship token, and its first act under the token is
   the branch update against the default branch as it stands after the previous
