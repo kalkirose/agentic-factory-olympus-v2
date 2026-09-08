@@ -508,10 +508,7 @@ async function writeStep(ctx, base, next) {
  * @returns {Promise<{records: string[], sha: string|null}>}
  */
 async function dispatchSet(ctx, base, { round, since, records }) {
-  const stamped = runEvents(ctx).find(
-    (e) => e.event === 'reconcile-write-set' && e.since === since,
-  );
-  if (stamped) return { records: stamped.records ?? [], sha: stamped.sha ?? null };
+  // NEGATIVE CONTROL: the stamp is written and never read back.
   const sha = await headSha(base.worktree);
   const { records: active, skipped } = activeOf(base.worktree, records);
   ctx.store.append('reconcile-write-set', {
@@ -650,7 +647,7 @@ async function writeRound(
  * (ADR-0078).
  */
 function commitMessage(ctx, seat, record, since) {
-  return `reconcile: ${ctx.runId} ${seat} ${record} @${since}`;
+  return `reconcile: ${ctx.runId} ${seat} @${since}`;
 }
 
 /** The records this round has already committed a write for. */
@@ -663,11 +660,7 @@ async function roundCommits(base, runId, since) {
   const records = new Set();
   for (const line of log.split('\n').map((entry) => entry.trim())) {
     if (!line.startsWith(mark) || !line.endsWith(tail)) continue;
-    const named = line.slice(mark.length, line.length - tail.length).split(' ');
-    // A subject a pin before this rule wrote names the seat alone. It answers
-    // for no record, so the round re-dispatches that record rather than taking
-    // the commit for one it never made.
-    if (named.length === 2) records.add(named[1]);
+    records.add(line);
   }
   return records;
 }
@@ -690,7 +683,7 @@ function writtenAlready(ctx, events, { seat, record, since, committed, base }) {
   const stamps = events.filter(
     (e) => e.event === 'record-units' && e.seat === seat && e.seq > since,
   );
-  const done = committed.has(record) || stamps.some((e) => e.record === record);
+  const done = committed.has(commitMessage(ctx, seat, record, since)) || stamps.some((e) => e.record === record);
   if (!done) return null;
   const report = readJson(lastSeatReportEvent(events, seat)?.path);
   if (stamps.length === 0) {
