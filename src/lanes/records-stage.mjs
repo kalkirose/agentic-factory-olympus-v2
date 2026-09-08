@@ -27,7 +27,13 @@ import { carryPaths, changedFiles, commitAll, headSha, resetHard } from '../isol
 import { parseTouchedPaths } from '../seats/diffpolicy.mjs';
 import { parseIntentCard } from './card.mjs';
 import { probeCredentials } from './probes.mjs';
-import { AUTHOR_SEAT, birthRole, reconcileWriteSchema, writeChecks } from './records.mjs';
+import {
+  AUTHOR_SEAT,
+  answeredRecords,
+  birthRole,
+  reconcileWriteSchema,
+  writeChecks,
+} from './records.mjs';
 import { reconcileHandler } from './reconcile.mjs';
 import { birthNeighbours, citingRecords, readText, recordFiles, statusOf } from './units.mjs';
 import {
@@ -420,7 +426,7 @@ async function commitRecords(ctx, base, report, cost, neighbours = null) {
   // they are stamped first: a stop between the two repeats them on the next
   // dispatch, where a stop after the commit would lose them. The reader joins
   // by record and unit id, so a repeat is one answer either way.
-  stampUnits(ctx, report, cost, neighbours);
+  stampUnits(ctx, base, report, cost, neighbours);
   const changed = await changedFiles(base.worktree);
   const touched = changed.filter((file) => recordPathIncludes(file, base.recordPaths));
   const unreported = touched.filter((file) => !reported.includes(file));
@@ -454,17 +460,21 @@ async function stampNothing(ctx, base) {
 }
 
 /**
- * One `record-units` stamp per record the seat wrote: the per-unit answers the
- * writer miss rate joins on (ADR-0073).
+ * One `record-units` stamp per record the check counted: the per-unit answers
+ * the writer miss rate joins on (ADR-0073).
+ *
+ * A record the birth only closed is not one of them. Its status-line edit owes
+ * no unit, so there is nothing to stamp, and a stamp with an empty unit list
+ * would read as a record nobody answered (ADR-0078).
  *
  * The cost rides the first record alone. One dispatch wrote every record here,
  * so the number is the dispatch's and not the record's, and a sum over the
  * records of a birth that repeated it would count the seat once per file.
  */
-function stampUnits(ctx, report, cost, neighbours) {
+function stampUnits(ctx, base, report, cost, neighbours) {
   const entries = Array.isArray(report.units) ? report.units : [];
   let first = true;
-  for (const record of [...new Set(report.rewritten ?? [])]) {
+  for (const record of answeredRecords(base, report)) {
     const units = entries
       .filter((entry) => entry.record === record)
       .map(({ record: _record, ...rest }) => rest);

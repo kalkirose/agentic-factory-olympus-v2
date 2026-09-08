@@ -738,6 +738,22 @@ export async function unitRecords(base, records, report, added = null) {
 }
 
 /**
+ * The records one report answered units for, minus the ones the active filter
+ * drops.
+ *
+ * It is the set the unit check counted. Every counted record takes an entry by
+ * rule 1, rule 2 refuses an entry about any other record, and an entry about a
+ * dropped one is dropped. So a stamp per record of this set is one stamp per
+ * record the seat answered, and never one for a record it was told to leave
+ * alone (ADR-0078).
+ * @returns {string[]}
+ */
+export function answeredRecords(base, report) {
+  const named = [...new Set((report?.units ?? []).map((entry) => entry.record))];
+  return activeOf(base?.worktree, named).records;
+}
+
+/**
  * The eight refusals over a unit report, numbered as the plan and the tests
  * name them. Rules 1 to 5 bind every record seat, rule 6 the writer, rules 7
  * and 8 the review.
