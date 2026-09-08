@@ -1518,17 +1518,70 @@ test('a records-lane run at its cap pushes the branch and parks for rounds (W18)
   assert.ok(existsSync(closed.ticket));
 });
 
+test('the operator route to the cap stamps the stall it used to skip (W16)', async (t) => {
+  const fx = stageFixture(t, {
+    lane: 'records',
+    seed: async (ctx) => {
+      const worktree = ctx.payload.worktree;
+      ctx.store.append('records-committed', {
+        actor: 'daemon',
+        sha: await headSha(worktree),
+        paths: [ADR],
+        decided: true,
+      });
+      // The park a crashed write seat leaves, and the answer that ships the
+      // code without the records. On this lane there is no code to ship.
+      const park = ctx.store.append('park', {
+        actor: 'daemon',
+        type: 'seat-failure',
+        question: 'The write seat failed.',
+        answers: { options: ['ship-without-records', 'abandon'] },
+        reason: 'seat-failure',
+        detail: { seat: 'reconcile-write:1' },
+        gist: 'seat-failure: the write seat failed',
+      });
+      ctx.store.append('answer', {
+        actor: 'operator',
+        parkSeq: park.seq,
+        option: 'ship-without-records',
+        answer: 'the records are owed',
+      });
+      return { next: 'reconcile' };
+    },
+    seats: { 'reconcile-judge': judgeOwed() },
+  });
+  const runId = await fx.launch();
+  const park = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'park' && e.type === 'reconcile-cap',
+    'the reconcile-cap park',
+  );
+  const events = readEvents(runLedgerPath(fx.paths, runId));
+  // The stall is loud on this route too, and it names the cause.
+  const stall = events.find((e) => e.event === 'reconcile-stall');
+  assert.equal(stall.stream, 'loud');
+  assert.equal(stall.cause, 'operator');
+  // Nothing certified the tree, and the ticket stands for the work.
+  assert.ok(!events.some((e) => e.event === 'reconciliation-written' && e.ok === false));
+  assert.ok(existsSync(park.detail.ticket));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const closed = await waitClosed(fx.paths, runId);
+  assert.equal(closed.find((e) => e.event === 'run-closed').reason, 'reconcile-cap');
+});
+
 test('a bought round raises the cap and the run ships (D3)', async (t) => {
   const fx = capFixture(t);
   const runId = await fx.launch();
   const park = await capPark(fx, runId);
-  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'rounds', answer: '1' });
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'rounds', answer: '2' });
   const events = await waitClosed(fx.paths, runId);
-  // The stage re-entered its corrective round, and the run shipped.
+  // The stage re-entered its corrective round with the cap raised by the count
+  // the answer named, and the run shipped.
   const extended = events.find((e) => e.event === 'reconcile-cap-extended');
   assert.equal(extended.parkSeq, park.seq);
-  assert.equal(extended.rounds, 1);
-  assert.equal(extended.cap, 2);
+  assert.equal(extended.rounds, 2);
+  assert.equal(extended.cap, 3);
   assert.equal(events.filter((e) => e.event === 'reconcile-round').length, 2);
   assert.equal(events.filter((e) => e.event === 'reconcile-rendered').at(-1).verdict, 'green');
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
