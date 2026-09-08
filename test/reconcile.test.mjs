@@ -1596,13 +1596,22 @@ test('the branch ticket names the branch, the records and the open findings', ()
     residual: [
       { id: 'F1', file: ADR, unit: 'U3', head: 'The module', summary: 'the claim fails', evidence: 'src/base.mjs' },
     ],
-    open: ['F1', 'adr-form'],
+    open: ['F1', 'adr-form', `unwritten:${ADR_TWO}`],
+    failed: [{ record: ADR_TWO, defects: ['the report accounts for it nowhere'] }],
   });
   assert.ok(text.includes('olympus/proj-1'));
   assert.ok(text.includes(`- ${ADR}`));
   assert.ok(text.includes('[F1]'));
   assert.ok(text.includes('- adr-form'));
   assert.ok(!text.includes('PR #'));
+  // The branch is on the origin, and the dispatches that wrote nothing are
+  // named with the defects that ended them (ADR-0079).
+  assert.ok(text.includes('## The branch on origin'));
+  assert.ok(text.includes('## Failed dispatches'));
+  assert.ok(text.includes(`- ${ADR_TWO}`));
+  assert.ok(text.includes('  - the report accounts for it nowhere'));
+  // The unwritten mark is not a red layer, and the ticket never lists it as one.
+  assert.ok(!text.includes(`- unwritten:${ADR_TWO}`), text);
 });
 
 // -- the restart boundaries --------------------------------------------------
