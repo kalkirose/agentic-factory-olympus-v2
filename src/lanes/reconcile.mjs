@@ -490,6 +490,9 @@ async function writeStep(ctx, base, next) {
   const outcome = await writeRound(ctx, roundBase(base, set), {
     records,
     since: judged.seq,
+    // The records lane has no code to ship without them, so a refused dispatch
+    // there ends itself and the render carries the record it left unwritten.
+    isolate: base.mode === 'records',
     buildRole: (record, brief) =>
       writeRole(
         base,
@@ -579,7 +582,7 @@ function recheckBrief(recheck, record, brief) {
 async function writeRound(
   ctx,
   base,
-  { records, since, buildRole, findings = [], answered = false },
+  { records, since, buildRole, findings = [], answered = false, isolate = false },
 ) {
   const entries = [];
   const reports = [];
@@ -617,6 +620,10 @@ async function writeRound(
       env: base.env,
       constitution: base.constitution,
       styleFiles: base.styleFiles,
+      // What ended this record's last dispatch, where a round before this one
+      // spent its budget on it. The seat that reads it is a fresh dispatch with
+      // a budget of its own (ADR-0079).
+      brief: refusedDefects(runEvents(ctx), record),
       buildRole: (brief) => buildRole(record, brief),
       checks: (report) =>
         writeChecks(base, [record], report, { seat: 'writer', findings, siblings }),
@@ -630,13 +637,26 @@ async function writeRound(
       },
     });
     if (outcome.fail) {
-      // A work-product defect past its corrective round is the seat's answer,
-      // and it is not a question for a person: the ticket is the route the
-      // harness took for every story before this stage existed. A seat that
-      // never delivered a report at all is the other shape, and that one parks.
+      // A seat that never delivered a report at all parks: the failure is the
+      // dispatch and not the work product.
       const failure = seatFailureAfter(runEvents(ctx), seat, spawnedAt);
-      if (Array.isArray(failure?.defects)) return { fallback: WORK_PRODUCT_DEFECT };
-      return { fail: outcome.fail };
+      if (!Array.isArray(failure?.defects)) return { fail: outcome.fail };
+      // A work-product defect past its corrective round ends this dispatch and
+      // nothing else. The tree goes back to its last commit, the entry carries
+      // the defects, and the round goes on to the next record. The next cycle
+      // keeps the record's finding open and the next round dispatches it again
+      // (ADR-0079). The story and repair lanes' judged write keeps the ticket
+      // route it took before this stage existed.
+      if (!isolate) return { fallback: WORK_PRODUCT_DEFECT };
+      await resetHard(base.worktree, await headSha(base.worktree));
+      entries.push({
+        record,
+        seat,
+        failed: true,
+        attempts: attemptsOf(runEvents(ctx), seat, spawnedAt),
+        defects: failure.defects,
+      });
+      continue;
     }
     // A stop between the seat's report and its commit leaves the write for the
     // restart. The tree is one worktree and the daemon that comes back holds it,
@@ -817,6 +837,32 @@ function siblingsOf(base, record, scope) {
   return citingRecords(base.worktree, record, base.recordPaths, { scope });
 }
 
+/**
+ * The defects that ended this record's last dispatch, or null.
+ *
+ * A round that spends its budget on a record leaves the reason on its entry.
+ * The round that dispatches the record again reads it there, so the seat starts
+ * from what refused its predecessor rather than from nothing (ADR-0079).
+ */
+function refusedDefects(events, record) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.event !== 'reconciliation-written') continue;
+    const entry = (e.records ?? []).find((r) => r.record === record);
+    if (!entry) continue;
+    return entry.failed === true && Array.isArray(entry.defects) ? entry.defects : null;
+  }
+  return null;
+}
+
+/** The records one write stamp could not write, by path. */
+export function unwrittenRecords(anchor) {
+  return (anchor?.records ?? []).filter((entry) => entry.failed === true).map((e) => e.record);
+}
+
+/** The mark a record with no write of its own carries in an open set. */
+export const UNWRITTEN = 'unwritten:';
+
 function attemptsOf(events, seat, since) {
   return events.filter((e) => e.event === 'seat-spawned' && e.seat === seat && e.seq > since)
     .length;
@@ -958,6 +1004,9 @@ async function cycleStep(ctx, base) {
     // round answers. It rides the open set by name, because the round's brief
     // and the stall's ticket both state what is still wrong (ADR-0075).
     ...reds.map((r) => r.layer),
+    // A record the last round could not write. The render stays red until a
+    // round writes it, and the next round dispatches it by name (ADR-0079).
+    ...unwrittenRecords(anchor).map((record) => `${UNWRITTEN}${record}`),
   ];
   ctx.store.append('reconcile-rendered', {
     actor: ACTOR,
@@ -1201,7 +1250,9 @@ async function correctStep(ctx, base, next) {
   const anchor = cycleAnchor(events);
   const index = findingIndex(events);
   const open = (rendered?.open ?? []).map((id) => index.get(id)).filter(Boolean);
-  const layers = (rendered?.open ?? []).filter((id) => !index.has(id));
+  const layers = (rendered?.open ?? []).filter(
+    (id) => !index.has(id) && !id.startsWith(UNWRITTEN),
+  );
   const round = roundsSince(events, judged.seq) + 1;
   const set = await dispatchSet(ctx, base, {
     round,
@@ -1219,6 +1270,9 @@ async function correctStep(ctx, base, next) {
     records,
     since: rendered.seq,
     findings: open,
+    // A corrective dispatch that spends its budget ends itself. The record
+    // keeps its finding open and the next round dispatches it again.
+    isolate: true,
     // A corrective invocation lists the ids it answered; the first write of a
     // run answers no finding and is asked for no such list.
     answered: true,
@@ -1241,11 +1295,13 @@ async function correctStep(ctx, base, next) {
     reports: outcome.reports,
     corrective: open.map((f) => f.id),
   });
+  const failed = outcome.entries.filter((entry) => entry.failed === true).map((e) => e.record);
   ctx.store.append('reconcile-round', {
     actor: ACTOR,
     round,
     records,
     findings: rendered.open ?? [],
+    ...(failed.length > 0 && { failed }),
   });
   return null;
 }
@@ -1268,10 +1324,17 @@ async function correctStep(ctx, base, next) {
  */
 export function correctiveRecords(events, rendered, records) {
   const index = findingIndex(events);
-  const open = (rendered?.open ?? []).map((id) => index.get(id)).filter(Boolean);
-  const layers = (rendered?.open ?? []).filter((id) => !index.has(id));
+  const ids = rendered?.open ?? [];
+  const open = ids.map((id) => index.get(id)).filter(Boolean);
+  const layers = ids.filter((id) => !index.has(id) && !id.startsWith(UNWRITTEN));
+  const unwritten = new Set(
+    ids.filter((id) => id.startsWith(UNWRITTEN)).map((id) => id.slice(UNWRITTEN.length)),
+  );
   const owed = new Set(
-    records.filter((record) => open.some((f) => f.file === record || f.file2 === record)),
+    records.filter(
+      (record) =>
+        unwritten.has(record) || open.some((f) => f.file === record || f.file2 === record),
+    ),
   );
   const named = layerRecords(events, rendered?.cycle, records);
   for (const record of named) owed.add(record);

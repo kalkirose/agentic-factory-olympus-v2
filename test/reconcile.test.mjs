@@ -576,6 +576,86 @@ function reviewOnce(record, summary) {
   };
 }
 
+/** The sentence a corrective dispatch writes into the record it answers. */
+const ANSWERED = 'The corrective round answered the finding.';
+
+/**
+ * A writer that refuses twice over one record, then writes it. The refused
+ * report accounts for the judged record nowhere, which is the deterministic
+ * defect the checks refuse (ADR-0079).
+ */
+function writeRefusing(contents, refuses, { corrective = true } = {}) {
+  const seen = new Map();
+  return ({ prompt }) => {
+    const record = Object.keys(contents).find((r) => prompt.includes(`- ${r}`));
+    const answering = prompt.includes('Confirmed findings:');
+    let n = 0;
+    if (record === refuses && answering === corrective) {
+      n = (seen.get(record) ?? 0) + 1;
+      seen.set(record, n);
+    }
+    if (n > 0 && n <= 2) {
+      return {
+        report: {
+          rewritten: [],
+          unchanged: [],
+          units: [],
+          divergences: [],
+          ...(prompt.includes('Confirmed findings:') && { answered: findingIds(prompt) }),
+          summary: 'the report accounts for the record nowhere',
+        },
+      };
+    }
+    const text = prompt.includes('Confirmed findings:')
+      ? contents[record].replace('## Decision', `## Decision\n\n${ANSWERED}`)
+      : contents[record];
+    return {
+      files: { [record]: text },
+      report: {
+        rewritten: [record],
+        unchanged: [],
+        units: units(record, text),
+        divergences: NO_DIVERGENCE(record),
+        ...(prompt.includes('Confirmed findings:') && { answered: findingIds(prompt) }),
+        summary: 'the record states what the tree holds',
+      },
+    };
+  };
+}
+
+/** A review that raises one finding per record until the record answers it. */
+function reviewUnanswered(summary) {
+  return ({ prompt }) => {
+    const read = recordOf(prompt);
+    const answers = unitsFromBrief(prompt, read);
+    const target = prompt.includes(ANSWERED)
+      ? null
+      : (answers.find((u) => u.kind === 'claim') ?? answers.at(-1));
+    if (target) target.verdict = 'fails';
+    return {
+      report: {
+        findings: target
+          ? [
+              {
+                id: 'r1',
+                criterion: RECORD_CRITERION_KEYS[0],
+                severity: 'HIGH',
+                file: read,
+                unit: target.id,
+                head: headOf(prompt, target.id),
+                line: 1,
+                summary,
+                evidence: 'src/base.mjs',
+              },
+            ]
+          : [],
+        units: answers,
+        summary: 'the record against the tree',
+      },
+    };
+  };
+}
+
 /** The verifier: confirm what it is asked to confirm, resolve prior findings. */
 const confirmAndResolve = ({ prompt }) => ({
   report: {
@@ -1151,6 +1231,97 @@ test('a corrective round dispatches a born record the judge never owed (W6)', as
   const round = events.find((e) => e.event === 'reconcile-round');
   assert.deepEqual(round.records, [ADR_TWO]);
   assert.equal(events.filter((e) => e.event === 'reconcile-rendered').at(-1).verdict, 'green');
+});
+
+// -- a refused dispatch (ADR-0079) --------------------------------------------
+
+test('a seat refused twice ends its dispatch, and the round goes on (W14)', async (t) => {
+  const two = {
+    [ADR]: ADR_REWRITTEN,
+    [ADR_TWO]: ADR_TWO_TEXT + '\nThe module src/base.mjs is read by the feature.\n',
+  };
+  const fx = stageFixture(t, {
+    files: { [ADR_TWO]: ADR_TWO_TEXT },
+    seats: {
+      'reconcile-judge': judgeOwed(Object.keys(two)),
+      'reconcile-write': writeRefusing(two, ADR_TWO),
+      'record-review': reviewUnanswered('the record claims what the tree does not hold'),
+      'fury-verifier': confirmAndResolve,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  // The run ships: one refused dispatch is one record, not the run.
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!events.some((e) => e.event === 'park'));
+  assert.ok(!events.some((e) => e.event === 'reconcile-stall'));
+
+  // The first corrective round wrote one record and stamped the other failed,
+  // with the defects that ended it.
+  const round = events.filter((e) => e.event === 'reconcile-round')[0];
+  assert.deepEqual(round.records, [ADR, ADR_TWO]);
+  assert.deepEqual(round.failed, [ADR_TWO]);
+  const written = events.filter((e) => e.event === 'reconciliation-written');
+  const failed = written[1].records.find((r) => r.record === ADR_TWO);
+  assert.equal(failed.failed, true);
+  assert.equal(failed.attempts, 2);
+  assert.match(failed.defects[0], /accounts for it nowhere/);
+  assert.ok(!written[1].rewritten.includes(ADR_TWO));
+
+  // The render that follows carries the record by name, and the round behind
+  // it dispatches that record with the defects in its brief.
+  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
+  assert.ok(rendered[1].open.includes(`unwritten:${ADR_TWO}`), rendered[1].open.join(', '));
+  assert.deepEqual(events.filter((e) => e.event === 'reconcile-round')[1].records, [ADR_TWO]);
+  const second = fx.calls
+    .filter((c) => c.seat === 'reconcile-write' && c.prompt.includes(`- ${ADR_TWO}`))
+    .at(-1);
+  assert.ok(second.prompt.includes('Correction brief'), second.prompt.slice(0, 400));
+  assert.ok(second.prompt.includes('accounts for it nowhere'), second.prompt.slice(0, 400));
+  assert.equal(rendered.at(-1).verdict, 'green');
+});
+
+test('a records-lane judged write refused twice leaves the record unwritten (W14)', async (t) => {
+  const two = {
+    [ADR]: ADR_REWRITTEN,
+    [ADR_TWO]: ADR_TWO_TEXT + '\nThe module src/base.mjs is read by the feature.\n',
+  };
+  const fx = stageFixture(t, {
+    lane: 'records',
+    seed: async (ctx) => {
+      const worktree = ctx.payload.worktree;
+      writeFileSync(join(worktree, ADR_TWO), ADR_TWO_TEXT);
+      const sha = await commitAll(worktree, 'records: the birth writes both');
+      ctx.store.append('records-committed', {
+        actor: 'daemon',
+        sha,
+        paths: [ADR, ADR_TWO],
+        decided: true,
+      });
+      return { next: 'reconcile' };
+    },
+    seats: {
+      'reconcile-judge': judgeOwed(Object.keys(two)),
+      'reconcile-write': writeRefusing(two, ADR_TWO, { corrective: false }),
+      'record-review': reviewUnanswered('the record claims what the tree does not hold'),
+      'fury-verifier': confirmAndResolve,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  // The lane has no code to ship without the records, so the run neither
+  // closes nor parks on one refused dispatch.
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!events.some((e) => e.event === 'park'));
+  const written = events.filter((e) => e.event === 'reconciliation-written');
+  assert.equal(written[0].ok, true);
+  assert.deepEqual(written[0].rewritten, [ADR]);
+  assert.equal(written[0].records.find((r) => r.record === ADR_TWO).failed, true);
+  // The render names the record no write answered, and the round dispatches it.
+  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
+  assert.ok(rendered[0].open.includes(`unwritten:${ADR_TWO}`), rendered[0].open.join(', '));
+  assert.ok(events.find((e) => e.event === 'reconcile-round').records.includes(ADR_TWO));
+  assert.equal(rendered.at(-1).verdict, 'green');
 });
 
 test('a spent record cap stalls loud, ships the code and names what is open', async (t) => {

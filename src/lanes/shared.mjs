@@ -693,12 +693,17 @@ export async function seatWithChecks(
     checks,
     defectReason = 'work-product-defect',
     park = null,
+    brief: opening = null,
   },
 ) {
   const limit = attemptLimit(runEvents(ctx), seat);
   // The evidence rides every bought retry, crash or defect: the park promised
-  // it, and the seat that crashed is briefed on what ended its predecessor.
-  let brief = boughtRetry(runEvents(ctx), seat) ? failureBrief(runEvents(ctx), seat) : null;
+  // it, and the seat that crashed is briefed on what ended its predecessor. A
+  // caller that holds the evidence of an earlier dispatch of the same work
+  // states it here, and this one is a fresh dispatch with its own budget.
+  let brief = boughtRetry(runEvents(ctx), seat)
+    ? failureBrief(runEvents(ctx), seat)
+    : (opening ?? null);
   for (let attempt = 1; ; attempt++) {
     const events = runEvents(ctx);
     const n = invocationCount(events, seat) + 1;

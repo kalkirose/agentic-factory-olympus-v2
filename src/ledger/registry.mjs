@@ -490,7 +490,10 @@ export const RUN_EVENTS = new Set([
   //
   // One writer runs per record, in sequence, each with its own seat identity
   // (ADR-0075). So `records` carries one entry per record, `{record, seat,
-  // cost, attempts, unitsAnswered}`, and a reader prices one record.
+  // cost, attempts, unitsAnswered}`, and a reader prices one record. An entry
+  // with `failed: true` carries the `defects` that ended that dispatch and no
+  // write: the seat spent its budget, the round went on to the next record, and
+  // the render carries `unwritten:<record>` until a round writes it (ADR-0079).
   // A divergence entry carries `evidence`, the path that shows the
   // shift, so a later eval can ask how many recorded shifts were wrong without
   // re-reading the run. `siblings` is what the write answered for every active
@@ -535,18 +538,20 @@ export const RUN_EVENTS = new Set([
   // counts alone cannot tell them apart (ADR-0073).
   'record-units',
   // One corrective round of the reconcile stage: the `round`, the `records` it
-  // dispatched a writer for, and the `findings` it was answering. It counts
-  // against `gates.reconcileRounds` and against nothing else. The code repair
-  // ladder stamps `repair-round`, and the two caps never read each other's
-  // rounds.
+  // dispatched a writer for, the `findings` it was answering, and the `failed`
+  // records whose dispatch spent its budget. It counts against
+  // `gates.reconcileRounds` and against nothing else. The code repair ladder
+  // stamps `repair-round`, and the two caps never read each other's rounds.
   'reconcile-round',
   // One cycle of the reconcile stage, rendered: the `cycle`, which continues
   // the run's own counter so `runId#cycle` stays unique across both renders,
-  // the `sha` of the record commit it judged, the `verdict`, what it left
-  // `open`, the `records` it read and the `layers` it ran. It is the record
-  // certification, and it is never a `verdict-rendered`: two certifications
-  // with two grounds and two shas cannot share one stamp, and the admission
-  // gate reads each against its own tree (ADR-0075).
+  // the `sha` of the record commit it judged, the `base` of the window it read
+  // that sha through, the `verdict`, what it left `open`, the `records` it read
+  // and the `layers` it ran. An `open` entry is a finding id, a red layer name,
+  // or `unwritten:<record>` for a record no write of the round answered. It is
+  // the record certification, and it is never a `verdict-rendered`: two
+  // certifications with two grounds and two shas cannot share one stamp, and
+  // the admission gate reads each against its own tree (ADR-0075).
   'reconcile-rendered',
   // The stage stopped at its cap with findings still open: the `rounds` it
   // spent and what stayed `open`. A red render whose dispatch set is empty
