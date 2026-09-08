@@ -502,8 +502,11 @@ export const RUN_EVENTS = new Set([
   'reconciliation-written',
   // The set one write round dispatched over: the `round`, the `since` the
   // round opened at, the `sha` the tree stood at, the `records` in dispatch
-  // order and the `skipped` the active filter dropped, each with the `status`
-  // word its line read.
+  // order, the `skipped` the active filter dropped, each with the `status` word
+  // its line read, and the `kept` a corrective round owed no answer for, each
+  // with the reason. A seat over a record no finding names writes nothing and
+  // costs the round a dispatch, so the round spends one on the records that owe
+  // an answer and stamps the rest (ADR-0079).
   //
   // A seat name is the index in this list. A list read from the tree shrinks
   // between two entries of one round, because a seat closes the record it was

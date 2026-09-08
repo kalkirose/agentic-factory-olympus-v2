@@ -13,7 +13,11 @@ import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { commitAll, headSha } from '../src/isolation/tree.mjs';
-import { reconcileStep, reconcileTicketFromBranch } from '../src/lanes/reconcile.mjs';
+import {
+  correctiveRecords,
+  reconcileStep,
+  reconcileTicketFromBranch,
+} from '../src/lanes/reconcile.mjs';
 import { withReconcileStage } from '../src/lanes/records-stage.mjs';
 import { RECORD_CRITERION_KEYS } from '../src/lanes/lenses.mjs';
 import { recordUnits } from '../src/lanes/units.mjs';
@@ -489,6 +493,74 @@ function headOf(prompt, id) {
   return new RegExp(`^- ${id} \\(line \\d+[^)]*\\): (.+)$`, 'm').exec(prompt)?.[1] ?? id;
 }
 
+/**
+ * A writer that writes the record it was given, and answers on a later round.
+ * The second dispatch adds a sentence, so the finding the review raised is on
+ * a record whose text has moved.
+ */
+function writeCorrecting(contents) {
+  const seen = new Map();
+  return ({ prompt }) => {
+    const record = Object.keys(contents).find((r) => prompt.includes(`- ${r}`));
+    const rounds = (seen.get(record) ?? 0) + 1;
+    seen.set(record, rounds);
+    const text =
+      rounds === 1
+        ? contents[record]
+        : contents[record].replace(
+            '## Decision',
+            '## Decision\n\nThe corrective round answered the finding.',
+          );
+    return {
+      files: { [record]: text },
+      report: {
+        rewritten: [record],
+        unchanged: [],
+        units: units(record, text),
+        divergences: NO_DIVERGENCE(record),
+        ...(prompt.includes('Confirmed findings:') && { answered: findingIds(prompt) }),
+        summary: 'the record states what the tree holds',
+      },
+    };
+  };
+}
+
+/** A review that raises one finding, on one record, the first time it reads it. */
+function reviewOnce(record, summary) {
+  const seen = new Set();
+  return ({ prompt }) => {
+    const read = recordOf(prompt);
+    const answers = unitsFromBrief(prompt, read);
+    const raise = read === record && !seen.has(read);
+    const target = raise ? (answers.find((u) => u.kind === 'claim') ?? answers.at(-1)) : null;
+    if (target) {
+      seen.add(read);
+      target.verdict = 'fails';
+    }
+    return {
+      report: {
+        findings: target
+          ? [
+              {
+                id: 'r1',
+                criterion: RECORD_CRITERION_KEYS[0],
+                severity: 'HIGH',
+                file: read,
+                unit: target.id,
+                head: headOf(prompt, target.id),
+                line: 1,
+                summary,
+                evidence: 'src/base.mjs',
+              },
+            ]
+          : [],
+        units: answers,
+        summary: 'the record against the tree',
+      },
+    };
+  };
+}
+
 /** The verifier: confirm what it is asked to confirm, resolve prior findings. */
 const confirmAndResolve = ({ prompt }) => ({
   report: {
@@ -666,6 +738,52 @@ test('a repair round past a green render owes the recheck, and a re-run owes a c
     ]),
     'done',
   );
+});
+
+// -- the corrective dispatch set (ADR-0079) -----------------------------------
+
+const ADR_THREE = 'docs/adr/adr-0003-name-the-range.md';
+
+test('a corrective round dispatches the records an open finding names (W15)', () => {
+  const three = [ADR, ADR_TWO, ADR_THREE];
+  const events = ledger(
+    { event: 'finding', id: 'F1', file: ADR, summary: 'the claim fails' },
+    { event: 'finding', id: 'F2', file: ADR_THREE, file2: ADR_TWO, criterion: 'consistent' },
+    { event: 'layer-result', cycle: 2, layer: 'adr-form', status: 'green' },
+  );
+  // The findings decide the set, and a record no finding names owes nothing.
+  assert.deepEqual([...correctiveRecords(events, { cycle: 2, open: ['F1'] }, three)], [ADR]);
+  // A consistent finding names two records, and both answer it.
+  assert.deepEqual(
+    [...correctiveRecords(events, { cycle: 2, open: ['F2'] }, three)],
+    [ADR_TWO, ADR_THREE],
+  );
+  // A red layer that names records in its output dispatches those records.
+  const named = ledger(
+    { event: 'finding', id: 'F1', file: ADR, summary: 'the claim fails' },
+    {
+      event: 'layer-result',
+      cycle: 2,
+      layer: 'adr-form',
+      status: 'red',
+      output: `${ADR_TWO}:3 the status line is malformed\n${ADR_THREE}:1 the title is missing`,
+    },
+  );
+  assert.deepEqual(
+    [...correctiveRecords(named, { cycle: 2, open: ['adr-form'] }, three)],
+    [ADR_TWO, ADR_THREE],
+  );
+  // A red layer that names no record of the set dispatches the whole set.
+  const silent = ledger({
+    event: 'layer-result',
+    cycle: 2,
+    layer: 'adr-form',
+    status: 'red',
+    output: 'the record tree does not parse',
+  });
+  assert.equal(correctiveRecords(silent, { cycle: 2, open: ['adr-form'] }, three), null);
+  // A layer red in an earlier cycle says nothing about this one.
+  assert.deepEqual([...correctiveRecords(named, { cycle: 3, open: ['F1'] }, three)], [ADR]);
 });
 
 // -- the stage end to end ----------------------------------------------------
@@ -877,6 +995,91 @@ test('a confirmed record finding buys a corrective round, and no repair-dev runs
   assert.ok(corrective.prompt.includes(finding.head), finding.head);
   // And the verdict never moved.
   assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 1);
+});
+
+test('a corrective round spends a seat on the records that owe one (W15)', async (t) => {
+  const three = {
+    [ADR]: ADR_REWRITTEN,
+    [ADR_TWO]: ADR_TWO_TEXT + '\nThe module src/base.mjs is read by the feature.\n',
+    [ADR_THREE]: ADR_TWO_TEXT.replace('ADR-0002', 'ADR-0003') + '\nThe range is src/base.mjs.\n',
+  };
+  const fx = stageFixture(t, {
+    files: {
+      [ADR_TWO]: ADR_TWO_TEXT,
+      [ADR_THREE]: ADR_TWO_TEXT.replace('ADR-0002', 'ADR-0003'),
+    },
+    seats: {
+      'reconcile-judge': judgeOwed(Object.keys(three)),
+      'reconcile-write': writeCorrecting(three),
+      'record-review': reviewOnce(ADR, 'the record claims a doubling the tree does not hold'),
+      'fury-verifier': confirmAndResolve,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+
+  // The judged write dispatched all three; the corrective round dispatched the
+  // one record with an open finding and stamped the other two.
+  const sets = events.filter((e) => e.event === 'reconcile-write-set');
+  assert.equal(sets.length, 2);
+  assert.deepEqual(sets[0].records, Object.keys(three));
+  assert.equal(sets[0].kept, undefined);
+  assert.deepEqual(sets[1].records, [ADR]);
+  assert.deepEqual(sets[1].kept, [
+    { record: ADR_TWO, reason: 'no open finding' },
+    { record: ADR_THREE, reason: 'no open finding' },
+  ]);
+  const round = events.find((e) => e.event === 'reconcile-round');
+  assert.deepEqual(round.records, [ADR]);
+  // Four writer dispatches: three at the write, one at the correction.
+  const writers = fx.calls.filter((c) => c.seat === 'reconcile-write');
+  assert.equal(writers.length, 4);
+  assert.ok(writers[3].prompt.includes('Confirmed findings:'));
+  assert.ok(writers[3].prompt.includes(`- ${ADR}`), writers[3].prompt);
+});
+
+test('a corrective round dispatches a born record the judge never owed (W6)', async (t) => {
+  // The judge owes one record of a born pair. The other is the birth's, and a
+  // finding on it used to have no writer at all.
+  const fx = stageFixture(t, {
+    // The birth writes the second record on the run's own branch, so the run's
+    // window holds it and the judge still owes only the first.
+    seed: seedHandler(async (ctx) => {
+      const worktree = ctx.payload.worktree;
+      writeFileSync(join(worktree, ADR_TWO), ADR_TWO_TEXT);
+      const sha = await commitAll(worktree, 'records: the birth writes the second');
+      ctx.store.append('records-committed', {
+        actor: 'daemon',
+        sha,
+        paths: [ADR, ADR_TWO],
+        decided: true,
+      });
+    }),
+    seats: {
+      'reconcile-judge': judgeOwed([ADR]),
+      'reconcile-write': writeCorrecting({
+        [ADR]: ADR_REWRITTEN,
+        [ADR_TWO]: ADR_TWO_TEXT + '\nThe module src/base.mjs is read by the feature.\n',
+      }),
+      'record-review': reviewOnce(ADR_TWO, 'the record states a value the tree does not hold'),
+      'fury-verifier': confirmAndResolve,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The write stamp names the judged record alone, and the cycle read both.
+  const written = events.find((e) => e.event === 'reconciliation-written');
+  assert.deepEqual(written.rewritten, [ADR]);
+  assert.deepEqual(
+    events.find((e) => e.event === 'reconcile-review-set').records,
+    [ADR, ADR_TWO],
+  );
+  // The corrective round dispatched the born record the finding names.
+  const round = events.find((e) => e.event === 'reconcile-round');
+  assert.deepEqual(round.records, [ADR_TWO]);
+  assert.equal(events.filter((e) => e.event === 'reconcile-rendered').at(-1).verdict, 'green');
 });
 
 test('a spent record cap stalls loud, ships the code and names what is open', async (t) => {

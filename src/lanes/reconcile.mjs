@@ -231,7 +231,7 @@ function cycleStepOf(events, anchor) {
   const cycle = nextCycle(events);
   if (!events.some((e) => e.event === 'layer-result' && e.cycle === cycle)) return 'spectrum';
   const dispatched = events.find((e) => e.event === 'reconcile-review-set' && e.cycle === cycle);
-  const records = dispatched ? (dispatched.records ?? []) : reviewedRecords(anchor);
+  const records = dispatched ? (dispatched.records ?? []) : reviewedRecords(events, anchor);
   const stamped = new Set(
     events.filter((e) => e.event === 'record-units' && e.cycle === cycle).map((e) => e.record),
   );
@@ -249,15 +249,22 @@ function cycleStepOf(events, anchor) {
 }
 
 /**
- * The records a cycle reviews, from the anchor that earned it. It is the widest
- * of the lists the anchor holds. Those are the records it rewrote, the records
- * it left alone, and the paths a born stamp names. A record the round did not
- * change is still a record the pass touched. The review reads every one of them
- * on every cycle (ADR-0075, ADR-0077).
+ * The records of this pass's set, from the anchor that earned it and the birth
+ * behind it. Those are the records the anchor rewrote, the records it left
+ * alone, the paths a born stamp names, and the paths this run's own birth
+ * committed.
+ *
+ * The born set rides every anchor. A judge that owes one record leaves a write
+ * stamp that names that record alone, and the born records would then have no
+ * writer at all: a finding on one could never be answered, and the render would
+ * stay red to the cap (ADR-0079).
  */
-function reviewedRecords(anchor) {
+function reviewedRecords(events, anchor) {
   const entries = Array.isArray(anchor?.records) ? anchor.records.map((r) => r.record) : [];
-  return [...new Set([...(anchor?.rewritten ?? []), ...entries, ...(anchor?.paths ?? [])])];
+  const born = recordsCommitted(events)?.paths ?? [];
+  return [
+    ...new Set([...(anchor?.rewritten ?? []), ...entries, ...(anchor?.paths ?? []), ...born]),
+  ];
 }
 
 /**
@@ -508,22 +515,33 @@ async function writeStep(ctx, base, next) {
  * (ADR-0078).
  * @returns {Promise<{records: string[], sha: string|null}>}
  */
-async function dispatchSet(ctx, base, { round, since, records }) {
+async function dispatchSet(ctx, base, { round, since, records, owed = null }) {
   const stamped = runEvents(ctx).find(
     (e) => e.event === 'reconcile-write-set' && e.since === since,
   );
   if (stamped) return { records: stamped.records ?? [], sha: stamped.sha ?? null };
   const sha = await headSha(base.worktree);
   const { records: active, skipped } = activeOf(base.worktree, records);
+  // A round that owes an answer for part of the set dispatches that part and
+  // stamps the rest. A seat over a record no finding names writes nothing and
+  // costs a dispatch (ADR-0079).
+  const dispatched = owed === null ? active : active.filter((record) => owed.has(record));
+  const kept =
+    owed === null
+      ? []
+      : active
+          .filter((record) => !owed.has(record))
+          .map((record) => ({ record, reason: 'no open finding' }));
   ctx.store.append('reconcile-write-set', {
     actor: ACTOR,
     round,
     since,
     sha,
-    records: active,
+    records: dispatched,
     skipped,
+    ...(kept.length > 0 && { kept }),
   });
-  return { records: active, sha };
+  return { records: dispatched, sha };
 }
 
 /**
@@ -906,7 +924,7 @@ async function cycleStep(ctx, base) {
   // merge base computed here (ADR-0079). A window the read could not answer
   // falls back to the anchor's own list, which is what the stage read before.
   const window = await runWindow(base);
-  const changed = window.files.length > 0 ? window.files : reviewedRecords(anchor);
+  const changed = window.files.length > 0 ? window.files : reviewedRecords(events, anchor);
   const spectrum = await runRecordLayers(ctx, base, { cycle, sha, changed });
   if (spectrum.error) {
     return commandError(
@@ -1104,7 +1122,8 @@ async function correctStep(ctx, base, next) {
   const set = await dispatchSet(ctx, base, {
     round,
     since: rendered.seq,
-    records: reviewedRecords(anchor),
+    records: reviewedRecords(events, anchor),
+    owed: correctiveRecords(events, rendered, reviewedRecords(events, anchor)),
   });
   // A red render with nothing to dispatch over is the cap. Every record of the
   // set is closed, no seat may answer for one, and a round that spawns none
@@ -1145,6 +1164,56 @@ async function correctStep(ctx, base, next) {
     findings: rendered.open ?? [],
   });
   return null;
+}
+
+/**
+ * The records a corrective round owes a seat: every record an open finding
+ * names, and every record a red layer names in the output it captured.
+ *
+ * Seven of sixteen seats owed nothing on the run this rule comes from. A seat
+ * over a record no finding names reads the record, writes nothing, and costs
+ * the round four minutes and a dispatch (ADR-0079).
+ *
+ * A red layer that names no record of the set is the one case that widens
+ * again: the layer says the record diff is wrong and nothing in its output says
+ * where, so every record of the set owes an answer.
+ * @param {object[]} events the run's ledger, in order
+ * @param {object} rendered the render this round answers
+ * @param {string[]} records the set the round stands over
+ * @returns {Set<string>|null} null where every record of the set is owed
+ */
+export function correctiveRecords(events, rendered, records) {
+  const index = findingIndex(events);
+  const open = (rendered?.open ?? []).map((id) => index.get(id)).filter(Boolean);
+  const layers = (rendered?.open ?? []).filter((id) => !index.has(id));
+  const owed = new Set(
+    records.filter((record) => open.some((f) => f.file === record || f.file2 === record)),
+  );
+  const named = layerRecords(events, rendered?.cycle, records);
+  for (const record of named) owed.add(record);
+  if (layers.length > 0 && named.size === 0) return null;
+  return owed;
+}
+
+/**
+ * The records a red layer of one cycle named in its captured output. The form
+ * gate prints the record path and the line it refused, so the round reads the
+ * layer's own answer rather than dispatching every record behind it.
+ */
+function layerRecords(events, cycle, records) {
+  const named = new Set();
+  for (const e of events) {
+    if (e.event !== 'layer-result' || e.cycle !== cycle || e.status !== 'red') continue;
+    const texts = [e.output ?? '', ...(e.parts ?? []).map((part) => part.output ?? '')];
+    for (const text of texts) {
+      for (const match of String(text).matchAll(/[\w./\\-]+\.md/g)) {
+        const path = match[0].replaceAll('\\', '/');
+        const hit = records.find((record) => path === record || path.endsWith(`/${record}`));
+        if (hit) named.add(hit);
+      }
+    }
+  }
+  return named;
 }
 
 /** The red layers a corrective round is answering, stated to the seat. */
