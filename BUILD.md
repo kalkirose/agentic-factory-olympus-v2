@@ -753,5 +753,11 @@ never carries a project's specifics.
   list a round or a cycle dispatched and what the filter dropped, stamped before
   the first seat spawns, so a re-entry keeps every seat name. The write commit
   subject names the record, and `writtenAlready` matches on it. A red render
-  whose dispatch set is empty stalls at once with `rounds: 0`. ADR-0078 is new,
-  and ADR-0075 and ADR-0077 are superseded in part by it.
+  whose dispatch set is empty stalls at once with `rounds: 0`. The divergence
+  declaration reads the counted set too: a judged supersession declares about
+  the record it added, and an entry about the record it closed is read rather
+  than refused. The brief states the closed-record rule under either lifecycle.
+  One range read serves the closure rule and the sibling answers, so a merge
+  round that leaves the replacement in a peer seat's commit passes both; a
+  range read that fails is a defect that names it, never an empty range.
+  ADR-0078 is new, and ADR-0075 and ADR-0077 are superseded in part by it.

@@ -38,7 +38,14 @@ its judged records on a `Supersedes` line. Every unit of such a replacement is
 the writer's. An entry in `units` about a dropped record is dropped with it and
 never refused. `stampUnits` in `src/lanes/records-stage.mjs` and in
 `src/lanes/reconcile.mjs` stamps one `record-units` event per record the check
-counted, and none for a record it dropped.
+counted, and none for a record it dropped. A counted record the seat answered no
+unit for takes its stamp with an empty list, because the stamp says which
+records a dispatch was answerable for.
+
+**The declaration.** `divergenceDefects` reads the same counted set. A judged
+write that supersedes its record declares about the record it added, and one
+entry about the record it closed is read rather than refused. A birth judges no
+record and declares none, which is what its brief asks for.
 
 **The closure.** A record whose status line a write closed is accounted for by a
 replacement of the same round, or by an entry in `unchanged` with the reason it
@@ -46,8 +53,16 @@ was retired. The round's range runs from the sha the round opened at to the
 worktree, so a replacement a peer seat of the round committed counts. A closure
 with neither is refused, and the defect names the routes. Under `rewrite` it
 names the one route that lifecycle holds. The same check runs at a birth over
-the record files the birth changed. `lifecycleLines` states the rule to the
-seat, so the brief and the check say one thing.
+the record files the birth changed. `lifecycleLines` states the rule to the seat
+under either lifecycle, because the filter and this check are not gated on one,
+so the brief and the check say one thing.
+
+**The range.** One read serves the closure rule and the sibling answers.
+`siblingChecks` accepts the record that replaces a superseded sibling anywhere in
+that range, because a merge round leaves it in a peer seat's commit. A range
+read that fails is never an empty range: an empty one reads a legal supersession
+as a bare closure, so the failure is stated as a defect that names the read, and
+no closure and no sibling answer is judged on it.
 
 **The dispatched set.** `reconcile-write-set` and `reconcile-review-set` carry
 the list a round or a cycle dispatched, in dispatch order, and the records the
@@ -82,6 +97,12 @@ dispatches that record again rather than counting a peer's write for it.
 
 A seat that answers a closed record's units spends tokens on answers the harness
 drops. The brief tells it not to, and the drop costs the report nothing.
+
+A run a restart carries mid-cycle across this change holds no review set either.
+Its cycle derives the list from the tree, where a record the pass closed is
+gone. A seat can then take a name a peer already stamped under, and one
+record's review answer is lost. The write side falls back on the record in its
+commit subject, and the review side holds no such fact.
 
 A record every seat is barred from is a record the review never reads. The form
 gate still reads it, because the layers run over the whole record diff and the
