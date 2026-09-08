@@ -88,7 +88,6 @@ import { cloneDir, fetchClone, branchSha } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 import {
   headSha,
-  push,
   mergeIntoTree,
   concludeMerge,
   abortMerge,
@@ -147,6 +146,7 @@ import {
   freezeExclusions,
   invocationCount,
   parkDirective,
+  pushBranch,
   sinceFreshPass,
   GATE_FORMS,
   withAbandonGuard,
@@ -986,21 +986,6 @@ async function labelRequest(ctx, base, pr, labels, atCreation) {
       `and the forge refused: ${applied.reason ?? 'no reason given'}. ` +
       'Define them on the repository, then answer to open the request again.',
   });
-}
-
-async function pushBranch(ctx, base, { expected = null } = {}) {
-  try {
-    // Plain pushes cover the fast-forward cases. A fresh pass rewrites the
-    // run branch's history; that push carries an explicit lease on the
-    // remote head the loop just observed — force over exactly that value.
-    await push(base.worktree, 'origin', base.branch, { lease: expected });
-    return null;
-  } catch (error) {
-    return parkDirective('provisioning-gate', {
-      ...GATE_FORMS,
-      question: `The remote rejected the push of ${base.branch}:\n${error.message}`,
-    });
-  }
 }
 
 // -- the check watcher -------------------------------------------------------

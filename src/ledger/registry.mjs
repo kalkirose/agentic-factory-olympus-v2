@@ -562,6 +562,12 @@ export const RUN_EVENTS = new Set([
   // park asks anybody first. The ticket is the answer, so the close-out
   // `reconciliation-judged` that names one owns this record.
   'reconcile-stall',
+  // The rounds a person bought at a `reconcile-cap` park: the `parkSeq` the
+  // answer belongs to, the `rounds` it names, and the `cap` this pass is judged
+  // against from here. The step derivation reads it, and the stage re-enters
+  // its corrective round on the newest one whatever ended the round before it
+  // (ADR-0079).
+  'reconcile-cap-extended',
   // The recheck a repair round owes a green reconciliation: the `delta` the
   // round committed, the `units` whose evidence paths it touched, what the
   // `judge` said about a record not already owed, and the `result`. A repair
@@ -861,6 +867,12 @@ export const PARK_TYPES = new Set([
   // writes decision records and dispatches no dev seat, so a red on anything but
   // a record layer is a code defect nobody in the run may repair (ADR-0075).
   'ci-red',
+  // A records-lane run whose record rounds are spent with findings still open.
+  // The lane has no code to ship, so the fallback every other lane takes would
+  // close the run and lose the branch, the ledger and the findings. The branch
+  // is pushed, the ticket is written, and the park offers the rounds that
+  // finish the work or the abandon that closes the run (ADR-0079).
+  'reconcile-cap',
   // Terminal-state discipline (ADR-0015): a recoverable failure parks with
   // `retry` / `abandon` instead of closing the run.
   'seat-failure', // a seat work product past its machine retry allowance

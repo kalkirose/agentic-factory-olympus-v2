@@ -16,7 +16,7 @@ import {
 } from '../config/project.mjs';
 import { branchSha, cloneDir, fetchClone } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
-import { changedFiles, headSha, resetHard } from '../isolation/tree.mjs';
+import { changedFiles, headSha, push, resetHard } from '../isolation/tree.mjs';
 import { stackEnv } from '../isolation/stacks.mjs';
 import { RUN_CACHE_ENV, runCacheDir } from '../isolation/worktrees.mjs';
 
@@ -600,6 +600,29 @@ export function seatFail(ctx, seat, result, park = null) {
       'invocation carrying the failure evidence, or "abandon" to close the run.' +
       (park?.note ? `\n${park.note}` : ''),
   });
+}
+
+/**
+ * Puts the run branch on the origin, or parks on the refusal.
+ *
+ * Two callers: the ship stage, where the branch has to exist before a request
+ * can name it, and the records lane's cap, where the branch is the whole of the
+ * work and a close that left it in the local clone lost it (ADR-0079).
+ *
+ * Plain pushes cover the fast-forward cases. A fresh pass rewrites the run
+ * branch's history; that push carries an explicit lease on the remote head the
+ * loop just observed, and forces over exactly that value.
+ */
+export async function pushBranch(ctx, base, { expected = null } = {}) {
+  try {
+    await push(base.worktree, 'origin', base.branch, { lease: expected });
+    return null;
+  } catch (error) {
+    return parkDirective('provisioning-gate', {
+      ...GATE_FORMS,
+      question: `The remote rejected the push of ${base.branch}:\n${error.message}`,
+    });
+  }
 }
 
 export function commandFail(ctx, run) {

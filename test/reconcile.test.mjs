@@ -19,6 +19,7 @@ import {
   reconcileTicketFromBranch,
 } from '../src/lanes/reconcile.mjs';
 import { withReconcileStage } from '../src/lanes/records-stage.mjs';
+import { withAbandonGuard } from '../src/lanes/shared.mjs';
 import { RECORD_CRITERION_KEYS } from '../src/lanes/lenses.mjs';
 import { recordUnits } from '../src/lanes/units.mjs';
 import { kindTest } from '../src/lanes/records.mjs';
@@ -272,7 +273,9 @@ function stageFixture(
   const lanes = {
     [lane]: {
       stages: ['seed', ...reconcile.stages],
-      handlers: { seed: seed ?? seedHandler(), ...reconcile.handlers },
+      // The guard every assembled lane carries: a park answered `abandon`
+      // closes the run at the next stage entry (ADR-0015).
+      handlers: withAbandonGuard({ seed: seed ?? seedHandler(), ...reconcile.handlers }),
     },
   };
   let daemon = new Daemon(join(root, 'home'), { waitSleep: NO_WAIT, lanes });
@@ -532,6 +535,29 @@ function writeCorrecting(contents) {
         rewritten: [record],
         unchanged: [],
         units: units(record, text),
+        divergences: NO_DIVERGENCE(record),
+        ...(prompt.includes('Confirmed findings:') && { answered: findingIds(prompt) }),
+        summary: 'the record states what the tree holds',
+      },
+    };
+  };
+}
+
+/** A writer that leaves a different record on every dispatch it takes. */
+function writeEveryRound(record = ADR, text = ADR_REWRITTEN) {
+  let n = 0;
+  return ({ prompt }) => {
+    n += 1;
+    const body = text.replace(
+      '## Consequences',
+      `## Consequences\n\nDispatch ${n} answered the review.`,
+    );
+    return {
+      files: { [record]: body },
+      report: {
+        rewritten: [record],
+        unchanged: [],
+        units: units(record, body),
         divergences: NO_DIVERGENCE(record),
         ...(prompt.includes('Confirmed findings:') && { answered: findingIds(prompt) }),
         summary: 'the record states what the tree holds',
@@ -1413,8 +1439,9 @@ test('a red record layer is a red render with the layer in the open set', async 
   assert.ok(corrective.prompt.includes('- adr-form'));
 });
 
-test('a records-lane stall closes the run on the cap and tickets from the branch', async (t) => {
-  const fx = stageFixture(t, {
+/** The records-lane fixture that reaches its cap with one round and one open. */
+function capFixture(t) {
+  return stageFixture(t, {
     lane: 'records',
     config: { gates: { tier1: [{ name: 'adr-form', command: 'adrform' }], recordLayers: ['adr-form'], reconcileRounds: 1 } },
     seed: async (ctx) => {
@@ -1430,7 +1457,7 @@ test('a records-lane stall closes the run on the cap and tickets from the branch
     },
     seats: {
       'reconcile-judge': judgeOwed(),
-      'reconcile-write': writeThenCorrect(),
+      'reconcile-write': writeEveryRound(),
       'record-review': recordReview([
         'the record claims a doubling the tree does not hold',
         'the record cites a symbol the tree does not export',
@@ -1438,24 +1465,73 @@ test('a records-lane stall closes the run on the cap and tickets from the branch
       'fury-verifier': confirmAndResolve,
     },
   });
+}
+
+/** The park a records-lane run leaves at its cap, once it is on the ledger. */
+function capPark(fx, runId) {
+  return waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'park' && e.type === 'reconcile-cap',
+    'the reconcile-cap park',
+  );
+}
+
+test('a records-lane run at its cap pushes the branch and parks for rounds (W18)', async (t) => {
+  const fx = capFixture(t);
   const runId = await fx.launch();
+  const park = await capPark(fx, runId);
+  // The park offers the rounds that finish the work, and the abandon every run
+  // park owes. The count rides the text.
+  assert.deepEqual(park.answers.options, ['rounds', 'abandon']);
+  assert.deepEqual(park.answers.reasoned, ['rounds']);
+  assert.equal(park.answers.text, 'the number of rounds to buy');
+  // The work is on the origin before anybody is asked.
+  assert.match(
+    gitSync(['ls-remote', '--heads', fx.origin, `run/${runId}`], fx.origin),
+    new RegExp(`run/${runId}`),
+  );
+  // The ticket names the records, the findings and the branch on origin.
+  const ticket = readFileSync(park.detail.ticket, 'utf8');
+  assert.ok(ticket.includes('## The branch on origin'));
+  assert.ok(ticket.includes('## Findings to answer'));
+  assert.ok(ticket.includes(ADR));
+  assert.ok(!ticket.includes('merge commit'));
+  // The stall is loud, and its owner is the ticketed judgment.
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  const stall = live.find((e) => e.event === 'reconcile-stall');
+  assert.equal(stall.stream, 'loud');
+  const ticketed = live.filter((e) => e.event === 'reconciliation-judged').at(-1);
+  assert.equal(ticketed.ticket, park.detail.ticket);
+  assert.equal(ticketed.cause, 'record-cap');
+  assert.deepEqual(live.find((e) => e.event === 'reconciliation-judged').born, [ADR]);
+  // Nothing certified the tree: a cap park is not a fallback.
+  assert.ok(!live.some((e) => e.event === 'reconciliation-written' && e.ok === false));
+
+  // Abandon closes the run on the condition the park recorded, with the ticket.
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
   const events = await waitClosed(fx.paths, runId);
   const closed = events.find((e) => e.event === 'run-closed');
   assert.equal(closed.state, 'failed');
   assert.equal(closed.reason, 'reconcile-cap');
+  assert.equal(closed.ticket, park.detail.ticket);
   assert.ok(existsSync(closed.ticket));
-  const ticket = readFileSync(closed.ticket, 'utf8');
-  assert.ok(ticket.includes('## The branch'));
-  assert.ok(ticket.includes(ADR));
-  assert.ok(!ticket.includes('merge commit'));
-  // The stall's owner is the ticketed judgment, so the loud item has one.
-  const ticketed = events.filter((e) => e.event === 'reconciliation-judged').at(-1);
-  assert.equal(ticketed.ticket, closed.ticket);
-  assert.equal(ticketed.cause, 'record-cap');
-  // The judge found the record born in this run's own records stage.
-  const judged = events.find((e) => e.event === 'reconciliation-judged');
-  assert.deepEqual(judged.born, [ADR]);
-  assert.deepEqual(judged.late, []);
+});
+
+test('a bought round raises the cap and the run ships (D3)', async (t) => {
+  const fx = capFixture(t);
+  const runId = await fx.launch();
+  const park = await capPark(fx, runId);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'rounds', answer: '1' });
+  const events = await waitClosed(fx.paths, runId);
+  // The stage re-entered its corrective round, and the run shipped.
+  const extended = events.find((e) => e.event === 'reconcile-cap-extended');
+  assert.equal(extended.parkSeq, park.seq);
+  assert.equal(extended.rounds, 1);
+  assert.equal(extended.cap, 2);
+  assert.equal(events.filter((e) => e.event === 'reconcile-round').length, 2);
+  assert.equal(events.filter((e) => e.event === 'reconcile-rendered').at(-1).verdict, 'green');
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
 });
 
 test('the branch ticket names the branch, the records and the open findings', () => {

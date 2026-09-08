@@ -77,7 +77,10 @@ import {
   gist,
   lastRecoveryPark,
   lastSeatReportEvent,
+  answeredPark,
   loadProjectConfig,
+  parkDirective,
+  pushBranch,
   readConstitution,
   readJson,
   runEnv,
@@ -135,6 +138,10 @@ export function reconcileHandler({ next = NEXT_STAGE } = {}) {
     if (base.fail) return base.fail;
     for (;;) {
       if (ctx.stopped()) return null;
+      // The rounds a person bought at a cap park, stamped before the step
+      // derivation reads them (ADR-0079).
+      const asked = extendCap(ctx, base);
+      if (asked) return asked;
       const events = runEvents(ctx);
       const step = reconcileStep(events, { cap: base.cap });
       if (step === 'done') return { next };
@@ -142,6 +149,46 @@ export function reconcileHandler({ next = NEXT_STAGE } = {}) {
       if (directive) return directive;
     }
   };
+}
+
+/**
+ * The rounds a person answered a `reconcile-cap` park with, stamped once.
+ *
+ * The option's whole content is the count, so an answer that carries no whole
+ * number is asked again rather than read as a number nobody wrote. The stamp is
+ * keyed on the park it answers, so a restart repeats nothing (ADR-0079).
+ */
+function extendCap(ctx, base) {
+  const events = runEvents(ctx);
+  const asked = answeredPark(events, 'reconcile-cap');
+  if (!asked?.answer || asked.answer.option !== ROUNDS) return null;
+  if (events.some((e) => e.event === 'reconcile-cap-extended' && e.parkSeq === asked.park.seq)) {
+    return null;
+  }
+  const rounds = Number.parseInt(String(asked.answer.answer ?? '').trim(), 10);
+  if (!Number.isInteger(rounds) || rounds < 1) {
+    return parkDirective('reconcile-cap', {
+      question:
+        `"${asked.answer.answer ?? ''}" names no number of rounds. Answer "${ROUNDS}" with a ` +
+        'whole number of corrective rounds to buy, or "abandon" to close the run.',
+      options: [ROUNDS],
+      reasoned: [ROUNDS],
+      text: 'the number of rounds to buy',
+      reason: 'reconcile-cap',
+      detail: asked.park.detail ?? {},
+    });
+  }
+  const bought = events
+    .filter((e) => e.event === 'reconcile-cap-extended')
+    .reduce((total, e) => total + (e.rounds ?? 0), 0);
+  ctx.store.append('reconcile-cap-extended', {
+    actor: ACTOR,
+    parkSeq: asked.park.seq,
+    rounds,
+    cap: (base.cap ?? DEFAULT_RECONCILE_ROUNDS) + bought + rounds,
+    gist: gist(`${rounds} more record round(s) bought at the cap`),
+  });
+  return null;
 }
 
 /** One step of the stage. A directive ends the stage; null derives again. */
@@ -214,7 +261,24 @@ export function reconcileStep(events, { cap = DEFAULT_RECONCILE_ROUNDS } = {}) {
   const rounds = roundsSince(events, judged.seq);
   const renders = rendersSince(events, judged.seq);
   const stalled = repairStalled(events, renders, rendered, { round: 'reconcile-round' });
-  return rounds >= cap || stalled ? 'stall' : 'correct';
+  // The rounds a person bought at a cap park. The newest one re-enters the
+  // correction whatever ended the round before it, and every one of them raises
+  // the cap this pass is judged against (ADR-0079).
+  const bought = boughtRounds(events, judged.seq);
+  if (bought.seq > rendered.seq) return 'correct';
+  return rounds >= cap + bought.rounds || stalled ? 'stall' : 'correct';
+}
+
+/** The rounds bought at the cap parks of this pass, and the newest one's seq. */
+function boughtRounds(events, since) {
+  let rounds = 0;
+  let seq = 0;
+  for (const e of events) {
+    if (e.event !== 'reconcile-cap-extended' || e.seq < since) continue;
+    rounds += e.rounds ?? 0;
+    seq = e.seq;
+  }
+  return { rounds, seq };
 }
 
 /**
@@ -1544,6 +1608,12 @@ async function stallStep(ctx, base, next, { rounds = null, empty = false } = {})
 async function fallbackStep(ctx, base, { cause, residual = [], next = NEXT_STAGE }) {
   const index = findingIndex(runEvents(ctx));
   const findings = residual.filter((id) => index.has(id));
+  // The records lane keeps its work and asks for rounds. It stamps no fallback:
+  // a fallback is the run's own decision to ride with the findings open, and
+  // this run is still working (ADR-0079).
+  if (base.mode === 'records') {
+    return recordsCap(ctx, base, { cause, residual: findings, open: residual });
+  }
   ctx.store.append('reconciliation-written', {
     actor: ACTOR,
     ok: false,
@@ -1554,34 +1624,36 @@ async function fallbackStep(ctx, base, { cause, residual = [], next = NEXT_STAGE
     ...(cause === RECORD_CAP && { partial: true, residual: findings }),
     gist: gist(`the record write ended in a fallback: ${cause}`),
   });
-  if (base.mode !== 'records') return { next };
-  return closeOnCap(ctx, base, { cause, residual: findings, open: residual });
+  return { next };
 }
 
 /**
- * The records lane's own ending at the cap. There is no code to ship and no
- * merge commit to name, so the ticket carries the run branch and the open
- * findings, and the run closes with the reason on its `run-closed` record.
+ * The records lane at its cap: the work is kept, and a person is asked for
+ * rounds.
+ *
+ * There is no code to ship, so a close here loses the branch, the ledger, the
+ * findings and the worktree, and the ticket it leaves launches a fresh birth
+ * from the default branch. The branch goes to the origin first, the ticket
+ * names every record, every open finding and every dispatch the rounds could
+ * not write, and the park offers the rounds that finish the work (ADR-0079).
  */
-function closeOnCap(ctx, base, { cause, residual, open }) {
+async function recordsCap(ctx, base, { cause, residual, open }) {
+  const pushed = await pushBranch(ctx, base);
+  if (pushed) return pushed;
   const events = runEvents(ctx);
   const judged = judgment(events);
-  const records = judged?.records ?? [];
+  const anchor = cycleAnchor(events);
+  const records = anchor ? reviewedRecords(events, anchor) : (judged?.records ?? []);
   const index = findingIndex(events);
   const detail = residual.map((id) => index.get(id)).filter(Boolean);
+  const failed = (anchor?.records ?? []).filter((entry) => entry.failed === true);
+  const reason = judged?.reason ?? '(none recorded)';
   let ticket = null;
   try {
     ticket = reconcileTicketPath(ctx.paths, ctx.runId);
     writeFileSync(
       ticket,
-      reconcileTicketFromBranch({
-        ctx,
-        base,
-        records,
-        reason: judged?.reason ?? '(none recorded)',
-        residual: detail,
-        open,
-      }),
+      reconcileTicketFromBranch({ ctx, base, records, reason, residual: detail, open, failed }),
     );
   } catch (error) {
     return blocked(
@@ -1591,6 +1663,9 @@ function closeOnCap(ctx, base, { cause, residual, open }) {
         'Repair the daemon home, then answer.',
     );
   }
+  // The stall is loud on every route to this park, including the routes that
+  // reach it without spending a round (ADR-0079).
+  stampStall(ctx, events, { cause, open });
   // The ticket before the stamp: a stamped ticket always exists to launch from,
   // and the stamp is what owns the loud stall (ADR-0024).
   ctx.store.append('reconciliation-judged', {
@@ -1598,13 +1673,54 @@ function closeOnCap(ctx, base, { cause, residual, open }) {
     ok: true,
     owed: true,
     records,
-    reason: judged?.reason ?? '(none recorded)',
+    reason,
     ticket,
     cause,
     ...(residual.length > 0 && { residual }),
     gist: gist(`reconciliation ticketed from the branch: ${records.join(', ')}`),
   });
-  return { close: { state: 'failed', reason: 'reconcile-cap', ticket } };
+  return parkDirective('reconcile-cap', {
+    question: capQuestion(base, { records, open, failed, ticket }),
+    options: [ROUNDS],
+    reasoned: [ROUNDS],
+    text: 'the number of rounds to buy',
+    reason: 'reconcile-cap',
+    detail: { ticket, branch: base.branch ?? '(none)' },
+  });
+}
+
+/** The option that raises the record cap and re-enters the corrective round. */
+export const ROUNDS = 'rounds';
+
+/** What the park asks, and what it says the run is holding while it waits. */
+function capQuestion(base, { records, open, failed, ticket }) {
+  return [
+    `The record rounds of this run are spent and ${open.length} item(s) stay open:`,
+    ...open.map((id) => `- ${id}`),
+    '',
+    `The branch ${base.branch ?? '(none)'} is on the origin, with ${records.length} record(s)`,
+    `on it. The ticket that states the rest of the work is ${ticket}.`,
+    ...(failed.length > 0
+      ? ['', 'These dispatches spent their budget and wrote nothing:', ...failed.map((e) => `- ${e.record}`)]
+      : []),
+    '',
+    `Answer "${ROUNDS}" with a whole number to buy that many corrective rounds, or "abandon"`,
+    'to close the run and leave the branch and the ticket for a later one.',
+  ].join('\n');
+}
+
+/** The loud stall, where the route to the cap did not already stamp one. */
+function stampStall(ctx, events, { cause, open }) {
+  const rendered = lastRendered(events);
+  if (events.some((e) => e.event === 'reconcile-stall' && e.seq > (rendered?.seq ?? 0))) return;
+  const judged = judgment(events);
+  ctx.store.append('reconcile-stall', {
+    actor: ACTOR,
+    rounds: judged ? roundsSince(events, judged.seq) : 0,
+    open,
+    cause,
+    gist: gist(`the record work ended in ${cause} with ${open.length} open: ${open.join(', ')}`),
+  });
 }
 
 /**
@@ -1613,8 +1729,18 @@ function closeOnCap(ctx, base, { cause, residual, open }) {
  * request and the merge commit: nothing merged, so the work stands on the branch
  * and the run that reads this ticket starts from there (ADR-0075).
  */
-export function reconcileTicketFromBranch({ ctx, base, records, reason, residual = [], open = [] }) {
-  const layers = open.filter((id) => !residual.some((f) => f.id === id));
+export function reconcileTicketFromBranch({
+  ctx,
+  base,
+  records,
+  reason,
+  residual = [],
+  open = [],
+  failed = [],
+}) {
+  const layers = open.filter(
+    (id) => !residual.some((f) => f.id === id) && !id.startsWith(UNWRITTEN),
+  );
   return [
     `# Reconciliation ticket: run ${ctx.runId}`,
     '',
@@ -1628,12 +1754,23 @@ export function reconcileTicketFromBranch({ ctx, base, records, reason, residual
     '',
     `Judged reason: ${reason}`,
     '',
-    '## The branch',
+    '## The branch on origin',
     '',
-    `- run branch: ${base.branch ?? '(none)'} (read it with git log)`,
+    `- run branch: ${base.branch ?? '(none)'}, pushed to origin (read it with git log)`,
     `- the run that wrote it: ${ctx.runId}`,
     ...(residual.length > 0
       ? ['', '## Findings to answer', '', ...residual.map((f) => `- ${findingLine(f)}`)]
+      : []),
+    ...(failed.length > 0
+      ? [
+          '',
+          '## Failed dispatches',
+          '',
+          ...failed.flatMap((entry) => [
+            `- ${entry.record}`,
+            ...(entry.defects ?? []).map((defect) => `  - ${defect}`),
+          ]),
+        ]
       : []),
     ...(layers.length > 0
       ? ['', '## Red layers', '', ...layers.map((layer) => `- ${layer}`)]
