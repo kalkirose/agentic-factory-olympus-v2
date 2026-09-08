@@ -578,7 +578,9 @@ export async function writeChecks(base, records, report, opts = {}) {
   defects.push(...closureDefects(base, closed, replaced, unchanged));
   const touched = new Set(changed);
   const kept = new Set(counted.records);
-  const listedClosed = new Set(activeOf(base?.worktree, report.rewritten).skipped.map((s) => s.record));
+  const listedClosed = new Set(
+    activeOf(base?.worktree, report.rewritten).skipped.map((entry) => entry.record),
+  );
   for (const record of report.rewritten) {
     // A closed record in `rewritten` is tolerated. The seat changed the file, so
     // it listed it; the closure rule is what accounts for that record.

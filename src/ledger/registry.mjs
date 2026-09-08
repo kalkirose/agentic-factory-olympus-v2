@@ -545,10 +545,10 @@ export const RUN_EVENTS = new Set([
   // spent and what stayed `open`. A red render whose dispatch set is empty
   // stamps `rounds: 0`: every record of it is closed, no seat can answer the
   // render, and a round that spawns nothing buys nothing (ADR-0078). Loud,
-  // because the run then takes the fallback on its own. The code ships and the records go to a ticket, or a
-  // records-lane run closes on the cap, and no park asks anybody first. The
-  // ticket is the answer, so the close-out `reconciliation-judged` that names
-  // one owns this record.
+  // because the run then takes the fallback on its own. The code ships and the
+  // records go to a ticket, or a records-lane run closes on the cap, and no
+  // park asks anybody first. The ticket is the answer, so the close-out
+  // `reconciliation-judged` that names one owns this record.
   'reconcile-stall',
   // The recheck a repair round owes a green reconciliation: the `delta` the
   // round committed, the `units` whose evidence paths it touched, what the
