@@ -243,13 +243,13 @@ test('a record-only ticket ships through the records lane', async (t) => {
     ['record-author', 'reconcile-judge', 'record-review'],
     'the records lane spawned seats it does not owe',
   );
-  // The birth seat runs the record layers itself, and its environment carries
-  // the base those commands judge against: the merge base, which is the base CI
-  // reads the request at (ADR-0079).
+  // The brief names what reads the form of the born files and when. The seat
+  // environment carries the base the layer judges against at the render: the
+  // merge base, which is the base CI reads the request at (ADR-0079).
   const author = seats.find((c) => c.seat === 'record-author');
   assert.equal(author.baseSha, launchBase);
-  assert.match(author.prompt, /Run these commands in the worktree before you report/);
-  assert.match(author.prompt, /- lint: node \.olympus\/gates\/lint\.mjs/);
+  assert.match(author.prompt, /These layers read your files after the commit, at the render: lint\./);
+  assert.match(author.prompt, /check your own files before you report/);
   // Every record seat reads the harness's own enumerator by absolute path, and
   // the review seat is given the record and no diff.
   const review = seats.find((c) => c.seat === 'record-review');

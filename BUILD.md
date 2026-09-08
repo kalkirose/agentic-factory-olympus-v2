@@ -771,13 +771,14 @@ never carries a project's specifics.
   of that window, so a parent the birth closed passes and a parent already
   closed at the base is refused. `recordScope` takes no range, and `rangeStart`,
   the ship base and `OLYMPUS_BASE_SHA` answer the merge base, so the in-run gate
-  reads the set CI reads. The birth brief carries the computed siblings, the
-  neighbourhood of a touched record, and the record layers' commands with their
-  prerequisites first; the schema asks for `siblings` only where the forecast
-  holds one. A corrective round dispatches the records an open finding or a red
-  layer names and stamps the rest `kept`; a cycle after the first reads the
-  records the last round changed and the records with an open finding, and keeps
-  the rest with the cycle of their green. A write dispatch that spends its
+  reads the set CI reads. The birth brief carries the computed siblings and the
+  neighbourhood of a touched record. It names the layers that read the form at
+  the render, and the seat checks its own files against the constitution first.
+  The schema asks for `siblings` only where the forecast holds one. A corrective
+  round dispatches the records an open finding or a red layer names, and stamps
+  the rest `kept`. A cycle after the first reads the records the last round
+  changed and the records with an open finding, and keeps the rest with the
+  cycle of their green. A write dispatch that spends its
   budget ends itself, stamps `failed` with its defects, and the render carries
   `unwritten:<record>` until a round writes it. A records-lane run at its cap
   pushes its branch, writes the ticket and parks `reconcile-cap`, where `rounds`

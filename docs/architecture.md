@@ -92,11 +92,12 @@ Three lanes share the machinery:
   readiness → records → reconcile → update → ship → close-out. No fix seat, no
   suite, no code verdict. A record-only ticket is refused on the repair lane at
   the launch door with this lane named, and a ticket that names code is refused
-  here (ADR-0074). The birth reads the ticket's own touched records: it is
-  briefed with the records that cite them, the neighbourhood around them and the
-  record layers' commands, and its environment carries the window's base, so a
-  form defect is the seat's to fix inside its dispatch. At the record cap the
-  lane keeps its work and asks for rounds rather than closing (ADR-0079).
+  here (ADR-0074). The birth reads the ticket's own touched records. It is
+  briefed with the records that cite them and the neighbourhood around them.
+  The brief names the layers that read the form at the render, after the commit,
+  and the seat checks its own files against the constitution before it reports.
+  Its environment carries the window's base. At the record cap the lane keeps
+  its work and asks for rounds rather than closing (ADR-0079).
 
 A story launch may **resume from a prior run's freeze**: it starts on the
 frozen commit, carries the born spec and the freeze record over, stamps

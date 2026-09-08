@@ -45,11 +45,12 @@ the merge base is refused as a supersession of a closed record.
 replacement the birth wrote answers a closure the birth made.
 
 **The brief carries every list the check refuses on.** The birth reads the
-ticket's own touched records and is briefed with the records that cite them, the
-neighbourhood around them, and the record layers' commands with their
-prerequisites first. Its environment carries the window's base. The schema asks
-for `siblings` only where the forecast holds one, and the brief states an empty
-forecast in one sentence.
+ticket's own touched records and is briefed with the records that cite them and
+the neighbourhood around them. The brief names the layers that read the form at
+the render, and the cost of a defect there, and asks the seat to check its own
+files against the constitution first. Its environment carries the window's base.
+The schema asks for `siblings` only where the forecast holds one, and the brief
+states an empty forecast in one sentence.
 
 **A corrective round dispatches the records that owe an answer.**
 `correctiveRecords` reads the render: every active record an open finding names
@@ -101,6 +102,12 @@ run closes.
 
 A failed dispatch leaves its record's finding open for one more cycle, which
 costs one review seat and one write seat.
+
+The form of a born record is first read by the record layer at the render, over
+the commit. No command a birth seat can run proves the form of a file it has not
+committed, so the brief states the cost of a defect and the seat reads its own
+work against the constitution. A form defect therefore still costs one cycle and
+one corrective round.
 
 ## Rejected options
 

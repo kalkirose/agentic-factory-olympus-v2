@@ -725,7 +725,7 @@ function citingTree(count = 23, id = '0001') {
   return out;
 }
 
-test('the birth brief carries the siblings, the neighbours and the gate commands (W2, W3, W4)', async (t) => {
+test('the birth brief carries the siblings, the neighbours and the render (W2, W3, W4)', async (t) => {
   const touched = 'docs/adr/adr-0001-keep-one-entry-point.md';
   const probe = join(tempDir(), 'birth-env.json');
   const fx = laneFixture(t, {
@@ -754,10 +754,15 @@ test('the birth brief carries the siblings, the neighbours and the gate commands
   // capped by rank with the count above the cap stated.
   assert.match(brief, /The neighbourhood\. Read each one whole/);
   assert.match(brief, /11 more active records cite these or are cited by them/);
-  // The record layers this project runs, prerequisites first, as commands.
-  assert.match(brief, /Run these commands in the worktree before you report/);
-  assert.ok(brief.indexOf('- lockfile: node -e') < brief.indexOf('- adr-form: node -e'), brief);
-  assert.ok(!brief.includes('- unit: node --test'), brief);
+  // What reads the form of these files, and when. No command proves the form of
+  // an uncommitted record, so the brief names the layer and the cost.
+  assert.match(brief, /These layers read your files after the commit, at the render: adr-form\./);
+  assert.match(brief, /A form defect there costs the run a cycle and a corrective round\./);
+  assert.match(brief, /check your own files before you report/);
+  // No command: the brief names the layer and never a line the seat could run
+  // over uncommitted files. The code layers of the project are not named at all.
+  assert.ok(!brief.includes('node -e'), brief);
+  assert.ok(!brief.includes('lockfile'), brief);
   // The environment carries the base the gate reads.
   assert.match(JSON.parse(readFileSync(probe, 'utf8')), /^[0-9a-f]{40}$/);
   // One dispatch: the report answered the shape the brief asked for.

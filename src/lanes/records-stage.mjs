@@ -545,9 +545,9 @@ async function recordsBase(ctx, mode) {
     constitution: readConstitution(worktree, config),
     defaultBranch,
     testPaths: config.repo.testPaths ?? [],
-    // The commands the seat runs before it reports: the record layers of this
-    // project and what they need, in the order they run.
-    gateCommands: recordGateCommands(config),
+    // The layers that read a record diff. The birth brief names them as what
+    // reads the form of its files, at the render and after the commit.
+    recordLayers: config.gates?.recordLayers ?? [],
     spec: {
       key,
       path: source.path,
@@ -577,38 +577,6 @@ function birthSiblingForecast(worktree, touched, recordPaths) {
     }
   }
   return [...out];
-}
-
-/**
- * The record layers' own commands, prerequisites first, as the seat runs them.
- *
- * A form defect in a born record used to surface one cycle and one corrective
- * round later, because the seat had no way to run the gate: the layer that
- * installs the dependencies runs at the reconcile stage. The seat runs the same
- * commands the layer runs, over the same bytes (ADR-0079).
- * @returns {Array<{layer: string, command: string}>}
- */
-function recordGateCommands(config) {
-  const layers = config?.gates?.tier1 ?? [];
-  const named = new Set(config?.gates?.recordLayers ?? []);
-  const byName = new Map(layers.map((layer) => [layer.name, layer]));
-  const ordered = [];
-  const seen = new Set();
-  const add = (name) => {
-    const layer = byName.get(name);
-    if (!layer || seen.has(name)) return;
-    seen.add(name);
-    for (const need of layer.needs ?? []) add(need);
-    ordered.push(layer);
-  };
-  for (const layer of layers) if (named.has(layer.name)) add(layer.name);
-  const out = [];
-  for (const layer of ordered) {
-    const argv = config?.commands?.[layer.command];
-    if (!Array.isArray(argv) || argv.length === 0) continue;
-    out.push({ layer: layer.name, command: argv.join(' ') });
-  }
-  return out;
 }
 
 /**

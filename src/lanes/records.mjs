@@ -193,7 +193,7 @@ export function birthRole(base, spec, neighbours, brief) {
     '"unchanged" with the reason.',
     ...neighbourhoodLines(neighbours),
     ...siblingLines(spec?.siblings),
-    ...gateLines(base?.gateCommands),
+    ...renderLines(base?.recordLayers),
     '',
     'Rules:',
     ...RECORD_RULES,
@@ -428,21 +428,23 @@ function siblingLines(siblings) {
 }
 
 /**
- * The checks the project runs over a record diff, as commands the seat runs.
+ * What reads the form of a born record, and when.
  *
- * They are stated in the birth brief alone. A form defect a seat can see is a
- * defect it fixes inside its own dispatch; the same defect at the render costs
- * a cycle and a corrective round (ADR-0079).
+ * The record layers run at the render, over the commit. No command a birth seat
+ * can run proves the form of an uncommitted file, so the brief states the cost
+ * of a defect and asks the seat to read its own work against the constitution
+ * before it reports (ADR-0079).
  */
-function gateLines(commands) {
-  const list = commands ?? [];
+function renderLines(layers) {
+  const list = layers ?? [];
   if (list.length === 0) return [];
   return [
     '',
-    'Run these commands in the worktree before you report, in this order. They are the checks',
-    'this project runs over a record diff, and the render reads the same bytes:',
-    ...list.map((entry) => `- ${entry.layer}: ${entry.command}`),
-    'A defect one of them names is yours to fix here.',
+    `These layers read your files after the commit, at the render: ${list.join(', ')}.`,
+    'A form defect there costs the run a cycle and a corrective round.',
+    'So read the constitution above and check your own files before you report: the word',
+    'budget, the heading set, the status line forms, the one-sentence decision, the sentence',
+    'length and the words it bans.',
   ];
 }
 
