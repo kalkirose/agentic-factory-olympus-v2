@@ -679,7 +679,14 @@ async function writeRound(
     const spawnedAt = lastSeq(runEvents(ctx));
     const outcome = await seatWithChecks(ctx, {
       seat,
-      schema: reconcileWriteSchema({ units: true, answered, siblings: siblings !== null }),
+      // One fact for the schema and the brief: the list the harness computed.
+      // An empty list asks the seat for no sibling entry, and the brief says so
+      // (ADR-0079).
+      schema: reconcileWriteSchema({
+        units: true,
+        answered,
+        siblings: (siblings ?? []).length > 0,
+      }),
       cwd: base.worktree,
       env: base.env,
       constitution: base.constitution,

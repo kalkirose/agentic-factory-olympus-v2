@@ -135,22 +135,23 @@ export function reconcileWriteSchema({ answered = false, siblings = false, units
           required: ['record', 'state', 'statement', ...(units ? ['evidence'] : [])],
         },
       },
-      ...(siblings && {
-        siblings: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              record: { type: 'string' },
-              state: { type: 'string', enum: [...SIBLING_STATES] },
-              reason: { type: 'string' },
-              replacement: { type: 'string' },
-            },
-            required: ['record', 'state', 'reason'],
+      // The sibling answers. The dispatch decides whether the report owes them,
+      // and the shape holds them either way, so a seat that answers a sibling
+      // nobody asked about is never refused for it (ADR-0079).
+      siblings: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            record: { type: 'string' },
+            state: { type: 'string', enum: [...SIBLING_STATES] },
+            reason: { type: 'string' },
+            replacement: { type: 'string' },
           },
+          required: ['record', 'state', 'reason'],
         },
-      }),
+      },
       ...(answered && { answered: { type: 'array', items: { type: 'string' } } }),
       summary: { type: 'string' },
     },
@@ -192,6 +193,7 @@ export function birthRole(base, spec, neighbours, brief) {
     '"unchanged" with the reason.',
     ...neighbourhoodLines(neighbours),
     ...siblingLines(spec?.siblings),
+    ...gateLines(base?.gateCommands),
     '',
     'Rules:',
     ...RECORD_RULES,
@@ -408,15 +410,36 @@ function neighbourhoodLines(neighbours) {
  * run already writes is not in the list: it is answered as itself.
  */
 function siblingLines(siblings) {
-  const list = siblings ?? [];
-  if (list.length === 0) return [];
+  if (siblings === null || siblings === undefined) return [];
+  if (siblings.length === 0) {
+    return ['', 'No active record cites a record this write supersedes, so "siblings" takes no entry.'];
+  }
   return [
     '',
     'These active records cite a record you supersede. Read each one whole and answer it in',
     '"siblings":',
-    ...list.map((path) => `- ${path}`),
+    ...siblings.map((path) => `- ${path}`),
     '- "consistent" with the one-sentence reason it still stands, or "superseded" with the',
     '  record that replaces it in this round.',
+  ];
+}
+
+/**
+ * The checks the project runs over a record diff, as commands the seat runs.
+ *
+ * They are stated in the birth brief alone. A form defect a seat can see is a
+ * defect it fixes inside its own dispatch; the same defect at the render costs
+ * a cycle and a corrective round (ADR-0079).
+ */
+function gateLines(commands) {
+  const list = commands ?? [];
+  if (list.length === 0) return [];
+  return [
+    '',
+    'Run these commands in the worktree before you report, in this order. They are the checks',
+    'this project runs over a record diff, and the render reads the same bytes:',
+    ...list.map((entry) => `- ${entry.layer}: ${entry.command}`),
+    'A defect one of them names is yours to fix here.',
   ];
 }
 
@@ -445,8 +468,8 @@ function lifecycleLines(base) {
     '- The list is ADR-<id> items joined by ", ", with " and " before the last. Every record it',
     '  names is added in this same diff and names the old record back. One record may split into',
     '  several, and several may merge into one.',
-    '- A record another active record cites arrives in "siblings". Answer each one: "consistent"',
-    '  with the reason, or "superseded" with the record that replaces it in this round.',
+    '- The records that cite a record you supersede arrive in "siblings", listed in this brief.',
+    '  Answer each one. A brief that lists none takes no "siblings" entry.',
     '- Two active records that decide one unbuilt part differently resolve by recency. The newer',
     '  decision stands, the older record gets its status line, and your divergence entry names',
     '  both records and the reason.',

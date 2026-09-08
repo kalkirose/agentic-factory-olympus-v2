@@ -150,12 +150,19 @@ function fixtureParse(line) {
   }
 }
 
-function seatScript({ reportPath, model, report, files = {}, hang = false }) {
+function seatScript({ reportPath, model, report, files = {}, hang = false, probe = null }) {
   const stmts = [
     "const fs = require('fs');",
     "const path = require('path');",
     `console.log(${JSON.stringify(JSON.stringify({ meta: { model }, cost: 0.5 }))});`,
   ];
+  // What the seat's own environment held, written where a scenario can read it.
+  // The environment is the one thing a prompt cannot show (ADR-0079).
+  if (probe) {
+    stmts.push(
+      `fs.writeFileSync(${JSON.stringify(probe)}, JSON.stringify(process.env.OLYMPUS_BASE_SHA ?? null));`,
+    );
+  }
   for (const [file, content] of Object.entries(files)) {
     stmts.push(
       `fs.mkdirSync(path.dirname(${JSON.stringify(file)}), { recursive: true });`,
@@ -683,6 +690,98 @@ function reviewedUnits(prompt) {
 // A reconciliation ticket names its records in prose under a heading and
 // carries no fenced block. The paths the work touches are those records, so
 // the brief states them and the neighbourhood is derived from them.
+// -- the birth brief (ADR-0079) -----------------------------------------------
+
+/** The project that supersedes its records, with a record layer of its own. */
+const SUPERSEDE_LAYERS = {
+  repo: {
+    testPaths: ['tests'],
+    recordPaths: ['docs/adr', `!${TEMPLATE_PATH}`],
+    recordLifecycle: 'supersede',
+  },
+  commands: {
+    suite: ['node', '--test', 'tests/*.test.mjs'],
+    lockfile: ['node', '-e', 'process.exit(0)'],
+    adrform: ['node', '-e', 'process.exit(0)'],
+  },
+  gates: {
+    tier1: [
+      { name: 'unit', command: 'suite' },
+      { name: 'lockfile', command: 'lockfile' },
+      { name: 'adr-form', command: 'adrform', needs: ['lockfile'] },
+    ],
+    recordLayers: ['adr-form'],
+  },
+};
+
+/** Active records that cite the record a sweep ticket touches, by count. */
+function citingTree(count = 23, id = '0001') {
+  const out = {};
+  for (let n = 0; n < count; n++) {
+    const number = String(11 + n).padStart(4, '0');
+    out[`docs/adr/adr-${number}-cites.md`] =
+      `# ADR-${number}: A record\n\n**Status:** Accepted\n\n## Decision\n\nIt relies on ADR-${id}.\n`;
+  }
+  return out;
+}
+
+test('the birth brief carries the siblings, the neighbours and the gate commands (W2, W3, W4)', async (t) => {
+  const touched = 'docs/adr/adr-0001-keep-one-entry-point.md';
+  const probe = join(tempDir(), 'birth-env.json');
+  const fx = laneFixture(t, {
+    config: SUPERSEDE_LAYERS,
+    files: { 'tickets/records.md': ticketText([touched]), ...citingTree() },
+    seats: {
+      'record-author': () => ({
+        files: { [RECORD_PATH]: RECORD_TEXT },
+        report: { ...bornReport(), siblings: [] },
+        probe,
+      }),
+    },
+  });
+  const { runId } = await fx.launch({ lane: 'records', ticket: 'tickets/records.md' });
+  await waitClosed(fx.paths, runId);
+  const brief = fx.calls.find((c) => c.seat === 'record-author').prompt;
+
+  // The siblings the check computes afterwards, computed before the seat runs.
+  // The list is not capped: every record that cites a superseded one owes an
+  // answer, and a batch of this shape has 23 of them.
+  assert.match(brief, /These active records cite a record you supersede/);
+  const cites = Object.keys(citingTree());
+  assert.equal(cites.length, 23);
+  for (const path of cites) assert.ok(brief.includes(`- ${path}`), path);
+  // The neighbourhood of a touched record is that record's own, and it is
+  // capped by rank with the count above the cap stated.
+  assert.match(brief, /The neighbourhood\. Read each one whole/);
+  assert.match(brief, /11 more active records cite these or are cited by them/);
+  // The record layers this project runs, prerequisites first, as commands.
+  assert.match(brief, /Run these commands in the worktree before you report/);
+  assert.ok(brief.indexOf('- lockfile: node -e') < brief.indexOf('- adr-form: node -e'), brief);
+  assert.ok(!brief.includes('- unit: node --test'), brief);
+  // The environment carries the base the gate reads.
+  assert.match(JSON.parse(readFileSync(probe, 'utf8')), /^[0-9a-f]{40}$/);
+  // One dispatch: the report answered the shape the brief asked for.
+  assert.equal(fx.calls.filter((c) => c.seat === 'record-author').length, 1);
+});
+
+test('a birth over records nothing cites asks for no sibling entry (W13)', async (t) => {
+  const fx = laneFixture(t, {
+    config: SUPERSEDE_LAYERS,
+    files: { 'tickets/records.md': ticketText(['docs/adr/adr-0001-keep-one-entry-point.md']) },
+    seats: {
+      // The report carries no `siblings`, and the schema does not ask for one.
+      'record-author': () => ({ files: { [RECORD_PATH]: RECORD_TEXT }, report: bornReport() }),
+    },
+  });
+  const { runId } = await fx.launch({ lane: 'records', ticket: 'tickets/records.md' });
+  const events = await waitClosed(fx.paths, runId);
+  const brief = fx.calls.find((c) => c.seat === 'record-author').prompt;
+  assert.match(brief, /No active record cites a record this write supersedes/);
+  assert.equal(fx.calls.filter((c) => c.seat === 'record-author').length, 1);
+  assert.ok(!events.some((e) => e.event === 'seat-failure'));
+  assert.equal(events.find((e) => e.event === 'records-committed').decided, true);
+});
+
 test('a ticket with no block gives the birth the records it names', async (t) => {
   const ticket = [
     '# Reconciliation ticket: run r1',

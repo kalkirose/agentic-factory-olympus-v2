@@ -120,6 +120,11 @@ test('the write schema carries the units, the divergence evidence and the siblin
     'statement',
     'evidence',
   ]);
+  // The sibling answers are in the shape whatever the dispatch asks for, so a
+  // seat that answers a sibling nobody asked about is never refused for it. The
+  // requirement is the dispatch's own (ADR-0079).
+  assert.ok(plain.properties.siblings !== undefined);
+  assert.deepEqual(validateReport(plain, reportWith(completeUnits(), { siblings: [] })), []);
   const both = reconcileWriteSchema({ answered: true, siblings: true });
   assert.deepEqual(checkReportSchema(both), []);
   assert.ok(both.required.includes('answered'));
@@ -756,6 +761,31 @@ test('all three briefs carry the criteria, the unit duty, the neighbourhood and 
     assert.ok(brief.includes('git diff main...HEAD'));
     assert.ok(brief.includes('"divergences" takes exactly one entry per judged record (1)'));
     assert.ok(brief.includes('"evidence": the repo-relative path'));
+  }
+});
+
+test('a computed sibling list of none takes no entry, and says so (W13)', () => {
+  const base = { worktree: '/tmp/run', defaultBranch: 'main', recordLifecycle: 'supersede' };
+  const sentence = 'No active record cites a record this write supersedes, so "siblings" takes no entry.';
+  // The empty list and the absent one are two different facts. A dispatch that
+  // computed a list of none says so; a lane with no sibling contract at all
+  // states nothing.
+  const empty = writeRole(base, { ...JUDGED, siblings: [] }, null);
+  assert.ok(empty.includes(sentence), empty);
+  assert.ok(!writeRole(base, JUDGED, null).includes(sentence));
+  assert.ok(!writeRole(base, JUDGED, null).includes('These active records cite a record'));
+  // A computed list is stated, and the bullet points the seat at it.
+  const listed = writeRole(base, { ...JUDGED, siblings: ['docs/adr/adr-004-cites.md'] }, null);
+  assert.ok(listed.includes('- docs/adr/adr-004-cites.md'), listed);
+  assert.ok(!listed.includes(sentence), listed);
+  for (const brief of [empty, listed]) {
+    assert.ok(
+      brief.includes(
+        'The records that cite a record you supersede arrive in "siblings", listed in this brief.',
+      ),
+      brief,
+    );
+    assert.ok(brief.includes('A brief that lists none takes no "siblings" entry.'), brief);
   }
 });
 
