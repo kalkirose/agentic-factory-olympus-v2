@@ -1054,6 +1054,20 @@ test('a birth that closes a record with neither route is refused', async (t) => 
     defects.some((d) => /no such record is added in this diff/.test(d)),
     defects.join('\n'),
   );
+  // The same birth under the lifecycle that rewrites its records. There is no
+  // supersession there, so the defect names the one route that lifecycle holds.
+  const rewrite = { worktree: dir, defaultBranch: 'main', recordPaths: ['docs/adr'] };
+  const under = await writeChecks(rewrite, [], report, { seat: 'writer' });
+  assert.equal(under.length, 1);
+  assert.match(under[0], /adr-001-first\.md is closed in this diff and nothing accounts for it/);
+  assert.match(under[0], /Report it in "unchanged" with the reason you retired it/);
+  // And the reason accounts for it under either lifecycle.
+  const declared = {
+    ...report,
+    rewritten: [],
+    unchanged: [{ record, reason: 'the decision this record states is gone' }],
+  };
+  assert.deepEqual(await writeChecks(rewrite, [], declared, { seat: 'writer' }), []);
 });
 
 // Two seats of one round that merge two records into one. The second seat finds

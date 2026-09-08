@@ -1539,6 +1539,12 @@ test('a judged record the tree has closed takes no writer', async (t) => {
   assert.equal(typeof dispatched[0].sha, 'string');
   assert.deepEqual(dispatched[0].records, [ADR]);
   assert.deepEqual(dispatched[0].skipped, [{ record: ADR_TWO, status: 'retired' }]);
+  // The stamp lands before the first seat of the round spawns, so no dispatch
+  // is ever made off a list the ledger does not hold.
+  const firstWriter = events.find(
+    (e) => e.event === 'seat-spawned' && e.seat.startsWith('reconcile-write'),
+  );
+  assert.ok(dispatched[0].seq < firstWriter.seq, 'the set was stamped after the first seat');
   // The stamped list is the seats the ledger then spawned, in order.
   assert.deepEqual(
     events
@@ -1620,6 +1626,73 @@ test('a judged write that supersedes its record answers the replacement', async 
   // The cycle reviews the replacement, and the closed record takes no seat.
   const reviewed = events.filter((e) => e.event === 'reconcile-review-set');
   assert.deepEqual(reviewed.at(-1).records, [SUPERSEDES[ADR].added]);
+  assert.equal(events.find((e) => e.event === 'reconcile-rendered').verdict, 'green');
+});
+
+test('a judged write that supersedes one record with two answers both', async (t) => {
+  const heirs = ['docs/adr/adr-0003-name-the-base.md', 'docs/adr/adr-0004-read-the-base.md'];
+  const texts = {
+    [heirs[0]]: replacement('0003', 'ADR-0001', 'Name the base', 'The module src/base.mjs names the base.'),
+    [heirs[1]]: replacement('0004', 'ADR-0001', 'Read the base', 'The module src/base.mjs holds one value.'),
+  };
+  const split = {
+    [ADR]: {
+      closed: ADR_TEXT.replace(
+        '**Status:** Accepted',
+        '**Status:** Superseded by ADR-0003 and ADR-0004 (2026-09-08)',
+      ),
+      files: texts,
+    },
+  };
+  const fx = stageFixture(t, {
+    config: SUPERSEDE_REPO,
+    seats: {
+      'reconcile-judge': judgeOwed(),
+      'reconcile-write': ({ prompt }) => {
+        const record = Object.keys(split).find((r) => prompt.includes(`- ${r}`));
+        const { closed, files } = split[record];
+        return {
+          files: { [record]: closed, ...files },
+          report: {
+            rewritten: heirs,
+            unchanged: [],
+            // Every unit of both records the write added, and none of the one
+            // it closed.
+            units: heirs.flatMap((heir) => units(heir, files[heir])),
+            divergences: NO_DIVERGENCE(record),
+            siblings: [],
+            summary: `${record} becomes two records`,
+          },
+        };
+      },
+      'record-review': reviewClean,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // One attempt, no refusal: the write closed the record it was given and
+  // answered the two records it added.
+  assert.equal(fx.calls.filter((c) => c.seat === 'reconcile-write').length, 1);
+  assert.ok(!events.some((e) => e.event === 'seat-failure'));
+  const written = events.find((e) => e.event === 'reconciliation-written');
+  assert.deepEqual(written.rewritten, heirs);
+  assert.deepEqual(
+    written.records.map((r) => r.record),
+    [ADR],
+  );
+  assert.ok(written.records[0].unitsAnswered > 0);
+  // One unit stamp per record the check counted, and none for the record whose
+  // status line the write changed.
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'record-units' && e.seat.startsWith('reconcile-write'))
+      .map((e) => e.record),
+    heirs,
+  );
+  // The cycle reviews both replacements, and the closed record takes no seat.
+  assert.deepEqual(events.filter((e) => e.event === 'reconcile-review-set').at(-1).records, heirs);
+  assert.equal(fx.calls.filter((c) => c.seat === 'record-review').length, 2);
   assert.equal(events.find((e) => e.event === 'reconcile-rendered').verdict, 'green');
 });
 
@@ -1898,6 +1971,11 @@ test('a cycle re-entered after the tree closed a record reviews the set it stamp
   const stamped = held.filter((e) => e.event === 'reconcile-review-set');
   assert.equal(stamped.length, 1);
   assert.deepEqual(stamped[0].records, [ADR, ADR_TWO]);
+  // The stamp lands before the first review seat of the cycle spawns.
+  const firstReview = held.find(
+    (e) => e.event === 'seat-spawned' && e.seat.startsWith('record-review'),
+  );
+  assert.ok(stamped[0].seq < firstReview.seq, 'the set was stamped after the first seat');
   const worktree = held.find((e) => e.event === 'run-launched').worktree;
   // The tree moves under the cycle: one of the two records it is reviewing is
   // closed while the daemon is down.
