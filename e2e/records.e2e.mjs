@@ -12,8 +12,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import {
   PROJECT,
   PROJECT_CONFIG,
@@ -879,6 +879,13 @@ test('a records-lane run at its cap parks, takes a bought round, and ships', asy
   assert.ok(events.some((e) => e.event === 'reconcile-stall'));
   // The record rode the merge after the bought round.
   assert.ok(originTree(fx, 'main').includes(RECORD), 'the record did not ride the merge');
+  // The ticket the cap wrote describes work that shipped, so the close-out
+  // takes it out of the directory a person launches from.
+  assert.ok(!existsSync(park.detail.ticket), 'the cap ticket is still owed');
+  assert.ok(existsSync(join(fx.home, 'tickets', 'absorbed', basename(park.detail.ticket))));
+  const last = events.filter((e) => e.event === 'reconciliation-judged').at(-1);
+  assert.equal(last.owed, false);
+  assert.match(last.absorbed, /absorbed/);
 
   await stopDaemon(fx);
 });

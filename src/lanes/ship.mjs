@@ -60,11 +60,12 @@
 // cycle; every other route judges the tree again first. Every handler
 // re-derives its position from the run ledger, the git state, and the forge,
 // so a daemon restart resumes mid-ship without memory.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
   ciEvidenceDir,
   commandLogPath,
+  absorbedTicketPath,
   repairTicketPath,
   reconcileTicketPath,
   runReportPath,
@@ -2743,6 +2744,49 @@ function residualLine(f) {
 }
 
 /**
+ * The cap ticket of a run that went on and shipped.
+ *
+ * A records-lane run at its cap writes a ticket and parks. The rounds a person
+ * buys there finish the work, and the merge carries it, so the ticket describes
+ * work that shipped. It leaves the tickets directory a person launches from,
+ * and the ledger records both the absorption and a move that failed (ADR-0079).
+ */
+function absorbCapTicket(ctx, events, ticketed) {
+  const bought = events.some(
+    (e) => e.event === 'reconcile-cap-extended' && e.seq > ticketed.seq,
+  );
+  if (!bought) return;
+  const absorbed = absorbedTicketPath(ctx.paths, ticketed.ticket);
+  let moved = null;
+  try {
+    mkdirSync(dirname(absorbed), { recursive: true });
+    renameSync(ticketed.ticket, absorbed);
+    moved = absorbed;
+  } catch (error) {
+    moved = null;
+    ctx.store.append('reconciliation-judged', {
+      actor: ACTOR,
+      ok: true,
+      owed: false,
+      records: ticketed.records ?? [],
+      reason: 'the rounds bought at the record cap wrote the records, and the merge carried them',
+      cause: `the cap ticket could not be moved: ${error.message}`,
+      gist: gist(`the cap ticket stays at ${ticketed.ticket}`),
+    });
+  }
+  if (moved === null) return;
+  ctx.store.append('reconciliation-judged', {
+    actor: ACTOR,
+    ok: true,
+    owed: false,
+    records: ticketed.records ?? [],
+    reason: 'the rounds bought at the record cap wrote the records, and the merge carried them',
+    absorbed: moved,
+    gist: gist(`the cap ticket is absorbed: ${moved}`),
+  });
+}
+
+/**
  * The close's half of the reconciliation: the records that did not ride the
  * merge are ticketed here, where the merge commit the ticket names exists.
  *
@@ -2755,9 +2799,10 @@ function reconcileClose(ctx, base, merged) {
   const events = runEvents(ctx);
   const judged = sinceFreshPass(events, (e) => e.event === 'reconciliation-judged');
   if (judged?.ok !== true || judged.owed !== true) return;
-  if (events.some((e) => e.event === 'reconciliation-judged' && typeof e.ticket === 'string')) {
-    return;
-  }
+  const ticketed = events.find(
+    (e) => e.event === 'reconciliation-judged' && typeof e.ticket === 'string',
+  );
+  if (ticketed) return absorbCapTicket(ctx, events, ticketed);
   const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written');
   // The records that rode this merge with a confirmed finding still open. The
   // rewrite ships, because the judge found the old records owed and discarding
