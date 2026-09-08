@@ -1687,6 +1687,56 @@ test('a restart between the review and the verifier renders once, from the ledge
   assert.equal(events.find((e) => e.event === 'reconcile-rendered').verdict, 'green');
 });
 
+test('a restart inside the review fan-out re-runs the seats with no report (W8)', async (t) => {
+  const two = {
+    [ADR]: ADR_REWRITTEN,
+    [ADR_TWO]: ADR_TWO_TEXT + '\nThe module src/base.mjs is read by the feature.\n',
+  };
+  const fx = stageFixture(t, {
+    files: { [ADR_TWO]: ADR_TWO_TEXT },
+    seats: {
+      'reconcile-judge': judgeOwed(Object.keys(two)),
+      'reconcile-write': writeOnce(two),
+      // The second seat of the fan-out never answers, so the stop falls inside
+      // the cycle with one report on the ledger and one owed.
+      'record-review': hangNth(2, reviewClean),
+      'fury-verifier': confirmAndResolve,
+    },
+  });
+  const runId = await fx.launch();
+  await waitRunEvents(
+    fx.paths,
+    runId,
+    (events) => events.filter((e) => e.event === 'seat-spawned' && e.seat.startsWith('record-review')).length >= 2,
+    { label: 'both review seats spawned', attempts: 900 },
+  );
+  await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'seat-report' && e.seat.startsWith('record-review'),
+    'the first review report',
+  );
+  await fx.restart();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+
+  // Three dispatches for two records: the seat that answered is never asked
+  // again, and the seat that did not is.
+  const reviews = fx.calls.filter((c) => c.seat === 'record-review');
+  assert.equal(reviews.length, 3);
+  const bySlot = reviews.reduce((n, c) => ({ ...n, [c.full]: (n[c.full] ?? 0) + 1 }), {});
+  assert.deepEqual(bySlot, { 'record-review:1': 1, 'record-review:2': 2 });
+  // One stamp per record, and the answer of the seat that finished stands.
+  const stamps = events.filter(
+    (e) => e.event === 'record-units' && e.seat.startsWith('record-review'),
+  );
+  assert.deepEqual(
+    stamps.map((e) => e.record).sort(),
+    Object.keys(two).slice().sort(),
+  );
+  assert.equal(events.filter((e) => e.event === 'reconcile-rendered').length, 1);
+});
+
 test('a restart after the render never re-enters the verdict', async (t) => {
   // The stage hands the run on and the update holds it there once, so the stop
   // lands past the render and in front of the close.

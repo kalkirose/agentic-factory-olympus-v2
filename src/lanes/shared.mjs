@@ -717,8 +717,25 @@ export async function seatWithChecks(
     defectReason = 'work-product-defect',
     park = null,
     brief: opening = null,
+    resumeByReport = null,
   },
 ) {
+  // The report the ledger already holds for this seat's label, past the stamp
+  // the caller names. A stop inside a fan-out then costs the seats that had not
+  // answered and no others, and the checks judge the report again before it
+  // stands (ADR-0079).
+  if (typeof resumeByReport === 'number' && label) {
+    const path = runReportPath(ctx.paths, ctx.runId, label);
+    const stamped = runEvents(ctx).some(
+      (e) =>
+        e.event === 'seat-report' &&
+        e.seat === seat &&
+        e.path === path &&
+        e.seq > resumeByReport,
+    );
+    const report = stamped ? readJson(path) : null;
+    if (report && (await checks(report)).length === 0) return { report };
+  }
   const limit = attemptLimit(runEvents(ctx), seat);
   // The evidence rides every bought retry, crash or defect: the park promised
   // it, and the seat that crashed is briefed on what ended its predecessor. A
