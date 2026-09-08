@@ -44,7 +44,7 @@ import { cyclePlan, persistentReds, runSpectrum } from './spectrum.mjs';
 import { recordReviewRound } from './review.mjs';
 import {
   WRITE_SEAT,
-  answeredRecords,
+  countedRecords,
   correctiveRole,
   findingLine,
   parseRecordList,
@@ -572,7 +572,13 @@ async function writeRound(
   for (let i = 0; i < records.length; i++) {
     const record = records[i];
     const seat = `${WRITE_SEAT}:${i + 1}`;
-    const done = writtenAlready(ctx, runEvents(ctx), { seat, record, since, committed, base });
+    const done = await writtenAlready(ctx, runEvents(ctx), {
+      seat,
+      record,
+      since,
+      committed,
+      base,
+    });
     if (done) {
       entries.push(done.entry);
       reports.push(done.report);
@@ -619,6 +625,9 @@ async function writeRound(
     if (ctx.stopped()) return { stopped: true };
     const before = await headSha(base.worktree);
     const changed = await changedFiles(base.worktree);
+    // The set the check counted, read before the commit takes this dispatch's
+    // own diff out of the worktree. It is what the stamps cover (ADR-0078).
+    const counted = await countedRecords(base, [record], outcome.report, changed);
     const sha =
       changed.length > 0
         ? await commitAll(base.worktree, commitMessage(ctx, seat, record, since))
@@ -628,10 +637,10 @@ async function writeRound(
       seat,
       ...(typeof outcome.cost === 'number' && { cost: outcome.cost }),
       attempts: attemptsOf(runEvents(ctx), seat, spawnedAt),
-      unitsAnswered: answeredCount(base, outcome.report),
+      unitsAnswered: answeredCount(counted, outcome.report),
       ...(sha !== before && { sha }),
     };
-    stampUnits(ctx, base, { seat, report: outcome.report, cost: outcome.cost });
+    stampUnits(ctx, base, { seat, records: counted, report: outcome.report, cost: outcome.cost });
     entries.push(entry);
     reports.push(outcome.report);
   }
@@ -686,7 +695,7 @@ async function roundCommits(base, runId, since) {
  * list from the tree, where a record a seat closed is gone, and a seat name
  * would then answer for a record its dispatch never touched (ADR-0078).
  */
-function writtenAlready(ctx, events, { seat, record, since, committed, base }) {
+async function writtenAlready(ctx, events, { seat, record, since, committed, base }) {
   const stamps = events.filter(
     (e) => e.event === 'record-units' && e.seat === seat && e.seq > since,
   );
@@ -695,8 +704,11 @@ function writtenAlready(ctx, events, { seat, record, since, committed, base }) {
   const report = readJson(lastSeatReportEvent(events, seat)?.path);
   if (stamps.length === 0) {
     if (!report) return null;
-    stampUnits(ctx, base, { seat, report });
-    return { entry: entryOf(events, base, { seat, record, since, report }), report };
+    // This dispatch's own diff is in its commit, so the records the report says
+    // it wrote are what name the replacement.
+    const counted = await countedRecords(base, [record], report);
+    stampUnits(ctx, base, { seat, records: counted, report });
+    return { entry: entryOf(events, counted, { seat, record, since, report }), report };
   }
   return {
     entry: {
@@ -711,19 +723,19 @@ function writtenAlready(ctx, events, { seat, record, since, committed, base }) {
 }
 
 /** One per-record entry, rebuilt from the report a stop left behind. */
-function entryOf(events, base, { seat, record, since, report }) {
+function entryOf(events, counted, { seat, record, since, report }) {
   return {
     record,
     seat,
     attempts: attemptsOf(events, seat, since),
-    unitsAnswered: answeredCount(base, report),
+    unitsAnswered: answeredCount(counted, report),
   };
 }
 
 /** How many units one dispatch answered, over the records the check counted. */
-function answeredCount(base, report) {
-  const counted = new Set(answeredRecords(base, report));
-  return (report.units ?? []).filter((u) => counted.has(u.record)).length;
+function answeredCount(counted, report) {
+  const set = new Set(counted);
+  return (report.units ?? []).filter((u) => set.has(u.record)).length;
 }
 
 /**
@@ -731,13 +743,14 @@ function answeredCount(base, report) {
  *
  * One stamp per record the check counted. A dispatch that supersedes the record
  * it was given answers the record that replaces it, so the stamp names that
- * one; the closed record owes no unit and takes no stamp (ADR-0078). The cost
- * rides the first stamp, because the number is the dispatch's.
+ * one; the closed record owes no unit and takes no stamp (ADR-0078). A counted
+ * record the seat answered no unit for takes a stamp with an empty list. The
+ * cost rides the first stamp, because the number is the dispatch's.
  */
-function stampUnits(ctx, base, { seat, report, cost }) {
+function stampUnits(ctx, base, { seat, records, report, cost }) {
   const entries = Array.isArray(report.units) ? report.units : [];
   let first = true;
-  for (const record of answeredRecords(base, report)) {
+  for (const record of records) {
     const units = entries
       .filter((u) => u.record === record)
       .map((u) => ({

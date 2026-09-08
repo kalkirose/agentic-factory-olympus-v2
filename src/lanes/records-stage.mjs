@@ -29,8 +29,8 @@ import { parseIntentCard } from './card.mjs';
 import { probeCredentials } from './probes.mjs';
 import {
   AUTHOR_SEAT,
-  answeredRecords,
   birthRole,
+  countedRecords,
   reconcileWriteSchema,
   writeChecks,
 } from './records.mjs';
@@ -422,12 +422,12 @@ async function birthSiblings(base, report) {
  */
 async function commitRecords(ctx, base, report, cost, neighbours = null) {
   const reported = [...new Set(report.rewritten ?? [])];
+  const changed = await changedFiles(base.worktree);
   // The unit answers are facts about the report and not about the commit, so
   // they are stamped first: a stop between the two repeats them on the next
   // dispatch, where a stop after the commit would lose them. The reader joins
   // by record and unit id, so a repeat is one answer either way.
-  stampUnits(ctx, base, report, cost, neighbours);
-  const changed = await changedFiles(base.worktree);
+  stampUnits(ctx, await countedRecords(base, [], report, changed), report, cost, neighbours);
   const touched = changed.filter((file) => recordPathIncludes(file, base.recordPaths));
   const unreported = touched.filter((file) => !reported.includes(file));
   const paths = [...new Set([...reported, ...touched])];
@@ -464,17 +464,17 @@ async function stampNothing(ctx, base) {
  * the writer miss rate joins on (ADR-0073).
  *
  * A record the birth only closed is not one of them. Its status-line edit owes
- * no unit, so there is nothing to stamp, and a stamp with an empty unit list
- * would read as a record nobody answered (ADR-0078).
+ * no unit, so nothing counts it and nothing stamps it (ADR-0078). A counted
+ * record with no unit still takes its stamp, with an empty list.
  *
  * The cost rides the first record alone. One dispatch wrote every record here,
  * so the number is the dispatch's and not the record's, and a sum over the
  * records of a birth that repeated it would count the seat once per file.
  */
-function stampUnits(ctx, base, report, cost, neighbours) {
+function stampUnits(ctx, records, report, cost, neighbours) {
   const entries = Array.isArray(report.units) ? report.units : [];
   let first = true;
-  for (const record of answeredRecords(base, report)) {
+  for (const record of records) {
     const units = entries
       .filter((entry) => entry.record === record)
       .map(({ record: _record, ...rest }) => rest);

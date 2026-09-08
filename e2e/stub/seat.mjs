@@ -233,14 +233,14 @@ function supersedeWrite(record, { closed, added, text }) {
       rewritten: [added],
       unchanged: [],
       units: [...unitAnswers(added, added), ...unitAnswers(record, record)],
-      divergences: [
-        {
-          record,
-          state: 'none',
-          statement: 'the record that replaces this one states the tree',
-          evidence: added,
-        },
-      ],
+      // One entry per record the check counts, and one about the record this
+      // write closed, which the harness reads and never refuses.
+      divergences: [added, record].map((path) => ({
+        record: path,
+        state: 'none',
+        statement: 'the record that replaces this one states the tree',
+        evidence: added,
+      })),
       ...(prompt.includes('Confirmed findings:') && {
         answered: [...prompt.matchAll(/^- \[(F\d+)\]/gm)].map((m) => m[1]),
       }),

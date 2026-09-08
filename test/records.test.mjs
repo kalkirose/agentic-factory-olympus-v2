@@ -20,7 +20,6 @@ import {
   recordScope,
   siblingChecks,
   supersedeChecks,
-  unitRecords,
   unitChecks,
   writeChecks,
   writeRole,
@@ -611,7 +610,7 @@ test('every sibling of a supersession is answered, and a superseded one is repla
   };
   const unwritten = await siblingChecks(base, siblings, empty);
   assert.equal(unwritten.length, 1);
-  assert.match(unwritten[0], /no record that replaces it is in this diff/);
+  assert.match(unwritten[0], /no record that replaces it is in this round/);
   // An entry for a record that is not a sibling is refused: a record in the
   // run's own scope is answered as itself.
   const extra = {
@@ -890,10 +889,6 @@ test('a birth that closes six records and writes sixteen is not refused', async 
   // entries are dropped, and the report stands.
   const answered = { ...report, units: [...units, ...asRationale(dir, olds)] };
   assert.deepEqual(await writeChecks(base, [], answered, { seat: 'writer' }), []);
-  // The set the check counts is the sixteen, and the six are named as dropped.
-  const counted = await unitRecords(base, [], report);
-  assert.deepEqual(counted.records, news);
-  assert.deepEqual(counted.dropped, olds);
   // The two refusals still stand over a new record.
   const short = { ...report, units: units.filter((u) => u.id !== 'U2' || u.record !== news[7]) };
   const missing = await writeChecks(base, [], short, { seat: 'writer' });
@@ -928,7 +923,12 @@ test('the same birth is refused when the closed records stay in the set', async 
   const unfiltered = [...news, ...olds];
   const report = { rewritten: unfiltered, unchanged: [], units, divergences: [] };
   const missing = unitChecks(base, unfiltered, report, { seat: 'writer' });
-  assert.ok(missing.length >= 18, `${missing.length} defects`);
+  // Three units per old record, six old records. The live batch was twenty-two
+  // records wide and took 438 of this defect; the shape is the same one.
+  assert.ok(
+    missing.length >= 18,
+    `${missing.length} defects over ${olds.length} closed records of three units each`,
+  );
   assert.ok(
     missing.every((defect) => /^unit check 1: /.test(defect)),
     missing[0],
@@ -953,11 +953,20 @@ test('a judged supersession answers its replacements and none of the record it c
   });
   const heirs = ['docs/adr/adr-003-third.md', 'docs/adr/adr-004-fourth.md'];
   const units = heirs.flatMap((heir) => answersFor(dir, heir));
+  // The divergence duty reads the same set the unit check counts: one entry per
+  // record this write added, and the record it closed is read rather than
+  // refused.
   const report = {
     rewritten: heirs,
     unchanged: [],
     units,
     divergences: [
+      ...heirs.map((heir) => ({
+        record: heir,
+        state: 'none',
+        statement: 'the record states the tree as it stands',
+        evidence: 'src/feature.mjs:1',
+      })),
       {
         record,
         state: 'none',
@@ -968,14 +977,22 @@ test('a judged supersession answers its replacements and none of the record it c
     summary: 'one record becomes two',
   };
   assert.deepEqual(await writeChecks(base, [record], report, { seat: 'writer' }), []);
-  // The unit set is the two records the write added, and the one it closed is
-  // dropped from it.
-  const counted = await unitRecords(base, [record], report);
-  assert.deepEqual(counted.records, heirs);
-  assert.deepEqual(counted.dropped, [record]);
+  // The entry about the closed record is tolerated and never owed.
+  const silent = { ...report, divergences: report.divergences.slice(0, 2) };
+  assert.deepEqual(await writeChecks(base, [record], silent, { seat: 'writer' }), []);
+  // A replacement with no entry of its own is refused, and so is a second entry
+  // for one of them.
+  const short = { ...report, divergences: report.divergences.slice(1) };
+  const owed = await writeChecks(base, [record], short, { seat: 'writer' });
+  assert.equal(owed.length, 1);
+  assert.match(owed[0], /adr-003-third\.md was judged owed and "divergences" accounts for it nowhere/);
+  const twice = { ...report, divergences: [...report.divergences, report.divergences[0]] };
+  const doubled = await writeChecks(base, [record], twice, { seat: 'writer' });
+  assert.equal(doubled.length, 1);
+  assert.match(doubled[0], /has 2 entries in "divergences"/);
   // Every unit of a replacement is the writer's, so a missing one is refused.
-  const short = { ...report, units: units.filter((u) => !(u.record === heirs[1] && u.id === 'U0')) };
-  const defects = await writeChecks(base, [record], short, { seat: 'writer' });
+  const thin = { ...report, units: units.filter((u) => !(u.record === heirs[1] && u.id === 'U0')) };
+  const defects = await writeChecks(base, [record], thin, { seat: 'writer' });
   assert.equal(defects.length, 1);
   assert.match(defects[0], /^unit check 1: docs\/adr\/adr-004-fourth\.md U0/);
   // And an answer about the closed record is dropped rather than refused.
@@ -1110,17 +1127,175 @@ test('a closure a peer seat of the round replaced is accounted for', async (t) =
 });
 
 test('the brief says once that a status-line change is not a rewrite', () => {
-  const base = { worktree: '/tmp/run', defaultBranch: 'main', recordLifecycle: 'supersede' };
   const bullet = 'A status-line change of an old record is not a rewrite.';
-  for (const [name, brief] of Object.entries(briefs(base))) {
-    assert.ok(brief.includes(bullet), name);
-    assert.ok(brief.includes('List that record in neither'), name);
-    assert.ok(brief.includes('unless you retire it with a reason, and answer none of its'), name);
-    assert.ok(brief.includes('The harness reads its status line from the tree.'), name);
-    assert.ok(brief.includes('Every unit of a record you add is'), name);
-    // Once, and in one place: the lifecycle rule the brief already carries.
-    assert.equal(brief.split(bullet).length - 1, 1, name);
+  // The filter and the closure check are not gated on the lifecycle, so the
+  // rule reaches the seat under either one. A check the brief never states is a
+  // rule the seat cannot meet.
+  for (const lifecycle of ['supersede', 'rewrite']) {
+    const base = { worktree: '/tmp/run', defaultBranch: 'main', recordLifecycle: lifecycle };
+    for (const [name, brief] of Object.entries(briefs(base))) {
+      const where = `${lifecycle} ${name}`;
+      assert.ok(brief.includes(bullet), where);
+      assert.ok(brief.includes('List that record in neither'), where);
+      assert.ok(brief.includes('unless you retire it with a reason, and answer none of its'), where);
+      assert.ok(brief.includes('The harness reads its status line from the tree.'), where);
+      assert.ok(brief.includes('Every unit of a record you add is'), where);
+      // Once, and in one place.
+      assert.equal(brief.split(bullet).length - 1, 1, where);
+      // The supersession rules stay the supersede lifecycle's own.
+      assert.equal(brief.includes('It never edits an accepted one.'), lifecycle === 'supersede', where);
+    }
   }
+  // The two reconciliation briefs state what a supersession owes the
+  // declaration, where the lifecycle holds one.
+  const supersede = { worktree: '/tmp/run', defaultBranch: 'main', recordLifecycle: 'supersede' };
+  const rewrite = { worktree: '/tmp/run', defaultBranch: 'main' };
+  const clause = 'A record you add to replace one of these takes an entry of its own.';
+  for (const name of ['write', 'corrective']) {
+    assert.ok(briefs(supersede)[name].includes(clause), name);
+    assert.ok(!briefs(rewrite)[name].includes(clause), name);
+  }
+});
+
+test('a closed record the write never touched is refused in rewritten', async (t) => {
+  const dir = acceptedTree(t);
+  // A record an earlier round closed, which this write never opens.
+  const closed = 'docs/adr/adr-002-second.md';
+  commitTree(
+    dir,
+    { [closed]: superseded('002', 'ADR-003', 'The second decision stands.') },
+    'records: an earlier round closed it',
+  );
+  const written = 'docs/adr/adr-004-fourth.md';
+  writeTree(dir, { [written]: ACCEPTED('004') });
+  const base = { worktree: dir, defaultBranch: 'main', recordPaths: ['docs/adr'] };
+  const report = {
+    rewritten: [written, closed],
+    unchanged: [],
+    units: answersFor(dir, written),
+    divergences: [],
+    summary: 'one record written, and one this write never opened',
+  };
+  const defects = await writeChecks(base, [], report, { seat: 'writer' });
+  assert.equal(defects.length, 1, defects.join('\n'));
+  assert.match(
+    defects[0],
+    /you report docs\/adr\/adr-002-second\.md as rewritten and the file is unchanged in the tree/,
+  );
+  // The same list without it stands: a closed record the write did change is
+  // the one the closure rule accounts for.
+  assert.deepEqual(
+    await writeChecks(base, [], { ...report, rewritten: [written] }, { seat: 'writer' }),
+    [],
+  );
+});
+
+// The sibling side of the same range. A merge round closes two records with
+// one, and the second seat answers a sibling of a record its own diff never
+// touched: the record that replaces it is in the first seat's commit
+// (ADR-0078).
+test('a sibling the round replaced is answered from a peer seat commit', async (t) => {
+  const dir = acceptedTree(t);
+  const cites = 'docs/adr/adr-005-cites.md';
+  commitTree(dir, { [cites]: ACCEPTED('005', 'This record relies on ADR-002.') }, 'records: a citing record');
+  const record = 'docs/adr/adr-002-second.md';
+  const merged = 'docs/adr/adr-003-third.md';
+  const roundFrom = gitSync(['rev-parse', 'HEAD'], dir).trim();
+  commitTree(
+    dir,
+    {
+      'docs/adr/adr-001-first.md': superseded('001', 'ADR-003'),
+      [record]: superseded('002', 'ADR-003', 'The second decision stands.'),
+      [merged]: SUPERSEDER('003', 'ADR-001 and ADR-002'),
+    },
+    'reconcile: the first seat merges two records into one',
+  );
+  const report = {
+    rewritten: [],
+    unchanged: [],
+    units: [],
+    divergences: [
+      {
+        record,
+        state: 'none',
+        statement: 'the merge states both decisions',
+        evidence: 'src/feature.mjs:1',
+      },
+    ],
+    siblings: [
+      {
+        record: cites,
+        state: 'superseded',
+        reason: 'it decides the part the merged record now decides',
+        replacement: merged,
+      },
+    ],
+    summary: 'the peer of this round closed it',
+  };
+  const base = { ...lifecycleBase(dir), roundFrom };
+  assert.deepEqual(
+    await writeChecks(base, [record], report, { seat: 'writer', siblings: [cites] }),
+    [],
+  );
+  // A replacement the round does not hold is still refused.
+  const absent = {
+    ...report,
+    siblings: [{ ...report.siblings[0], replacement: 'docs/adr/adr-009-absent.md' }],
+  };
+  const defects = await writeChecks(base, [record], absent, { seat: 'writer', siblings: [cites] });
+  assert.equal(defects.length, 1, defects.join('\n'));
+  assert.match(defects[0], /no record that replaces it is in this round/);
+  // And without the round's range the peer's write is out of reach, which is
+  // the read this rule widened.
+  const narrow = await writeChecks(lifecycleBase(dir), [record], report, {
+    seat: 'writer',
+    siblings: [cites],
+  });
+  assert.ok(
+    narrow.some((defect) => /no record that replaces it is in this round/.test(defect)),
+    narrow.join('\n'),
+  );
+});
+
+test('a range read that fails is stated, and no closure is judged on it', async (t) => {
+  const dir = acceptedTree(t);
+  const record = 'docs/adr/adr-002-second.md';
+  const roundFrom = gitSync(['rev-parse', 'HEAD'], dir).trim();
+  commitTree(
+    dir,
+    {
+      'docs/adr/adr-001-first.md': superseded('001', 'ADR-003'),
+      [record]: superseded('002', 'ADR-003', 'The second decision stands.'),
+      'docs/adr/adr-003-third.md': SUPERSEDER('003', 'ADR-001 and ADR-002'),
+    },
+    'reconcile: the first seat merges two records into one',
+  );
+  const report = {
+    rewritten: [],
+    unchanged: [],
+    units: [],
+    divergences: [
+      {
+        record,
+        state: 'none',
+        statement: 'the merge states both decisions',
+        evidence: 'src/feature.mjs:1',
+      },
+    ],
+    summary: 'the peer of this round closed it',
+  };
+  assert.deepEqual(
+    await writeChecks({ ...lifecycleBase(dir), roundFrom }, [record], report, { seat: 'writer' }),
+    [],
+  );
+  // A range git cannot read says nothing about the closure. The check states
+  // the failed read and judges no closure on it, because an empty range would
+  // read a legal supersession as a bare one.
+  const broken = { ...lifecycleBase(dir), roundFrom: '0000000000000000000000000000000000000000' };
+  const defects = await writeChecks(broken, [record], report, { seat: 'writer' });
+  assert.equal(defects.length, 1);
+  assert.match(defects[0], /the range this round opened at cannot be read \(0{40}\.\.HEAD: /);
+  assert.ok(!defects[0].includes('nothing accounts for it'), defects[0]);
 });
 
 test('the correction brief enumerates no unit of a closed record', (t) => {

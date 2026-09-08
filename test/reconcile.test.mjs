@@ -1410,7 +1410,9 @@ function supersedeWrite(map) {
         rewritten: [added],
         unchanged: [],
         units: units(added, text),
-        divergences: NO_DIVERGENCE(record),
+        // One entry per record the check counts, and one about the record this
+        // write closed, which the check reads and never refuses.
+        divergences: [...NO_DIVERGENCE(added), ...NO_DIVERGENCE(record)],
         siblings: [],
         summary: `${record} is superseded by ${added}`,
       },
@@ -1659,7 +1661,10 @@ test('a judged write that supersedes one record with two answers both', async (t
             // Every unit of both records the write added, and none of the one
             // it closed.
             units: heirs.flatMap((heir) => units(heir, files[heir])),
-            divergences: NO_DIVERGENCE(record),
+            divergences: [
+              ...heirs.flatMap((heir) => NO_DIVERGENCE(heir)),
+              ...NO_DIVERGENCE(record),
+            ],
             siblings: [],
             summary: `${record} becomes two records`,
           },
@@ -1738,7 +1743,9 @@ test('a round that merges two records into one passes both its seats', async (t)
             rewritten: first ? [merged] : [],
             unchanged: [],
             units: first ? units(merged, mergedText) : [],
-            divergences: NO_DIVERGENCE(record),
+            divergences: first
+              ? [...NO_DIVERGENCE(merged), ...NO_DIVERGENCE(record)]
+              : NO_DIVERGENCE(record),
             // The record this round added cites both parents, so it is a sibling
             // of the second seat's write and that seat answers it.
             siblings: briefSiblings(prompt).map((cites) => ({

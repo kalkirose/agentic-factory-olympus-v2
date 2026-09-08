@@ -1048,3 +1048,41 @@ test('a birth that closes a record with no route is refused once and answers', a
     [RECORD_PATH],
   );
 });
+
+// The stamp follows the set the check counted, and never the answers alone. A
+// record the enumeration finds no unit in is still a record the dispatch was
+// answerable for, so it takes its stamp with an empty list (ADR-0078).
+test('a counted record with no unit takes its stamp all the same', async (t) => {
+  const bare = 'docs/adr/adr-0003-bare.md';
+  const fx = laneFixture(t, {
+    seats: {
+      'record-author': () => ({
+        files: { [RECORD_PATH]: RECORD_TEXT, [bare]: '' },
+        report: {
+          rewritten: [RECORD_PATH, bare],
+          unchanged: [],
+          units: unitAnswers(),
+          divergences: [],
+          summary: 'one record, and one file the enumeration finds nothing in',
+        },
+      }),
+    },
+    files: { 'tickets/records.md': ticketText([RECORD_PATH, bare]) },
+  });
+  const { runId } = await fx.launch({ lane: 'records', ticket: 'tickets/records.md' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // One dispatch, no refusal: an empty unit list is legal.
+  assert.equal(fx.calls.filter((c) => c.seat === 'record-author').length, 1);
+  assert.ok(!events.some((e) => e.event === 'seat-failure'));
+  const stamps = events.filter((e) => e.event === 'record-units');
+  assert.deepEqual(
+    stamps.map((e) => e.record),
+    [RECORD_PATH, bare],
+  );
+  assert.deepEqual(stamps[1].units, []);
+  assert.deepEqual(stamps[1].counts, { claims: 0, holds: 0, fails: 0, notBuilt: 0 });
+  // The cost rides the first stamp, as it always did.
+  assert.equal(typeof stamps[0].cost, 'number');
+  assert.equal(stamps[1].cost, undefined);
+});
