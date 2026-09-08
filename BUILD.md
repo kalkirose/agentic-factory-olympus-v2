@@ -761,3 +761,25 @@ never carries a project's specifics.
   round that leaves the replacement in a peer seat's commit passes both; a
   range read that fails is a defect that names it, never an empty range.
   ADR-0078 is new, and ADR-0075 and ADR-0077 are superseded in part by it.
+- 2026-09-08: one window on the run's record work, and a records run that
+  continues where a seat can still act. A corrective round over a born
+  supersession was refused twice on a check that read the dispatch's own
+  uncommitted diff, and the refusal ended the run with nothing merged. Every
+  reader of the record tree now opens at `runWindow`: the merge base of the run
+  branch and the default branch, computed at the read, out to the worktree.
+  `writeRange` and `roundFrom` are gone. The pairing asks the tree at both ends
+  of that window, so a parent the birth closed passes and a parent already
+  closed at the base is refused. `recordScope` takes no range, and `rangeStart`,
+  the ship base and `OLYMPUS_BASE_SHA` answer the merge base, so the in-run gate
+  reads the set CI reads. The birth brief carries the computed siblings, the
+  neighbourhood of a touched record, and the record layers' commands with their
+  prerequisites first; the schema asks for `siblings` only where the forecast
+  holds one. A corrective round dispatches the records an open finding or a red
+  layer names and stamps the rest `kept`; a cycle after the first reads the
+  records the last round changed and the records with an open finding, and keeps
+  the rest with the cycle of their green. A write dispatch that spends its
+  budget ends itself, stamps `failed` with its defects, and the render carries
+  `unwritten:<record>` until a round writes it. A records-lane run at its cap
+  pushes its branch, writes the ticket and parks `reconcile-cap`, where `rounds`
+  buys more and `abandon` closes. Record review seats resume by report and stamp
+  as they settle. ADR-0079 is new and supersedes ADR-0078 in part.
