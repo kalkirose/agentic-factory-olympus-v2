@@ -88,6 +88,7 @@ import { cloneDir, fetchClone, branchSha } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 import {
   headSha,
+  push,
   mergeIntoTree,
   concludeMerge,
   abortMerge,
