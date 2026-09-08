@@ -412,7 +412,10 @@ function neighbourhoodLines(neighbours) {
 function siblingLines(siblings) {
   if (siblings === null || siblings === undefined) return [];
   if (siblings.length === 0) {
-    return ['', 'No active record cites a record this write supersedes, so "siblings" takes no entry.'];
+    return [
+      '',
+      'No active record cites a record this write supersedes, so "siblings" takes no entry.',
+    ];
   }
   return [
     '',

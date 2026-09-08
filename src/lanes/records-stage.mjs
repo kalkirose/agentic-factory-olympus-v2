@@ -588,7 +588,7 @@ function birthSiblingForecast(worktree, touched, recordPaths) {
  * commands the layer runs, over the same bytes (ADR-0079).
  * @returns {Array<{layer: string, command: string}>}
  */
-export function recordGateCommands(config) {
+function recordGateCommands(config) {
   const layers = config?.gates?.tier1 ?? [];
   const named = new Set(config?.gates?.recordLayers ?? []);
   const byName = new Map(layers.map((layer) => [layer.name, layer]));

@@ -71,13 +71,13 @@ import {
 import { currentPass, findingIndex, passOpeningSha, repairStalled } from './verdict.mjs';
 import {
   ACTOR,
+  answeredPark,
   answeredPath,
   blocked,
   commandError,
   gist,
   lastRecoveryPark,
   lastSeatReportEvent,
-  answeredPark,
   loadProjectConfig,
   parkDirective,
   pushBranch,
@@ -108,6 +108,13 @@ const NEXT_STAGE = 'update';
  * a console like the option that closes the run.
  */
 export const SHIP_WITHOUT_RECORDS = 'ship-without-records';
+
+/**
+ * The answer that buys a records-lane run more corrective rounds at its cap.
+ * The text carries the count, because the option's whole content is the number
+ * (ADR-0079).
+ */
+const ROUNDS = 'rounds';
 
 const RECONCILE_JUDGE_SCHEMA = {
   type: 'object',
@@ -927,12 +934,12 @@ function refusedDefects(events, record) {
 }
 
 /** The records one write stamp could not write, by path. */
-export function unwrittenRecords(anchor) {
+function unwrittenRecords(anchor) {
   return (anchor?.records ?? []).filter((entry) => entry.failed === true).map((e) => e.record);
 }
 
 /** The mark a record with no write of its own carries in an open set. */
-export const UNWRITTEN = 'unwritten:';
+const UNWRITTEN = 'unwritten:';
 
 function attemptsOf(events, seat, since) {
   return events.filter((e) => e.event === 'seat-spawned' && e.seat === seat && e.seq > since)
@@ -1325,11 +1332,12 @@ async function correctStep(ctx, base, next) {
     (id) => !index.has(id) && !id.startsWith(UNWRITTEN),
   );
   const round = roundsSince(events, judged.seq) + 1;
+  const held = reviewedRecords(events, anchor);
   const set = await dispatchSet(ctx, base, {
     round,
     since: rendered.seq,
-    records: reviewedRecords(events, anchor),
-    owed: correctiveRecords(events, rendered, reviewedRecords(events, anchor)),
+    records: held,
+    owed: correctiveRecords(events, rendered, held),
   });
   // A red render with nothing to dispatch over is the cap. Every record of the
   // set is closed, no seat may answer for one, and a round that spawns none
@@ -1383,7 +1391,7 @@ async function correctStep(ctx, base, next) {
  *
  * Seven of sixteen seats owed nothing on the run this rule comes from. A seat
  * over a record no finding names reads the record, writes nothing, and costs
- * the round four minutes and a dispatch (ADR-0079).
+ * the round a dispatch (ADR-0079).
  *
  * A red layer that names no record of the set is the one case that widens
  * again: the layer says the record diff is wrong and nothing in its output says
@@ -1696,9 +1704,6 @@ async function recordsCap(ctx, base, { cause, residual, open }) {
   });
 }
 
-/** The option that raises the record cap and re-enters the corrective round. */
-export const ROUNDS = 'rounds';
-
 /** What the park asks, and what it says the run is holding while it waits. */
 function capQuestion(base, { records, open, failed, ticket }) {
   return [
@@ -1708,7 +1713,11 @@ function capQuestion(base, { records, open, failed, ticket }) {
     `The branch ${base.branch ?? '(none)'} is on the origin, with ${records.length} record(s)`,
     `on it. The ticket that states the rest of the work is ${ticket}.`,
     ...(failed.length > 0
-      ? ['', 'These dispatches spent their budget and wrote nothing:', ...failed.map((e) => `- ${e.record}`)]
+      ? [
+          '',
+          'These dispatches spent their budget and wrote nothing:',
+          ...failed.map((e) => `- ${e.record}`),
+        ]
       : []),
     '',
     `Answer "${ROUNDS}" with a whole number to buy that many corrective rounds, or "abandon"`,
