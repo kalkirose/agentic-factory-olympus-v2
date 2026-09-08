@@ -26,6 +26,7 @@ import {
   withReconcileStage,
 } from '../src/lanes/records-stage.mjs';
 import { kindTest } from '../src/lanes/records.mjs';
+import { recordUnits } from '../src/lanes/units.mjs';
 import { commitAll, headSha, resetHard } from '../src/isolation/tree.mjs';
 import {
   tempDir,
@@ -892,4 +893,196 @@ test('a pass with no records to carry stamps nothing, and carries once', async (
     (e) => e.event === 'records-committed' && e.carried === true,
   );
   assert.equal(stamps.length, 1);
+});
+
+// -- the closed record at a birth (ADR-0078) ----------------------------------
+
+/** The existing record, closed by the write that replaces it. */
+const EXISTING_CLOSED = EXISTING_RECORD.replace(
+  '**Status:** Accepted',
+  '**Status:** Superseded by ADR-0002 (2026-09-08)',
+);
+
+/** The record a birth writes to replace the existing one. */
+const REPLACEMENT_TEXT = [
+  '# ADR-0002: Double the input',
+  '',
+  '**Status:** Accepted',
+  '**Supersedes:** ADR-0001',
+  '',
+  '## Decision',
+  '',
+  'The module src/base.mjs holds the base value the feature doubles.',
+  '',
+  '## Consequences',
+  '',
+  'The doubling is not yet implemented.',
+  '',
+].join('\n');
+
+/** Every unit of one text, answered as the harness counts them. */
+function answersOf(record, text) {
+  return recordUnits(text).map((unit) => ({
+    record,
+    id: unit.id,
+    kind: unit.kind ?? (kindTest(unit.head) ? 'claim' : 'rationale'),
+    verdict: 'holds',
+    evidence: unit.kind ? 'structure' : kindTest(unit.head) ? 'src/base.mjs' : 'the reason',
+  }));
+}
+
+const SUPERSEDE_CONFIG = {
+  repo: {
+    testPaths: ['tests'],
+    recordPaths: ['docs/adr', `!${TEMPLATE_PATH}`],
+    recordLifecycle: 'supersede',
+  },
+};
+
+// The sweep shape, at one record. The birth closes the record it replaces and
+// writes the replacement. The status-line edit owes no unit, so nothing asks
+// the seat for one and nothing stamps one (ADR-0078).
+test('a birth that supersedes a record answers the replacement alone', async (t) => {
+  const fx = laneFixture(t, {
+    config: SUPERSEDE_CONFIG,
+    seats: {
+      'record-author': () => ({
+        files: {
+          'docs/adr/adr-0001-keep-one-entry-point.md': EXISTING_CLOSED,
+          [RECORD_PATH]: REPLACEMENT_TEXT,
+        },
+        report: {
+          rewritten: [RECORD_PATH],
+          unchanged: [],
+          units: answersOf(RECORD_PATH, REPLACEMENT_TEXT),
+          divergences: [],
+          siblings: [],
+          summary: 'the decision moves to a new record',
+        },
+      }),
+    },
+    files: { 'tickets/records.md': ticketText([RECORD_PATH]) },
+  });
+  const { runId } = await fx.launch({ lane: 'records', ticket: 'tickets/records.md' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // One attempt, and no refusal: the write is right and the harness says so.
+  assert.equal(fx.calls.filter((c) => c.seat === 'record-author').length, 1);
+  assert.ok(!events.some((e) => e.event === 'seat-failure'));
+  // One unit stamp, for the record the seat wrote. The closed record owes none.
+  const stamps = events.filter((e) => e.event === 'record-units');
+  assert.deepEqual(
+    stamps.map((e) => e.record),
+    [RECORD_PATH],
+  );
+  assert.ok(stamps[0].units.length > 0);
+  // The born stamp still names every record path the commit changed, and marks
+  // the one the seat did not report. That is what the reconcile stage reads.
+  const born = events.find((e) => e.event === 'records-committed');
+  assert.deepEqual(born.paths.sort(), [
+    'docs/adr/adr-0001-keep-one-entry-point.md',
+    RECORD_PATH,
+  ]);
+  assert.deepEqual(born.unreported, ['docs/adr/adr-0001-keep-one-entry-point.md']);
+  assert.equal(born.decided, true);
+  // The brief told the seat the rule before it wrote.
+  const brief = fx.calls.find((c) => c.seat === 'record-author').prompt;
+  assert.ok(brief.includes('A status-line change of an old record is not a rewrite.'), brief);
+});
+
+// The other half of the closure rule. A record this write closed with neither a
+// replacement nor a reason is a judged record discharged unread, and the seat
+// buys its one corrective attempt for it (ADR-0078).
+test('a birth that closes a record with no route is refused once and answers', async (t) => {
+  let attempt = 0;
+  const fx = laneFixture(t, {
+    config: SUPERSEDE_CONFIG,
+    seats: {
+      'record-author': () => {
+        attempt += 1;
+        const bare = attempt === 1;
+        return {
+          files: {
+            'docs/adr/adr-0001-keep-one-entry-point.md': EXISTING_RECORD.replace(
+              '**Status:** Accepted',
+              '**Status:** Retired (2026-09-08): the entry point this record named is gone.',
+            ),
+            [RECORD_PATH]: RECORD_TEXT,
+          },
+          report: {
+            rewritten: [RECORD_PATH],
+            unchanged: bare
+              ? []
+              : [
+                  {
+                    record: 'docs/adr/adr-0001-keep-one-entry-point.md',
+                    reason: 'the entry point this record named is gone',
+                  },
+                ],
+            units: answersOf(RECORD_PATH, RECORD_TEXT),
+            divergences: [],
+            siblings: [],
+            summary: 'one record retired, one written',
+          },
+        };
+      },
+    },
+    files: { 'tickets/records.md': ticketText([RECORD_PATH]) },
+  });
+  const { runId } = await fx.launch({ lane: 'records', ticket: 'tickets/records.md' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // Two dispatches: the first was refused for the bare closure, and the
+  // correction brief carried the defect.
+  const calls = fx.calls.filter((c) => c.seat === 'record-author');
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].prompt, /is closed in this diff and nothing accounts for it/);
+  assert.match(calls[1].prompt, /report it in "unchanged" with the reason you retired it/);
+  // The correction brief enumerates the record the seat still owes units for,
+  // and never the one it closed.
+  assert.ok(calls[1].prompt.includes(`The units of ${RECORD_PATH}, as the harness counts them:`));
+  assert.ok(!calls[1].prompt.includes('The units of docs/adr/adr-0001-keep-one-entry-point.md'));
+  // The retired record takes no unit stamp on either attempt.
+  assert.deepEqual(
+    [...new Set(events.filter((e) => e.event === 'record-units').map((e) => e.record))],
+    [RECORD_PATH],
+  );
+});
+
+// The stamp follows the set the check counted, and never the answers alone. A
+// record the enumeration finds no unit in is still a record the dispatch was
+// answerable for, so it takes its stamp with an empty list (ADR-0078).
+test('a counted record with no unit takes its stamp all the same', async (t) => {
+  const bare = 'docs/adr/adr-0003-bare.md';
+  const fx = laneFixture(t, {
+    seats: {
+      'record-author': () => ({
+        files: { [RECORD_PATH]: RECORD_TEXT, [bare]: '' },
+        report: {
+          rewritten: [RECORD_PATH, bare],
+          unchanged: [],
+          units: unitAnswers(),
+          divergences: [],
+          summary: 'one record, and one file the enumeration finds nothing in',
+        },
+      }),
+    },
+    files: { 'tickets/records.md': ticketText([RECORD_PATH, bare]) },
+  });
+  const { runId } = await fx.launch({ lane: 'records', ticket: 'tickets/records.md' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // One dispatch, no refusal: an empty unit list is legal.
+  assert.equal(fx.calls.filter((c) => c.seat === 'record-author').length, 1);
+  assert.ok(!events.some((e) => e.event === 'seat-failure'));
+  const stamps = events.filter((e) => e.event === 'record-units');
+  assert.deepEqual(
+    stamps.map((e) => e.record),
+    [RECORD_PATH, bare],
+  );
+  assert.deepEqual(stamps[1].units, []);
+  assert.deepEqual(stamps[1].counts, { claims: 0, holds: 0, fails: 0, notBuilt: 0 });
+  // The cost rides the first stamp, as it always did.
+  assert.equal(typeof stamps[0].cost, 'number');
+  assert.equal(stamps[1].cost, undefined);
 });

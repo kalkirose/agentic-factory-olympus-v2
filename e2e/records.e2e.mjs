@@ -13,6 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PROJECT,
+  PROJECT_CONFIG,
   assertMilestones,
   assertNoWiringFailure,
   assertSeatArgv,
@@ -339,6 +340,263 @@ test('a record-only ticket is refused on the repair lane, with the lane to use',
   // Nothing was spent on it, and the console's own feedback names the lane.
   assert.ok(!instanceEvents(fx).some((e) => e.event === 'launch'));
   assertStatusRenders(assert, ctl(fx, ['status']));
+
+  await stopDaemon(fx);
+});
+
+// -- the supersede lifecycle (ADR-0078) ---------------------------------------
+//
+// The project that never edits an accepted record. A write closes the old
+// record on its status line and adds the record that states the tree. The
+// closed record owes no unit, and a seat that answers its units all the same is
+// not refused for it.
+
+/** The project config with the lifecycle this scenario is about. */
+const SUPERSEDE_PROJECT =
+  JSON.stringify(
+    { ...PROJECT_CONFIG, repo: { ...PROJECT_CONFIG.repo, recordLifecycle: 'supersede' } },
+    null,
+    2,
+  ) + '\n';
+
+const HEIRS = ['docs/adr/adr-0002-name-the-base.md', 'docs/adr/adr-0003-read-the-base.md'];
+
+/** The record as the write closes it: nothing changed but the status line. */
+const RECORD_CLOSED = RECORD_TEXT.replace(
+  '**Status:** Accepted',
+  '**Status:** Superseded by ADR-0002 and ADR-0003 (2026-09-08)',
+);
+
+/** One record that replaces another, naming it back under its status line. */
+function heir(id, title, decision) {
+  return [
+    `# ADR-${id}: ${title}`,
+    '',
+    '**Status:** Accepted',
+    '**Supersedes:** ADR-0001',
+    '',
+    '## Decision',
+    '',
+    decision,
+    '',
+  ].join('\n');
+}
+
+const HEIR_TEXT = {
+  [HEIRS[0]]: heir('0002', 'Name the base', 'The module src/base.mjs names the factor.'),
+  [HEIRS[1]]: heir('0003', 'Read the base', 'The route routes/[lang=lang]/shop/+page.mjs reads it.'),
+};
+
+const SUPERSEDE_TICKET = `# Record ticket: split the doubling decision
+
+## The work
+
+The decision this record states is two decisions. Write them, and close the
+record they replace.
+
+## Touched paths
+
+\`\`\`touched-paths
+${RECORD}
+${HEIRS[0]}
+${HEIRS[1]}
+\`\`\`
+`;
+
+// The birth writes all three files and reports all three in "rewritten",
+// answering every unit of every one of them. The harness drops the answers
+// about the record the write closed, and refuses nothing.
+const SCENARIO_SUPERSEDE = {
+  bornRecords: {
+    [RECORD]: RECORD_CLOSED,
+    [HEIRS[0]]: HEIR_TEXT[HEIRS[0]],
+    [HEIRS[1]]: HEIR_TEXT[HEIRS[1]],
+  },
+  recordSiblings: true,
+  reconcileJudge: {
+    owed: false,
+    records: [],
+    reason: 'the records this run wrote state what the tree holds',
+  },
+};
+
+// The reconcile stage's own supersession: the birth decides nothing, the judge
+// owes the accepted record, and the write closes it and adds its replacement.
+const SCENARIO_WRITE_SUPERSEDE = {
+  recordSiblings: true,
+  reconcileJudge: {
+    owed: true,
+    records: [RECORD],
+    reason: 'the diff moved past what this record states',
+  },
+  reconcileSupersedes: {
+    [RECORD]: {
+      closed: RECORD_TEXT.replace(
+        '**Status:** Accepted',
+        '**Status:** Superseded by ADR-0002 (2026-09-08)',
+      ),
+      added: HEIRS[0],
+      text: HEIR_TEXT[HEIRS[0]],
+    },
+  },
+};
+
+test('a birth that supersedes one record with two ships on one attempt', async (t) => {
+  const fx = buildFixture({
+    prefix: 'olympus-e2e-records-supersede-',
+    scenario: SCENARIO_SUPERSEDE,
+    tree: {
+      '.olympus/project.json': SUPERSEDE_PROJECT,
+      [TICKET]: SUPERSEDE_TICKET,
+      [RECORD]: RECORD_TEXT,
+    },
+  });
+  t.after(() => cleanup(fx));
+
+  await startDaemon(fx);
+  ctl(fx, ['launch', '--project', PROJECT, '--lane', 'records', '--ticket', TICKET]);
+  const runId = await pollFor(
+    'the launch stamp',
+    () => instanceEvents(fx).find((e) => e.event === 'launch')?.runId,
+    { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
+  );
+  await pollFor(
+    'the run to close',
+    () => runEvents(fx, runId).some((e) => e.event === 'run-closed'),
+    { attempts: 900, abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+
+  const events = runEvents(fx, runId);
+  assertNoWiringFailure(assert, fx, runId);
+  assertMilestones(assert, events, [
+    'records-committed',
+    'reconciliation-judged',
+    'reconcile-review-set',
+    'reconcile-rendered',
+    'pr-opened',
+    'merged',
+    'run-closed',
+  ]);
+
+  // One birth attempt. The seat answered the closed record's units as well, and
+  // the harness dropped them rather than refusing the report.
+  const author = seatCalls(fx).filter((c) => c.seat === 'record-author');
+  assert.equal(author.length, 1, 'the birth was refused and dispatched again');
+  assert.ok(!events.some((e) => e.event === 'seat-failure'));
+  assert.match(author[0].prompt, /A status-line change of an old record is not a rewrite\./);
+
+  // The birth commit holds all three files, and the unit stamps name the two
+  // records the write added.
+  const born = events.find((e) => e.event === 'records-committed');
+  assert.deepEqual(born.paths.slice().sort(), [RECORD, ...HEIRS].sort());
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'record-units' && e.seat === 'record-author')
+      .map((e) => e.record)
+      .sort(),
+    HEIRS.slice().sort(),
+  );
+
+  // One review seat per active record, and none for the record the write
+  // closed.
+  const dispatched = events.filter((e) => e.event === 'reconcile-review-set');
+  assert.equal(dispatched.length, 1);
+  assert.deepEqual(dispatched[0].records.slice().sort(), HEIRS.slice().sort());
+  const reviews = seatCalls(fx).filter((c) => c.seat === 'record-review');
+  assert.equal(reviews.length, 2);
+  for (const call of reviews) {
+    assert.ok(!call.prompt.includes(`Review one decision record: ${RECORD}`), call.prompt);
+  }
+
+  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
+  assert.equal(rendered.length, 1);
+  assert.equal(rendered[0].verdict, 'green');
+  assert.deepEqual(rendered[0].records.slice().sort(), HEIRS.slice().sort());
+  // The record layers still read the whole record diff.
+  assert.deepEqual(
+    events.filter((e) => e.event === 'layer-result').map((e) => [e.layer, e.status]),
+    [['lint', 'green']],
+  );
+
+  // The supersession rode the merge: the closed record and both heirs stand on
+  // the default branch.
+  const merged = events.find((e) => e.event === 'merged');
+  assert.equal(merged.reconciled, true);
+  const tree = originTree(fx, 'main');
+  for (const path of [RECORD, ...HEIRS]) assert.ok(tree.includes(path), path);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+
+  await stopDaemon(fx);
+});
+
+test('a judged write supersedes its record and answers the replacement', async (t) => {
+  const fx = buildFixture({
+    prefix: 'olympus-e2e-records-write-supersede-',
+    scenario: SCENARIO_WRITE_SUPERSEDE,
+    tree: {
+      '.olympus/project.json': SUPERSEDE_PROJECT,
+      [TICKET]: RECORD_TICKET,
+      [RECORD]: RECORD_TEXT,
+    },
+  });
+  t.after(() => cleanup(fx));
+
+  await startDaemon(fx);
+  ctl(fx, ['launch', '--project', PROJECT, '--lane', 'records', '--ticket', TICKET]);
+  const runId = await pollFor(
+    'the launch stamp',
+    () => instanceEvents(fx).find((e) => e.event === 'launch')?.runId,
+    { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
+  );
+  await pollFor(
+    'the run to close',
+    () => runEvents(fx, runId).some((e) => e.event === 'run-closed'),
+    { attempts: 900, abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+
+  const events = runEvents(fx, runId);
+  assertNoWiringFailure(assert, fx, runId);
+  assertMilestones(assert, events, [
+    'reconciliation-judged',
+    'reconcile-write-set',
+    'reconciliation-written',
+    'reconcile-rendered',
+    'merged',
+    'run-closed',
+  ]);
+
+  // The round stamped the set it dispatched, and the one writer of it closed
+  // the record it was given.
+  const dispatched = events.find((e) => e.event === 'reconcile-write-set');
+  assert.deepEqual(dispatched.records, [RECORD]);
+  assert.deepEqual(dispatched.skipped, []);
+  const writers = seatCalls(fx).filter((c) => c.seat === 'reconcile-write');
+  assert.equal(writers.length, 1);
+  assert.equal(writers[0].named, 'reconcile-write:1');
+
+  const written = events.find((e) => e.event === 'reconciliation-written');
+  assert.equal(written.ok, true);
+  assert.deepEqual(written.rewritten, [HEIRS[0]]);
+  assert.deepEqual(
+    written.records.map((r) => [r.record, r.seat]),
+    [[RECORD, 'reconcile-write:1']],
+  );
+  assert.ok(written.records[0].unitsAnswered > 0);
+  // The write answered the closed record's units too, and the stamp holds the
+  // record it added and no other.
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'record-units' && e.seat.startsWith('reconcile-write'))
+      .map((e) => e.record),
+    [HEIRS[0]],
+  );
+
+  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
+  assert.equal(rendered.at(-1).verdict, 'green');
+  assert.deepEqual(rendered.at(-1).records, [HEIRS[0]]);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const tree = originTree(fx, 'main');
+  for (const path of [RECORD, HEIRS[0]]) assert.ok(tree.includes(path), path);
 
   await stopDaemon(fx);
 });

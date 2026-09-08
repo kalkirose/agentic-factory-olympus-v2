@@ -175,10 +175,20 @@ function recordAuthor() {
   };
 }
 
-/** One record, rewritten to state the tree. The brief names the one record. */
+/**
+ * One record, rewritten to state the tree. The brief names the one record.
+ *
+ * A scenario that names a supersession takes the other route: the old record
+ * keeps its body and takes its status line, the record that replaces it is
+ * added, and the report answers every unit of the replacement. It answers the
+ * closed record's units as well, which the harness drops without a defect
+ * (ADR-0078).
+ */
 function recordWrite() {
   const record = match(/^- (\S+\.md)$/m)?.[1];
   if (!record) throw new Error('the write brief names no record');
+  const supersede = (scenario.reconcileSupersedes ?? {})[record];
+  if (supersede) return supersedeWrite(record, supersede);
   const text = (scenario.reconcileWrites ?? {})[record];
   if (text) {
     const full = join(process.cwd(), record);
@@ -204,6 +214,38 @@ function recordWrite() {
       }),
       ...(scenario.recordSiblings && { siblings: [] }),
       summary: `${record}, as the tree stands`,
+    },
+  };
+}
+
+/** The supersession one write makes: the old record closed, the new one added. */
+function supersedeWrite(record, { closed, added, text }) {
+  for (const [path, content] of [
+    [record, closed],
+    [added, text],
+  ]) {
+    const full = join(process.cwd(), path);
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, content);
+  }
+  return {
+    report: {
+      rewritten: [added],
+      unchanged: [],
+      units: [...unitAnswers(added, added), ...unitAnswers(record, record)],
+      // One entry per record the check counts, and one about the record this
+      // write closed, which the harness reads and never refuses.
+      divergences: [added, record].map((path) => ({
+        record: path,
+        state: 'none',
+        statement: 'the record that replaces this one states the tree',
+        evidence: added,
+      })),
+      ...(prompt.includes('Confirmed findings:') && {
+        answered: [...prompt.matchAll(/^- \[(F\d+)\]/gm)].map((m) => m[1]),
+      }),
+      ...(scenario.recordSiblings && { siblings: [] }),
+      summary: `${record} is superseded by ${added}`,
     },
   };
 }

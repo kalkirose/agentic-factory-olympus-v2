@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { removeDir, tempDir, writeTree } from './helpers.mjs';
 import {
   NEIGHBOUR_CAP,
+  activeOf,
   activeRecords,
   birthNeighbours,
   citingRecords,
@@ -467,4 +468,82 @@ test('an exclusion entry takes a file out of the record tree', (t) => {
   assert.deepEqual(activeRecords(dir, ['docs/adr', '!docs/adr/TEMPLATE.md']), [
     'docs/adr/adr-001-first.md',
   ]);
+});
+
+// -- the active filter --------------------------------------------------------
+
+// The one filter every dispatch list goes through. A closed record is out of
+// every seat's scope, and the drop carries the word the status line read
+// (ADR-0078).
+test('activeOf keeps the active records of a list and names what it dropped', (t) => {
+  const dir = tree(t, {
+    'docs/adr/adr-001-first.md': record('001'),
+    'docs/adr/adr-002-second.md': record('002', {
+      status: 'Superseded by ADR-004 (2026-09-08)',
+    }),
+    'docs/adr/adr-003-third.md': record('003', {
+      status: 'Retired (2026-09-08): the gate this record named is gone.',
+    }),
+  });
+  const list = [
+    'docs/adr/adr-001-first.md',
+    'docs/adr/adr-002-second.md',
+    'docs/adr/adr-003-third.md',
+  ];
+  const filtered = activeOf(dir, list);
+  assert.deepEqual(filtered.records, ['docs/adr/adr-001-first.md']);
+  assert.deepEqual(filtered.skipped, [
+    { record: 'docs/adr/adr-002-second.md', status: 'superseded' },
+    { record: 'docs/adr/adr-003-third.md', status: 'retired' },
+  ]);
+  // A file the worktree cannot read stays in the list, so the unit check still
+  // refuses the record it cannot enumerate.
+  const missing = activeOf(dir, ['docs/adr/adr-009-absent.md']);
+  assert.deepEqual(missing.records, ['docs/adr/adr-009-absent.md']);
+  assert.deepEqual(missing.skipped, []);
+  // A file with no status line is active: a record nobody marked is a record
+  // nobody closed.
+  writeTree(dir, { 'docs/adr/adr-005-bare.md': '# ADR-005: A record\n\n## Decision\n\nOne.\n' });
+  assert.deepEqual(activeOf(dir, ['docs/adr/adr-005-bare.md']).records, [
+    'docs/adr/adr-005-bare.md',
+  ]);
+  // An empty list is an empty answer, and the list order is kept.
+  assert.deepEqual(activeOf(dir, []), { records: [], skipped: [] });
+  assert.deepEqual(activeOf(dir, [list[2], list[0]]).records, [list[0]]);
+});
+
+// The harness supersedes a record of its own in one form: the accepted line
+// stays where it stands and a supersession line is added under it. The form is
+// pinned here, and so is what the status reader answers for it (ADR-0078).
+test('the harness supersession form keeps the accepted line under the record', () => {
+  const closed = harness('0078-ask-nothing-of-a-closed-record');
+  const lines = (name) => harness(name).split('\n');
+  for (const name of [
+    '0075-judge-the-records-in-a-stage-of-their-own',
+    '0077-judge-the-record-set-the-pass-holds',
+  ]) {
+    const text = harness(name);
+    const head = lines(name);
+    assert.match(head[2], /^Status: accepted \(\d{4}-\d{2}-\d{2}\)$/, name);
+    assert.ok(
+      head.slice(3).some((line) => line.startsWith('Superseded in part by ADR-0078:')),
+      `${name} names no supersession by ADR-0078`,
+    );
+    // The reader answers the status line, and the accepted line is the status
+    // line. So the record stays active for every reader of this tree, and the
+    // supersession under it is prose a person reads.
+    assert.equal(statusOf(text).word, 'accepted', name);
+    assert.equal(isActiveRecord(text), true, name);
+    // The status line is the second unit, as it is in every record here.
+    assert.equal(recordUnits(text)[1].line, statusOf(text).line, name);
+  }
+  // The record that supersedes them stands accepted and names them back.
+  assert.equal(statusOf(closed).word, 'accepted');
+  assert.ok(closed.includes('- ADR-0073, ADR-0074, ADR-0075, ADR-0077'));
+  // A decision record is standalone fact: no em dash, and no reference to the
+  // work that produced it.
+  assert.ok(!closed.includes('—'));
+  for (const word of ['fix plan', 'the plan', 'revision']) {
+    assert.ok(!closed.toLowerCase().includes(word), word);
+  }
 });

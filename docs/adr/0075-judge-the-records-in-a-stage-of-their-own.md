@@ -5,6 +5,10 @@ Superseded in part by ADR-0077: the cycle anchors on the born record stamp,
 and not on the write stamp alone. A judgment that owes nothing over a born
 set still buys the layers, the review seats and the render. The admission gate
 refuses a records-lane tree whose record certification is null.
+Superseded in part by ADR-0078: the set a round or a cycle dispatches over is
+a ledger fact, and a re-entry dispatches that list rather than the tree. A
+dispatch signs its commit with the record as well as the seat, and a record
+the tree has closed takes no seat at all.
 
 ## Context
 

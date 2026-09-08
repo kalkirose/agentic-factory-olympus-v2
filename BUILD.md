@@ -733,3 +733,31 @@ never carries a project's specifics.
   judgment carries its born and late lists, so the late share reads a
   records-lane run at all. A records-lane request is titled `records: <runId>`.
   ADR-0077 is new and supersedes ADR-0075 in part.
+- 2026-09-08: a closed record owes no seat anything. A birth wrote sixteen
+  records and closed the six it replaced. It listed those six in `rewritten`,
+  because it had changed the files, and the unit check enumerated every unit of
+  every old body. An honest answer there is `fails`, which a writer may not
+  report, and rationale, which the kind test refuses. The report was refused
+  twice over a write that was right. `activeOf` in `src/lanes/units.mjs` is now
+  the one filter, and every list a seat is dispatched over goes through it: the
+  unit set, the rewritten loop, the correction brief, both unit stamps, the
+  stage scope and its fallback, and the three dispatch steps. A missing file
+  stays in the list and a file with no status line stays. The lifecycle does not
+  gate it. An answer about a dropped record is dropped rather than refused.
+  A judged write that supersedes its record answers the record it added, which
+  joins the unit set by its `Supersedes` line. The record it closed is accounted
+  for by a replacement of the same round, read from the round's opening sha to
+  the worktree, or by a reason in `unchanged`; a bare closure is refused at a
+  judged write and at a birth. The brief states the rule once, in
+  `lifecycleLines`. `reconcile-write-set` and `reconcile-review-set` carry the
+  list a round or a cycle dispatched and what the filter dropped, stamped before
+  the first seat spawns, so a re-entry keeps every seat name. The write commit
+  subject names the record, and `writtenAlready` matches on it. A red render
+  whose dispatch set is empty stalls at once with `rounds: 0`. The divergence
+  declaration reads the counted set too: a judged supersession declares about
+  the record it added, and an entry about the record it closed is read rather
+  than refused. The brief states the closed-record rule under either lifecycle.
+  One range read serves the closure rule and the sibling answers, so a merge
+  round that leaves the replacement in a peer seat's commit passes both; a
+  range read that fails is a defect that names it, never an empty range.
+  ADR-0078 is new, and ADR-0075 and ADR-0077 are superseded in part by it.

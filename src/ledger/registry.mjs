@@ -500,6 +500,23 @@ export const RUN_EVENTS = new Set([
   // is the only thing that says by how much (ADR-0073). A fallback carries
   // `partial: true` and `residual`, the findings that went to the ticket.
   'reconciliation-written',
+  // The set one write round dispatched over: the `round`, the `since` the
+  // round opened at, the `sha` the tree stood at, the `records` in dispatch
+  // order and the `skipped` the active filter dropped, each with the `status`
+  // word its line read.
+  //
+  // A seat name is the index in this list. A list read from the tree shrinks
+  // between two entries of one round, because a seat closes the record it was
+  // given, and every record behind it would then answer to a name another
+  // record's commit already holds. So the list is a fact of the ledger, and a
+  // re-entry dispatches the list it names (ADR-0078).
+  'reconcile-write-set',
+  // The set one cycle reviewed: the `cycle`, the `records` in dispatch order
+  // and the `skipped` the active filter dropped. It is the write set's rule on
+  // the review side: one seat per record, named by its index, and one
+  // `record-units` stamp per seat per cycle. A cycle re-entered after the tree
+  // closed a record reviews the set it stamped (ADR-0078).
+  'reconcile-review-set',
   // reconciliation (the stage, ADR-0075)
   // What one record seat answered, for one record, unit by unit: the `seat`
   // that ran with its slot suffix, the `cycle` where the stage had one, the
@@ -525,11 +542,13 @@ export const RUN_EVENTS = new Set([
   // gate reads each against its own tree (ADR-0075).
   'reconcile-rendered',
   // The stage stopped at its cap with findings still open: the `rounds` it
-  // spent and what stayed `open`. Loud, because the run then takes the
-  // fallback on its own. The code ships and the records go to a ticket, or a
-  // records-lane run closes on the cap, and no park asks anybody first. The
-  // ticket is the answer, so the close-out `reconciliation-judged` that names
-  // one owns this record.
+  // spent and what stayed `open`. A red render whose dispatch set is empty
+  // stamps `rounds: 0`: every record of it is closed, no seat can answer the
+  // render, and a round that spawns nothing buys nothing (ADR-0078). Loud,
+  // because the run then takes the fallback on its own. The code ships and the
+  // records go to a ticket, or a records-lane run closes on the cap, and no
+  // park asks anybody first. The ticket is the answer, so the close-out
+  // `reconciliation-judged` that names one owns this record.
   'reconcile-stall',
   // The recheck a repair round owes a green reconciliation: the `delta` the
   // round committed, the `units` whose evidence paths it touched, what the
