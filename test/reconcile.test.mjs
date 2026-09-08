@@ -1333,3 +1333,639 @@ test('every reader of the old coupling is gone from its module', () => {
   // And the retired cause is gone from the registry.
   assert.ok(!source('src/ledger/registry.mjs').includes('RECORD_FINDINGS'));
 });
+
+// -- the closed record (ADR-0078) ---------------------------------------------
+//
+// A closed record is out of every seat's scope, and the set a round or a cycle
+// dispatched over is a fact of the ledger. The two rules are one story: a
+// filter that read the tree at every entry would shrink the list between two
+// entries of one round, and a seat name is the index in that list.
+
+/** The record as a write closes it: nothing changed but the status line. */
+const ADR_RETIRED = ADR_TEXT.replace(
+  '**Status:** Accepted',
+  '**Status:** Retired (2026-09-08): the module this record named is gone.',
+);
+
+const ADR_TWO_RETIRED = ADR_TWO_TEXT.replace(
+  '**Status:** Accepted',
+  '**Status:** Retired (2026-09-08): the value this record named is gone.',
+);
+
+/** A record that replaces another, naming it back under its status line. */
+function replacement(id, parents, title, decision) {
+  return [
+    `# ADR-${id}: ${title}`,
+    '',
+    '**Status:** Accepted',
+    `**Supersedes:** ${parents}`,
+    '',
+    '## Decision',
+    '',
+    decision,
+    '',
+  ].join('\n');
+}
+
+/** The record as a write supersedes it, and the record that replaces it. */
+const SUPERSEDES = {
+  [ADR]: {
+    closed: ADR_TEXT.replace(
+      '**Status:** Accepted',
+      '**Status:** Superseded by ADR-0003 (2026-09-08)',
+    ),
+    added: 'docs/adr/adr-0003-name-the-base.md',
+    text: replacement('0003', 'ADR-0001', 'Name the base', 'The module src/base.mjs names the base.'),
+  },
+  [ADR_TWO]: {
+    closed: ADR_TWO_TEXT.replace(
+      '**Status:** Accepted',
+      '**Status:** Superseded by ADR-0004 (2026-09-08)',
+    ),
+    added: 'docs/adr/adr-0004-read-the-base.md',
+    text: replacement('0004', 'ADR-0002', 'Read the base', 'The module src/base.mjs holds one value.'),
+  },
+};
+
+/** The project that supersedes its records rather than editing them. */
+const SUPERSEDE_REPO = {
+  repo: {
+    testPaths: ['tests'],
+    recordPaths: ['docs/adr', `!${TEMPLATE}`],
+    recordLifecycle: 'supersede',
+  },
+};
+
+/**
+ * A writer that supersedes the record it was given: the old record takes its
+ * status line, and the record that replaces it is the one the report answers.
+ */
+function supersedeWrite(map) {
+  return ({ prompt }) => {
+    const record = Object.keys(map).find((r) => prompt.includes(`- ${r}`));
+    const { closed, added, text } = map[record];
+    return {
+      files: { [record]: closed, [added]: text },
+      report: {
+        rewritten: [added],
+        unchanged: [],
+        units: units(added, text),
+        divergences: NO_DIVERGENCE(record),
+        siblings: [],
+        summary: `${record} is superseded by ${added}`,
+      },
+    };
+  };
+}
+
+/** A seed that closes the record and stamps the birth that holds it. */
+function closedSeed(text = ADR_RETIRED) {
+  return seedHandler(async (ctx) => {
+    const worktree = ctx.payload.worktree;
+    writeFileSync(join(worktree, ADR), text);
+    const sha = await commitAll(worktree, 'records: the record is closed');
+    ctx.store.append('records-committed', { actor: 'daemon', sha, paths: [ADR], decided: true });
+  });
+}
+
+test('the cycle derives its review from the set it was dispatched over', () => {
+  const closed = 'docs/adr/adr-0009-closed.md';
+  const born = { event: 'records-committed', decided: true, paths: [ADR, closed], sha: 'bbb' };
+  const clean = { event: 'reconciliation-judged', ok: true, owed: false, born: [ADR], late: [] };
+  const layer = { event: 'layer-result', cycle: 1, layer: 'adr-form', status: 'green' };
+  const set = { event: 'reconcile-review-set', cycle: 1, records: [ADR], skipped: [] };
+  const stamp = { event: 'record-units', cycle: 1, record: ADR, seat: 'record-review:1' };
+  const verified = { event: 'seat-report', seat: 'fury-verifier' };
+  // The dispatched set is the active record alone, and its answers are in. The
+  // cycle owes the verifier, then the render, and no review seat.
+  assert.equal(reconcileStep(ledger(born, clean, layer, set, stamp)), 'verify');
+  assert.equal(reconcileStep(ledger(born, clean, layer, set, stamp, verified)), 'render');
+  // Before its seats report, the cycle still owes the review.
+  assert.equal(reconcileStep(ledger(born, clean, layer, set)), 'review');
+  // The anchor holds the closed record, which takes no seat and leaves no
+  // stamp. A derivation that read the anchor would re-enter the review of a
+  // cycle that is past it, so a ledger with the stamp never does.
+  assert.equal(reconcileStep(ledger(born, clean, layer, stamp, verified)), 'review');
+  // The stamp answers for its own cycle and for no other.
+  const other = { event: 'reconcile-review-set', cycle: 2, records: [], skipped: [] };
+  assert.equal(reconcileStep(ledger(born, clean, layer, other, stamp, verified)), 'review');
+});
+
+test('a closed record takes no review seat, and the layers still read its path', async (t) => {
+  const fx = stageFixture(t, {
+    config: {
+      ...SUPERSEDE_REPO,
+      commands: {
+        adrform: [process.execPath, '-e', 'process.exit(0)'],
+        codegate: [process.execPath, '-e', 'process.exit(0)'],
+      },
+      gates: {
+        tier1: [
+          { name: 'adr-form', command: 'adrform' },
+          { name: 'code', command: 'codegate' },
+        ],
+        recordLayers: ['adr-form'],
+      },
+    },
+    seed: closedSeed(),
+    seats: { 'reconcile-judge': judgeClean, 'record-review': reviewClean },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The born set holds the closed record. No seat is dispatched over it.
+  assert.deepEqual(events.find((e) => e.event === 'records-committed').paths, [ADR]);
+  assert.equal(fx.calls.filter((c) => c.seat === 'record-review').length, 0);
+  const rendered = events.find((e) => e.event === 'reconcile-rendered');
+  assert.equal(rendered.verdict, 'green');
+  assert.deepEqual(rendered.records, []);
+  // The layers read the record diff whole, so the form gate still reads the
+  // file the closure changed and the code layer stays out.
+  assert.deepEqual(
+    events.filter((e) => e.event === 'layer-result').map((e) => [e.layer, e.status]),
+    [['adr-form', 'green']],
+  );
+});
+
+test('a project that rewrites its records reviews the active ones alone', async (t) => {
+  const fx = stageFixture(t, {
+    seed: closedSeed(),
+    seats: { 'reconcile-judge': judgeClean, 'record-review': reviewClean },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(fx.calls.filter((c) => c.seat === 'record-review').length, 0);
+  // The cycle stamps what it dispatched and what it dropped, with the status
+  // word the dropped record carried. The lifecycle does not gate the filter: a
+  // record closed by hand traps a seat exactly as a superseded one does.
+  const dispatched = events.filter((e) => e.event === 'reconcile-review-set');
+  assert.equal(dispatched.length, 1);
+  assert.deepEqual(dispatched[0].records, []);
+  assert.deepEqual(dispatched[0].skipped, [{ record: ADR, status: 'retired' }]);
+  assert.deepEqual(events.find((e) => e.event === 'reconcile-rendered').records, []);
+});
+
+test('a judged record the tree has closed takes no writer', async (t) => {
+  const fx = stageFixture(t, {
+    files: { [ADR_TWO]: ADR_TWO_RETIRED },
+    seats: {
+      'reconcile-judge': judgeOwed([ADR, ADR_TWO]),
+      'reconcile-write': writeOnce(),
+      'record-review': reviewClean,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The judge named both records and its stamp keeps that answer.
+  assert.deepEqual(events.find((e) => e.event === 'reconciliation-judged').records, [ADR, ADR_TWO]);
+  // One dispatch, over the active record alone, and its brief names no other.
+  const writers = fx.calls.filter((c) => c.seat === 'reconcile-write');
+  assert.deepEqual(
+    writers.map((c) => c.full),
+    ['reconcile-write:1'],
+  );
+  assert.ok(writers[0].prompt.includes(`- ${ADR}`), writers[0].prompt);
+  assert.ok(!writers[0].prompt.includes(ADR_TWO), writers[0].prompt);
+  const written = events.find((e) => e.event === 'reconciliation-written');
+  assert.deepEqual(written.rewritten, [ADR]);
+  assert.equal(written.records.length, 1);
+  // The drop is a fact and never a silence: the round stamps the list it
+  // dispatched, the tree it opened on, and what it left out.
+  const dispatched = events.filter((e) => e.event === 'reconcile-write-set');
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0].round, 0);
+  assert.equal(typeof dispatched[0].sha, 'string');
+  assert.deepEqual(dispatched[0].records, [ADR]);
+  assert.deepEqual(dispatched[0].skipped, [{ record: ADR_TWO, status: 'retired' }]);
+  // The stamped list is the seats the ledger then spawned, in order.
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'seat-spawned' && e.seat.startsWith('reconcile-write'))
+      .map((e) => e.seat),
+    dispatched[0].records.map((_, i) => `reconcile-write:${i + 1}`),
+  );
+});
+
+test('a corrective round leaves the closed record of the born set alone', async (t) => {
+  const fx = stageFixture(t, {
+    files: { [ADR_TWO]: ADR_TWO_RETIRED },
+    // The birth decided one record and closed another. Both are on the born
+    // stamp, and the cycle stands on it.
+    seed: seedHandler(async (ctx, { sha }) => {
+      ctx.store.append('records-committed', {
+        actor: 'daemon',
+        sha,
+        paths: [ADR, ADR_TWO],
+        decided: true,
+      });
+    }),
+    seats: {
+      'reconcile-judge': judgeClean,
+      'reconcile-write': writeThenCorrect(),
+      'record-review': recordReview(['the record claims a doubling the tree does not hold']),
+      'fury-verifier': confirmAndResolve,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const rounds = events.filter((e) => e.event === 'reconcile-round');
+  assert.equal(rounds.length, 1);
+  assert.deepEqual(rounds[0].records, [ADR]);
+  const writers = fx.calls.filter((c) => c.seat === 'reconcile-write');
+  assert.deepEqual(
+    writers.map((c) => c.full),
+    ['reconcile-write:1'],
+  );
+  assert.ok(!writers[0].prompt.includes(ADR_TWO), writers[0].prompt);
+  const dispatched = events.filter((e) => e.event === 'reconcile-write-set');
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0].round, 1);
+  assert.deepEqual(dispatched[0].skipped, [{ record: ADR_TWO, status: 'retired' }]);
+});
+
+test('a judged write that supersedes its record answers the replacement', async (t) => {
+  const fx = stageFixture(t, {
+    config: SUPERSEDE_REPO,
+    seats: {
+      'reconcile-judge': judgeOwed(),
+      'reconcile-write': supersedeWrite(SUPERSEDES),
+      'record-review': reviewClean,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // One attempt, no refusal: the write closed the record it was given and
+  // answered the record it added.
+  assert.equal(fx.calls.filter((c) => c.seat === 'reconcile-write').length, 1);
+  assert.ok(!events.some((e) => e.event === 'seat-failure'));
+  const written = events.find((e) => e.event === 'reconciliation-written');
+  assert.deepEqual(written.rewritten, [SUPERSEDES[ADR].added]);
+  assert.deepEqual(
+    written.records.map((r) => r.record),
+    [ADR],
+  );
+  assert.ok(written.records[0].unitsAnswered > 0);
+  // The unit stamp names the record whose units the seat answered, and never
+  // the one whose status line it changed.
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'record-units' && e.seat.startsWith('reconcile-write'))
+      .map((e) => e.record),
+    [SUPERSEDES[ADR].added],
+  );
+  // The cycle reviews the replacement, and the closed record takes no seat.
+  const reviewed = events.filter((e) => e.event === 'reconcile-review-set');
+  assert.deepEqual(reviewed.at(-1).records, [SUPERSEDES[ADR].added]);
+  assert.equal(events.find((e) => e.event === 'reconcile-rendered').verdict, 'green');
+});
+
+/** The siblings a write brief names, which the report answers one by one. */
+function briefSiblings(prompt) {
+  const at = prompt.indexOf('Read each one whole and answer it in');
+  if (at === -1) return [];
+  return [...prompt.slice(at).matchAll(/^- (\S+\.md)$/gm)].map((m) => m[1]);
+}
+
+// A merge: two judged records become one, and one seat writes it. The peer seat
+// of the same round has committed by the time the second one is checked, so the
+// closure is read over the round's whole range (ADR-0078).
+test('a round that merges two records into one passes both its seats', async (t) => {
+  const merged = 'docs/adr/adr-0003-hold-the-base-once.md';
+  const mergedText = replacement(
+    '0003',
+    'ADR-0001 and ADR-0002',
+    'Hold the base once',
+    'The module src/base.mjs holds one value the feature reads.',
+  );
+  const closed = (text, id) =>
+    text.replace('**Status:** Accepted', `**Status:** Superseded by ADR-${id} (2026-09-08)`);
+  const fx = stageFixture(t, {
+    config: SUPERSEDE_REPO,
+    files: { [ADR_TWO]: ADR_TWO_TEXT },
+    seats: {
+      'reconcile-judge': judgeOwed([ADR, ADR_TWO]),
+      // The first seat writes the merged record and closes both parents. The
+      // second one finds its own record closed already and writes nothing.
+      'reconcile-write': ({ prompt }) => {
+        const first = prompt.includes(`- ${ADR}`);
+        const record = first ? ADR : ADR_TWO;
+        return {
+          ...(first && {
+            files: {
+              [ADR]: closed(ADR_TEXT, '0003'),
+              [ADR_TWO]: closed(ADR_TWO_TEXT, '0003'),
+              [merged]: mergedText,
+            },
+          }),
+          report: {
+            rewritten: first ? [merged] : [],
+            unchanged: [],
+            units: first ? units(merged, mergedText) : [],
+            divergences: NO_DIVERGENCE(record),
+            // The record this round added cites both parents, so it is a sibling
+            // of the second seat's write and that seat answers it.
+            siblings: briefSiblings(prompt).map((cites) => ({
+              record: cites,
+              state: 'consistent',
+              reason: 'it names the decision this write states',
+            })),
+            summary: first ? 'two records merge into one' : 'the merge closed this one',
+          },
+        };
+      },
+      'record-review': reviewClean,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // Two seats, one attempt each: neither was refused.
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'seat-spawned' && e.seat.startsWith('reconcile-write'))
+      .map((e) => e.seat),
+    ['reconcile-write:1', 'reconcile-write:2'],
+  );
+  assert.ok(!events.some((e) => e.event === 'seat-failure'));
+  const written = events.find((e) => e.event === 'reconciliation-written');
+  assert.equal(written.ok, true);
+  assert.deepEqual(written.rewritten, [merged]);
+  assert.deepEqual(
+    written.records.map((r) => r.record),
+    [ADR, ADR_TWO],
+  );
+  // One unit stamp, for the record the round added.
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'record-units' && e.seat.startsWith('reconcile-write'))
+      .map((e) => e.record),
+    [merged],
+  );
+});
+
+// A red layer over a set whose every record is closed. No seat can answer it,
+// so the round that would buy nothing is not bought (ADR-0078).
+test('a red render over a set with nothing to dispatch stalls at once', async (t) => {
+  const fx = stageFixture(t, {
+    config: {
+      commands: { adrform: [process.execPath, '-e', 'process.exit(1)'] },
+      gates: {
+        tier1: [{ name: 'adr-form', command: 'adrform' }],
+        recordLayers: ['adr-form'],
+        reconcileRounds: 5,
+      },
+    },
+    seed: closedSeed(),
+    seats: { 'reconcile-judge': judgeClean, 'record-review': reviewClean },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
+  assert.equal(rendered.length, 1);
+  assert.equal(rendered[0].verdict, 'red');
+  assert.deepEqual(rendered[0].open, ['adr-form']);
+  // The stall is the stage's answer, and no round was spent on it.
+  const stall = events.find((e) => e.event === 'reconcile-stall');
+  assert.equal(stall.rounds, 0);
+  assert.deepEqual(stall.open, ['adr-form']);
+  assert.match(stall.gist, /nothing to dispatch/);
+  assert.equal(events.filter((e) => e.event === 'reconcile-round').length, 0);
+  assert.equal(fx.calls.filter((c) => c.seat === 'reconcile-write').length, 0);
+  const written = events.find((e) => e.event === 'reconciliation-written');
+  assert.equal(written.ok, false);
+  assert.equal(written.cause, 'record-cap');
+});
+
+test('a restart past the review of a set with a closed record reads the review done', async (t) => {
+  const fx = stageFixture(t, {
+    files: { [ADR_TWO]: ADR_TWO_RETIRED },
+    seed: seedHandler(async (ctx, { sha }) => {
+      ctx.store.append('records-committed', {
+        actor: 'daemon',
+        sha,
+        paths: [ADR, ADR_TWO],
+        decided: true,
+      });
+    }),
+    seats: {
+      'reconcile-judge': judgeClean,
+      'record-review': recordReview(
+        Array(4).fill('the record claims a doubling the tree does not hold'),
+      ),
+      'fury-verifier': hangNth(1, refuteAll),
+    },
+  });
+  const runId = await fx.launch();
+  await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'record-units' && e.seat.startsWith('record-review'),
+    'reviewed',
+  );
+  await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'seat-spawned' && e.seat === 'fury-verifier',
+    'verifier',
+  );
+  // The live ledger, at the boundary the stop is about to land on.
+  const held = readEvents(runLedgerPath(fx.paths, runId));
+  const stamped = held.filter((e) => e.event === 'reconcile-review-set');
+  assert.equal(stamped.length, 1);
+  assert.deepEqual(stamped[0].records, [ADR], 'the closed record was dispatched to a seat');
+  assert.equal(reconcileStep(held), 'verify');
+  // The same ledger without the stamp is what a run from before this rule
+  // wrote, and it derives the review as owed all over again.
+  assert.equal(reconcileStep(held.filter((e) => e.event !== 'reconcile-review-set')), 'review');
+
+  await fx.restart();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // One answer per seat per cycle stands, whatever the restart re-entered.
+  assert.equal(
+    events.filter((e) => e.event === 'record-units' && e.seat.startsWith('record-review')).length,
+    1,
+  );
+  assert.deepEqual(
+    events.filter((e) => e.event === 'reconcile-review-set').map((e) => e.records),
+    [[ADR]],
+  );
+  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
+  assert.equal(rendered.length, 1);
+  assert.equal(rendered[0].verdict, 'green');
+  assert.deepEqual(rendered[0].records, [ADR]);
+});
+
+// The seat identity is the index in the dispatched list, so the list has to be
+// the same list on every entry of the round. A seat that closes the record it
+// was given moves that record out of a filter that reads the tree, and every
+// record behind it would answer to a name another record's commit already holds
+// (ADR-0078).
+test('a restart mid-round keeps the seat names the round dispatched under', async (t) => {
+  const fx = stageFixture(t, {
+    config: SUPERSEDE_REPO,
+    files: { [ADR_TWO]: ADR_TWO_TEXT },
+    seats: {
+      'reconcile-judge': judgeOwed([ADR, ADR_TWO]),
+      // The first record's seat closes it. The second one hangs, so the stop
+      // lands inside the round with the first record already closed.
+      'reconcile-write': hangNth(2, supersedeWrite(SUPERSEDES)),
+      'record-review': reviewClean,
+    },
+  });
+  const runId = await fx.launch();
+  await waitRunEvents(
+    fx.paths,
+    runId,
+    (events) => events.find((e) => e.event === 'seat-spawned' && e.seat === 'reconcile-write:2'),
+    { label: 'the second writer', attempts: 900 },
+  );
+  await fx.restart();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The round stamped the list it dispatched, once, and the resume read it.
+  const dispatched = events.filter((e) => e.event === 'reconcile-write-set');
+  assert.equal(dispatched.length, 1);
+  assert.deepEqual(dispatched[0].records, [ADR, ADR_TWO]);
+  assert.deepEqual(dispatched[0].skipped, []);
+  // Both records were written, each under the seat name its index gave it.
+  const written = events.find((e) => e.event === 'reconciliation-written');
+  assert.deepEqual(
+    written.records.map((r) => [r.record, r.seat]),
+    [
+      [ADR, 'reconcile-write:1'],
+      [ADR_TWO, 'reconcile-write:2'],
+    ],
+  );
+  assert.ok(
+    written.records.every((r) => r.unitsAnswered > 0),
+    JSON.stringify(written.records),
+  );
+  // Each dispatch answered the record it added, so the stamps name the two
+  // replacements and neither of the records they closed.
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'record-units' && e.seat.startsWith('reconcile-write'))
+      .map((e) => e.record),
+    [SUPERSEDES[ADR].added, SUPERSEDES[ADR_TWO].added],
+  );
+  // The commit one dispatch signed names its record, so a reader tells the two
+  // writes of the round apart without counting.
+  const subjects = gitSync(
+    ['log', '--format=%s'],
+    events.find((e) => e.event === 'run-launched').worktree,
+  );
+  assert.ok(subjects.includes(`reconcile-write:1 ${ADR} @`), subjects);
+  assert.ok(subjects.includes(`reconcile-write:2 ${ADR_TWO} @`), subjects);
+});
+
+// The seat name of a review is the index in the cycle's list, and one stamp
+// stands per seat per cycle. A list the filter shrinks between two entries of
+// one cycle would rename the seats and lose the answers behind the record it
+// dropped (ADR-0078).
+test('a cycle re-entered after the tree closed a record reviews the set it stamped', async (t) => {
+  const fx = stageFixture(t, {
+    files: { [ADR_TWO]: ADR_TWO_TEXT },
+    seed: seedHandler(async (ctx, { sha }) => {
+      ctx.store.append('records-committed', {
+        actor: 'daemon',
+        sha,
+        paths: [ADR, ADR_TWO],
+        decided: true,
+      });
+    }),
+    seats: {
+      'reconcile-judge': judgeClean,
+      'record-review': recordReview(
+        Array(6).fill('the record claims a doubling the tree does not hold'),
+      ),
+      'fury-verifier': hangNth(1, refuteAll),
+    },
+  });
+  const runId = await fx.launch();
+  await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'seat-spawned' && e.seat === 'fury-verifier',
+    'verifier',
+  );
+  const held = readEvents(runLedgerPath(fx.paths, runId));
+  const stamped = held.filter((e) => e.event === 'reconcile-review-set');
+  assert.equal(stamped.length, 1);
+  assert.deepEqual(stamped[0].records, [ADR, ADR_TWO]);
+  const worktree = held.find((e) => e.event === 'run-launched').worktree;
+  // The tree moves under the cycle: one of the two records it is reviewing is
+  // closed while the daemon is down.
+  await fx.daemon.stop();
+  writeFileSync(join(worktree, ADR), ADR_RETIRED);
+  await fx.restart();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // One stamp for the cycle, and the render reads the set it names.
+  assert.equal(events.filter((e) => e.event === 'reconcile-review-set').length, 1);
+  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
+  assert.equal(rendered.length, 1);
+  assert.deepEqual(rendered[0].records, [ADR, ADR_TWO]);
+  // Both records kept their answers, because the seats kept their names.
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'record-units' && e.seat.startsWith('record-review'))
+      .map((e) => e.record)
+      .sort(),
+    [ADR, ADR_TWO].sort(),
+  );
+});
+
+// A round that opened before the dispatch stamp existed holds none, so a resume
+// filters the tree again and the indices shift. The commit one dispatch signs
+// names the record, so the resume reads by record and never counts a write for
+// a file it never touched (ADR-0078).
+test('a round with no dispatch stamp resumes by record, not by index', async (t) => {
+  const fx = stageFixture(t, {
+    config: SUPERSEDE_REPO,
+    files: { [ADR_TWO]: ADR_TWO_TEXT },
+    seats: {
+      'reconcile-judge': judgeOwed([ADR, ADR_TWO]),
+      'reconcile-write': hangNth(2, supersedeWrite(SUPERSEDES)),
+      'record-review': reviewClean,
+    },
+  });
+  const runId = await fx.launch();
+  await waitRunEvents(
+    fx.paths,
+    runId,
+    (events) => events.find((e) => e.event === 'seat-spawned' && e.seat === 'reconcile-write:2'),
+    { label: 'the second writer', attempts: 900 },
+  );
+  await fx.daemon.stop();
+  // The ledger of a run that opened before the stamp: the round holds no list
+  // of its own, and the resume reads the tree, where the first record is now
+  // closed.
+  const path = runLedgerPath(fx.paths, runId);
+  const kept = readFileSync(path, 'utf8')
+    .split('\n')
+    .filter((line) => line.length > 0 && !line.includes('"reconcile-write-set"'));
+  writeFileSync(path, `${kept.join('\n')}\n`);
+  await fx.restart();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The second record was written, and no seat took the first record's commit
+  // for its own. The resumed round holds the shrunken list, so it accounts for
+  // the record it dispatched and no other.
+  const written = events.find((e) => e.event === 'reconciliation-written');
+  assert.deepEqual(
+    written.records.map((r) => r.record),
+    [ADR_TWO],
+  );
+  assert.ok(written.rewritten.includes(SUPERSEDES[ADR_TWO].added), written.rewritten.join(', '));
+  // Both writes stand in the tree: the first one committed before the stop.
+  const worktree = events.find((e) => e.event === 'run-launched').worktree;
+  for (const record of [SUPERSEDES[ADR].added, SUPERSEDES[ADR_TWO].added]) {
+    assert.ok(existsSync(join(worktree, record)), record);
+  }
+});
