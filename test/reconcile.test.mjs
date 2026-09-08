@@ -7,7 +7,7 @@
 // layers and the take-backs are all about a tree.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
@@ -226,10 +226,15 @@ function stageFixture(
   // for the stop, and the daemon that comes back closes.
   let held = false;
   let repaired = false;
+  // What the run's tree held at the last stage before the close. The close
+  // schedules the workspace teardown, and that delete runs while the caller
+  // reads, so every tree reading a scenario needs is taken here (ADR-0051).
+  const trees = [];
   const shipStub = {
     stages: ['update'],
     handlers: {
       update: async (ctx) => {
+        trees.push(treeSnapshot(ctx.payload.worktree));
         if (holdUpdate && !held) {
           held = true;
           while (!ctx.stopped()) await new Promise((resolve) => setTimeout(resolve, 20));
@@ -262,6 +267,8 @@ function stageFixture(
     origin,
     paths,
     calls: fixture.calls,
+    /** The tree readings the update stage took, newest last. */
+    trees,
     get daemon() {
       return daemon;
     },
@@ -282,6 +289,20 @@ function stageFixture(
       });
       return runId;
     },
+  };
+}
+
+/**
+ * One reading of a run's tree: the commit subjects it holds and the record
+ * files it stands on. It is taken while the run still holds the workspace,
+ * because the close tears that workspace down behind the caller.
+ */
+function treeSnapshot(worktree) {
+  const records = join(worktree, 'docs', 'adr');
+  return {
+    worktree,
+    subjects: gitSync(['log', '--format=%s'], worktree).trim().split('\n'),
+    records: existsSync(records) ? readdirSync(records).sort() : [],
   };
 }
 
@@ -1936,10 +1957,7 @@ test('a restart mid-round keeps the seat names the round dispatched under', asyn
   );
   // The commit one dispatch signed names its record, so a reader tells the two
   // writes of the round apart without counting.
-  const subjects = gitSync(
-    ['log', '--format=%s'],
-    events.find((e) => e.event === 'run-launched').worktree,
-  );
+  const subjects = fx.trees.at(-1).subjects.join('\n');
   assert.ok(subjects.includes(`reconcile-write:1 ${ADR} @`), subjects);
   assert.ok(subjects.includes(`reconcile-write:2 ${ADR_TWO} @`), subjects);
 });
@@ -2048,9 +2066,16 @@ test('a round with no dispatch stamp resumes by record, not by index', async (t)
     [ADR_TWO],
   );
   assert.ok(written.rewritten.includes(SUPERSEDES[ADR_TWO].added), written.rewritten.join(', '));
-  // Both writes stand in the tree: the first one committed before the stop.
-  const worktree = events.find((e) => e.event === 'run-launched').worktree;
+  // Both writes stand in the tree: the first one committed before the stop,
+  // and the resumed round added the second beside it.
+  const tree = fx.trees.at(-1).records;
   for (const record of [SUPERSEDES[ADR].added, SUPERSEDES[ADR_TWO].added]) {
-    assert.ok(existsSync(join(worktree, record)), record);
+    assert.ok(tree.includes(basename(record)), `${record} in ${tree.join(', ')}`);
   }
+  // And the render read them both, which is the harness's own reading of the
+  // same tree.
+  assert.deepEqual(
+    events.filter((e) => e.event === 'reconcile-rendered').at(-1).records.slice().sort(),
+    [SUPERSEDES[ADR].added, SUPERSEDES[ADR_TWO].added].sort(),
+  );
 });
