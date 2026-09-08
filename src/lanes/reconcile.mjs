@@ -50,6 +50,7 @@ import {
   parseRecordList,
   reconcileWriteSchema,
   recordScope,
+  runWindow,
   writeChecks,
   writeRole,
 } from './records.mjs';
@@ -901,7 +902,11 @@ async function cycleStep(ctx, base) {
   const anchor = cycleAnchor(events);
   const cycle = nextCycle(events);
   const sha = await headSha(base.worktree);
-  const changed = reviewedRecords(anchor);
+  // The one window this cycle reads: the run's own record work, against the
+  // merge base computed here (ADR-0079). A window the read could not answer
+  // falls back to the anchor's own list, which is what the stage read before.
+  const window = await runWindow(base);
+  const changed = window.files.length > 0 ? window.files : reviewedRecords(anchor);
   const spectrum = await runRecordLayers(ctx, base, { cycle, sha, changed });
   if (spectrum.error) {
     return commandError(
@@ -911,7 +916,7 @@ async function cycleStep(ctx, base) {
     );
   }
   const reds = persistentReds(spectrum.results ?? []);
-  const records = await reviewSet(ctx, base, { cycle, sha, changed });
+  const records = await reviewSet(ctx, base, { cycle, sha, window, changed });
   const priorRender = lastRendered(events);
   const index = findingIndex(events);
   // What the last render of this stage left open, as findings. A layer name in
@@ -922,7 +927,7 @@ async function cycleStep(ctx, base) {
     records,
     units: unitsFor(base, records),
     neighbours: neighboursFor(base, records),
-    moved: await movedFor(base, records, priorRender),
+    moved: await movedFor(base, records, priorRender, window),
     spec: base.specRef,
     cycle,
     priorConfirmed,
@@ -940,6 +945,9 @@ async function cycleStep(ctx, base) {
     actor: ACTOR,
     cycle,
     sha,
+    // The window this cycle read, so a later reader knows which records were
+    // this run's own when the render was made (ADR-0079).
+    ...(window.base && { base: window.base }),
     verdict: open.length === 0 ? 'green' : 'red',
     open,
     records,
@@ -989,12 +997,12 @@ async function runRecordLayers(ctx, base, { cycle, sha, changed }) {
  * lose the answers behind the record it dropped (ADR-0078).
  * @returns {Promise<string[]>}
  */
-async function reviewSet(ctx, base, { cycle, sha, changed }) {
+async function reviewSet(ctx, base, { cycle, sha, window, changed }) {
   const stamped = runEvents(ctx).find(
     (e) => e.event === 'reconcile-review-set' && e.cycle === cycle,
   );
   if (stamped) return stamped.records ?? [];
-  const scope = await stageScope(base, sha, changed);
+  const scope = await stageScope(base, window, changed);
   ctx.store.append('reconcile-review-set', {
     actor: ACTOR,
     cycle,
@@ -1005,19 +1013,22 @@ async function reviewSet(ctx, base, { cycle, sha, changed }) {
 }
 
 /**
- * The record set of this cycle: every record the pass has touched, on every
- * cycle, until the stage is green (ADR-0075). The range opens at the pass's own
- * opening sha, so a record an early round rewrote is read again by the round
- * that follows it.
+ * The record set of this cycle: every record the run's window holds, on every
+ * cycle, until the stage is green. The window opens at the merge base of the
+ * run branch and the default branch, so a record an early round rewrote is read
+ * again by the round that follows it, and a record the default branch gained
+ * meanwhile belongs to nobody here (ADR-0079).
  *
  * The scope and the fallback behind it both go through the active filter. The
  * layers still read the whole record diff, because the form gate is about the
  * file a closure changed as much as about the file a write added (ADR-0078).
  * @returns {Promise<{records: string[], skipped: Array<object>}>}
  */
-async function stageScope(base, sha, changed) {
-  const scope = await recordScope(base.worktree, base.rangeFrom, sha, base.recordPaths, {
+async function stageScope(base, window, changed) {
+  const scope = await recordScope(base.worktree, base.recordPaths, {
     lifecycle: base.recordLifecycle,
+    defaultBranch: base.defaultBranch,
+    window,
   }).catch(() => null);
   const files = scope ? scope.files : [];
   return activeOf(base.worktree, files.length > 0 ? files : changed);
@@ -1045,12 +1056,12 @@ function neighboursFor(base, records) {
  * changed since the tree the last cycle judged. The review's brief names them,
  * so a seat reads the sentences that moved before it reads the rest (ADR-0073).
  *
- * The comparison sha is the previous render's own, and the pass's opening sha on
- * the first cycle. Both are commits the run holds, so the read survives a
- * restart and needs no field of its own.
+ * The comparison sha is the previous render's own, and the window's base on the
+ * first cycle. Both are commits the run holds, so the read survives a restart
+ * and needs no field of its own.
  */
-async function movedFor(base, records, priorRender) {
-  const from = priorRender?.sha ?? base.rangeFrom;
+async function movedFor(base, records, priorRender, window = null) {
+  const from = priorRender?.sha ?? window?.base ?? base.rangeFrom;
   const out = {};
   if (typeof from !== 'string' || from.length === 0) return out;
   for (const record of records) {
@@ -1437,12 +1448,13 @@ async function reconcileBase(ctx) {
   const cardPath = typeof ctx.payload.card === 'string' ? ctx.payload.card : null;
   const ticket = answeredPath(events, 'ticket-missing') ?? ctx.payload.ticket;
   const mode = cardPath !== null ? 'story' : ctx.lane === 'records' ? 'records' : 'repair';
+  const defaultBranch = ctx.payload.defaultBranch ?? 'main';
   const base = recordBase({
     config,
     worktree,
     mode,
     branch: ctx.payload.branch,
-    defaultBranch: ctx.payload.defaultBranch ?? 'main',
+    defaultBranch,
     layers: config.gates.tier1 ?? [],
     commands: config.commands,
     recordLayers: config.gates?.recordLayers ?? [],
@@ -1452,7 +1464,7 @@ async function reconcileBase(ctx) {
     born: recordsCommitted(events)?.paths ?? [],
     specRef: cardPath ? join(ctx.paths.runs, ctx.runId, 'spec.md') : specPath(worktree, ticket),
     constitution: readConstitution(worktree, config),
-    rangeFrom: rangeStart(ctx, events),
+    rangeFrom: await rangeStart(ctx, events, { worktree, defaultBranch }),
   });
   // The seat environment carries the range, so the record layer's own gate reads
   // the pass's opening sha and never a CI variable no run sets (ADR-0075).
@@ -1465,15 +1477,17 @@ function specPath(worktree, ticket) {
 }
 
 /**
- * The sha the pass opened at, which is the start of every record range this
- * stage reads.
+ * The sha every record read of this stage opens at, and the sha the record
+ * layer's own gate command is given.
  *
- * The story and repair lanes open at the first implementation of the pass: that
- * commit's base is the tree before any of this run's work. The records lane
- * runs no dev seat, so it opens at the tree the run launched on, which is the
- * tree before its own records stage wrote a file.
+ * It is the merge base of the run branch and the default branch, computed here
+ * (ADR-0079). CI judges a request against that same commit, so the in-run gate
+ * and the CI gate read one set. A merge base the read cannot answer falls back
+ * to the sha the pass opened at, which is what the stage read before.
  */
-function rangeStart(ctx, events) {
+async function rangeStart(ctx, events, { worktree, defaultBranch }) {
+  const window = await runWindow({ worktree, defaultBranch });
+  if (window.base) return window.base;
   const lane =
     typeof ctx.payload.baseSha === 'string'
       ? ctx.payload.baseSha

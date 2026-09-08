@@ -114,7 +114,7 @@ import { fastPathDecision } from './fastpath.mjs';
 import { runCommand } from './exec.mjs';
 import { probeCredentials, worldConfig } from './probes.mjs';
 import { MERGE_SUITE_SCHEMA } from './story.mjs';
-import { WRITE_SEAT, findingLine } from './records.mjs';
+import { WRITE_SEAT, findingLine, runWindow } from './records.mjs';
 import {
   RECONCILE_STAGE,
   SHIP_WITHOUT_RECORDS,
@@ -125,7 +125,7 @@ import {
   reconcileTicketFromBranch,
 } from './reconcile.mjs';
 import { recordBase, recordsCommitted } from './records-stage.mjs';
-import { recordNeighbours } from './units.mjs';
+import { activeOf, recordNeighbours } from './units.mjs';
 import {
   DEV_SCHEMA,
   triageStep,
@@ -645,7 +645,7 @@ async function fastPathShip(ctx, base, out) {
       // The reconciliation's own ground: the run's records and the records they
       // name, computed at the merge (ADR-0075).
       records: {
-        neighbourhood: recordNeighbourhood(base, events),
+        neighbourhood: await recordNeighbourhood(base),
         recordPaths: base.recordPaths ?? [],
       },
     });
@@ -669,15 +669,19 @@ async function fastPathShip(ctx, base, out) {
 }
 
 /**
- * The reconciliation's ground: this run's own records and the records they name,
- * by path. A record outside it is a record no claim of this run rests on, so the
- * default branch may move it and the reconciliation still stands.
+ * The reconciliation's ground: the active records of this run's own window and
+ * the records they name, by path. A record outside it is a record no claim of
+ * this run rests on, so the default branch may move it and the reconciliation
+ * still stands.
+ *
+ * The window is the run's own work against its merge base, so a record the
+ * default branch gained while the run worked is never this run's ground
+ * (ADR-0079). A closed record leaves the set with its citers: no seat may edit
+ * one, so an incoming change to it asks this run for nothing.
  */
-function recordNeighbourhood(base, events) {
-  const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written');
-  const own = [
-    ...new Set([...(written?.rewritten ?? []), ...(recordsCommitted(events)?.paths ?? [])]),
-  ];
+async function recordNeighbourhood(base) {
+  const window = await runWindow(base);
+  const own = activeOf(base.worktree, window.files).records;
   const out = new Set(own);
   for (const record of own) {
     for (const near of recordNeighbours(base.worktree, record, base.recordPaths ?? []).neighbours) {
@@ -3133,16 +3137,23 @@ async function shipBase(ctx, forgeFor) {
         ? ticket
         : join(worktree, ticket)
       : null;
-  const rangeFrom = passOpeningSha(
-    runEvents(ctx),
-    ctx.payload.baseSha ?? recordsCommitted(runEvents(ctx))?.sha ?? null,
-  );
+  const defaultBranch = ctx.payload.defaultBranch ?? 'main';
+  // The merge base of the run branch and the default branch, computed here.
+  // It is the base CI judges the request against, so the gate command reads one
+  // set in the run and in CI. A read that fails falls back to the sha the pass
+  // opened at (ADR-0079).
+  const rangeFrom =
+    (await runWindow({ worktree, defaultBranch, recordPaths: config.repo.recordPaths ?? [] })).base ??
+    passOpeningSha(
+      runEvents(ctx),
+      ctx.payload.baseSha ?? recordsCommitted(runEvents(ctx))?.sha ?? null,
+    );
   return recordBase({
     forge,
     config,
     worktree,
     branch: ctx.payload.branch,
-    defaultBranch: ctx.payload.defaultBranch ?? 'main',
+    defaultBranch,
     // The project config the run pinned at its launch. It carries the ground of
     // every Tier-1 layer, so the fast path reads a default-branch move of it as
     // ground the certification rests on (ADR-0056).
