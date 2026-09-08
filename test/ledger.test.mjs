@@ -142,6 +142,8 @@ test('the record stage stamps every fact it is asked for', (t) => {
   for (const event of [
     'records-committed',
     'record-units',
+    'reconcile-write-set',
+    'reconcile-review-set',
     'reconcile-round',
     'reconcile-rendered',
     'reconcile-stall',
@@ -154,6 +156,20 @@ test('the record stage stamps every fact it is asked for', (t) => {
   // about every ledger and about no run.
   assert.ok(INSTANCE_EVENTS.has('duration-reset'));
   assert.ok(!RUN_EVENTS.has('duration-reset'));
+  // The two dispatch sets carry the list and what the filter dropped, so a
+  // resume reads the set the round or the cycle was dispatched over and never
+  // the tree a seat has moved since.
+  const set = ledger.append('reconcile-write-set', {
+    actor: 'daemon',
+    round: 1,
+    since: 4,
+    sha: 'aaa',
+    records: ['docs/adr/adr-0001-a.md'],
+    skipped: [{ record: 'docs/adr/adr-0002-b.md', status: 'superseded' }],
+  });
+  assert.equal(set.stream, undefined);
+  assert.equal(streamOf('reconcile-write-set'), null);
+  assert.equal(streamOf('reconcile-review-set'), null);
   const stall = ledger.append('reconcile-stall', { actor: 'daemon', rounds: 5, open: ['F1'] });
   ledger.close();
   // The stall asks the owner to look, so it rides the loud stream.
