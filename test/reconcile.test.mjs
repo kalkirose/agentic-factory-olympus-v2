@@ -2489,6 +2489,55 @@ test('a red render over a set with nothing to dispatch stalls at once', async (t
 // A red layer whose output names a record no seat may answer for. The question
 // of who owes an answer is asked over the active set, so the round widens to
 // that set rather than dispatching nothing and stalling (ADR-0079).
+// The scope a corrective seat answers siblings over is the set this run holds,
+// and not the list the round dispatches. A peer the round kept is answered by
+// the seat that wrote it (ADR-0079).
+test('a kept peer that cites the dispatched record is not a sibling', async (t) => {
+  const cites = `${ADR_TWO_TEXT}\nIt follows ADR-0001.\n`;
+  const fx = stageFixture(t, {
+    config: SUPERSEDE_REPO,
+    seed: seedHandler(async (ctx) => {
+      const worktree = ctx.payload.worktree;
+      writeFileSync(join(worktree, ADR), ADR_REWRITTEN);
+      writeFileSync(join(worktree, ADR_TWO), cites);
+      const sha = await commitAll(worktree, 'records: the birth writes the pair');
+      ctx.store.append('records-committed', {
+        actor: 'daemon',
+        sha,
+        paths: [ADR, ADR_TWO],
+        decided: true,
+      });
+    }),
+    seats: {
+      'reconcile-judge': judgeClean,
+      'reconcile-write': writeEveryRound(),
+      'record-review': reviewOnce(ADR, 'the record claims a doubling the tree does not hold'),
+      'fury-verifier': confirmAndResolve,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // One round over one record, with the peer kept.
+  const round = events.find((e) => e.event === 'reconcile-round');
+  assert.deepEqual(round.records, [ADR]);
+  assert.deepEqual(
+    (events.filter((e) => e.event === 'reconcile-write-set').at(-1).kept ?? []).map((k) => k.record),
+    [ADR_TWO],
+  );
+  // The corrective brief asks for no sibling answer about the peer.
+  const corrective = fx.calls.filter((c) => c.seat === 'reconcile-write').at(-1);
+  assert.ok(corrective.prompt.includes('Confirmed findings:'), corrective.prompt.slice(0, 200));
+  assert.ok(!corrective.prompt.includes('These active records cite a record you supersede'));
+  assert.ok(
+    corrective.prompt.includes('No active record cites a record this write supersedes'),
+    corrective.prompt,
+  );
+  // The peer is still the record's neighbour, which is where the seat reads it.
+  const neighbourhood = corrective.prompt.slice(corrective.prompt.indexOf('The neighbourhood'));
+  assert.ok(neighbourhood.includes(`- ${ADR_TWO}`), neighbourhood.slice(0, 300));
+});
+
 test('a red layer that names a closed record dispatches the active set', async (t) => {
   // The layer is red until the record the round writes holds the sentence the
   // corrective dispatch adds, and its output names the closed record alone.

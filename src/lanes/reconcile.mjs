@@ -665,7 +665,15 @@ function recheckBrief(recheck, record, brief) {
 async function writeRound(
   ctx,
   base,
-  { records, since, buildRole, findings = [], answered = false, isolate = false },
+  {
+    records,
+    since,
+    buildRole,
+    findings = [],
+    answered = false,
+    isolate = false,
+    scope = null,
+  },
 ) {
   const entries = [];
   const reports = [];
@@ -694,7 +702,10 @@ async function writeRound(
     // last commit is that dispatch's tree: the peer before it committed, and a
     // stop after this record's own commit leaves it at the head.
     await resetHard(base.worktree, await headSha(base.worktree));
-    const siblings = siblingsOf(base, record, records);
+    // The records this run holds, and not the list this round dispatches. A
+    // peer the round kept is this run's own record, answered by the seat that
+    // wrote it, and never a sibling of the record beside it (ADR-0079).
+    const siblings = siblingsOf(base, record, scope ?? records);
     const spawnedAt = lastSeq(runEvents(ctx));
     const outcome = await seatWithChecks(ctx, {
       seat,
@@ -1365,6 +1376,7 @@ async function correctStep(ctx, base, next) {
   const outcome = await writeRound(ctx, roundBase(base, set), {
     records,
     since: rendered.seq,
+    scope: held,
     findings: open,
     // A corrective dispatch that spends its budget ends itself. The record
     // keeps its finding open and the next round dispatches it again.
@@ -1375,7 +1387,7 @@ async function correctStep(ctx, base, next) {
     buildRole: (record, brief) =>
       correctiveRole(
         base,
-        { ...judged, records: [record], ...recordContext(base, record, records) },
+        { ...judged, records: [record], ...recordContext(base, record, held) },
         {
           findings: open.filter((f) => f.file === record || f.file2 === record),
           divergences: divergences.filter((d) => d.record === record),
