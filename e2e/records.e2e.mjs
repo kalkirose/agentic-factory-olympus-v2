@@ -11,6 +11,9 @@
 // records land on the default branch.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import {
   PROJECT,
   PROJECT_CONFIG,
@@ -112,6 +115,9 @@ test('a record-only ticket ships through the records lane', async (t) => {
   t.after(() => cleanup(fx));
 
   await startDaemon(fx);
+  // The tree every record seat of this run judges against: the default branch
+  // as it stands at the launch, which is the merge base of the run branch.
+  const launchBase = originSha(fx, 'refs/heads/main');
 
   // The lane takes a ticket, exactly as the repair lane does, and the console
   // settles that pairing before anything is provisioned.
@@ -237,6 +243,13 @@ test('a record-only ticket ships through the records lane', async (t) => {
     ['record-author', 'reconcile-judge', 'record-review'],
     'the records lane spawned seats it does not owe',
   );
+  // The birth seat runs the record layers itself, and its environment carries
+  // the base those commands judge against: the merge base, which is the base CI
+  // reads the request at (ADR-0079).
+  const author = seats.find((c) => c.seat === 'record-author');
+  assert.equal(author.baseSha, launchBase);
+  assert.match(author.prompt, /Run these commands in the worktree before you report/);
+  assert.match(author.prompt, /- lint: node \.olympus\/gates\/lint\.mjs/);
   // Every record seat reads the harness's own enumerator by absolute path, and
   // the review seat is given the record and no diff.
   const review = seats.find((c) => c.seat === 'record-review');
@@ -597,6 +610,275 @@ test('a judged write supersedes its record and answers the replacement', async (
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   const tree = originTree(fx, 'main');
   for (const path of [RECORD, HEIRS[0]]) assert.ok(tree.includes(path), path);
+
+  await stopDaemon(fx);
+});
+
+// -- the corrective round (ADR-0079) ------------------------------------------
+//
+// The shape the run this plan comes from met: a born supersession, a red
+// render over it, and a corrective round in which one seat spends its budget.
+// The parent of every replacement closed in the birth commit, one commit before
+// the round opened (W11, W14).
+
+const SCENARIO_CORRECTIVE = {
+  bornRecords: {
+    [RECORD]: RECORD_CLOSED,
+    [HEIRS[0]]: HEIR_TEXT[HEIRS[0]],
+    [HEIRS[1]]: HEIR_TEXT[HEIRS[1]],
+  },
+  recordSiblings: true,
+  reconcileJudge: {
+    owed: false,
+    records: [],
+    reason: 'the records this run wrote state what the tree holds',
+  },
+  // A finding on each heir. The first is answered in one round; the second
+  // holds a seat that spends its budget before it writes.
+  recordFindings: {
+    [HEIRS[0]]: { summary: 'the record states a module the tree does not hold', reads: 1 },
+    [HEIRS[1]]: { summary: 'the record names a route the tree does not serve', reads: 2 },
+  },
+  recordRefusals: { [HEIRS[1]]: 2 },
+  confirmFindings: true,
+};
+
+test('a corrective round over a born supersession survives a refused seat', async (t) => {
+  const fx = buildFixture({
+    prefix: 'olympus-e2e-records-corrective-',
+    scenario: SCENARIO_CORRECTIVE,
+    tree: {
+      '.olympus/project.json': SUPERSEDE_PROJECT,
+      [TICKET]: SUPERSEDE_TICKET,
+      [RECORD]: RECORD_TEXT,
+    },
+  });
+  t.after(() => cleanup(fx));
+
+  await startDaemon(fx);
+  ctl(fx, ['launch', '--project', PROJECT, '--lane', 'records', '--ticket', TICKET]);
+  const runId = await pollFor(
+    'the launch stamp',
+    () => instanceEvents(fx).find((e) => e.event === 'launch')?.runId,
+    { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
+  );
+  await pollFor(
+    'the run to close',
+    () => runEvents(fx, runId).some((e) => e.event === 'run-closed'),
+    { attempts: 1800, abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+
+  const events = runEvents(fx, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The birth wrote the supersession, and no seat was refused over the pairing:
+  // the parent closed in the birth commit, and the window reads it.
+  const author = seatCalls(fx).filter((c) => c.seat === 'record-author');
+  assert.equal(author.length, 1);
+  assert.match(author[0].baseSha ?? '', /^[0-9a-f]{40}$/);
+
+  // One round dispatched both heirs; one wrote, and one spent its budget.
+  const rounds = events.filter((e) => e.event === 'reconcile-round');
+  assert.equal(rounds.length, 2);
+  assert.deepEqual(rounds[0].records.slice().sort(), HEIRS.slice().sort());
+  assert.deepEqual(rounds[0].failed, [HEIRS[1]]);
+  const written = events.filter((e) => e.event === 'reconciliation-written');
+  const failed = written[0].records.find((r) => r.record === HEIRS[1]);
+  assert.equal(failed.failed, true);
+  assert.equal(failed.attempts, 2);
+  assert.ok(failed.defects.length > 0);
+  // The only seat failure is that dispatch, and the run neither closed nor
+  // parked on it.
+  assert.deepEqual(
+    events.filter((e) => e.event === 'seat-failure').map((e) => e.reason),
+    ['work-product-defect'],
+  );
+  assert.ok(!events.some((e) => e.event === 'park'));
+
+  // The render that followed named the record no write answered, and the next
+  // round dispatched that record alone.
+  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
+  assert.ok(rendered[1].open.includes(`unwritten:${HEIRS[1]}`), rendered[1].open.join(', '));
+  assert.deepEqual(rounds[1].records, [HEIRS[1]]);
+  assert.equal(rendered.at(-1).verdict, 'green');
+
+  // The third cycle read the record that moved and kept the one that did not.
+  const cycles = events.filter((e) => e.event === 'reconcile-review-set');
+  assert.equal(cycles.length, 3);
+  assert.deepEqual(cycles[2].records, [HEIRS[1]]);
+  assert.deepEqual(
+    (cycles[2].kept ?? []).map((k) => k.record),
+    [HEIRS[0]],
+  );
+
+  // The supersession rode the merge.
+  const tree = originTree(fx, 'main');
+  for (const path of [RECORD, ...HEIRS]) assert.ok(tree.includes(path), path);
+
+  await stopDaemon(fx);
+});
+
+// -- a moved default branch (ADR-0079) ----------------------------------------
+
+/** One commit on the default branch of the fixture origin, from the seed. */
+function pushToMain(fx, path, content, message) {
+  const full = join(fx.seed, path);
+  mkdirSync(dirname(full), { recursive: true });
+  writeFileSync(full, content);
+  execFileSync('git', ['add', '-A'], { cwd: fx.seed, encoding: 'utf8', windowsHide: true });
+  execFileSync('git', ['-c', 'commit.gpgsign=false', 'commit', '-m', message], {
+    cwd: fx.seed,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  execFileSync('git', ['push', '--quiet', fx.origin, 'main'], {
+    cwd: fx.seed,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  return execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: fx.seed,
+    encoding: 'utf8',
+    windowsHide: true,
+  }).trim();
+}
+
+/** A record the default branch gains while the run works. */
+const INCOMING = 'docs/adr/adr-0009-hold-the-route.md';
+const INCOMING_TEXT = [
+  '# ADR-0009: Hold the route',
+  '',
+  '**Status:** Accepted',
+  '',
+  '## Decision',
+  '',
+  'The module src/base.mjs holds the factor this route reads.',
+  '',
+].join('\n');
+
+test('a moved default branch re-runs the reconciliation on the run own set', async (t) => {
+  const fx = buildFixture({
+    prefix: 'olympus-e2e-records-moved-',
+    scenario: SCENARIO,
+    tree: { [TICKET]: RECORD_TICKET },
+  });
+  t.after(() => cleanup(fx));
+
+  await startDaemon(fx);
+  ctl(fx, ['launch', '--project', PROJECT, '--lane', 'records', '--ticket', TICKET]);
+  const runId = await pollFor(
+    'the launch stamp',
+    () => instanceEvents(fx).find((e) => e.event === 'launch')?.runId,
+    { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
+  );
+  // The competing work: a record on the default branch, which the update merges
+  // in. It is nobody's in this run, and the re-run reads the run's own set.
+  await pollFor(
+    'the record commit',
+    () => runEvents(fx, runId).some((e) => e.event === 'records-committed'),
+    { abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  const moved = pushToMain(fx, INCOMING, INCOMING_TEXT, 'records: main states one more decision');
+  await pollFor(
+    'the run to close',
+    () => runEvents(fx, runId).some((e) => e.event === 'run-closed'),
+    { attempts: 1800, abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+
+  const events = runEvents(fx, runId);
+  assertNoWiringFailure(assert, fx, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The update merged the moved branch and asked the reconciliation again.
+  const update = events.find((e) => e.event === 'pre-verdict-update' && e.ran);
+  assert.equal(update.mainSha, moved);
+  assert.equal(update.records.answer, 'rerun');
+  // The re-run read the run's own record and never the one main gained.
+  const cycles = events.filter((e) => e.event === 'reconcile-review-set');
+  assert.equal(cycles.length, 2);
+  assert.deepEqual(cycles[1].records, [RECORD]);
+  assert.equal(cycles[1].kept, undefined);
+  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
+  assert.equal(rendered.length, 2);
+  assert.deepEqual(rendered[1].records, [RECORD]);
+  assert.equal(rendered[1].verdict, 'green');
+  // Both records stand on the default branch, and the run wrote one of them.
+  const tree = originTree(fx, 'main');
+  assert.ok(tree.includes(RECORD), RECORD);
+  assert.ok(tree.includes(INCOMING), INCOMING);
+
+  await stopDaemon(fx);
+});
+
+// -- the cap park (ADR-0079) --------------------------------------------------
+
+/** The project with one corrective round, so the cap is one round away. */
+const ONE_ROUND_PROJECT =
+  JSON.stringify(
+    { ...PROJECT_CONFIG, gates: { ...PROJECT_CONFIG.gates, reconcileRounds: 1 } },
+    null,
+    2,
+  ) + '\n';
+
+// A finding the first round does not close: the review raises it on the first
+// two reads, so the run reaches its cap with the finding still open.
+const SCENARIO_CAP = {
+  bornRecords: { [RECORD]: RECORD_TEXT },
+  reconcileJudge: {
+    owed: false,
+    records: [],
+    reason: 'the record this run wrote states what the tree holds',
+  },
+  recordFindings: {
+    [RECORD]: { summary: 'the record states a module the tree does not hold', reads: 2 },
+  },
+  confirmFindings: true,
+};
+
+test('a records-lane run at its cap parks, takes a bought round, and ships', async (t) => {
+  const fx = buildFixture({
+    prefix: 'olympus-e2e-records-cap-',
+    scenario: SCENARIO_CAP,
+    tree: { '.olympus/project.json': ONE_ROUND_PROJECT, [TICKET]: RECORD_TICKET },
+  });
+  t.after(() => cleanup(fx));
+
+  await startDaemon(fx);
+  ctl(fx, ['launch', '--project', PROJECT, '--lane', 'records', '--ticket', TICKET]);
+  const runId = await pollFor(
+    'the launch stamp',
+    () => instanceEvents(fx).find((e) => e.event === 'launch')?.runId,
+    { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
+  );
+  const park = await pollFor(
+    'the cap park',
+    () => runEvents(fx, runId).find((e) => e.event === 'park' && e.type === 'reconcile-cap'),
+    { attempts: 1800, abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  // The work is on the origin before anybody is asked, and the ticket states
+  // the rest of it.
+  assert.equal(originSha(fx, `refs/heads/run/${runId}`).length, 40);
+  assert.deepEqual(park.answers.options, ['rounds', 'abandon']);
+  const ticket = readFileSync(park.detail.ticket, 'utf8');
+  assert.ok(ticket.includes('## The branch on origin'));
+  assert.ok(ticket.includes(RECORD));
+  // The console buys one more round, and the run finishes on it.
+  ctl(fx, ['answer', '--run', runId, '--option', 'rounds', '--text', '1']);
+  await pollFor(
+    'the run to close',
+    () => runEvents(fx, runId).some((e) => e.event === 'run-closed'),
+    { attempts: 1800, abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+
+  const events = runEvents(fx, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const extended = events.find((e) => e.event === 'reconcile-cap-extended');
+  assert.equal(extended.parkSeq, park.seq);
+  assert.equal(extended.rounds, 1);
+  assert.equal(extended.cap, 2);
+  assert.equal(events.filter((e) => e.event === 'reconcile-round').length, 2);
+  assert.equal(events.filter((e) => e.event === 'reconcile-rendered').at(-1).verdict, 'green');
+  assert.ok(events.some((e) => e.event === 'reconcile-stall'));
+  // The record rode the merge after the bought round.
+  assert.ok(originTree(fx, 'main').includes(RECORD), 'the record did not ride the merge');
 
   await stopDaemon(fx);
 });
