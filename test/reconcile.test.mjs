@@ -905,6 +905,17 @@ test('a corrective round dispatches the records an open finding names (W15)', ()
   assert.equal(correctiveRecords(silent, { cycle: 2, open: ['adr-form'] }, three), null);
   // A layer red in an earlier cycle says nothing about this one.
   assert.deepEqual([...correctiveRecords(named, { cycle: 3, open: ['F1'] }, three)], [ADR]);
+  // A red layer that names a record no seat may answer for names nobody: the
+  // set it is asked over is the active one, so the round widens rather than
+  // dispatching an empty list and stalling.
+  const closed = ledger({
+    event: 'layer-result',
+    cycle: 2,
+    layer: 'adr-form',
+    status: 'red',
+    output: 'docs/adr/adr-0009-closed.md:3 the status line is malformed',
+  });
+  assert.equal(correctiveRecords(closed, { cycle: 2, open: ['adr-form'] }, three), null);
 });
 
 // -- the stage end to end ----------------------------------------------------
@@ -2473,6 +2484,113 @@ test('a red render over a set with nothing to dispatch stalls at once', async (t
   const written = events.find((e) => e.event === 'reconciliation-written');
   assert.equal(written.ok, false);
   assert.equal(written.cause, 'record-cap');
+});
+
+// A red layer whose output names a record no seat may answer for. The question
+// of who owes an answer is asked over the active set, so the round widens to
+// that set rather than dispatching nothing and stalling (ADR-0079).
+test('a red layer that names a closed record dispatches the active set', async (t) => {
+  // The layer is red until the record the round writes holds the sentence the
+  // corrective dispatch adds, and its output names the closed record alone.
+  const layer = [
+    'const fs = require("fs");',
+    `const ok = fs.readFileSync(${JSON.stringify(ADR)}, "utf8").includes("Dispatch");`,
+    `if (!ok) console.log(${JSON.stringify(`${ADR_TWO}:3 the status line is malformed`)});`,
+    'process.exit(ok ? 0 : 1);',
+  ].join('\n');
+  const fx = stageFixture(t, {
+    lane: 'records',
+    config: {
+      commands: { adrform: [process.execPath, '-e', layer] },
+      gates: {
+        tier1: [{ name: 'adr-form', command: 'adrform' }],
+        recordLayers: ['adr-form'],
+        reconcileRounds: 5,
+      },
+    },
+    // The birth wrote one record and closed another. The layer is red and its
+    // output names the closed one.
+    seed: async (ctx) => {
+      const worktree = ctx.payload.worktree;
+      writeFileSync(join(worktree, ADR_TWO), ADR_TWO_RETIRED);
+      const sha = await commitAll(worktree, 'records: the birth writes one and closes one');
+      ctx.store.append('records-committed', {
+        actor: 'daemon',
+        sha,
+        paths: [ADR, ADR_TWO],
+        decided: true,
+      });
+      return { next: 'reconcile' };
+    },
+    seats: {
+      'reconcile-judge': judgeClean,
+      'reconcile-write': writeEveryRound(),
+      'record-review': reviewClean,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The round dispatched the record a seat may answer for, and nothing parked.
+  const round = events.find((e) => e.event === 'reconcile-round');
+  assert.deepEqual(round.records, [ADR]);
+  assert.ok(!events.some((e) => e.event === 'park'));
+  assert.ok(!events.some((e) => e.event === 'reconcile-stall'));
+  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
+  assert.deepEqual(rendered[0].open, ['adr-form']);
+  assert.equal(rendered.at(-1).verdict, 'green');
+});
+
+test('a bought round derives its set again, and never the empty one it stalled on', async (t) => {
+  const fx = stageFixture(t, {
+    lane: 'records',
+    config: {
+      commands: { adrform: [process.execPath, '-e', 'process.exit(1)'] },
+      gates: {
+        tier1: [{ name: 'adr-form', command: 'adrform' }],
+        recordLayers: ['adr-form'],
+        reconcileRounds: 5,
+      },
+    },
+    // Every record of the set is closed, so no seat may answer the red layer.
+    seed: closedSeed(),
+    seats: { 'reconcile-judge': judgeClean, 'record-review': reviewClean },
+  });
+  const runId = await fx.launch();
+  const park = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'park' && e.type === 'reconcile-cap',
+    'the reconcile-cap park',
+  );
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'rounds', answer: '1' });
+  const second = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'park' && e.type === 'reconcile-cap' && e.seq > park.seq,
+    'the second reconcile-cap park',
+  );
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  // The bought round read the set again rather than the empty list the stalled
+  // round stamped: two stamps for one round, the second past the extension.
+  const sets = live.filter((e) => e.event === 'reconcile-write-set');
+  assert.equal(sets.length, 2);
+  assert.deepEqual(
+    sets.map((e) => [e.round, e.since, e.records.length]),
+    [
+      [1, sets[0].since, 0],
+      [1, sets[0].since, 0],
+    ],
+  );
+  const extended = live.find((e) => e.event === 'reconcile-cap-extended');
+  assert.ok(sets[1].seq > extended.seq, 'the second set is older than the round that bought it');
+  assert.equal(live.filter((e) => e.event === 'reconcile-stall').length, 2);
+  // The work is not lost, and the person is asked again rather than answered
+  // with silence.
+  assert.equal(second.type, 'reconcile-cap');
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').reason, 'reconcile-cap');
 });
 
 test('a restart past the review of a set with a closed record reads the review done', async (t) => {

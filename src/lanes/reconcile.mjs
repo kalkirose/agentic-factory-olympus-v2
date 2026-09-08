@@ -590,8 +590,20 @@ async function writeStep(ctx, base, next) {
  * @returns {Promise<{records: string[], sha: string|null}>}
  */
 async function dispatchSet(ctx, base, { round, since, records, owed = null }) {
-  const stamped = runEvents(ctx).find(
-    (e) => e.event === 'reconcile-write-set' && e.since === since,
+  const events = runEvents(ctx);
+  // The set this round stamped, and never the one an earlier round of the same
+  // render left behind. A round is the pair of the render it answers and its
+  // own number, and a bought round derives its set again: an empty dispatch
+  // must not outlive the rounds a person paid for (ADR-0079).
+  const bought = events
+    .filter((e) => e.event === 'reconcile-cap-extended')
+    .reduce((seq, e) => Math.max(seq, e.seq), 0);
+  const stamped = events.find(
+    (e) =>
+      e.event === 'reconcile-write-set' &&
+      e.since === since &&
+      (e.round ?? 0) === round &&
+      e.seq > bought,
   );
   if (stamped) return { records: stamped.records ?? [], sha: stamped.sha ?? null };
   const sha = await headSha(base.worktree);
@@ -1333,11 +1345,16 @@ async function correctStep(ctx, base, next) {
   );
   const round = roundsSince(events, judged.seq) + 1;
   const held = reviewedRecords(events, anchor);
+  // The records a seat may answer for. A closed one takes no writer, so the
+  // question of who owes an answer is asked over the active set alone: a red
+  // layer that names a closed record names nobody, and the round widens
+  // (ADR-0079).
+  const active = activeOf(base.worktree, held).records;
   const set = await dispatchSet(ctx, base, {
     round,
     since: rendered.seq,
     records: held,
-    owed: correctiveRecords(events, rendered, held),
+    owed: correctiveRecords(events, rendered, active),
   });
   // A red render with nothing to dispatch over is the cap. Every record of the
   // set is closed, no seat may answer for one, and a round that spawns none
@@ -1393,12 +1410,12 @@ async function correctStep(ctx, base, next) {
  * over a record no finding names reads the record, writes nothing, and costs
  * the round a dispatch (ADR-0079).
  *
- * A red layer that names no record of the set is the one case that widens
- * again: the layer says the record diff is wrong and nothing in its output says
- * where, so every record of the set owes an answer.
+ * A red layer that names no active record of the set is the one case that
+ * widens again: the layer says the record diff is wrong and names no record a
+ * seat may answer for, so every record of the set owes an answer.
  * @param {object[]} events the run's ledger, in order
  * @param {object} rendered the render this round answers
- * @param {string[]} records the set the round stands over
+ * @param {string[]} records the active records the round stands over
  * @returns {Set<string>|null} null where every record of the set is owed
  */
 export function correctiveRecords(events, rendered, records) {
