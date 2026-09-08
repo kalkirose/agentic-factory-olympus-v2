@@ -785,6 +785,36 @@ test('the stage derives every one of its steps from its own stamps', () => {
   );
 });
 
+test('a bought round raises the cap to what the rounds spent plus what was paid', () => {
+  const judged = { event: 'reconciliation-judged', ok: true, owed: true, records: [ADR] };
+  const written = {
+    event: 'reconciliation-written',
+    ok: true,
+    rewritten: [ADR],
+    records: [{ record: ADR, seat: 'reconcile-write:1' }],
+  };
+  const layer = { event: 'layer-result', cycle: 1, layer: 'adr-form', status: 'green' };
+  const unitsStamp = { event: 'record-units', cycle: 1, record: ADR, seat: 'record-review:1' };
+  const verified = { event: 'seat-report', seat: 'fury-verifier' };
+  const red = { event: 'reconcile-rendered', cycle: 1, sha: 'aaa', verdict: 'red', open: ['F1'] };
+  const round = { event: 'reconcile-round', round: 1 };
+  const spent = [judged, written, layer, unitsStamp, verified, red, round];
+  // One round of a cap of five, and a stall the progress rule raised. The
+  // answer buys one round, and the cap it sets is that one round and no more.
+  const bought = { event: 'reconcile-cap-extended', parkSeq: 9, rounds: 1, cap: 2 };
+  assert.equal(reconcileStep(ledger(...spent, bought), { cap: 5 }), 'correct');
+  const second = { ...red, cycle: 2, sha: 'bbb' };
+  assert.equal(
+    reconcileStep(ledger(...spent, bought, second, { event: 'reconcile-round', round: 2 }), {
+      cap: 5,
+    }),
+    'stall',
+  );
+  // The configured cap governs a pass that bought nothing.
+  assert.equal(reconcileStep(ledger(...spent), { cap: 5 }), 'correct');
+  assert.equal(reconcileStep(ledger(...spent), { cap: 1 }), 'stall');
+});
+
 test('a born record set anchors the cycle where the pass wrote nothing', () => {
   // The judge leaves out a born record that still stands. A pass whose whole
   // diff is the birth write is therefore judged "nothing owed". The born stamp

@@ -185,14 +185,17 @@ function extendCap(ctx, base) {
       detail: asked.park.detail ?? {},
     });
   }
-  const bought = events
-    .filter((e) => e.event === 'reconcile-cap-extended')
-    .reduce((total, e) => total + (e.rounds ?? 0), 0);
+  // The cap this pass is judged against from here: the rounds it has spent,
+  // plus the rounds the answer bought. A stall the progress rule raised leaves
+  // the rounds below the configured cap, and a raise that added to that cap
+  // would hand the run rounds nobody paid for (ADR-0079).
+  const judged = judgment(events);
+  const spent = judged ? roundsSince(events, judged.seq) : 0;
   ctx.store.append('reconcile-cap-extended', {
     actor: ACTOR,
     parkSeq: asked.park.seq,
     rounds,
-    cap: (base.cap ?? DEFAULT_RECONCILE_ROUNDS) + bought + rounds,
+    cap: spent + rounds,
     gist: gist(`${rounds} more record round(s) bought at the cap`),
   });
   return null;
@@ -273,19 +276,19 @@ export function reconcileStep(events, { cap = DEFAULT_RECONCILE_ROUNDS } = {}) {
   // the cap this pass is judged against (ADR-0079).
   const bought = boughtRounds(events, judged.seq);
   if (bought.seq > rendered.seq) return 'correct';
-  return rounds >= cap + bought.rounds || stalled ? 'stall' : 'correct';
+  return rounds >= (bought.cap ?? cap) || stalled ? 'stall' : 'correct';
 }
 
-/** The rounds bought at the cap parks of this pass, and the newest one's seq. */
+/** The newest cap a person bought in this pass, and the seq that bought it. */
 function boughtRounds(events, since) {
-  let rounds = 0;
+  let cap = null;
   let seq = 0;
   for (const e of events) {
     if (e.event !== 'reconcile-cap-extended' || e.seq < since) continue;
-    rounds += e.rounds ?? 0;
+    cap = e.cap ?? null;
     seq = e.seq;
   }
-  return { rounds, seq };
+  return { cap, seq };
 }
 
 /**
