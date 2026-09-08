@@ -34,6 +34,7 @@ import {
   NEIGHBOUR_CAP,
   UNIT_KINDS,
   UNIT_VERDICTS,
+  activeOf,
   isActiveRecord,
   readText,
   recordId,
@@ -364,7 +365,9 @@ function unitDutyLines() {
 function retryUnitLines(base, records, brief) {
   if (!brief) return [];
   const lines = [];
-  for (const record of records) {
+  // The filtered set, because a closed record owes no unit and a brief that
+  // enumerated one would ask the seat for the answers the check drops.
+  for (const record of activeOf(base?.worktree, records).records) {
     const text = readText(join(base?.worktree ?? '', record));
     if (text === null) continue;
     lines.push('', `The units of ${record}, as the harness counts them:`);
@@ -439,8 +442,25 @@ function lifecycleLines(base) {
     '- Two active records that decide one unbuilt part differently resolve by recency. The newer',
     '  decision stands, the older record gets its status line, and your divergence entry names',
     '  both records and the reason.',
+    ...CLOSED_RECORD_DUTY,
   ];
 }
+
+/**
+ * What the seat owes an old record it closes, stated once.
+ *
+ * The seat used to list a closed record in `rewritten`, because the file
+ * changed, and the unit check then enumerated its whole body. No answer to a
+ * July claim passes both the writer's rule and the kind test, so the report was
+ * refused whatever the seat wrote. The rule is the harness's now: the status
+ * line is read from the tree, and the brief says so (ADR-0078).
+ */
+const CLOSED_RECORD_DUTY = [
+  '- A status-line change of an old record is not a rewrite. List that record in neither',
+  '  `rewritten` nor `unchanged` unless you retire it with a reason, and answer none of its',
+  '  units. The harness reads its status line from the tree. Every unit of a record you add is',
+  '  yours.',
+];
 
 /** The constitution's place in a record brief. */
 const CONSTITUTION_DUTY = [
@@ -532,23 +552,38 @@ export async function writeChecks(base, records, report, opts = {}) {
       );
     }
   }
+  // The round's whole range, read once: the uncommitted diff and every commit a
+  // peer dispatch of the same round already made. A merge of two records into
+  // one leaves the second seat's replacement in the first seat's commit.
+  const range = await writeRange(base, changed);
+  const closed = closedOf(base, records, changed);
+  const replaced = supersessions(base, [...closed], range).answered;
+  const counted = await unitRecords(base, records, report, changed);
   const rewritten = new Set(report.rewritten);
-  const unchanged = new Set(report.unchanged.map((u) => u.record));
+  const unchanged = new Map(report.unchanged.map((u) => [u.record, u.reason]));
   for (const record of records) {
     if (rewritten.has(record) && unchanged.has(record)) {
       defects.push(`${record} is reported as rewritten and as unchanged; it is one or the other.`);
       continue;
     }
-    if (!rewritten.has(record) && !unchanged.has(record)) {
-      defects.push(
-        `${record} was judged owed and your report accounts for it nowhere. Rewrite it, or ` +
-          'put it in unchanged with the reason it needs no change.',
-      );
-    }
+    if (rewritten.has(record) || unchanged.has(record)) continue;
+    // A record this write closed answers to the closure rule below. The tree
+    // accounts for it where a replacement of this round names it.
+    if (closed.has(record)) continue;
+    defects.push(
+      `${record} was judged owed and your report accounts for it nowhere. Rewrite it, or ` +
+        'put it in unchanged with the reason it needs no change.',
+    );
   }
+  defects.push(...closureDefects(base, closed, replaced, unchanged));
   const touched = new Set(changed);
+  const kept = new Set(counted.records);
+  const listedClosed = new Set(activeOf(base?.worktree, report.rewritten).skipped.map((s) => s.record));
   for (const record of report.rewritten) {
-    if (!records.includes(record) && records.length > 0) {
+    // A closed record in `rewritten` is tolerated. The seat changed the file, so
+    // it listed it; the closure rule is what accounts for that record.
+    if (listedClosed.has(record)) continue;
+    if (!records.includes(record) && !kept.has(record) && records.length > 0) {
       defects.push(`${record} is not one of the judged records; this run rewrites those alone.`);
     } else if (!touched.has(record)) {
       defects.push(`you report ${record} as rewritten and the file is unchanged in the tree.`);
@@ -557,9 +592,10 @@ export async function writeChecks(base, records, report, opts = {}) {
   defects.push(...divergenceDefects(base, records, report));
   if (seat !== null || Array.isArray(report.units)) {
     defects.push(
-      ...unitChecks(base, unitRecords(records, report), report, {
+      ...unitChecks(base, counted.records, report, {
         seat: seat ?? 'writer',
         findings,
+        dropped: counted.dropped,
       }),
     );
   }
@@ -567,6 +603,100 @@ export async function writeChecks(base, records, report, opts = {}) {
     defects.push(...(await supersedeChecks(base, records, report)));
   }
   if (siblings !== null) defects.push(...(await siblingChecks(base, siblings, report)));
+  return defects;
+}
+
+/**
+ * The record paths this write reaches: the uncommitted diff, and every commit a
+ * peer dispatch of the same round made since the round opened.
+ *
+ * The uncommitted diff alone is not the write. Two seats of one round that
+ * merge two records into one leave the second seat with a judged record the
+ * first one already closed and committed, and no replacement of its own
+ * (ADR-0078). A birth has no round, so its range is its own diff.
+ * @returns {Promise<string[]>}
+ */
+async function writeRange(base, changed) {
+  const files = new Set(changed.map(posix));
+  if (typeof base?.roundFrom === 'string' && base.roundFrom.length > 0) {
+    const committed = await changedInRange(base.worktree, base.roundFrom, 'HEAD').catch(() => []);
+    for (const file of committed) files.add(posix(file));
+  }
+  return [...files];
+}
+
+/**
+ * The records of this dispatch whose status line the worktree now reads closed.
+ * A judged write closes the records it was given; a birth closes whatever
+ * record file it changed.
+ * @returns {Set<string>}
+ */
+function closedOf(base, records, changed) {
+  const list =
+    records.length > 0
+      ? records
+      : changed.map(posix).filter((file) => recordPathIncludes(file, base?.recordPaths ?? []));
+  return new Set(activeOf(base?.worktree, list).skipped.map((entry) => entry.record));
+}
+
+/**
+ * The supersessions this write's range holds against a set of parents: the
+ * records it added that name one of them on a `Supersedes` line, and the
+ * parents those records answer for.
+ *
+ * Under the rewrite lifecycle nothing supersedes anything, so the answer is
+ * empty and a closure there takes the retirement route alone.
+ * @returns {{replacements: string[], answered: Set<string>}}
+ */
+function supersessions(base, parents, range) {
+  const replacements = [];
+  const answered = new Set();
+  if (parents.length === 0 || base?.recordLifecycle !== 'supersede') {
+    return { replacements, answered };
+  }
+  const byId = new Map();
+  for (const parent of parents) {
+    const id = recordId(parent);
+    if (id !== null && !byId.has(id)) byId.set(id, parent);
+  }
+  for (const file of range) {
+    if (!recordPathIncludes(file, base?.recordPaths ?? [])) continue;
+    const listed = parseRecordList(supersedesOf(readText(join(base.worktree, file)) ?? '') ?? '');
+    if (listed === null) continue;
+    let names = false;
+    for (const id of listed) {
+      const parent = byId.get(id);
+      if (parent === undefined || posix(parent) === posix(file)) continue;
+      answered.add(parent);
+      names = true;
+    }
+    if (names) replacements.push(file);
+  }
+  return { replacements, answered };
+}
+
+/**
+ * What a closure owes. A record whose status line this write set to superseded
+ * or retired is either replaced by a record of the same round, or retired in
+ * the report with the reason. Neither is a way to discharge a judged record
+ * unread, and nothing else refuses that (ADR-0078).
+ * @returns {string[]}
+ */
+function closureDefects(base, closed, replaced, unchanged) {
+  const defects = [];
+  for (const record of closed) {
+    if (replaced.has(record)) continue;
+    const reason = unchanged.get(record);
+    if (typeof reason === 'string' && reason.trim().length > 0) continue;
+    defects.push(
+      base?.recordLifecycle === 'supersede'
+        ? `${record} is closed in this diff and nothing accounts for it. A closure takes one ` +
+            'of two routes. Write the record that replaces it, with a "Supersedes" line that ' +
+            'names it. Or report it in "unchanged" with the reason you retired it.'
+        : `${record} is closed in this diff and nothing accounts for it. Report it in ` +
+            '"unchanged" with the reason you retired it.',
+    );
+  }
   return defects;
 }
 
@@ -580,12 +710,31 @@ function containmentTrees(base, records) {
 }
 
 /**
- * The records the unit check counts. A judged write answers the records it was
- * given; a birth answers the records it wrote, which are the ones it reported.
+ * The records the unit check counts, and the records it drops.
+ *
+ * A judged write answers the records it was given; a birth answers the records
+ * it wrote, which are the ones it reported. Either list goes through the active
+ * filter first, because a closed record owes no unit.
+ *
+ * A replacement joins the set. A judged write under the supersede lifecycle
+ * closes the record it was given and adds the record that states the tree, and
+ * that new record is the one whose every unit is the seat's (ADR-0078).
+ *
+ * The replacement is read from this dispatch's own diff and never from the
+ * round's range. A record a peer seat of the round wrote is that seat's work,
+ * and it answered every unit of it.
+ * @param {string[]|null} [added] this dispatch's own changed paths
+ * @returns {Promise<{records: string[], dropped: string[]}>}
  */
-function unitRecords(records, report) {
-  if (records.length > 0) return records;
-  return [...new Set(report.rewritten ?? [])];
+export async function unitRecords(base, records, report, added = null) {
+  const list = records.length > 0 ? records : [...new Set(report?.rewritten ?? [])];
+  const { records: active, skipped } = activeOf(base?.worktree, list);
+  const diff = added ?? (await changedFiles(base.worktree));
+  const { replacements } = supersessions(base, records, diff.map(posix));
+  return {
+    records: [...new Set([...active, ...replacements])],
+    dropped: skipped.map((entry) => entry.record),
+  };
 }
 
 /**
@@ -596,10 +745,20 @@ function unitRecords(records, report) {
  * The kind is not the seat's escape. A seat that calls every unit `rationale`
  * owes no path and passes a check that reads the kinds it was given, so rule 5
  * reads the unit's own text and refuses the label.
- * @param {{seat?: 'writer'|'review', findings?: object[]}} [opts]
+ *
+ * `dropped` names the records the active filter took out of the set. An answer
+ * about one of them is dropped with it and never refused: the brief tells the
+ * seat to leave it out, and a defect would spend a corrective round on a report
+ * that is otherwise right (ADR-0078).
+ * @param {{seat?: 'writer'|'review', findings?: object[], dropped?: string[]}} [opts]
  * @returns {string[]}
  */
-export function unitChecks(base, records, report, { seat = 'writer', findings = [] } = {}) {
+export function unitChecks(
+  base,
+  records,
+  report,
+  { seat = 'writer', findings = [], dropped = [] } = {},
+) {
   const entries = Array.isArray(report?.units) ? report.units : null;
   if (entries === null) {
     return [
@@ -608,9 +767,11 @@ export function unitChecks(base, records, report, { seat = 'writer', findings = 
   }
   const defects = [];
   const known = new Set(records.map(posix));
+  const closed = new Set(dropped.map(posix));
   const grouped = new Map();
   for (const entry of entries) {
     const record = posix(entry.record);
+    if (closed.has(record)) continue;
     if (!known.has(record)) {
       defects.push(
         `unit check 2: "units" names ${entry.record}, which is not a record of this dispatch ` +
