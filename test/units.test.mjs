@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { removeDir, tempDir, writeTree } from './helpers.mjs';
 import {
   NEIGHBOUR_CAP,
+  activeOf,
   activeRecords,
   birthNeighbours,
   citingRecords,
@@ -467,4 +468,46 @@ test('an exclusion entry takes a file out of the record tree', (t) => {
   assert.deepEqual(activeRecords(dir, ['docs/adr', '!docs/adr/TEMPLATE.md']), [
     'docs/adr/adr-001-first.md',
   ]);
+});
+
+// -- the active filter --------------------------------------------------------
+
+// The one filter every dispatch list goes through. A closed record is out of
+// every seat's scope, and the drop carries the word the status line read
+// (ADR-0078).
+test('activeOf keeps the active records of a list and names what it dropped', (t) => {
+  const dir = tree(t, {
+    'docs/adr/adr-001-first.md': record('001'),
+    'docs/adr/adr-002-second.md': record('002', {
+      status: 'Superseded by ADR-004 (2026-09-08)',
+    }),
+    'docs/adr/adr-003-third.md': record('003', {
+      status: 'Retired (2026-09-08): the gate this record named is gone.',
+    }),
+  });
+  const list = [
+    'docs/adr/adr-001-first.md',
+    'docs/adr/adr-002-second.md',
+    'docs/adr/adr-003-third.md',
+  ];
+  const filtered = activeOf(dir, list);
+  assert.deepEqual(filtered.records, ['docs/adr/adr-001-first.md']);
+  assert.deepEqual(filtered.skipped, [
+    { record: 'docs/adr/adr-002-second.md', status: 'superseded' },
+    { record: 'docs/adr/adr-003-third.md', status: 'retired' },
+  ]);
+  // A file the worktree cannot read stays in the list, so the unit check still
+  // refuses the record it cannot enumerate.
+  const missing = activeOf(dir, ['docs/adr/adr-009-absent.md']);
+  assert.deepEqual(missing.records, ['docs/adr/adr-009-absent.md']);
+  assert.deepEqual(missing.skipped, []);
+  // A file with no status line is active: a record nobody marked is a record
+  // nobody closed.
+  writeTree(dir, { 'docs/adr/adr-005-bare.md': '# ADR-005: A record\n\n## Decision\n\nOne.\n' });
+  assert.deepEqual(activeOf(dir, ['docs/adr/adr-005-bare.md']).records, [
+    'docs/adr/adr-005-bare.md',
+  ]);
+  // An empty list is an empty answer, and the list order is kept.
+  assert.deepEqual(activeOf(dir, []), { records: [], skipped: [] });
+  assert.deepEqual(activeOf(dir, [list[2], list[0]]).records, [list[0]]);
 });

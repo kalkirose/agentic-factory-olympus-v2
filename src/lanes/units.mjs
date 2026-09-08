@@ -348,6 +348,39 @@ export function isActiveRecord(text) {
 }
 
 /**
+ * The one filter every list of records a seat is dispatched over goes through:
+ * the records of the list the worktree still holds open, and the ones a closed
+ * status line drops.
+ *
+ * A closed record states what was known then. No seat may edit it, so no seat
+ * is asked for a unit, a finding or a report entry on one.
+ *
+ * Two shapes stay in the list on purpose. A file the worktree cannot read stays,
+ * so the "not enumerable" defect of the unit check still fires on a record a
+ * seat deleted. A file with no status line stays, because a record nobody
+ * marked is a record nobody closed.
+ *
+ * The drop is never silent: `skipped` carries the status word each dropped
+ * record read, and the stage stamps it beside the list it dispatched.
+ * @param {string} worktree
+ * @param {string[]} records
+ * @returns {{records: string[], skipped: Array<{record: string, status: string}>}}
+ */
+export function activeOf(worktree, records = []) {
+  const kept = [];
+  const skipped = [];
+  for (const record of records) {
+    const text = readText(join(worktree ?? '', record));
+    if (text === null || isActiveRecord(text)) {
+      kept.push(record);
+      continue;
+    }
+    skipped.push({ record, status: statusOf(text).word });
+  }
+  return { records: kept, skipped };
+}
+
+/**
  * The record id in a file name, by the leading digits after an `adr-` prefix.
  * ceq writes `adr-020-...md` and the harness writes `0026-...md`; both answer
  * the number the references carry.
