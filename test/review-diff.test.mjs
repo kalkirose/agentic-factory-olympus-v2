@@ -25,10 +25,12 @@ import { changedInRange, reviewDiff } from '../src/isolation/tree.mjs';
 import { gitCapped } from '../src/isolation/git.mjs';
 import { DEFAULT_EXCERPT_CHARS } from '../src/config/project.mjs';
 import {
+  VERIFIER_SEATS,
   furyRound,
   generalistReview,
   recordReviewRound,
   recordReviewSchema,
+  verifierFor,
 } from '../src/lanes/review.mjs';
 import {
   LENS_CRITERIA,
@@ -639,7 +641,7 @@ function claimFinding(overrides = {}) {
   return {
     id: 'r1',
     criterion: 'truth',
-    severity: 'MED',
+    severity: 'HIGH',
     file: RECORD_FILE,
     unit: 'U3',
     head: 'The helper doubles the price in src/pay.mjs.',
@@ -898,7 +900,6 @@ test('a record finding is stamped with its unit, and a consistent one with the s
   const consistent = claimFinding({
     id: 'r2',
     criterion: 'consistent',
-    severity: 'LOW',
     unit: 'U4',
     head: 'The second route is not yet built.',
     line: 12,
@@ -908,7 +909,7 @@ test('a record finding is stamped with its unit, and a consistent one with the s
     head2: 'The public surface is one route, in src/pay.mjs.',
   });
   const fx = seatsFixture(t, ({ seat, roleBlock }) =>
-    seat === 'fury-verifier'
+    seat.endsWith('-verifier')
       ? verdicts({ 'new-1': 'confirmed', 'new-2': 'confirmed' })({ roleBlock })
       : recordReport(worktree, RECORD_FILE, {
           findings: [claimFinding(), consistent],
@@ -934,18 +935,20 @@ test('a record finding is stamped with its unit, and a consistent one with the s
   assert.equal(truth.head, 'The helper doubles the price in src/pay.mjs.');
   assert.equal(truth.line, 8);
   assert.equal(truth.advisory, undefined);
+  // The seat's sentence reaches the ledger, because the corrective brief and
+  // the ticket both quote it.
+  assert.equal(truth.summary, 'the record claims a doubling the helper does not apply');
   assert.equal(second.criterion, 'consistent');
   assert.equal(second.file2, OTHER_RECORD);
   assert.equal(second.unit2, 'U3');
   assert.equal(second.head2, 'The public surface is one route, in src/pay.mjs.');
 });
 
-// The severity ladder does not reach a record: a MED on a record is verified at
-// its grade and blocks when it is confirmed.
-test('a MED finding on a record is verified and blocks', async (t) => {
+// One split for every lane: a HIGH is verified, and a confirmed one blocks.
+test('a HIGH finding on a record is verified and blocks', async (t) => {
   const worktree = recordTree(t);
   const fx = seatsFixture(t, ({ seat, roleBlock }) =>
-    seat === 'fury-verifier'
+    seat.endsWith('-verifier')
       ? verdicts({ 'new-1': 'confirmed' })({ roleBlock })
       : recordReport(worktree, RECORD_FILE, {
           findings: [claimFinding()],
@@ -958,7 +961,7 @@ test('a MED finding on a record is verified and blocks', async (t) => {
     cycle: 1,
   });
 
-  const verifier = fx.ctx.briefs.filter((b) => b.seat === 'fury-verifier');
+  const verifier = fx.ctx.briefs.filter((b) => b.seat === 'record-verifier');
   assert.equal(verifier.length, 1);
   assert.equal((verifier[0].roleBlock.match(/^- \[new-\d+\]/gm) ?? []).length, 1);
   assert.equal(outcome.confirmed.length, 1);
@@ -968,6 +971,74 @@ test('a MED finding on a record is verified and blocks', async (t) => {
   const [finding] = findingEvents(fx.paths);
   assert.equal(finding.confirmed, true);
   assert.equal(finding.advisory, undefined);
+});
+
+// The remarks. A MED and a LOW on a record are stamped with everything a
+// corrective brief needs to quote them, and nothing else happens to them: no
+// verifier reads them, and no render turns red on them (plan 41, point 2).
+test('a MED and a LOW record finding are remarks, stamped with their record place', async (t) => {
+  const worktree = recordTree(t);
+  const low = claimFinding({
+    id: 'r2',
+    severity: 'LOW',
+    criterion: 'reference',
+    unit: 'U4',
+    head: 'The second route is not yet built.',
+    line: 12,
+    summary: 'the record cites a route the tree does not name',
+  });
+  const fx = seatsFixture(t, () =>
+    recordReport(worktree, RECORD_FILE, {
+      findings: [claimFinding({ severity: 'MED' }), low],
+      units: { U3: { verdict: 'fails' }, U4: { kind: 'open', verdict: 'fails' } },
+    }),
+  );
+
+  const outcome = await recordReviewRound(fx.ctx, recordBase(worktree), {
+    records: [RECORD_FILE],
+    cycle: 1,
+  });
+
+  // No verifier at all: the round holds nothing for it.
+  assert.ok(!fx.ctx.briefs.some((b) => b.seat.endsWith('-verifier')), 'a remark bought a verifier');
+  assert.deepEqual(outcome.confirmed, []);
+  const events = findingEvents(fx.paths);
+  assert.equal(events.length, 2);
+  for (const finding of events) {
+    assert.equal(finding.advisory, true);
+    assert.equal(finding.record, true);
+    assert.equal(finding.confirmed, undefined);
+    assert.equal(finding.file, RECORD_FILE);
+  }
+  const [med, remark] = events;
+  assert.equal(med.severity, 'MED');
+  assert.equal(med.criterion, 'truth');
+  assert.equal(med.unit, 'U3');
+  assert.equal(med.head, 'The helper doubles the price in src/pay.mjs.');
+  assert.equal(med.line, 8);
+  assert.equal(med.summary, 'the record claims a doubling the helper does not apply');
+  assert.equal(remark.severity, 'LOW');
+  assert.equal(remark.unit, 'U4');
+  assert.equal(remark.criterion, 'reference');
+});
+
+// The brief states what the grade means, so the grade is a definition and not
+// a feeling.
+test('the record review brief states what HIGH means and what a remark is', async (t) => {
+  const worktree = recordTree(t);
+  const fx = seatsFixture(t, () => recordReport(worktree, RECORD_FILE));
+
+  await recordReviewRound(fx.ctx, recordBase(worktree), { records: [RECORD_FILE], cycle: 1 });
+
+  const brief = fx.ctx.briefs[0].roleBlock;
+  assert.ok(
+    brief.includes(
+      'HIGH means the record and the tree disagree on what the\n  product does, and a confirmed HIGH blocks.',
+    ),
+    brief,
+  );
+  assert.ok(brief.includes('MED and LOW are remarks'), brief);
+  assert.ok(brief.includes('never a round on their own'), brief);
 });
 
 test('a MED finding on code is advisory, and reaches no verifier', async (t) => {
@@ -1002,10 +1073,10 @@ test('a MED finding on code is advisory, and reaches no verifier', async (t) => 
 test('a refuted record finding keeps its verdict and takes no advisory word', async (t) => {
   const worktree = recordTree(t);
   const fx = seatsFixture(t, ({ seat, roleBlock }) =>
-    seat === 'fury-verifier'
+    seat.endsWith('-verifier')
       ? verdicts({})({ roleBlock })
       : recordReport(worktree, RECORD_FILE, {
-          findings: [claimFinding({ severity: 'LOW' })],
+          findings: [claimFinding()],
           units: { U3: { verdict: 'fails' } },
         }),
   );
@@ -1025,13 +1096,76 @@ test('a refuted record finding keeps its verdict and takes no advisory word', as
   assert.equal(finding.advisory, undefined);
 });
 
+// The item list picks the verifier: a round of record items alone takes the
+// seat that runs the records lane's own model, and anything else takes the
+// certification seat (plan 41, point 3).
+test('a settle over record items alone spawns the record verifier', async (t) => {
+  const worktree = recordTree(t);
+  const fx = seatsFixture(t, ({ seat, roleBlock }) =>
+    seat.endsWith('-verifier')
+      ? verdicts({ 'new-1': 'confirmed' })({ roleBlock })
+      : recordReport(worktree, RECORD_FILE, {
+          findings: [claimFinding()],
+          units: { U3: { verdict: 'fails' } },
+        }),
+  );
+
+  await recordReviewRound(fx.ctx, recordBase(worktree), { records: [RECORD_FILE], cycle: 4 });
+
+  const verifiers = fx.ctx.briefs.filter((b) => b.seat.endsWith('-verifier'));
+  assert.equal(verifiers.length, 1);
+  assert.equal(verifiers[0].seat, 'record-verifier');
+  assert.ok(!fx.ctx.briefs.some((b) => b.seat === 'fury-verifier'));
+  // One function behind both names: the brief is the verifier's own.
+  assert.ok(verifiers[0].roleBlock.includes('Verify each review finding below'), verifiers[0].roleBlock);
+  assert.ok(verifiers[0].roleBlock.includes(`[record: ${RECORD_FILE}]`), verifiers[0].roleBlock);
+});
+
+test('a settle holding one code item spawns the code verifier', async (t) => {
+  const fx = seatsFixture(t, ({ seat, roleBlock }) =>
+    seat.endsWith('-verifier')
+      ? verdicts({ 'new-1': 'confirmed' })({ roleBlock })
+      : {
+          findings: [
+            {
+              lens: 'security',
+              severity: 'HIGH',
+              finding: 'the token check reads a header it never validates',
+              evidence: 'src/pay.mjs:41',
+              file: 'src/pay.mjs',
+            },
+          ],
+          summary: 'one on code',
+        },
+  );
+
+  await generalistReview(fx.ctx, RECORD_BASE, { cycle: 1, diff: excerpted(), priorConfirmed: [] });
+
+  const verifiers = fx.ctx.briefs.filter((b) => b.seat.endsWith('-verifier'));
+  assert.equal(verifiers.length, 1);
+  assert.equal(verifiers[0].seat, 'fury-verifier');
+});
+
+// The seat name is the argument, so the choice is a function a reader can ask
+// without running a round.
+test('the item list picks the verifier seat', () => {
+  const record = { finding: { record: true } };
+  const code = { finding: { severity: 'HIGH' } };
+  assert.equal(verifierFor([record, record]), 'record-verifier');
+  assert.equal(verifierFor([record, code]), 'fury-verifier');
+  assert.equal(verifierFor([code]), 'fury-verifier');
+  // An empty round spawns nobody, and the name it would take is the code seat's.
+  assert.equal(verifierFor([]), 'fury-verifier');
+  assert.deepEqual([...VERIFIER_SEATS], ['fury-verifier', 'record-verifier']);
+});
+
 // A record seat's findings are record findings because a record seat raised
 // them. The project's path list decides nothing here: the stage handed the seat
 // one record and the seat read that record.
 test('a record seat raises record findings whatever the project paths say', async (t) => {
   const worktree = recordTree(t);
   const fx = seatsFixture(t, ({ seat, roleBlock }) =>
-    seat === 'fury-verifier'
+    seat.endsWith('-verifier')
       ? verdicts({ 'new-1': 'confirmed' })({ roleBlock })
       : recordReport(worktree, RECORD_FILE, {
           findings: [claimFinding({ criterion: 'divergence' })],
@@ -1057,7 +1191,7 @@ test('a record seat raises record findings whatever the project paths say', asyn
 test('the verifier is told the record, the unit head and the criterion', async (t) => {
   const worktree = recordTree(t);
   const fx = seatsFixture(t, ({ seat, roleBlock }) =>
-    seat === 'fury-verifier'
+    seat.endsWith('-verifier')
       ? verdicts({ 'new-1': 'confirmed' })({ roleBlock })
       : recordReport(worktree, RECORD_FILE, {
           findings: [claimFinding({ criterion: 'reference' })],
@@ -1067,7 +1201,7 @@ test('the verifier is told the record, the unit head and the criterion', async (
 
   await recordReviewRound(fx.ctx, recordBase(worktree), { records: [RECORD_FILE], cycle: 1 });
 
-  const brief = fx.ctx.briefs.find((b) => b.seat === 'fury-verifier').roleBlock;
+  const brief = fx.ctx.briefs.find((b) => b.seat === 'record-verifier').roleBlock;
   assert.ok(
     brief.includes(
       `[record: ${RECORD_FILE}] [unit: U3 "The helper doubles the price in src/pay.mjs."] ` +

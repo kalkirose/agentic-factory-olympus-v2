@@ -6,11 +6,12 @@
 // verifier confirms or refutes each item against the code, and only confirmed
 // items enter the verdict.
 //
-// The verifier's item list is severity OR record. A sub-HIGH finding on code
-// never blocks and is never verified: it lands in the run ledger as advisory
-// material. A finding on a decision record is verified at every grade and is
-// never advisory: a record states how the product works, so a sentence of it
-// that the tree contradicts is a defect and not a remark (ADR-0007).
+// The verifier's item list is severity, on every lane. A HIGH is verified and a
+// confirmed one blocks. A finding below HIGH never blocks and is never
+// verified, whatever it is about: it lands in the run ledger as a remark. A
+// remark on a decision record carries the record word, the criterion and the
+// unit it names, and the round that writes that record for a HIGH hands it to
+// the writer (ADR-0007).
 //
 // A record is judged by a round of its own. One seat reads one record, whole,
 // with the units the harness enumerated, the neighbourhood, the criteria and no
@@ -25,6 +26,12 @@
 // No re-fan-out over a judged tree: the fan-out fires once per implementation
 // pass; every later cycle of the pass reviews the repair diff with the
 // generalist seat and resolution-checks prior confirmed HIGHs.
+//
+// The verifier is one seat function under two seat names. A round whose every
+// item is about a decision record spawns `record-verifier`, which runs the
+// model the records lane runs; everything else spawns `fury-verifier` on the
+// certification model. One brief, one schema, one contract loop, and the seat
+// name is the argument (ADR-0005).
 //
 // The verifier is one of the two seats the replay probe is open to: it may ask
 // for a Tier-1 layer of its own run to be run again and read the output, where
@@ -550,12 +557,12 @@ function byRecord(value, record) {
  * verified, stamps every finding once per cycle, and returns the confirmed
  * findings plus the resolution results for prior confirmed ones.
  *
- * The split is the whole of the record rule. A sub-HIGH code finding is worth
- * less than the round it would cost, so it is stamped advisory and nobody must
- * act on it. A record finding is a claim that the record and the tree disagree,
- * and the verifier is the one seat that reads the code and answers such a
- * claim: it is put to that seat at every grade, a confirmed one blocks, and a
- * refuted one carries the verifier's evidence under its own id and no advisory
+ * One split, for every lane. A finding below HIGH is worth less than the round
+ * it would cost, so it is stamped advisory and nobody must act on it. A remark
+ * about a record is stamped with the record word, the criterion and the place,
+ * so the corrective round that writes that record for a HIGH can quote its
+ * sentence. A HIGH goes to the verifier: a confirmed one blocks, and a refuted
+ * record HIGH carries the verifier's evidence under its own id and no advisory
  * word (ADR-0007).
  *
  * A finding a record seat may not raise is refused before the verifier runs and
@@ -584,8 +591,8 @@ async function settleFindings(
   const refusals = findingRefusals(base, marked);
   const refused = new Set(refusals.map((r) => r.finding));
   const judged = marked.filter((f) => !refused.has(f));
-  const verifiable = judged.filter((f) => f.severity === 'HIGH' || f.record);
-  const advisory = judged.filter((f) => !(f.severity === 'HIGH' || f.record));
+  const verifiable = judged.filter((f) => f.severity === 'HIGH');
+  const advisory = judged.filter((f) => f.severity !== 'HIGH');
   const items = [
     ...verifiable.map((f, i) => ({ id: `new-${i + 1}`, mode: 'confirm', finding: f })),
     ...priorConfirmed.map((f) => ({ id: f.id, mode: 'resolution-check', finding: f })),
@@ -642,7 +649,7 @@ async function settleFindings(
       source: f.source,
       lens: f.lens,
       severity: f.severity,
-      summary: f.finding,
+      summary: sentenceOf(f),
       evidence: f.evidence,
       ...f.place,
       ...(f.record && { record: true, ...(f.criterion && { criterion: f.criterion }) }),
@@ -659,6 +666,10 @@ async function settleFindings(
     if (isConfirmed) confirmed.push(finding);
   }
   for (const f of advisory) {
+    // A remark about a record carries the record word, the criterion and the
+    // place, exactly as a HIGH does. The corrective round that writes the
+    // record for a HIGH reads them back out of the ledger and quotes the
+    // sentence to the writer (ADR-0007).
     stampReviewFinding(
       ctx,
       cycle,
@@ -667,9 +678,10 @@ async function settleFindings(
         source: f.source,
         lens: f.lens,
         severity: f.severity,
-        summary: f.finding,
+        summary: sentenceOf(f),
         evidence: f.evidence,
         ...f.place,
+        ...(f.record && { record: true, ...(f.criterion && { criterion: f.criterion }) }),
       },
       { advisory: true, diffTruncated },
     );
@@ -682,6 +694,16 @@ async function settleFindings(
     resolved,
     ...(refusals.length > 0 && { refused: refusals.map((r) => r.defect) }),
   };
+}
+
+/**
+ * The sentence a seat wrote about its finding. A code lens writes it under
+ * `finding` and a record seat under `summary`, and the stamp carries one field:
+ * a finding stamped without its sentence is a finding the corrective brief and
+ * the ticket both quote as nothing.
+ */
+function sentenceOf(f) {
+  return f.finding ?? f.summary;
 }
 
 /**
@@ -817,25 +839,48 @@ async function reviewSeat(ctx, { seat, label, schema, roleBlock, cwd, env, const
  * and is briefed with the output (ADR-0042).
  */
 async function verifierSeat(ctx, base, { cycle, items }) {
+  const seat = verifierFor(items);
   const outcome = await withReplayRounds(
     ctx,
-    { seat: 'fury-verifier', cycle, label: `fury-verifier-c${cycle}`, base },
-    (round) => verifierRounds(ctx, base, { cycle, items, ...round }),
+    { seat, cycle, label: `${seat}-c${cycle}`, base },
+    (round) => verifierRounds(ctx, base, { cycle, items, seat, ...round }),
   );
   if (outcome.fail) return outcome;
   return { results: new Map(outcome.report.results.map((r) => [r.id, r])) };
 }
 
+/**
+ * Which of the two verifiers answers a round.
+ *
+ * A round whose every item is about a decision record takes the record
+ * verifier, which runs the model the rest of the records lane runs. Everything
+ * else takes the code verifier and its certification model. The records lane's
+ * items are records by construction, so that lane never spawns the code seat;
+ * a mixed round is a code round with a record item in it, and the code seat
+ * reads both (ADR-0005, ADR-0026).
+ */
+export function verifierFor(items) {
+  const list = items ?? [];
+  return list.length > 0 && list.every((item) => item.finding?.record === true)
+    ? RECORD_VERIFIER
+    : CODE_VERIFIER;
+}
+
+/** The two verifier seat names, and the set every reader of one asks against. */
+const CODE_VERIFIER = 'fury-verifier';
+const RECORD_VERIFIER = 'record-verifier';
+export const VERIFIER_SEATS = Object.freeze([CODE_VERIFIER, RECORD_VERIFIER]);
+
 /** One verifier round: the contract loop, under the label the round names. */
-async function verifierRounds(ctx, base, { cycle, items, label, replays, budget }) {
-  const limit = attemptLimit(runEvents(ctx), 'fury-verifier');
-  const bought = boughtRetry(runEvents(ctx), 'fury-verifier');
+async function verifierRounds(ctx, base, { cycle, items, seat, label, replays, budget }) {
+  const limit = attemptLimit(runEvents(ctx), seat);
+  const bought = boughtRetry(runEvents(ctx), seat);
   const layers = (base.config?.gates?.tier1 ?? []).map((layer) => layer.name);
-  let brief = bought ? failureBrief(runEvents(ctx), 'fury-verifier') : null;
+  let brief = bought ? failureBrief(runEvents(ctx), seat) : null;
   for (let attempt = 1; ; attempt++) {
     const corrective = attempt === 2 || bought;
     const outcome = await reviewSeat(ctx, {
-      seat: 'fury-verifier',
+      seat,
       label: `${label}${corrective ? '-r' : ''}`,
       schema: VERIFIER_SCHEMA,
       roleBlock: verifierRole(base, items, brief, { replays, budget, layers }),
@@ -855,11 +900,11 @@ async function verifierRounds(ctx, base, { cycle, items, label, replays, budget 
     if (attempt >= limit) {
       ctx.store.append('seat-failure', {
         actor: ACTOR,
-        seat: 'fury-verifier',
+        seat,
         reason: 'verifier-coverage',
         defects,
       });
-      return { fail: seatFail(ctx, 'fury-verifier', { reason: 'verifier-coverage' }) };
+      return { fail: seatFail(ctx, seat, { reason: 'verifier-coverage' }) };
     }
     brief = defects;
   }
@@ -1036,8 +1081,10 @@ function recordFindingLines(record) {
     'Every finding carries:',
     '- "id": your own label for it, unique in this report.',
     '- "criterion": the one criterion above it fails.',
-    '- "severity": "HIGH", "MED" or "LOW". Every grade is verified and a confirmed finding of any',
-    '  grade blocks the ship, so grade what the finding is worth and nothing else.',
+    '- "severity": "HIGH", "MED" or "LOW". HIGH means the record and the tree disagree on what the',
+    '  product does, and a confirmed HIGH blocks. MED and LOW are remarks: recorded, handed to the',
+    '  writer when this record is written for a HIGH, and never a round on their own. Grade what',
+    '  the finding is worth.',
     `- "file": ${record}. "unit", "head" and "line": the unit it is about, as the list above`,
     '  states them.',
     '- "summary": what is wrong. "evidence": the file and line of the tree that answers it.',

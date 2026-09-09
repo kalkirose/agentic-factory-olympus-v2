@@ -249,8 +249,14 @@ export function writeRole(base, judged, brief) {
  * the verifier's own evidence, so the seat answers a claim about the tree
  * rather than a remark. A finding is one of the units, and every other unit of
  * the record is the seat's as well.
+ *
+ * The remarks ride the same brief. A finding below HIGH holds no render red and
+ * buys no round of its own, so it is handed to the writer this round dispatches
+ * on its record anyway: that seat is already reading the record, and a remark
+ * thrown away is a finding the next run raises again at a higher grade
+ * (ADR-0007).
  */
-export function correctiveRole(base, judged, { findings, divergences, brief }) {
+export function correctiveRole(base, judged, { findings, divergences, advisory = [], brief }) {
   const records = judged.records ?? [];
   return [
     'The decision records you rewrote were reviewed, and these findings were confirmed',
@@ -263,6 +269,14 @@ export function correctiveRole(base, judged, { findings, divergences, brief }) {
     '',
     'List the ids you answered in "answered". Answer them in the records, not in the report.',
     'A finding names one unit. Every other unit of the record is yours as well.',
+    ...(advisory.length > 0
+      ? [
+          '',
+          'These remarks hold no render red. Answer each one in this write, or state under',
+          '"answered" why the record is right:',
+          ...advisory.map((f) => `- ${remarkLine(f)}`),
+        ]
+      : []),
     '',
     'Records to reconcile:',
     ...records.map((r) => `- ${r}`),
@@ -306,6 +320,17 @@ export function findingLine(f) {
   const criterion = f.criterion ? ` [${f.criterion}]` : '';
   const against = againstClause(f);
   return `[${f.id}]${criterion}${where}${unit}${against} ${f.summary} (evidence: ${f.evidence})`;
+}
+
+/**
+ * One remark, as a brief and a ticket state it: the grade rides the line.
+ *
+ * A remark is answered at the writer's judgment rather than by rule, so the
+ * grade is part of what the seat is told. A confirmed finding needs no grade
+ * on its line: every one of them blocks (ADR-0007).
+ */
+export function remarkLine(f) {
+  return `[${f.severity ?? 'MED'}] ${findingLine(f)}`;
 }
 
 /**

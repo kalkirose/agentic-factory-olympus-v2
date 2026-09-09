@@ -107,7 +107,7 @@ function behaviour(name) {
     return { files: scenario.repairFiles, report: { summary: 'the open finding is repaired' } };
   }
   if (name === 'verdict-triage') return triage();
-  if (name === 'fury-verifier') return verifier();
+  if (name === 'fury-verifier' || name === 'record-verifier') return verifier();
   if (name.startsWith('fury-') || name === 'generalist-review') {
     return { report: { findings: [], summary: 'the diff answers the spec' } };
   }

@@ -18,6 +18,7 @@ import {
   parseRecordList,
   reconcileWriteSchema,
   recordScope,
+  remarkLine,
   runWindow,
   siblingChecks,
   supersedeChecks,
@@ -931,6 +932,44 @@ test('all three briefs carry the criteria, the unit duty, the neighbourhood and 
     assert.ok(brief.includes('"divergences" takes exactly one entry per judged record (1)'));
     assert.ok(brief.includes('"evidence": the repo-relative path'));
   }
+});
+
+// The remarks ride the brief of the round a HIGH opened on their record, under
+// one line that says what they are worth (plan 41, point 2).
+test('the corrective brief states the remarks and what answering one means', () => {
+  const base = { worktree: '/tmp/run', defaultBranch: 'main' };
+  const remark = {
+    id: 'F4',
+    severity: 'MED',
+    criterion: 'reference',
+    file: 'docs/adr/adr-001-first.md',
+    unit: 'U9',
+    head: 'The helper is named twice',
+    summary: 'the record spells the helper two ways',
+    evidence: 'src/routes.mjs:12',
+  };
+  const brief = correctiveRole(base, JUDGED, {
+    findings: [FINDING],
+    divergences: [],
+    advisory: [remark],
+    brief: null,
+  });
+  assert.ok(brief.includes('These remarks hold no render red.'), brief);
+  assert.ok(
+    brief.includes('Answer each one in this write, or state under\n"answered" why the record is right:'),
+    brief,
+  );
+  assert.ok(brief.includes(`- ${remarkLine(remark)}`), brief);
+  // The grade rides the remark's line and never a confirmed finding's: every
+  // confirmed finding blocks, and the grade would say nothing there.
+  assert.ok(brief.includes('- [MED] [F4] [reference]'), brief);
+  assert.ok(brief.includes(`- ${findingLine(FINDING)}`), brief);
+  // A round with no remark says nothing about them.
+  assert.ok(
+    !correctiveRole(base, JUDGED, { findings: [FINDING], divergences: [], brief: null }).includes(
+      'These remarks',
+    ),
+  );
 });
 
 test('a computed sibling list of none takes no entry, and says so (W13)', () => {

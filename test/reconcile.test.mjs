@@ -758,7 +758,7 @@ test('the stage derives every one of its steps from its own stamps', () => {
   assert.equal(reconcileStep(ledger(judged, written, layer)), 'review');
   const unitsStamp = { event: 'record-units', cycle: 1, record: ADR, seat: 'record-review:1' };
   assert.equal(reconcileStep(ledger(judged, written, layer, unitsStamp)), 'verify');
-  const verified = { event: 'seat-report', seat: 'fury-verifier' };
+  const verified = { event: 'seat-report', seat: 'record-verifier' };
   assert.equal(reconcileStep(ledger(judged, written, layer, unitsStamp, verified)), 'render');
   const green = { event: 'reconcile-rendered', cycle: 1, sha: 'aaa', verdict: 'green', open: [] };
   const red = { ...green, verdict: 'red', open: ['F1'] };
@@ -795,7 +795,7 @@ test('a bought round raises the cap to what the rounds spent plus what was paid'
   };
   const layer = { event: 'layer-result', cycle: 1, layer: 'adr-form', status: 'green' };
   const unitsStamp = { event: 'record-units', cycle: 1, record: ADR, seat: 'record-review:1' };
-  const verified = { event: 'seat-report', seat: 'fury-verifier' };
+  const verified = { event: 'seat-report', seat: 'record-verifier' };
   const red = { event: 'reconcile-rendered', cycle: 1, sha: 'aaa', verdict: 'red', open: ['F1'] };
   const round = { event: 'reconcile-round', round: 1 };
   const spent = [judged, written, layer, unitsStamp, verified, red, round];
@@ -832,7 +832,7 @@ test('a born record set anchors the cycle where the pass wrote nothing', () => {
   assert.equal(reconcileStep(ledger(born, clean, layer)), 'review');
   const unitsStamp = { event: 'record-units', cycle: 1, record: ADR, seat: 'record-review:1' };
   assert.equal(reconcileStep(ledger(born, clean, layer, unitsStamp)), 'verify');
-  const verified = { event: 'seat-report', seat: 'fury-verifier' };
+  const verified = { event: 'seat-report', seat: 'record-verifier' };
   assert.equal(reconcileStep(ledger(born, clean, layer, unitsStamp, verified)), 'render');
   const green = { event: 'reconcile-rendered', cycle: 1, sha: 'aaa', verdict: 'green', open: [] };
   const red = { ...green, verdict: 'red', open: ['F1'] };
@@ -863,6 +863,9 @@ test('a repair round past a green render owes the recheck, and a re-run owes a c
     { event: 'reconciliation-written', ok: true, rewritten: [ADR], records: [] },
     { event: 'layer-result', cycle: 1, layer: 'adr-form', status: 'green' },
     { event: 'record-units', cycle: 1, record: ADR, seat: 'record-review:1' },
+    // Either verifier name answers for the boundary behind the review: the
+    // stage spawns the record seat, and a ledger written before that seat
+    // existed holds the code seat's name (plan 41, point 3).
     { event: 'seat-report', seat: 'fury-verifier' },
     { event: 'reconcile-rendered', cycle: 1, sha: 'aaa', verdict: 'green', open: [] },
   );
@@ -1125,7 +1128,7 @@ test('a confirmed record finding buys a corrective round, and no repair-dev runs
       'reconcile-judge': judgeOwed(),
       'reconcile-write': writeThenCorrect(),
       'record-review': recordReview(['the record claims a doubling the tree does not hold']),
-      'fury-verifier': confirmAndResolve,
+      'record-verifier': confirmAndResolve,
     },
   });
   const runId = await fx.launch();
@@ -1174,7 +1177,7 @@ test('a corrective round spends a seat on the records that owe one (W15)', async
       'reconcile-judge': judgeOwed(Object.keys(three)),
       'reconcile-write': writeCorrecting(three),
       'record-review': reviewOnce(ADR, 'the record claims a doubling the tree does not hold'),
-      'fury-verifier': confirmAndResolve,
+      'record-verifier': confirmAndResolve,
     },
   });
   const runId = await fx.launch();
@@ -1287,7 +1290,7 @@ test('a corrective round dispatches a born record the judge never owed (W6)', as
         [ADR_TWO]: ADR_TWO_TEXT + '\nThe module src/base.mjs is read by the feature.\n',
       }),
       'record-review': reviewOnce(ADR_TWO, 'the record states a value the tree does not hold'),
-      'fury-verifier': confirmAndResolve,
+      'record-verifier': confirmAndResolve,
     },
   });
   const runId = await fx.launch();
@@ -1319,7 +1322,7 @@ test('a seat refused twice ends its dispatch, and the round goes on (W14)', asyn
       'reconcile-judge': judgeOwed(Object.keys(two)),
       'reconcile-write': writeRefusing(two, ADR_TWO),
       'record-review': reviewUnanswered('the record claims what the tree does not hold'),
-      'fury-verifier': confirmAndResolve,
+      'record-verifier': confirmAndResolve,
     },
   });
   const runId = await fx.launch();
@@ -1377,7 +1380,7 @@ test('a records-lane judged write refused twice leaves the record unwritten (W14
       'reconcile-judge': judgeOwed(Object.keys(two)),
       'reconcile-write': writeRefusing(two, ADR_TWO, { corrective: false }),
       'record-review': reviewUnanswered('the record claims what the tree does not hold'),
-      'fury-verifier': confirmAndResolve,
+      'record-verifier': confirmAndResolve,
     },
   });
   const runId = await fx.launch();
@@ -1409,7 +1412,7 @@ test('a spent record cap stalls loud, ships the code and names what is open', as
         'the record claims a doubling the tree does not hold',
         'the record cites a symbol the tree does not export',
       ]),
-      'fury-verifier': confirmAndResolve,
+      'record-verifier': confirmAndResolve,
     },
   });
   const runId = await fx.launch();
@@ -1445,7 +1448,7 @@ test('a round that closes nothing stalls on the progress rule, whatever the cap'
         'the record claims a doubling the tree does not hold',
         'the record claims a doubling the tree does not hold',
       ]),
-      'fury-verifier': confirmAndResolve,
+      'record-verifier': confirmAndResolve,
     },
   });
   const runId = await fx.launch();
@@ -1509,7 +1512,7 @@ function capFixture(t) {
         'the record claims a doubling the tree does not hold',
         'the record cites a symbol the tree does not export',
       ]),
-      'fury-verifier': confirmAndResolve,
+      'record-verifier': confirmAndResolve,
     },
   });
 }
@@ -1634,6 +1637,151 @@ test('a bought round raises the cap and the run ships (D3)', async (t) => {
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
 });
 
+// -- the remarks (plan 41, point 2) -------------------------------------------
+
+/**
+ * A review that grades: one HIGH and one remark on the first read of one
+ * record, each on a unit of its own, and nothing on any later read.
+ *
+ * Each finding names a unit the same report answers `fails`, because a finding
+ * on a unit the seat called `holds` is refused (rule 8, ADR-0073).
+ */
+function reviewGraded(record, { high = null, remark = null } = {}) {
+  const seen = new Set();
+  return ({ prompt }) => {
+    const read = recordOf(prompt);
+    const answers = unitsFromBrief(prompt, read);
+    if (read !== record || seen.has(read)) {
+      return { report: { findings: [], units: answers, summary: 'the record stands' } };
+    }
+    seen.add(read);
+    const findings = [];
+    const raise = (severity, summary, target) => {
+      if (!target) return;
+      target.verdict = 'fails';
+      findings.push({
+        id: `r${findings.length + 1}`,
+        criterion: RECORD_CRITERION_KEYS[0],
+        severity,
+        file: read,
+        unit: target.id,
+        head: headOf(prompt, target.id),
+        line: 1,
+        summary,
+        evidence: 'src/base.mjs',
+      });
+    };
+    const claims = answers.filter((u) => u.kind === 'claim');
+    if (high) raise('HIGH', high, claims[0]);
+    if (remark) raise('MED', remark, claims[high ? 1 : 0]);
+    return { report: { findings, units: answers, summary: 'the record against the tree' } };
+  };
+}
+
+/** A writer that answers every id its brief names, remarks included. */
+function writeAnswering(contents) {
+  const seen = new Map();
+  return ({ prompt }) => {
+    const record = Object.keys(contents).find((r) => prompt.includes(`- ${r}`));
+    const rounds = (seen.get(record) ?? 0) + 1;
+    seen.set(record, rounds);
+    const text =
+      rounds === 1
+        ? contents[record]
+        : contents[record].replace('## Decision', `## Decision\n\n${ANSWERED}`);
+    return {
+      files: { [record]: text },
+      report: {
+        rewritten: [record],
+        unchanged: [],
+        units: units(record, text),
+        divergences: NO_DIVERGENCE(record),
+        ...(prompt.includes('Confirmed findings:') && {
+          answered: [...new Set([...prompt.matchAll(/\[(F\d+)\]/g)].map((m) => m[1]))],
+        }),
+        summary: 'the record states what the tree holds',
+      },
+    };
+  };
+}
+
+// A remark buys nothing. No verifier reads it, no round answers it, and the
+// render is green with the remark named beside the empty open set.
+test('a cycle whose findings are all remarks renders green and lists them', async (t) => {
+  const fx = stageFixture(t, {
+    seats: {
+      'reconcile-judge': judgeOwed(),
+      'reconcile-write': writeOnce(),
+      'record-review': reviewGraded(ADR, { remark: 'the record names the module loosely' }),
+      'record-verifier': confirmAndResolve,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+
+  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
+  assert.equal(rendered.length, 1);
+  assert.equal(rendered[0].verdict, 'green');
+  assert.deepEqual(rendered[0].open, []);
+  const remark = events.find((e) => e.event === 'finding');
+  assert.equal(remark.advisory, true);
+  assert.equal(remark.record, true);
+  assert.equal(remark.severity, 'MED');
+  assert.deepEqual(rendered[0].advisory, [remark.id]);
+  // The run's most expensive reader is never spawned for a remark, and no
+  // round is opened for one.
+  assert.ok(!fx.calls.some((c) => c.seat.endsWith('-verifier')));
+  assert.ok(!events.some((e) => e.event === 'reconcile-round'));
+});
+
+// The remark rides the brief of the round a HIGH opened on its record, and the
+// write stamp records the ids the writer says it answered.
+test('a corrective round hands the writer the remarks its record holds', async (t) => {
+  const fx = stageFixture(t, {
+    seats: {
+      'reconcile-judge': judgeOwed(),
+      'reconcile-write': writeAnswering({ [ADR]: ADR_REWRITTEN }),
+      'record-review': reviewGraded(ADR, {
+        high: 'the record claims a doubling the tree does not hold',
+        remark: 'the record names the module loosely',
+      }),
+      'record-verifier': confirmAndResolve,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+
+  const findings = events.filter((e) => e.event === 'finding');
+  const high = findings.find((e) => e.severity === 'HIGH');
+  const remark = findings.find((e) => e.severity === 'MED');
+  assert.equal(remark.advisory, true);
+  assert.equal(high.confirmed, true);
+  // The render is red on the HIGH alone, and it names the remark beside it.
+  const first = events.filter((e) => e.event === 'reconcile-rendered')[0];
+  assert.deepEqual(first.open, [high.id]);
+  assert.deepEqual(first.advisory, [remark.id]);
+
+  // The set the round dispatched carries the remark, so a resume rebuilds the
+  // same brief.
+  const set = events.filter((e) => e.event === 'reconcile-write-set').at(-1);
+  assert.deepEqual(set.advisory, [{ record: ADR, ids: [remark.id] }]);
+
+  // The brief states both, and says what a remark is worth.
+  const corrective = fx.calls.filter((c) => c.seat === 'reconcile-write').at(-1);
+  assert.ok(corrective.prompt.includes(`[${high.id}]`), corrective.prompt);
+  assert.ok(corrective.prompt.includes('These remarks hold no render red.'), corrective.prompt);
+  assert.ok(corrective.prompt.includes(`[MED] [${remark.id}]`), corrective.prompt);
+  assert.ok(corrective.prompt.includes(remark.summary), corrective.prompt);
+
+  // The write stamp names both, so a later round hands the remark over no
+  // second time.
+  const written = events.filter((e) => e.event === 'reconciliation-written').at(-1);
+  assert.deepEqual(written.answered.slice().sort(), [high.id, remark.id].sort());
+  assert.equal(events.filter((e) => e.event === 'reconcile-rendered').at(-1).verdict, 'green');
+});
+
 test('the branch ticket names the branch, the records and the open findings', () => {
   const text = reconcileTicketFromBranch({
     ctx: { runId: 'proj-1' },
@@ -1659,6 +1807,42 @@ test('the branch ticket names the branch, the records and the open findings', ()
   assert.ok(text.includes('  - the report accounts for it nowhere'));
   // The unwritten mark is not a red layer, and the ticket never lists it as one.
   assert.ok(!text.includes(`- unwritten:${ADR_TWO}`), text);
+});
+
+// The remarks a run ships with are on the ticket the next run reads, under one
+// heading, with the grade on every line (plan 41, point 2).
+test('the branch ticket names the remarks nobody answered', () => {
+  const text = reconcileTicketFromBranch({
+    ctx: { runId: 'proj-1' },
+    base: { branch: 'olympus/proj-1' },
+    records: [ADR],
+    reason: 'the ticket decides one record',
+    open: [],
+    remarks: [
+      {
+        id: 'F2',
+        severity: 'MED',
+        criterion: 'truth',
+        file: ADR,
+        unit: 'U3',
+        head: 'The module',
+        summary: 'the record names the module loosely',
+        evidence: 'src/base.mjs',
+      },
+    ],
+  });
+  assert.ok(text.includes('## Remarks not answered'), text);
+  assert.ok(text.includes('[MED] [F2]'), text);
+  assert.ok(text.includes('the record names the module loosely'), text);
+  // A run that carries none says nothing about them.
+  const clean = reconcileTicketFromBranch({
+    ctx: { runId: 'proj-1' },
+    base: { branch: 'olympus/proj-1' },
+    records: [ADR],
+    reason: 'the ticket decides one record',
+    open: [],
+  });
+  assert.ok(!clean.includes('## Remarks not answered'), clean);
 });
 
 // -- the restart boundaries --------------------------------------------------
@@ -1771,7 +1955,7 @@ test('a restart between the review and the verifier renders once, from the ledge
       'record-review': recordReview(
         Array(4).fill('the record claims a doubling the tree does not hold'),
       ),
-      'fury-verifier': hangNth(1, refuteAll),
+      'record-verifier': hangNth(1, refuteAll),
     },
   });
   const runId = await fx.launch();
@@ -1781,7 +1965,7 @@ test('a restart between the review and the verifier renders once, from the ledge
     (e) => e.event === 'record-units' && e.seat.startsWith('record-review'),
     'reviewed',
   );
-  await waitEvent(fx.paths, runId, (e) => e.event === 'seat-spawned' && e.seat === 'fury-verifier', 'verifier');
+  await waitEvent(fx.paths, runId, (e) => e.event === 'seat-spawned' && e.seat === 'record-verifier', 'verifier');
   await fx.restart();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
@@ -1809,7 +1993,7 @@ test('a restart inside the review fan-out re-runs the seats with no report (W8)'
       // The second seat of the fan-out never answers, so the stop falls inside
       // the cycle with one report on the ledger and one owed.
       'record-review': hangNth(2, reviewClean),
-      'fury-verifier': confirmAndResolve,
+      'record-verifier': confirmAndResolve,
     },
   });
   const runId = await fx.launch();
@@ -1884,7 +2068,7 @@ test('a restart inside a corrective round re-enters that round alone', async (t)
       'reconcile-judge': judgeOwed(),
       'reconcile-write': writeThenCorrect(),
       'record-review': recordReview(['the record claims a doubling the tree does not hold']),
-      'fury-verifier': confirmAndResolve,
+      'record-verifier': confirmAndResolve,
     },
   });
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
@@ -2021,7 +2205,7 @@ test('a record the last render kept is not newly owed at the recheck', async (t)
           : judgeOwed([ADR])(),
       'reconcile-write': writeEveryRound(),
       'record-review': reviewOnce(ADR, 'the record claims a doubling the tree does not hold'),
-      'fury-verifier': confirmAndResolve,
+      'record-verifier': confirmAndResolve,
     },
   });
   const runId = await fx.launch();
@@ -2246,7 +2430,7 @@ test('the cycle derives its review from the set it was dispatched over', () => {
   const layer = { event: 'layer-result', cycle: 1, layer: 'adr-form', status: 'green' };
   const set = { event: 'reconcile-review-set', cycle: 1, records: [ADR], skipped: [] };
   const stamp = { event: 'record-units', cycle: 1, record: ADR, seat: 'record-review:1' };
-  const verified = { event: 'seat-report', seat: 'fury-verifier' };
+  const verified = { event: 'seat-report', seat: 'record-verifier' };
   // The dispatched set is the active record alone, and its answers are in. The
   // cycle owes the verifier, then the render, and no review seat.
   assert.equal(reconcileStep(ledger(born, clean, layer, set, stamp)), 'verify');
@@ -2382,7 +2566,7 @@ test('a corrective round leaves the closed record of the born set alone', async 
       'reconcile-judge': judgeClean,
       'reconcile-write': writeThenCorrect(),
       'record-review': recordReview(['the record claims a doubling the tree does not hold']),
-      'fury-verifier': confirmAndResolve,
+      'record-verifier': confirmAndResolve,
     },
   });
   const runId = await fx.launch();
@@ -2656,7 +2840,7 @@ test('a kept peer that cites the dispatched record is not a sibling', async (t) 
       'reconcile-judge': judgeClean,
       'reconcile-write': writeEveryRound(),
       'record-review': reviewOnce(ADR, 'the record claims a doubling the tree does not hold'),
-      'fury-verifier': confirmAndResolve,
+      'record-verifier': confirmAndResolve,
     },
   });
   const runId = await fx.launch();
@@ -2802,7 +2986,7 @@ test('a restart past the review of a set with a closed record reads the review d
       'record-review': recordReview(
         Array(4).fill('the record claims a doubling the tree does not hold'),
       ),
-      'fury-verifier': hangNth(1, refuteAll),
+      'record-verifier': hangNth(1, refuteAll),
     },
   });
   const runId = await fx.launch();
@@ -2815,7 +2999,7 @@ test('a restart past the review of a set with a closed record reads the review d
   await waitEvent(
     fx.paths,
     runId,
-    (e) => e.event === 'seat-spawned' && e.seat === 'fury-verifier',
+    (e) => e.event === 'seat-spawned' && e.seat === 'record-verifier',
     'verifier',
   );
   // The live ledger, at the boundary the stop is about to land on.
@@ -2926,14 +3110,14 @@ test('a cycle re-entered after the tree closed a record reviews the set it stamp
       'record-review': recordReview(
         Array(6).fill('the record claims a doubling the tree does not hold'),
       ),
-      'fury-verifier': hangNth(1, refuteAll),
+      'record-verifier': hangNth(1, refuteAll),
     },
   });
   const runId = await fx.launch();
   await waitEvent(
     fx.paths,
     runId,
-    (e) => e.event === 'seat-spawned' && e.seat === 'fury-verifier',
+    (e) => e.event === 'seat-spawned' && e.seat === 'record-verifier',
     'verifier',
   );
   const held = readEvents(runLedgerPath(fx.paths, runId));

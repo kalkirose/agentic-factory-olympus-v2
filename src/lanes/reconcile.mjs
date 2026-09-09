@@ -41,7 +41,7 @@ import {
 } from '../isolation/tree.mjs';
 import { configuredGroups } from './schedule.mjs';
 import { cyclePlan, persistentReds, runSpectrum } from './spectrum.mjs';
-import { recordReviewRound } from './review.mjs';
+import { VERIFIER_SEATS, recordReviewRound } from './review.mjs';
 import {
   WRITE_SEAT,
   countedRecords,
@@ -50,6 +50,7 @@ import {
   parseRecordList,
   reconcileWriteSchema,
   recordScope,
+  remarkLine,
   runWindow,
   writeChecks,
   writeRole,
@@ -68,7 +69,13 @@ import {
   statusOf,
   supersedesOf,
 } from './units.mjs';
-import { currentPass, findingIndex, passOpeningSha, repairStalled } from './verdict.mjs';
+import {
+  advisoryIndex,
+  currentPass,
+  findingIndex,
+  passOpeningSha,
+  repairStalled,
+} from './verdict.mjs';
 import {
   ACTOR,
   answeredPark,
@@ -316,8 +323,11 @@ function cycleStepOf(events, anchor) {
   const lastUnits = [...events]
     .reverse()
     .find((e) => e.event === 'record-units' && e.cycle === cycle);
+  // Either verifier name answers for the boundary: the stage spawns the record
+  // seat over its own items and the code seat over a mixed round (ADR-0005).
   const verified = events.some(
-    (e) => e.event === 'seat-report' && e.seat === 'fury-verifier' && e.seq > lastUnits.seq,
+    (e) =>
+      e.event === 'seat-report' && VERIFIER_SEATS.includes(e.seat) && e.seq > lastUnits.seq,
   );
   return verified ? 'render' : 'verify';
 }
@@ -598,9 +608,15 @@ async function writeStep(ctx, base, next) {
  * between two entries of one round, and every record behind the one a seat
  * closed would answer to a name another record's commit already holds
  * (ADR-0078).
- * @returns {Promise<{records: string[], sha: string|null}>}
+ * `advisory` is the remarks each dispatched record holds, by id. It is stamped
+ * with the set because the brief is rebuilt from this stamp on a resume: a
+ * round that re-derived the remarks from the ledger after its own write would
+ * read a different list, and the seat would answer a brief nobody sent it
+ * (ADR-0007).
+ * @returns {Promise<{records: string[], sha: string|null,
+ *   advisory: Array<{record: string, ids: string[]}>}>}
  */
-async function dispatchSet(ctx, base, { round, since, records, owed = null }) {
+async function dispatchSet(ctx, base, { round, since, records, owed = null, advisory = [] }) {
   const events = runEvents(ctx);
   // The set this round stamped, and never the one an earlier round of the same
   // render left behind. A round is the pair of the render it answers and its
@@ -616,7 +632,13 @@ async function dispatchSet(ctx, base, { round, since, records, owed = null }) {
       (e.round ?? 0) === round &&
       e.seq > bought,
   );
-  if (stamped) return { records: stamped.records ?? [], sha: stamped.sha ?? null };
+  if (stamped) {
+    return {
+      records: stamped.records ?? [],
+      sha: stamped.sha ?? null,
+      advisory: stamped.advisory ?? [],
+    };
+  }
   const sha = await headSha(base.worktree);
   const { records: active, skipped } = activeOf(base.worktree, records);
   // A round that owes an answer for part of the set dispatches that part and
@@ -629,6 +651,7 @@ async function dispatchSet(ctx, base, { round, since, records, owed = null }) {
       : active
           .filter((record) => !owed.has(record))
           .map((record) => ({ record, reason: 'no open finding' }));
+  const remarks = advisory.filter((entry) => dispatched.includes(entry.record));
   ctx.store.append('reconcile-write-set', {
     actor: ACTOR,
     round,
@@ -637,8 +660,9 @@ async function dispatchSet(ctx, base, { round, since, records, owed = null }) {
     records: dispatched,
     skipped,
     ...(kept.length > 0 && { kept }),
+    ...(remarks.length > 0 && { advisory: remarks }),
   });
-  return { records: dispatched, sha };
+  return { records: dispatched, sha, advisory: remarks };
 }
 
 /**
@@ -1120,6 +1144,13 @@ async function cycleStep(ctx, base) {
     // round writes it, and the next round dispatches it by name (ADR-0079).
     ...unwrittenRecords(anchor).map((record) => `${UNWRITTEN}${record}`),
   ];
+  // The remarks this cycle raised. They hold nothing red, and a reader of the
+  // ledger asks what a green render stood over (ADR-0007).
+  const advisory = runEvents(ctx)
+    .filter(
+      (e) => e.event === 'finding' && e.cycle === cycle && e.record === true && e.advisory === true,
+    )
+    .map((e) => e.id);
   ctx.store.append('reconcile-rendered', {
     actor: ACTOR,
     cycle,
@@ -1129,6 +1160,7 @@ async function cycleStep(ctx, base) {
     ...(window.base && { base: window.base }),
     verdict: open.length === 0 ? 'green' : 'red',
     open,
+    ...(advisory.length > 0 && { advisory }),
     records,
     // The records this cycle stood over and did not read again. The render is
     // the whole set: what a seat read, and what its last green review answers
@@ -1388,6 +1420,7 @@ async function correctStep(ctx, base, next) {
     since: rendered.seq,
     records: held,
     owed: correctiveRecords(events, rendered, active),
+    advisory: recordRemarks(events, active, judged.seq),
   });
   // A red render with nothing to dispatch over is the cap. Every record of the
   // set is closed, no seat may answer for one, and a round that spawns none
@@ -1395,6 +1428,13 @@ async function correctStep(ctx, base, next) {
   if (set.records.length === 0) return stallStep(ctx, base, next, { rounds: 0, empty: true });
   const records = set.records;
   const divergences = Array.isArray(anchor?.divergences) ? anchor.divergences : [];
+  // The remarks this round hands over, rebuilt from the set it stamped. A
+  // remark rides the brief of the record it is about and nothing else.
+  const remarks = advisoryIndex(events);
+  const remarksFor = (record) =>
+    (set.advisory.find((entry) => entry.record === record)?.ids ?? [])
+      .map((id) => remarks.get(id))
+      .filter(Boolean);
   const outcome = await writeRound(ctx, roundBase(base, set), {
     records,
     since: rendered.seq,
@@ -1413,6 +1453,7 @@ async function correctStep(ctx, base, next) {
         {
           findings: open.filter((f) => f.file === record || f.file2 === record),
           divergences: divergences.filter((d) => d.record === record),
+          advisory: remarksFor(record),
           brief: layerBrief(layers, brief),
         },
       ),
@@ -1420,10 +1461,17 @@ async function correctStep(ctx, base, next) {
   if (outcome.fail) return outcome.fail;
   if (outcome.stopped) return null;
   if (outcome.fallback) return fallbackStep(ctx, base, { cause: outcome.fallback, next });
+  // The remarks the writers say they answered ride the stamp beside the
+  // findings the round was opened for. A later round reads that list and hands
+  // over what it does not name, so a remark is offered once (ADR-0007).
+  const handed = new Set(set.advisory.flatMap((entry) => entry.ids));
+  const answered = [...new Set(outcome.reports.flatMap((r) => r.answered ?? []))].filter((id) =>
+    handed.has(id),
+  );
   await stampWritten(ctx, base, {
     entries: outcome.entries,
     reports: outcome.reports,
-    corrective: open.map((f) => f.id),
+    corrective: [...open.map((f) => f.id), ...answered],
   });
   const failed = outcome.entries.filter((entry) => entry.failed === true).map((e) => e.record);
   ctx.store.append('reconcile-round', {
@@ -1434,6 +1482,55 @@ async function correctStep(ctx, base, next) {
     ...(failed.length > 0 && { failed }),
   });
   return null;
+}
+
+/**
+ * The remarks each record still holds: every advisory record finding this pass
+ * raised on it that no write of the pass says it answered.
+ *
+ * A remark holds no render red, so nothing else reads it. It is collected here
+ * because the round that writes the record for a HIGH is the one seat that is
+ * reading that record anyway, and a remark thrown away comes back as the HIGH
+ * of a later run (ADR-0007).
+ * @param {object[]} events the run's ledger, in order
+ * @param {string[]} records the records a seat may answer for
+ * @param {number} since the seq the pass's judgment stands at
+ * @returns {Array<{record: string, ids: string[]}>}
+ */
+export function recordRemarks(events, records, since) {
+  const answered = new Set();
+  for (const e of events) {
+    if (e.event !== 'reconciliation-written') continue;
+    for (const id of e.answered ?? []) answered.add(id);
+  }
+  const held = new Set(records);
+  const out = new Map();
+  for (const e of events) {
+    if (e.event !== 'finding' || e.record !== true || e.advisory !== true) continue;
+    if (e.seq <= since || answered.has(e.id) || !held.has(e.file)) continue;
+    if (!out.has(e.file)) out.set(e.file, []);
+    out.get(e.file).push(e.id);
+  }
+  return [...out].map(([record, ids]) => ({ record, ids }));
+}
+
+/**
+ * The heading a ticket lists the remarks under, in both lanes. One heading, so
+ * a person who reads two tickets reads one word for one thing.
+ */
+export const REMARKS_HEADING = '## Remarks not answered';
+
+/**
+ * The remarks a run carries out of its record work, as findings: the advisory
+ * record findings of the pass no write says it answered.
+ * @returns {object[]}
+ */
+export function remarksOf(events, records, since) {
+  const index = advisoryIndex(events);
+  return recordRemarks(events, records, since)
+    .flatMap((entry) => entry.ids)
+    .map((id) => index.get(id))
+    .filter(Boolean);
 }
 
 /**
@@ -1716,6 +1813,9 @@ async function recordsCap(ctx, base, { cause, residual, open }) {
   const records = anchor ? reviewedRecords(events, anchor) : (judged?.records ?? []);
   const index = findingIndex(events);
   const detail = residual.map((id) => index.get(id)).filter(Boolean);
+  // The remarks this run ships with. They blocked nothing, and the ticket that
+  // states the rest of the work is where the next run reads them (ADR-0007).
+  const remarks = remarksOf(events, records, judged?.seq ?? 0);
   const failed = (anchor?.records ?? []).filter((entry) => entry.failed === true);
   const reason = judged?.reason ?? '(none recorded)';
   let ticket = null;
@@ -1723,7 +1823,16 @@ async function recordsCap(ctx, base, { cause, residual, open }) {
     ticket = reconcileTicketPath(ctx.paths, ctx.runId);
     writeFileSync(
       ticket,
-      reconcileTicketFromBranch({ ctx, base, records, reason, residual: detail, open, failed }),
+      reconcileTicketFromBranch({
+        ctx,
+        base,
+        records,
+        reason,
+        residual: detail,
+        open,
+        failed,
+        remarks,
+      }),
     );
   } catch (error) {
     return blocked(
@@ -1808,6 +1917,7 @@ export function reconcileTicketFromBranch({
   residual = [],
   open = [],
   failed = [],
+  remarks = [],
 }) {
   const layers = open.filter(
     (id) => !residual.some((f) => f.id === id) && !id.startsWith(UNWRITTEN),
@@ -1831,6 +1941,9 @@ export function reconcileTicketFromBranch({
     `- the run that wrote it: ${ctx.runId}`,
     ...(residual.length > 0
       ? ['', '## Findings to answer', '', ...residual.map((f) => `- ${findingLine(f)}`)]
+      : []),
+    ...(remarks.length > 0
+      ? ['', REMARKS_HEADING, '', ...remarks.map((f) => `- ${remarkLine(f)}`)]
       : []),
     ...(failed.length > 0
       ? [

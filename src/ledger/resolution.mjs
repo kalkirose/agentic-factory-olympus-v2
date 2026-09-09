@@ -116,11 +116,11 @@ export const LOUD_OWNERSHIP = {
       match: (item) => item.kind === 'reconciliation-lost',
       by: 'the human, from a console',
     },
-    // A record finding shipped as advice. The merge has happened and the
+    // A HIGH record finding shipped as advice. The merge has happened and the
     // finding is in the product's own documentation, so nothing a later stamp
-    // says brings it back: the rule that routes record findings to the verifier
-    // did not classify it, or the project's record paths name the wrong tree,
-    // and a person decides which (ADR-0007).
+    // says brings it back: the rule that routes a HIGH to the verifier did not
+    // classify it, or the project's record paths name the wrong tree, and a
+    // person decides which (ADR-0007).
     {
       name: 'record-finding-shipped',
       match: (item) => item.kind === 'record-finding-shipped',

@@ -296,6 +296,12 @@ export const RUN_EVENTS = new Set([
   // an allowlist addition is judged by the spec lens alone, and a reading of
   // whether anybody is judging them has to be countable (ADR-0010).
   //
+  // `advisory: true` says the finding blocks nothing. It is every finding below
+  // HIGH, on every lane. One about a decision record carries the `record` word,
+  // the `criterion` and the place with it, because the corrective round that
+  // writes that record for a HIGH hands the remark to the writer and quotes its
+  // sentence (ADR-0007).
+  //
   // A finding on a decision record names the unit it is about: `unit` is the
   // id the harness enumerated, `head` the first words of that unit and `line`
   // its line. The head is what carries the finding across a write, because the
@@ -511,6 +517,10 @@ export const RUN_EVENTS = new Set([
   // costs the round a dispatch, so the round spends one on the records that owe
   // an answer and stamps the rest (ADR-0079).
   //
+  // `advisory` is the remarks each dispatched record holds, `{record, ids}`.
+  // The corrective brief is rebuilt from this list on a resume, so a seat that
+  // is dispatched twice answers one brief (ADR-0007).
+  //
   // A seat name is the index in this list. A list read from the tree shrinks
   // between two entries of one round, because a seat closes the record it was
   // given, and every record behind it would then answer to a name another
@@ -549,7 +559,9 @@ export const RUN_EVENTS = new Set([
   // that sha through, the `verdict`, what it left `open`, the `records` it read,
   // the `kept` it stood over and did not read again, and the `layers` it ran.
   // An `open` entry is a finding id, a red layer name, or `unwritten:<record>`
-  // for a record no write of the round answered. It is
+  // for a record no write of the round answered. `advisory` is the remarks the
+  // cycle raised on its records: they hold nothing red, and a reader of a green
+  // render asks what it stood over (ADR-0007). It is
   // the record certification, and it is never a `verdict-rendered`: two
   // certifications with two grounds and two shas cannot share one stamp, and
   // the admission gate reads each against its own tree (ADR-0075).
@@ -928,10 +940,10 @@ export const GATE_INTEGRITY_KINDS = new Set([
   // knew was owed, lost at the close with nothing behind it. Stamped at
   // close-out, where both routes have had their chance (ADR-0026).
   'reconciliation-lost',
-  // A run merged holding a review finding that was stamped advisory on a file
-  // the project calls a decision record. After the record rule the count is
-  // always zero: a finding on a record goes to the verifier at every grade and
-  // is never advisory (ADR-0007). A non-zero one says the rule stopped
+  // A run merged holding a HIGH review finding that was stamped advisory on a
+  // file the project calls a decision record. The count is always zero: a HIGH
+  // goes to the verifier and is never advisory, and a finding below HIGH is a
+  // remark the ticket carries (ADR-0007). A non-zero one says the split stopped
   // classifying, or that `repo.recordPaths` names a tree the reviews do not
   // read. Stamped at close-out, in both lanes.
   'record-finding-shipped',

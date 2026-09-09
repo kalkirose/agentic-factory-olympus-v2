@@ -3,7 +3,8 @@
 // design-level decision recorded in an ADR, never ad hoc from a call site.
 //
 // Seats run Claude Opus 5 at xhigh effort. The certification spine (verdict
-// triage, the Fury verifier, the eval seat) runs Claude Fable 5.1 at high,
+// triage, the Fury verifier over a code item, the eval seat) runs Claude Fable
+// 5.1 at high,
 // named through CERTIFICATION_MODEL and CERTIFICATION_EFFORT. FALLBACK_MODEL is the substitute a refused seat
 // degrades to, and it names Opus 5: a certification seat whose model is refused
 // runs on Opus 5 at the same effort, and a seat already on Opus 5 has no
@@ -59,6 +60,12 @@ export const SEATS = Object.freeze({
   'fury-operational': seat(),
   'fury-interface': seat(),
   'fury-verifier': seat({ model: CERTIFICATION_MODEL, effort: CERTIFICATION_EFFORT }),
+  // The verifier of a record item. It is the one verifier that reads no code
+  // diff: it reads a decision record whole and the tree the record describes,
+  // and it takes the model the rest of the records lane runs on. Its tool
+  // policy is the code verifier's, the replay probe included (ADR-0005,
+  // ADR-0042).
+  'record-verifier': seat(),
   'generalist-review': seat(),
   // ship
   'card-sweep': seat(),

@@ -22,6 +22,7 @@ import {
   admitted,
   certifiedTrees,
   certifyingStage,
+  reconcileTicket,
   recordsLaneCiRed,
   unjudgedRecords,
   UNJUDGED_RECORDS_QUESTION,
@@ -769,6 +770,38 @@ function reconcileFixture(t, { seats, config = {} } = {}) {
   return shipFixture(t, { files: { [ADR_FILE]: ADR_TEXT }, seats, config });
 }
 
+// The close-out's ticket and the branch ticket carry the remarks under one
+// heading. A record that ships with a remark names it where the next ticket is
+// written (plan 41, point 2).
+test('the close-out ticket names the remarks nobody answered', () => {
+  const remark = {
+    id: 'F2',
+    severity: 'LOW',
+    criterion: 'reference',
+    file: ADR_FILE,
+    unit: 'U3',
+    head: 'The module',
+    summary: 'the record cites a symbol the tree spells otherwise',
+    evidence: 'src/feature.mjs',
+  };
+  const args = {
+    ctx: { runId: 'proj-1' },
+    base: { storyKey: 'S-1' },
+    merged: { pr: 7, mergeSha: 'abcdef1' },
+    records: [ADR_FILE],
+    reason: 'the diff implements the doubling decision',
+  };
+
+  const text = reconcileTicket({ ...args, remarks: [remark] });
+  assert.ok(text.includes('## Remarks not answered'), text);
+  assert.ok(text.includes('[LOW] [F2]'), text);
+  assert.ok(text.includes(remark.summary), text);
+  // A remark is not a finding to answer: it opened no round and it blocks
+  // nothing, so it never appears under that heading.
+  assert.ok(!text.includes('## Findings to answer'), text);
+  assert.ok(!reconcileTicket(args).includes('## Remarks not answered'));
+});
+
 test('an owed judgment writes the records onto the run branch and one request carries both', async (t) => {
   const fx = reconcileFixture(t, { seats: reconcileSeats() });
   fx.forge.state.autoChecks = () => [running()];
@@ -941,17 +974,33 @@ test('a ticket the close cannot write is loud, and the kind names it', async (t)
 // finding on a record path carries the advisory word, so the count is always
 // zero; a ledger that holds one is a defect of the mechanism, and a person
 // decides what it cost (ADR-0007).
-test('a ledger holding an advisory finding on a record path is loud at the close', async (t) => {
+// A HIGH goes to the verifier on every lane, so an advisory HIGH on a record
+// path is the split failing. A finding below HIGH is a remark by rule, and the
+// close says nothing about one (plan 41, point 2).
+test('a ledger holding an advisory HIGH on a record path is loud at the close', async (t) => {
   const fx = shipFixture(t, {
     files: { [ADR_FILE]: ADR_TEXT },
     seedExtra: async (ctx) => {
       ctx.store.append('finding', {
         actor: 'daemon',
         cycle: 1,
+        id: 'F8',
+        source: 'record-review:1',
+        lens: 'record',
+        severity: 'LOW',
+        summary: 'the record names the module loosely',
+        evidence: `${ADR_FILE}:5`,
+        file: ADR_FILE,
+        record: true,
+        advisory: true,
+      });
+      ctx.store.append('finding', {
+        actor: 'daemon',
+        cycle: 1,
         id: 'F9',
         source: 'generalist-review',
         lens: 'operational',
-        severity: 'MED',
+        severity: 'HIGH',
         summary: 'the record says nothing about retries',
         evidence: `${ADR_FILE}:5`,
         file: ADR_FILE,
@@ -969,6 +1018,7 @@ test('a ledger holding an advisory finding on a record path is loud at the close
     (e) => e.event === 'gate-integrity' && e.kind === 'record-finding-shipped',
   );
   assert.equal(loud.pr, opened.pr);
+  // The remark is not counted: it is the rule working, not the rule failing.
   assert.deepEqual(loud.findings, ['F9']);
   assert.deepEqual(loud.records, [ADR_FILE]);
   assert.ok(openLoud(fx.paths).some((item) => item.seq === loud.seq));
