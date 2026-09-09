@@ -1970,6 +1970,73 @@ function repairAfterGreen(deltaFile) {
   };
 }
 
+test('a record the last render kept is not newly owed at the recheck', async (t) => {
+  // The pair the run holds: one record a round rewrote, one the second cycle
+  // kept. The recheck judge names the kept one, which this run already stands
+  // over, so nothing is newly owed and no second judgment is made (ADR-0079).
+  let seeded = false;
+  const fx = stageFixture(t, {
+    repairOnce: true,
+    seed: async (ctx) => {
+      const worktree = ctx.payload.worktree;
+      if (seeded) {
+        const baseSha = await headSha(worktree);
+        writeFileSync(join(worktree, 'src/other.mjs'), 'export const changed = true;\n');
+        const sha = await commitAll(worktree, 'repair: seed');
+        ctx.store.append('implementation-committed', {
+          actor: 'daemon',
+          pass: 1,
+          phase: 'repair',
+          baseSha,
+          sha,
+        });
+        ctx.store.append('repair-round', {
+          actor: 'daemon',
+          pass: 1,
+          round: 1,
+          cap: 3,
+          sha,
+          openBefore: [],
+        });
+        return { next: 'reconcile' };
+      }
+      seeded = true;
+      return seedHandler(async (inner) => {
+        const tree = inner.payload.worktree;
+        writeFileSync(join(tree, ADR), ADR_REWRITTEN);
+        writeFileSync(join(tree, ADR_TWO), `${ADR_TWO_TEXT}\nThe range is src/base.mjs.\n`);
+        const sha = await commitAll(tree, 'records: the birth writes the pair');
+        inner.store.append('records-committed', {
+          actor: 'daemon',
+          sha,
+          paths: [ADR, ADR_TWO],
+          decided: true,
+        });
+      })(ctx);
+    },
+    seats: {
+      'reconcile-judge': ({ prompt }) =>
+        prompt.includes('A repair round changed this run')
+          ? { report: { owed: true, records: [ADR_TWO], reason: 'the delta moves the second record' } }
+          : judgeOwed([ADR])(),
+      'reconcile-write': writeEveryRound(),
+      'record-review': reviewOnce(ADR, 'the record claims a doubling the tree does not hold'),
+      'fury-verifier': confirmAndResolve,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The green render stood over both: one read, one kept.
+  const green = events.filter((e) => e.event === 'reconcile-rendered').find((e) => e.verdict === 'green');
+  assert.deepEqual(green.records, [ADR]);
+  assert.deepEqual(green.kept, [ADR_TWO]);
+  // The recheck owes nothing, and no judgment names the kept record late.
+  const recheck = events.find((e) => e.event === 'reconcile-recheck');
+  assert.equal(recheck.result, 'kept');
+  assert.ok(!events.some((e) => e.event === 'reconciliation-judged' && e.recheck === true));
+});
+
 test('a repair whose delta touches no evidence path stamps the recheck kept', async (t) => {
   const fx = stageFixture(t, {
     seed: repairAfterGreen('src/other.mjs'),

@@ -93,8 +93,9 @@ wider window, which reads more accepted records and refuses nothing it should
 pass.
 
 A kept record is not read again by a fresh seat while its text stands. Its last
-green review is the answer of record. A `consistent` finding raised from the
-moved side still dispatches the kept record it names.
+green review is the answer of record, at the recheck as much as at the cycle: a
+record the render kept is this run's own and never newly owed. A `consistent`
+finding raised from the moved side still dispatches the kept record it names.
 
 A parked run holds its slot decision open until a person answers. The forge then
 holds a `run/` branch with no request behind it, and the branch stays until the

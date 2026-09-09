@@ -1545,7 +1545,11 @@ async function recheckStep(ctx, base) {
   const units = touchedUnits(events, touched);
   const judge = await recheckJudge(ctx, base, { delta, touched });
   if (judge.fail) return judge.fail;
-  const owed = (judge.records ?? []).filter((record) => !(rendered.records ?? []).includes(record));
+  // A record the last render stood over is already this run's, whether a seat
+  // read it or its last green review answers for it. Only a record outside that
+  // set is newly owed (ADR-0079).
+  const held = new Set([...(rendered.records ?? []), ...(rendered.kept ?? [])]);
+  const owed = (judge.records ?? []).filter((record) => !held.has(record));
   const stamp = {
     actor: ACTOR,
     delta: delta ? `${delta.from}..${delta.to}` : null,
