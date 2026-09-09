@@ -16,7 +16,7 @@ import {
 } from '../config/project.mjs';
 import { branchSha, cloneDir, fetchClone } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
-import { changedFiles, headSha, resetHard } from '../isolation/tree.mjs';
+import { changedFiles, headSha, push, resetHard } from '../isolation/tree.mjs';
 import { stackEnv } from '../isolation/stacks.mjs';
 import { RUN_CACHE_ENV, runCacheDir } from '../isolation/worktrees.mjs';
 
@@ -602,6 +602,29 @@ export function seatFail(ctx, seat, result, park = null) {
   });
 }
 
+/**
+ * Puts the run branch on the origin, or parks on the refusal.
+ *
+ * Two callers: the ship stage, where the branch has to exist before a request
+ * can name it, and the records lane's cap, where the branch is the whole of the
+ * work and a close that left it in the local clone lost it (ADR-0079).
+ *
+ * Plain pushes cover the fast-forward cases. A fresh pass rewrites the run
+ * branch's history; that push carries an explicit lease on the remote head the
+ * loop just observed, and forces over exactly that value.
+ */
+export async function pushBranch(ctx, base, { expected = null } = {}) {
+  try {
+    await push(base.worktree, 'origin', base.branch, { lease: expected });
+    return null;
+  } catch (error) {
+    return parkDirective('provisioning-gate', {
+      ...GATE_FORMS,
+      question: `The remote rejected the push of ${base.branch}:\n${error.message}`,
+    });
+  }
+}
+
 export function commandFail(ctx, run) {
   return commandError(
     ctx,
@@ -693,12 +716,34 @@ export async function seatWithChecks(
     checks,
     defectReason = 'work-product-defect',
     park = null,
+    brief: opening = null,
+    resumeByReport = null,
   },
 ) {
+  // The report the ledger already holds for this seat's label, past the stamp
+  // the caller names. A stop inside a fan-out then costs the seats that had not
+  // answered and no others, and the checks judge the report again before it
+  // stands (ADR-0079).
+  if (typeof resumeByReport === 'number' && label) {
+    const path = runReportPath(ctx.paths, ctx.runId, label);
+    const stamped = runEvents(ctx).some(
+      (e) =>
+        e.event === 'seat-report' &&
+        e.seat === seat &&
+        e.path === path &&
+        e.seq > resumeByReport,
+    );
+    const report = stamped ? readJson(path) : null;
+    if (report && (await checks(report)).length === 0) return { report };
+  }
   const limit = attemptLimit(runEvents(ctx), seat);
   // The evidence rides every bought retry, crash or defect: the park promised
-  // it, and the seat that crashed is briefed on what ended its predecessor.
-  let brief = boughtRetry(runEvents(ctx), seat) ? failureBrief(runEvents(ctx), seat) : null;
+  // it, and the seat that crashed is briefed on what ended its predecessor. A
+  // caller that holds the evidence of an earlier dispatch of the same work
+  // states it here, and this one is a fresh dispatch with its own budget.
+  let brief = boughtRetry(runEvents(ctx), seat)
+    ? failureBrief(runEvents(ctx), seat)
+    : (opening ?? null);
   for (let attempt = 1; ; attempt++) {
     const events = runEvents(ctx);
     const n = invocationCount(events, seat) + 1;

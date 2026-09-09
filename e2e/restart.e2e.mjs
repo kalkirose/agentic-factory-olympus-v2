@@ -101,6 +101,22 @@ function after(events, seq, kind) {
   return events.filter((e) => e.seq > seq && e.event === kind);
 }
 
+/**
+ * The work a stop left unfinished: every layer that started and stamped no
+ * result, and every seat the stop terminated. A resumed stage re-uses what the
+ * ledger already holds and does this again, so this is what a release owes.
+ */
+function interrupted(events) {
+  const results = new Set(events.filter((e) => e.event === 'layer-result').map((e) => e.layer));
+  const layers = events
+    .filter((e) => e.event === 'layer-started' && !results.has(e.layer))
+    .map((e) => e.layer);
+  const seats = events
+    .filter((e) => e.event === 'seat-terminated' && e.reason === 'daemon-stopped')
+    .map((e) => e.seat);
+  return [...new Set([...layers, ...seats])];
+}
+
 /** The pid of the seat that is standing still, once it says so. */
 async function stalledSeat(fx, runId) {
   rmSyncQuiet(fx.stallMarker);
@@ -185,8 +201,13 @@ test('a restart inside the verdict stage finishes the step, and a hold governs t
     'the start under a hold spawned a seat',
   );
 
-  // The release runs the stage the hold stopped, and the stage owes its layers:
-  // the seat before them answered, so there is no step to finish.
+  // The release runs the stage the hold stopped, and the stage finishes the
+  // step the stop interrupted. Which step that is belongs to the host: a
+  // machine that runs the layers inside one poll is stopped in the review fan
+  // out, and a slower one is stopped in the spectrum. The ledger says which,
+  // and the release owes that one.
+  const owed = interrupted(stopped);
+  assert.ok(owed.length > 0, 'the stop interrupted no step of the stage');
   ctl(fx, ['release', '--all']);
   const released = await pollFor(
     'the release stamp',
@@ -194,8 +215,14 @@ test('a restart inside the verdict stage finishes the step, and a hold governs t
     { abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
   );
   await pollFor(
-    'the layers the released stage owes',
-    () => after(runEvents(fx, runId), released.seq, 'layer-started').length > 0,
+    'the step the released stage finishes',
+    () =>
+      runEvents(fx, runId).some(
+        (e) =>
+          e.seq > released.seq &&
+          ((e.event === 'layer-started' && owed.includes(e.layer)) ||
+            (e.event === 'seat-spawned' && owed.includes(e.seat))),
+      ),
     { attempts: 900, abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
   );
 

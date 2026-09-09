@@ -135,22 +135,25 @@ export function reconcileWriteSchema({ answered = false, siblings = false, units
           required: ['record', 'state', 'statement', ...(units ? ['evidence'] : [])],
         },
       },
-      ...(siblings && {
-        siblings: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              record: { type: 'string' },
-              state: { type: 'string', enum: [...SIBLING_STATES] },
-              reason: { type: 'string' },
-              replacement: { type: 'string' },
-            },
-            required: ['record', 'state', 'reason'],
+      // The sibling answers. The dispatch decides whether the report owes them,
+      // and the shape holds them either way, so a report that carries the field
+      // where nothing asked for it is still valid. What the entries may say is
+      // the checks' rule: one per sibling, and none for a record that is not
+      // one (ADR-0079).
+      siblings: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            record: { type: 'string' },
+            state: { type: 'string', enum: [...SIBLING_STATES] },
+            reason: { type: 'string' },
+            replacement: { type: 'string' },
           },
+          required: ['record', 'state', 'reason'],
         },
-      }),
+      },
       ...(answered && { answered: { type: 'array', items: { type: 'string' } } }),
       summary: { type: 'string' },
     },
@@ -192,6 +195,7 @@ export function birthRole(base, spec, neighbours, brief) {
     '"unchanged" with the reason.',
     ...neighbourhoodLines(neighbours),
     ...siblingLines(spec?.siblings),
+    ...renderLines(base?.recordLayers),
     '',
     'Rules:',
     ...RECORD_RULES,
@@ -408,15 +412,41 @@ function neighbourhoodLines(neighbours) {
  * run already writes is not in the list: it is answered as itself.
  */
 function siblingLines(siblings) {
-  const list = siblings ?? [];
-  if (list.length === 0) return [];
+  if (siblings === null || siblings === undefined) return [];
+  if (siblings.length === 0) {
+    return [
+      '',
+      'No active record cites a record this write supersedes, so "siblings" takes no entry.',
+    ];
+  }
   return [
     '',
     'These active records cite a record you supersede. Read each one whole and answer it in',
     '"siblings":',
-    ...list.map((path) => `- ${path}`),
+    ...siblings.map((path) => `- ${path}`),
     '- "consistent" with the one-sentence reason it still stands, or "superseded" with the',
     '  record that replaces it in this round.',
+  ];
+}
+
+/**
+ * What reads the form of a born record, and when.
+ *
+ * The record layers run at the render, over the commit. No command a birth seat
+ * can run proves the form of an uncommitted file, so the brief states the cost
+ * of a defect and asks the seat to read its own work against the constitution
+ * before it reports (ADR-0079).
+ */
+function renderLines(layers) {
+  const list = layers ?? [];
+  if (list.length === 0) return [];
+  return [
+    '',
+    `These layers read your files after the commit, at the render: ${list.join(', ')}.`,
+    'A form defect there costs the run a cycle and a corrective round.',
+    'So read the constitution above and check your own files before you report: the word',
+    'budget, the heading set, the status line forms, the one-sentence decision, the sentence',
+    'length and the words it bans.',
   ];
 }
 
@@ -445,8 +475,8 @@ function lifecycleLines(base) {
     '- The list is ADR-<id> items joined by ", ", with " and " before the last. Every record it',
     '  names is added in this same diff and names the old record back. One record may split into',
     '  several, and several may merge into one.',
-    '- A record another active record cites arrives in "siblings". Answer each one: "consistent"',
-    '  with the reason, or "superseded" with the record that replaces it in this round.',
+    '- The records that cite a record you supersede arrive in "siblings", listed in this brief.',
+    '  Answer each one. A brief that lists none takes no "siblings" entry.',
     '- Two active records that decide one unbuilt part differently resolve by recency. The newer',
     '  decision stands, the older record gets its status line, and your divergence entry names',
     '  both records and the reason.',
@@ -513,24 +543,30 @@ function specLines(spec) {
 }
 
 /**
- * The record files a pass changed, over the range the pass opened in.
+ * The record files this run changed, read through the window.
  *
- * The range is the pass's own, never the last round's diff. A round that
- * touched one of four records leaves the other three answered by an earlier
- * cycle and unread by this one, which is how a defect on a record left the
- * review after round one and shipped. Under the supersede lifecycle a
- * superseded or retired record is out of every seat's scope, so it leaves the
- * set here.
+ * The window opens at the merge base of the run branch and the default branch,
+ * so a record the default branch gained while the run worked is never in this
+ * set, and a record an early round rewrote is read again by the round that
+ * follows it (ADR-0079). Under the supersede lifecycle a superseded or retired
+ * record is out of every seat's scope, so it leaves the set here.
+ *
+ * `only` says whether the run's whole diff is records. It reads the window's
+ * base against the worktree, because the layer plan asks about the whole diff
+ * and the window carries the record half of it.
  * @param {string} worktree
- * @param {string} from the sha the pass opened at
- * @param {string} to the sha the stage judges
  * @param {string[]} recordPaths
- * @param {{lifecycle?: string}} [opts]
- * @returns {Promise<{files: string[], only: boolean}>}
+ * @param {{lifecycle?: string, defaultBranch?: string, window?: object}} [opts]
+ * @returns {Promise<{files: string[], only: boolean, base: string|null}>}
  */
-export async function recordScope(worktree, from, to, recordPaths = [], { lifecycle } = {}) {
-  const changed = await changedInRange(worktree, from, to);
-  const records = changed.filter((file) => recordPathIncludes(file, recordPaths));
+export async function recordScope(
+  worktree,
+  recordPaths = [],
+  { lifecycle, defaultBranch = 'main', window = null } = {},
+) {
+  const read = window ?? (await runWindow({ worktree, defaultBranch, recordPaths }));
+  if (read.error !== null) throw new Error(read.error);
+  const records = read.files;
   const files =
     lifecycle === 'supersede'
       ? records.filter((file) => {
@@ -538,7 +574,8 @@ export async function recordScope(worktree, from, to, recordPaths = [], { lifecy
           return text === null || isActiveRecord(text);
         })
       : records;
-  return { files, only: changed.length > 0 && records.length === changed.length };
+  const changed = await windowPaths(worktree, read.base);
+  return { files, only: changed.length > 0 && records.length === changed.length, base: read.base };
 }
 
 /**
@@ -567,12 +604,13 @@ export async function writeChecks(base, records, report, opts = {}) {
       );
     }
   }
-  // The round's whole range, read once: the uncommitted diff and every commit a
-  // peer dispatch of the same round already made. A merge of two records into
-  // one leaves the second seat's replacement in the first seat's commit.
-  const range = await writeRange(base, changed);
+  // The run's whole window, read once: every record this run has changed since
+  // its merge base, committed or not. A merge of two records into one leaves
+  // the second seat's replacement in the first seat's commit, and a birth's
+  // closure stands one commit behind the round that answers it (ADR-0079).
+  const window = opts.window ?? (await runWindow(base));
   const closed = closedOf(base, records, changed);
-  const replaced = supersessions(base, [...closed], range.files).answered;
+  const replaced = supersessions(base, [...closed], window.files).answered;
   const counted = await unitRecords(base, records, report, changed);
   const rewritten = new Set(report.rewritten);
   const unchanged = new Map(report.unchanged.map((u) => [u.record, u.reason]));
@@ -590,14 +628,14 @@ export async function writeChecks(base, records, report, opts = {}) {
         'put it in unchanged with the reason it needs no change.',
     );
   }
-  // A range this check could not read says nothing about a closure, so it
+  // A window this check could not read says nothing about a closure, so it
   // states the failure and judges no closure on it. A defect on a bare closure
   // there would name the seat for a git call that did not run.
-  if (range.error === null) {
+  if (window.error === null) {
     defects.push(...closureDefects(base, closed, replaced, unchanged));
   } else if (closed.size > 0) {
     defects.push(
-      `the range this round opened at cannot be read (${range.error}), so a record this write ` +
+      `the record window of this run cannot be read (${window.error}), so a record this write ` +
         'closed cannot be matched to the record that replaces it. The read is the harness\'s ' +
         'own; report it.',
     );
@@ -634,41 +672,59 @@ export async function writeChecks(base, records, report, opts = {}) {
     );
   }
   if (base?.recordLifecycle === 'supersede') {
-    defects.push(...(await supersedeChecks(base, records, report)));
+    defects.push(...(await supersedeChecks(base, records, report, { window })));
   }
   if (siblings !== null) {
-    defects.push(...(await siblingChecks(base, siblings, report, { range })));
+    defects.push(...(await siblingChecks(base, siblings, report, { window })));
   }
   return defects;
 }
 
 /**
- * The record paths this write reaches: the uncommitted diff, and every commit a
- * peer dispatch of the same round made since the round opened.
+ * The one window on this run's work in the record tree: the merge base of the
+ * run branch and the default branch, and every record path the run changed
+ * from there to the worktree.
  *
- * The uncommitted diff alone is not the write. Two seats of one round that
- * merge two records into one leave the second seat with a judged record the
- * first one already closed and committed, and no replacement of its own
- * (ADR-0078). A birth has no round, so its range is its own diff.
+ * Every reader of what the run did to the records opens here. A reader with a
+ * narrower window reads a record this run closed in an earlier commit as
+ * untouched, and refuses the write that supersedes it (ADR-0079). The base is
+ * computed at the read and never at the launch, so a record the default branch
+ * gained during the run stands outside the window and belongs to nobody here.
  *
- * A range read that fails is never an empty range. An empty one reads as a
- * round that wrote no replacement, which turns a legal supersession into a bare
- * closure, so the failure is returned and the caller states it.
- * @returns {Promise<{files: string[], error: string|null}>}
+ * A read that fails is never an empty window. An empty one reads as a run that
+ * wrote no replacement, which turns a legal supersession into a bare closure,
+ * so the failure is returned and the caller states it.
+ * @param {{worktree: string, defaultBranch?: string, recordPaths?: string[]}} base
+ * @returns {Promise<{base: string|null, files: string[], error: string|null}>}
  */
-async function writeRange(base, changed) {
-  const files = new Set(changed.map(posix));
-  if (typeof base?.roundFrom !== 'string' || base.roundFrom.length === 0) {
-    return { files: [...files], error: null };
+export async function runWindow(base) {
+  const worktree = base?.worktree;
+  const recordPaths = base?.recordPaths ?? [];
+  const branch = base?.defaultBranch ?? 'main';
+  let mergeBase;
+  try {
+    mergeBase = (await git(['merge-base', 'HEAD', branch], { cwd: worktree })).trim();
+  } catch (error) {
+    return { base: null, files: [], error: `merge-base HEAD ${branch}: ${error.message}` };
   }
   try {
-    for (const file of await changedInRange(base.worktree, base.roundFrom, 'HEAD')) {
-      files.add(posix(file));
-    }
+    const paths = await windowPaths(worktree, mergeBase);
+    return {
+      base: mergeBase,
+      files: paths.filter((file) => recordPathIncludes(file, recordPaths)),
+      error: null,
+    };
   } catch (error) {
-    return { files: [...files], error: `${base.roundFrom}..HEAD: ${error.message}` };
+    return { base: mergeBase, files: [], error: `${mergeBase}..HEAD: ${error.message}` };
   }
-  return { files: [...files], error: null };
+}
+
+/** Every path the window holds, records and code alike: the two reads, once. */
+async function windowPaths(worktree, mergeBase) {
+  const files = new Set();
+  for (const file of await changedInRange(worktree, mergeBase, 'HEAD')) files.add(posix(file));
+  for (const file of await changedFiles(worktree)) files.add(posix(file));
+  return [...files];
 }
 
 /**
@@ -686,9 +742,9 @@ function closedOf(base, records, changed) {
 }
 
 /**
- * The supersessions this write's range holds against a set of parents: the
- * records it added that name one of them on a `Supersedes` line, and the
- * parents those records answer for.
+ * The supersessions a set of record files holds against a set of parents: the
+ * records that name one of them on a `Supersedes` line, and the parents those
+ * records answer for. The window is the set every caller passes.
  *
  * Under the rewrite lifecycle nothing supersedes anything, so the answer is
  * empty and a closure there takes the retirement route alone.
@@ -1019,27 +1075,25 @@ function evidencePath(evidence) {
  * ones, and every new one names the old record back.
  * @returns {Promise<string[]>}
  */
-export async function supersedeChecks(base, records, report) {
+export async function supersedeChecks(base, records, report, { window = null } = {}) {
   const worktree = base.worktree;
   const recordPaths = base.recordPaths ?? [];
   const entries = recordPaths.filter((entry) => !entry.startsWith('!'));
   if (entries.length === 0) return [];
-  let mergeBase = base.mergeBase ?? null;
-  if (!mergeBase) {
-    try {
-      mergeBase = (await git(['merge-base', 'HEAD', base.defaultBranch], { cwd: worktree })).trim();
-    } catch (error) {
-      return [`the accepted record set cannot be computed: ${error.message}`];
-    }
+  const read = window ?? (await runWindow(base));
+  if (read.error !== null) {
+    return [`the accepted record set cannot be computed: ${read.error}`];
   }
+  const mergeBase = read.base;
   const accepted = new Set(
     (await filesAt(worktree, mergeBase, entries)).filter((file) =>
       recordPathIncludes(file, recordPaths),
     ),
   );
-  const changed = (await changedFiles(worktree))
-    .map(posix)
-    .filter((file) => recordPathIncludes(file, recordPaths));
+  // The window, and never this dispatch's own diff. A corrective seat rewrites
+  // a replacement its run's birth committed, and the record that replacement
+  // closed stands one commit behind it (ADR-0079).
+  const changed = read.files;
   const added = changed.filter((file) => !accepted.has(file));
   const defects = [];
   for (const file of changed) {
@@ -1047,7 +1101,7 @@ export async function supersedeChecks(base, records, report) {
     defects.push(...(await acceptedEditDefects(worktree, mergeBase, file, added)));
   }
   for (const file of added) {
-    defects.push(...supersedesBackDefects(worktree, file, accepted, changed));
+    defects.push(...(await supersedesBackDefects(worktree, mergeBase, file, accepted)));
   }
   return defects;
 }
@@ -1118,8 +1172,18 @@ async function acceptedEditDefects(worktree, mergeBase, file, added) {
   return defects;
 }
 
-/** The other direction: a new record's parent is superseded in the same diff. */
-function supersedesBackDefects(worktree, file, accepted, changed) {
+/**
+ * The other direction: a new record's parent is an accepted record this run
+ * closed.
+ *
+ * The parent is read from the tree at both ends of the window, and never from a
+ * list of what one dispatch changed. A parent the merge base already holds
+ * closed is a supersession of a closed record, and no write of this run can
+ * make it legal. A parent the merge base holds open owes a closed status line
+ * naming this record, wherever in the run it was set: the birth commit, a peer
+ * seat's commit, or this seat's own diff (ADR-0079).
+ */
+async function supersedesBackDefects(worktree, mergeBase, file, accepted) {
   const back = supersedesOf(readText(join(worktree, file)) ?? '');
   if (back === null) return [];
   const listed = parseRecordList(back);
@@ -1137,19 +1201,26 @@ function supersedesBackDefects(worktree, file, accepted, changed) {
       defects.push(`${file} supersedes ADR-${id}, which is not an accepted record of this tree.`);
       continue;
     }
-    if (!changed.includes(old)) {
+    if (!isActiveRecord((await showAt(worktree, mergeBase, old)) ?? '')) {
       defects.push(
-        `${file} supersedes ${old} and this diff leaves that record's status line unchanged. ` +
-          'Set it to "Superseded by <list> (YYYY-MM-DD)" and change nothing else in it.',
+        `${file} supersedes ${old}, and that record is already closed at this run's merge base. ` +
+          'A closed record is superseded once. Name the active record that replaced it, or ' +
+          'leave the line out.',
       );
       continue;
     }
     const status = statusOf(readText(join(worktree, old)) ?? '');
     const superseded = SUPERSEDED_BY.exec(status.text ?? '');
     const listedBack = superseded === null ? null : parseRecordList(superseded[1]);
-    if (listedBack === null || !listedBack.includes(self)) {
-      defects.push(`${file} supersedes ${old} and that record's status line does not name it.`);
+    if (listedBack !== null && listedBack.includes(self)) continue;
+    if (status.word !== 'superseded' && status.word !== 'retired') {
+      defects.push(
+        `${file} supersedes ${old} and this diff leaves that record's status line unchanged. ` +
+          'Set it to "Superseded by <list> (YYYY-MM-DD)" and change nothing else in it.',
+      );
+      continue;
     }
+    defects.push(`${file} supersedes ${old} and that record's status line does not name it.`);
   }
   return defects;
 }
@@ -1213,16 +1284,15 @@ async function showAt(worktree, sha, file) {
  * the record that replaces it. A sibling nobody answered is a record left
  * citing a decision that no longer stands.
  *
- * The replacement is read over the round's whole range, which is the range the
- * closure rule reads. A record that replaces a sibling may be a peer seat's
- * work: a merge round closes two records with one, and the second seat answers
- * a sibling of a record it never wrote (ADR-0078). `range` is that read, made
- * once by the caller. Without one the answer is this dispatch's own diff, which
- * is what a birth holds.
- * @param {{range?: {files: string[], error: string|null}}} [opts]
+ * The replacement is read over the run's window, which is the set the closure
+ * rule reads. A record that replaces a sibling may be a peer seat's work or an
+ * earlier commit's: a merge round closes two records with one, and a corrective
+ * round answers a sibling of a record the birth wrote (ADR-0079). `window` is
+ * that read, made once by the caller. Without one it is made here.
+ * @param {{window?: {base: string|null, files: string[], error: string|null}}} [opts]
  * @returns {Promise<string[]>}
  */
-export async function siblingChecks(base, siblings, report, { range = null } = {}) {
+export async function siblingChecks(base, siblings, report, { window = null } = {}) {
   const list = (siblings ?? []).map(posix);
   const entries = Array.isArray(report?.siblings) ? report.siblings : [];
   const defects = [];
@@ -1238,12 +1308,13 @@ export async function siblingChecks(base, siblings, report, { range = null } = {
       n === 0
         ? `${record} cites a record this write supersedes and "siblings" accounts for it ` +
             'nowhere. Give it one entry: "consistent" with the reason, or "superseded" with the ' +
-            'record that replaces it in this round.'
+            'record that replaces it in this round. The records that cite what this write ' +
+            `closed: ${list.join(', ')}.`
         : `${record} has ${n} entries in "siblings"; each sibling takes exactly one.`,
     );
   }
   if (list.length === 0 && entries.length === 0) return defects;
-  const read = range ?? { files: await changedFiles(base.worktree), error: null };
+  const read = window ?? (await runWindow(base));
   const touched = new Set(read.files.map(posix));
   for (const entry of entries) {
     const record = posix(entry.record);
@@ -1255,7 +1326,7 @@ export async function siblingChecks(base, siblings, report, { range = null } = {
       continue;
     }
     if (entry.state !== 'superseded') continue;
-    // A range the read could not answer says nothing about the replacement, so
+    // A window the read could not answer says nothing about the replacement, so
     // nothing is refused on it. The caller states the failed read once.
     if (read.error !== null) continue;
     const replacement = posix(entry.replacement ?? '');

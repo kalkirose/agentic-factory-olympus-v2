@@ -330,12 +330,17 @@ export async function recordReviewRound(
   },
 ) {
   const list = records ?? [];
+  // The stamp this cycle's seats resume behind. A report the ledger holds for a
+  // seat's own label after it is this cycle's answer (ADR-0079).
+  const since =
+    runEvents(ctx).find((e) => e.event === 'reconcile-review-set' && e.cycle === cycle)?.seq ?? 0;
   const outcomes = await Promise.all(
     list.map((record, i) =>
       recordReviewSeat(ctx, base, {
         record,
         slot: i + 1,
         cycle,
+        since,
         units: unitsOf(base, units, record),
         neighbours: neighboursOf(base, neighbours, record),
         moved: byRecord(moved, record) ?? [],
@@ -347,7 +352,6 @@ export async function recordReviewRound(
   if (failed) return { fail: failed.fail };
   const collected = [];
   for (const outcome of outcomes) {
-    stampRecordUnits(ctx, cycle, outcome);
     collected.push(
       ...outcome.report.findings.map((f) => ({
         ...f,
@@ -360,16 +364,27 @@ export async function recordReviewRound(
   return settleFindings(ctx, base, { cycle, collected, priorConfirmed });
 }
 
-/** One record, one seat, one check loop. The slot keeps the seat's own budget. */
+/**
+ * One record, one seat, one check loop. The slot keeps the seat's own budget.
+ *
+ * The seat resumes by report: a report the ledger holds for this seat's label
+ * after this cycle's dispatch stamp is this cycle's answer, and the checks run
+ * over it again rather than a fresh seat over the same record. A stop inside
+ * the fan-out used to cost every seat of the cycle (ADR-0079).
+ *
+ * The unit stamp lands as the seat settles, for the same reason: a stamp that
+ * waited for the whole fan-out is a stamp a stop takes with it.
+ */
 async function recordReviewSeat(
   ctx,
   base,
-  { record, slot, cycle, units, neighbours, moved, spec },
+  { record, slot, cycle, since = 0, units, neighbours, moved, spec },
 ) {
   const seat = `${REVIEW_SEAT}:${slot}`;
   const outcome = await seatWithChecks(ctx, {
     seat,
     label: `${REVIEW_SEAT}-${slot}-c${cycle}`,
+    resumeByReport: since,
     schema: recordReviewSchema(),
     cwd: base.worktree,
     env: base.env,
@@ -379,7 +394,16 @@ async function recordReviewSeat(
     checks: (report) => recordSeatDefects(base, record, report),
   });
   if (outcome.fail) return { fail: outcome.fail };
-  return { seat, record, units, neighbours, report: outcome.report, cost: outcome.cost };
+  const settled = {
+    seat,
+    record,
+    units,
+    neighbours,
+    report: outcome.report,
+    cost: outcome.cost,
+  };
+  stampRecordUnits(ctx, cycle, settled);
+  return settled;
 }
 
 /**

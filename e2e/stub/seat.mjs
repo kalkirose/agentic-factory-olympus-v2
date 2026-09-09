@@ -8,13 +8,16 @@
 // The scenario file (OLYMPUS_E2E_SCENARIO) holds the artifact texts, so one
 // stub drives every lane.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 
 const argv = process.argv.slice(2);
 const prompt = argv[argv.length - 1] ?? '';
 const model = valueOf('--model') ?? '(none)';
 const scenario = JSON.parse(readFileSync(process.env.OLYMPUS_E2E_SCENARIO, 'utf8'));
+
+/** The sentence a corrective dispatch writes into the record it answers. */
+const ANSWERED = 'The corrective round answered the finding.';
 
 // A seat name may carry a slot suffix (`reconcile-write:2`). The suffix is the
 // dispatch's identity and not a seat, so the behaviour table reads the base.
@@ -30,17 +33,32 @@ if (!seat || !reportPath) {
   process.exit(3);
 }
 
-// A seat that never answers. The scenario names one when it has to hold a run
-// still at an exact point: the moment after the stage created its worktree and
+// A seat that holds where it is. The scenario names one when it has to stop a
+// run at an exact point: the moment after the stage created its worktree and
 // before anything read it. The pid goes to the marker file first, so the
 // scenario can end this process when it has what it waited for.
+//
+// The hold lifts where the scenario stops naming this seat. A scenario that
+// needs the world to move under a running run holds a seat at the boundary,
+// moves it, and lets the seat answer; a scenario about a crash ends the
+// process instead, and this loop never sees the change.
 if (scenario.stallSeat === seat) {
   writeFileSync(scenario.stallMarker, String(process.pid));
   // The timer holds the loop open. Without it the runtime finds nothing left
-  // to do, ends the process on the pending await, and the stall becomes a
-  // seat that exited rather than a seat that never answered.
-  setInterval(() => {}, 1 << 30);
-  await new Promise(() => {});
+  // to do, ends the process on the pending await, and the hold becomes a seat
+  // that exited rather than a seat that never answered.
+  const beat = setInterval(() => {}, 1 << 30);
+  while (stallNamed()) await new Promise((resolve) => setTimeout(resolve, 50));
+  clearInterval(beat);
+}
+
+/** Whether the scenario, as it stands on disk now, still holds this seat. */
+function stallNamed() {
+  try {
+    return JSON.parse(readFileSync(process.env.OLYMPUS_E2E_SCENARIO, 'utf8')).stallSeat === seat;
+  } catch {
+    return true;
+  }
 }
 
 let work;
@@ -176,6 +194,44 @@ function recordAuthor() {
 }
 
 /**
+ * The calls this run has already recorded, this one included. The stub runs one
+ * process per dispatch, so a scenario that counts dispatches counts them here.
+ */
+function priorCalls(match) {
+  const out = [];
+  for (const name of readdirSync(scenario.callDir)) {
+    if (!name.endsWith('.json')) continue;
+    let call;
+    try {
+      call = JSON.parse(readFileSync(join(scenario.callDir, name), 'utf8'));
+    } catch {
+      continue;
+    }
+    if (match(call)) out.push(call);
+  }
+  return out;
+}
+
+/** How many corrective dispatches this run has made over one record, this one included. */
+function correctiveCalls(record) {
+  return priorCalls(
+    (call) =>
+      call.seat === 'reconcile-write' &&
+      call.prompt.includes('Confirmed findings:') &&
+      call.prompt.includes(`- ${record}`),
+  ).length;
+}
+
+/** How many times this run has reviewed one record, this read included. */
+function reviewCalls(record) {
+  return priorCalls(
+    (call) =>
+      call.seat === 'record-review' &&
+      call.prompt.includes(`Review one decision record: ${record}`),
+  ).length;
+}
+
+/**
  * One record, rewritten to state the tree. The brief names the one record.
  *
  * A scenario that names a supersession takes the other route: the old record
@@ -187,15 +243,35 @@ function recordAuthor() {
 function recordWrite() {
   const record = match(/^- (\S+\.md)$/m)?.[1];
   if (!record) throw new Error('the write brief names no record');
+  const corrective = prompt.includes('Confirmed findings:');
+  // A scenario about a refused dispatch: the report accounts for the judged
+  // record nowhere, which is the check every write is refused on.
+  const refusals = (scenario.recordRefusals ?? {})[record] ?? 0;
+  if (corrective && correctiveCalls(record) <= refusals) {
+    return {
+      report: {
+        rewritten: [],
+        unchanged: [],
+        units: [],
+        divergences: [],
+        answered: [...prompt.matchAll(/^- \[(F\d+)\]/gm)].map((m) => m[1]),
+        ...(scenario.recordSiblings && { siblings: [] }),
+        summary: 'the report accounts for the record nowhere',
+      },
+    };
+  }
   const supersede = (scenario.reconcileSupersedes ?? {})[record];
   if (supersede) return supersedeWrite(record, supersede);
-  const text = (scenario.reconcileWrites ?? {})[record];
+  // A corrective dispatch answers the finding in the record, which is what
+  // moves the text the next cycle reads.
+  const text = corrective
+    ? `${readFileSync(join(process.cwd(), record), 'utf8')}\n${ANSWERED}\n`
+    : (scenario.reconcileWrites ?? {})[record];
   if (text) {
     const full = join(process.cwd(), record);
     mkdirSync(dirname(full), { recursive: true });
     writeFileSync(full, text);
   }
-  const corrective = prompt.includes('Confirmed findings:');
   return {
     report: {
       rewritten: text ? [record] : [],
@@ -250,22 +326,51 @@ function supersedeWrite(record, { closed, added, text }) {
   };
 }
 
-/** One record, reviewed whole. The brief carries the enumeration it answers. */
+/**
+ * One record, reviewed whole. The brief carries the enumeration it answers.
+ *
+ * A scenario that names a finding for this record raises it on the first reads
+ * of that record and on no later one, so a corrective round can close it. The
+ * finding names a unit the same report answers `fails`, which is the rule every
+ * record review report is refused on (ADR-0073).
+ */
 function recordReview() {
   const record = match(/^Review one decision record: (.+)$/m)?.[1]?.trim();
   if (!record) throw new Error('the review brief names no record');
+  const units = [...prompt.matchAll(/^- (U\d+) \(line \d+(?:, (\w+))?\): (.+)$/gm)].map(
+    ([, id, kind, head]) => ({
+      record,
+      id,
+      kind: kind ?? (claimLike(head) ? 'claim' : 'rationale'),
+      verdict: 'holds',
+      evidence: claimLike(head) ? record : 'structure',
+      head,
+    }),
+  );
+  const raised = (scenario.recordFindings ?? {})[record];
+  const target =
+    raised && reviewCalls(record) <= (raised.reads ?? 1)
+      ? (units.find((u) => u.kind === 'claim') ?? units[units.length - 1])
+      : null;
+  if (target) target.verdict = 'fails';
   return {
     report: {
-      findings: [],
-      units: [...prompt.matchAll(/^- (U\d+) \(line \d+(?:, (\w+))?\): (.+)$/gm)].map(
-        ([, id, kind, head]) => ({
-          record,
-          id,
-          kind: kind ?? (claimLike(head) ? 'claim' : 'rationale'),
-          verdict: 'holds',
-          evidence: claimLike(head) ? record : 'structure',
-        }),
-      ),
+      findings: target
+        ? [
+            {
+              id: 'r1',
+              criterion: 'truth',
+              severity: 'HIGH',
+              file: record,
+              unit: target.id,
+              head: target.head,
+              line: 1,
+              summary: raised.summary,
+              evidence: record,
+            },
+          ]
+        : [],
+      units: units.map(({ head: _head, ...rest }) => rest),
       summary: 'every unit of the record stands',
     },
   };
@@ -420,12 +525,15 @@ function triage() {
 
 function verifier() {
   const items = [...prompt.matchAll(/^- \[([^\]]+)\] \((confirm|resolution-check)\)/gm)];
+  // A scenario about a red render needs its findings confirmed; every other
+  // scenario reads a tree that holds what its records state.
+  const confirm = scenario.confirmFindings === true ? 'confirmed' : 'refuted';
   return {
     report: {
       results: items.map(([, id, mode]) => ({
         id,
-        verdict: mode === 'confirm' ? 'refuted' : 'resolved',
-        evidence: 'the code does not show the finding',
+        verdict: mode === 'confirm' ? confirm : 'resolved',
+        evidence: 'the record states what the tree does not hold',
       })),
       summary: `${items.length} item(s) verified`,
     },
@@ -484,6 +592,9 @@ function record() {
       prompt,
       reportPath,
       cwd: process.cwd(),
+      // The range the harness gave this seat. A gate command reads it, and a
+      // scenario about the base the in-run gate judges reads it here.
+      baseSha: process.env.OLYMPUS_BASE_SHA ?? null,
       // Whether the machine's credential reached this seat. The strip follows
       // suite execution, so the answer differs per seat by design.
       secret: process.env[scenario.secretName] !== undefined,

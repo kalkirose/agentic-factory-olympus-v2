@@ -92,7 +92,12 @@ Three lanes share the machinery:
   readiness → records → reconcile → update → ship → close-out. No fix seat, no
   suite, no code verdict. A record-only ticket is refused on the repair lane at
   the launch door with this lane named, and a ticket that names code is refused
-  here (ADR-0074).
+  here (ADR-0074). The birth reads the ticket's own touched records. It is
+  briefed with the records that cite them and the neighbourhood around them.
+  The brief names the layers that read the form at the render, after the commit,
+  and the seat checks its own files against the constitution before it reports.
+  Its environment carries the window's base. At the record cap the lane keeps
+  its work and asks for rounds rather than closing (ADR-0079).
 
 A story launch may **resume from a prior run's freeze**: it starts on the
 frozen commit, carries the born spec and the freeze record over, stamps
@@ -803,7 +808,18 @@ suite authoring (seat) → adversary → freeze (process).
   unit, a finding or a report entry on a record whose status line reads
   superseded or retired. The filtered set a round or a cycle dispatched over is
   stamped before its first seat spawns, so a restart dispatches the list the
-  ledger names and never the tree a seat has moved since (ADR-0078).
+  ledger names and never the tree a seat has moved since (ADR-0078). Every read
+  of what the run did to the record tree opens at one window: the merge base of
+  the run branch and the default branch, computed at the read, out to the
+  worktree. So a record the default branch gained during the run belongs to
+  nobody here, a record this run closed in an earlier commit is closed, and the
+  in-run gate reads the set CI reads. The first cycle of a pass reviews every
+  active record of that window. A later cycle reviews the records the last round
+  changed and the records an open finding names, and stamps the rest `kept`. A
+  corrective round dispatches the active records an open finding or a red layer
+  names. A dispatch that spends its budget ends itself: the entry carries the
+  defects, the render carries `unwritten:<record>`, and the next round writes it
+  (ADR-0079).
 - **The update stage** (ADR-0033) sits between the reconciliation and the ship.
   The run takes the project's ship token, and its first act under the token is
   the branch update against the default branch as it stands after the previous
@@ -1042,10 +1058,14 @@ suite authoring (seat) → adversary → freeze (process).
   and leaves the ticket, and the close writes that ticket where the records did
   not ride the merge whole, or stamps `reconciliation-lost` where it cannot.
   The `merged` stamp carries `reconciled` where the records rode. A stall at
-  `gates.reconcileRounds` takes the fallback on its own and asks nobody:
-  `reconcile-stall` is loud, the story and repair lanes ship the code and ticket
-  the residual, and the records lane closes on the cap and tickets from its
-  branch.
+  `gates.reconcileRounds` is loud on every route to it, and the lane decides
+  what follows. The story and repair lanes take the fallback on their own and
+  ask nobody: the code ships and the residual goes to a ticket. The records lane
+  holds no code to ship, so it pushes the run branch to the origin, writes the
+  ticket with every record, every open finding and every failed dispatch, and
+  parks `reconcile-cap`. An answered `rounds` raises the cap by that count and
+  the stage re-enters its corrective round; `abandon` closes the run and leaves
+  the branch and the ticket for a later one (ADR-0079).
 - **Learning artifact** (ADR-0031): optional, by project config
   (`closeout.learning`: an instructions file and a workspace directory, both
   absolute). A fresh-context seat writes a human-readable lesson about the
@@ -1125,11 +1145,12 @@ suite authoring (seat) → adversary → freeze (process).
 
 ## Escalations and the human
 
-- **Touchpoint catalog** (closed, ten park events): open decisions at build
+- **Touchpoint catalog** (closed, eleven park events): open decisions at build
   start; grounding conflict at spec birth; intent conflict at spec gate;
   spec-gate non-convergence; unkilled-gap survivor; second 0/3 adversary
   round; second stall; card invalidated at ship-time sweep; card decision at
-  ship-time sweep; provisioning gate.
+  ship-time sweep; provisioning gate; the record cap on the records lane, which
+  offers the rounds that finish the work (ADR-0079).
 - A park is the last resort, not the first: a stop whose answer is a clock the
   harness can read is a wait instead, and only a spent wait asks (ADR-0069).
 - Park = stamped escalation record (question, context refs, answer forms) + a

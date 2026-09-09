@@ -32,6 +32,7 @@ import {
   birthRole,
   countedRecords,
   reconcileWriteSchema,
+  runWindow,
   writeChecks,
 } from './records.mjs';
 import { reconcileHandler } from './reconcile.mjs';
@@ -357,7 +358,12 @@ export async function birthRecords(ctx, base) {
   const written = [];
   const outcome = await seatWithChecks(ctx, {
     seat: AUTHOR_SEAT,
-    schema: reconcileWriteSchema({ units: true, siblings: base.recordLifecycle === 'supersede' }),
+    // The forecast is what the schema asks for. A dispatch whose brief lists no
+    // sibling asks the seat for no sibling entry (ADR-0079).
+    schema: reconcileWriteSchema({
+      units: true,
+      siblings: (base.spec?.siblings ?? []).length > 0,
+    }),
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
@@ -526,21 +532,51 @@ async function recordsBase(ctx, mode) {
   }
   const key = source.key ?? ctx.runId;
   const recordPaths = config.repo.recordPaths ?? [];
+  const defaultBranch = ctx.payload.defaultBranch ?? 'main';
+  const touched = touchedPaths(readFileSync(source.path, 'utf8'), worktree, recordPaths);
+  // The window the birth writes inside. Its base rides the seat environment, so
+  // the record layers the seat runs read the range CI reads (ADR-0079).
+  const window = await runWindow({ worktree, defaultBranch, recordPaths });
   return recordBase({
     config,
     worktree,
     key,
-    env: runEnv(ctx, config),
+    env: runEnv(ctx, config, { rangeFrom: window.base }),
     constitution: readConstitution(worktree, config),
-    defaultBranch: ctx.payload.defaultBranch ?? 'main',
+    defaultBranch,
     testPaths: config.repo.testPaths ?? [],
+    // The layers that read a record diff. The birth brief names them as what
+    // reads the form of its files, at the render and after the commit.
+    recordLayers: config.gates?.recordLayers ?? [],
     spec: {
       key,
       path: source.path,
       ...(source.reason && { reason: source.reason }),
-      touchedPaths: touchedPaths(readFileSync(source.path, 'utf8'), worktree, recordPaths),
+      touchedPaths: touched,
+      // The lists the checks refuse on, computed before the seat runs. A brief
+      // that gave neither asked the seat to guess the harness's own reading
+      // (ADR-0079).
+      ...(config.repo?.recordLifecycle === 'supersede' && {
+        siblings: birthSiblingForecast(worktree, touched, recordPaths),
+      }),
     },
   });
+}
+
+/**
+ * The active records that cite a record this work touches, minus the records
+ * the work itself writes. It is the list the sibling check computes after the
+ * seat runs, forecast from the ticket's own paths.
+ */
+function birthSiblingForecast(worktree, touched, recordPaths) {
+  const records = touched.filter((path) => recordPathIncludes(path, recordPaths));
+  const out = new Set();
+  for (const record of records) {
+    for (const other of citingRecords(worktree, record, recordPaths, { scope: records })) {
+      out.add(other);
+    }
+  }
+  return [...out];
 }
 
 /**

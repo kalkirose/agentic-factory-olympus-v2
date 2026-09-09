@@ -55,20 +55,18 @@ title: Alpha feature
 Provide f(x) that doubles x in src/feature.mjs.
 `;
 
-// The closed set of terminal routes, now three. A new entry belongs to a
+// The closed set of terminal routes, now two. A new entry belongs to a
 // design-level decision recorded in an ADR, never to a call site that found a
 // new way to give up. Every park of every type offers `abandon`, and that one
 // route closes on the reason the answered park recorded — so no park type
 // carries a close of its own.
 //
-// The third is the records lane at the record cap. That lane holds no code, so
-// there is nothing to ship and no merge commit a ticket could name: the stage
-// tickets the work from the run branch and the run ends. It asks nobody, which
-// is the decision the stall records (ADR-0075).
+// The records lane at its record cap used to be a third. It parks now: the
+// branch is pushed, the ticket is written, and a person buys rounds or answers
+// `abandon`, which closes through the one route (ADR-0079).
 const CLOSE_SET = new Set([
   'shipped', // the ship step's close-out
   'failed:<answer>', // the abandon route (lanes/shared.mjs)
-  'failed:reconcile-cap', // the records lane at its record cap (lanes/reconcile.mjs)
 ]);
 
 // -- source scan -------------------------------------------------------------

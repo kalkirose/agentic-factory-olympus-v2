@@ -490,7 +490,10 @@ export const RUN_EVENTS = new Set([
   //
   // One writer runs per record, in sequence, each with its own seat identity
   // (ADR-0075). So `records` carries one entry per record, `{record, seat,
-  // cost, attempts, unitsAnswered}`, and a reader prices one record.
+  // cost, attempts, unitsAnswered}`, and a reader prices one record. An entry
+  // with `failed: true` carries the `defects` that ended that dispatch and no
+  // write: the seat spent its budget, the round went on to the next record, and
+  // the render carries `unwritten:<record>` until a round writes it (ADR-0079).
   // A divergence entry carries `evidence`, the path that shows the
   // shift, so a later eval can ask how many recorded shifts were wrong without
   // re-reading the run. `siblings` is what the write answered for every active
@@ -502,8 +505,11 @@ export const RUN_EVENTS = new Set([
   'reconciliation-written',
   // The set one write round dispatched over: the `round`, the `since` the
   // round opened at, the `sha` the tree stood at, the `records` in dispatch
-  // order and the `skipped` the active filter dropped, each with the `status`
-  // word its line read.
+  // order, the `skipped` the active filter dropped, each with the `status` word
+  // its line read, and the `kept` a corrective round owed no answer for, each
+  // with the reason. A seat over a record no finding names writes nothing and
+  // costs the round a dispatch, so the round spends one on the records that owe
+  // an answer and stamps the rest (ADR-0079).
   //
   // A seat name is the index in this list. A list read from the tree shrinks
   // between two entries of one round, because a seat closes the record it was
@@ -511,11 +517,15 @@ export const RUN_EVENTS = new Set([
   // record's commit already holds. So the list is a fact of the ledger, and a
   // re-entry dispatches the list it names (ADR-0078).
   'reconcile-write-set',
-  // The set one cycle reviewed: the `cycle`, the `records` in dispatch order
-  // and the `skipped` the active filter dropped. It is the write set's rule on
-  // the review side: one seat per record, named by its index, and one
-  // `record-units` stamp per seat per cycle. A cycle re-entered after the tree
-  // closed a record reviews the set it stamped (ADR-0078).
+  // The set one cycle reviewed: the `cycle`, the `records` in dispatch order,
+  // the `skipped` the active filter dropped, and the `kept` this cycle did not
+  // read again, each with the cycle whose review it stands on. It is the write
+  // set's rule on the review side: one seat per record, named by its index, and
+  // one `record-units` stamp per seat per cycle. A cycle re-entered after the
+  // tree closed a record reviews the set it stamped (ADR-0078). A cycle after
+  // the first reads the records the last round changed and the records an open
+  // finding names; a fresh seat over an unchanged green record raises findings
+  // on unchanged sentences and spends the cap (ADR-0079).
   'reconcile-review-set',
   // reconciliation (the stage, ADR-0075)
   // What one record seat answered, for one record, unit by unit: the `seat`
@@ -528,18 +538,21 @@ export const RUN_EVENTS = new Set([
   // counts alone cannot tell them apart (ADR-0073).
   'record-units',
   // One corrective round of the reconcile stage: the `round`, the `records` it
-  // dispatched a writer for, and the `findings` it was answering. It counts
-  // against `gates.reconcileRounds` and against nothing else. The code repair
-  // ladder stamps `repair-round`, and the two caps never read each other's
-  // rounds.
+  // dispatched a writer for, the `findings` it was answering, and the `failed`
+  // records whose dispatch spent its budget. It counts against
+  // `gates.reconcileRounds` and against nothing else. The code repair ladder
+  // stamps `repair-round`, and the two caps never read each other's rounds.
   'reconcile-round',
   // One cycle of the reconcile stage, rendered: the `cycle`, which continues
   // the run's own counter so `runId#cycle` stays unique across both renders,
-  // the `sha` of the record commit it judged, the `verdict`, what it left
-  // `open`, the `records` it read and the `layers` it ran. It is the record
-  // certification, and it is never a `verdict-rendered`: two certifications
-  // with two grounds and two shas cannot share one stamp, and the admission
-  // gate reads each against its own tree (ADR-0075).
+  // the `sha` of the record commit it judged, the `base` of the window it read
+  // that sha through, the `verdict`, what it left `open`, the `records` it read,
+  // the `kept` it stood over and did not read again, and the `layers` it ran.
+  // An `open` entry is a finding id, a red layer name, or `unwritten:<record>`
+  // for a record no write of the round answered. It is
+  // the record certification, and it is never a `verdict-rendered`: two
+  // certifications with two grounds and two shas cannot share one stamp, and
+  // the admission gate reads each against its own tree (ADR-0075).
   'reconcile-rendered',
   // The stage stopped at its cap with findings still open: the `rounds` it
   // spent and what stayed `open`. A red render whose dispatch set is empty
@@ -550,6 +563,12 @@ export const RUN_EVENTS = new Set([
   // park asks anybody first. The ticket is the answer, so the close-out
   // `reconciliation-judged` that names one owns this record.
   'reconcile-stall',
+  // The rounds a person bought at a `reconcile-cap` park: the `parkSeq` the
+  // answer belongs to, the `rounds` it names, and the `cap` this pass is judged
+  // against from here. The step derivation reads it, and the stage re-enters
+  // its corrective round on the newest one whatever ended the round before it
+  // (ADR-0079).
+  'reconcile-cap-extended',
   // The recheck a repair round owes a green reconciliation: the `delta` the
   // round committed, the `units` whose evidence paths it touched, what the
   // `judge` said about a record not already owed, and the `result`. A repair
@@ -849,6 +868,12 @@ export const PARK_TYPES = new Set([
   // writes decision records and dispatches no dev seat, so a red on anything but
   // a record layer is a code defect nobody in the run may repair (ADR-0075).
   'ci-red',
+  // A records-lane run whose record rounds are spent with findings still open.
+  // The lane has no code to ship, so the fallback every other lane takes would
+  // close the run and lose the branch, the ledger and the findings. The branch
+  // is pushed, the ticket is written, and the park offers the rounds that
+  // finish the work or the abandon that closes the run (ADR-0079).
+  'reconcile-cap',
   // Terminal-state discipline (ADR-0015): a recoverable failure parks with
   // `retry` / `abandon` instead of closing the run.
   'seat-failure', // a seat work product past its machine retry allowance

@@ -454,6 +454,11 @@ export function recordFiles(worktree, recordPaths = []) {
  * @returns {{neighbours: string[], dropped: number}}
  */
 export function recordNeighbours(worktree, record, recordPaths = []) {
+  return capped(rankedNeighbours(worktree, record, recordPaths));
+}
+
+/** The same ranking, before the cap: the birth neighbourhood unions these. */
+function rankedNeighbours(worktree, record, recordPaths = []) {
   const file = String(record).replaceAll('\\', '/');
   const self = recordId(file);
   const active = activeRecords(worktree, recordPaths).filter((f) => f !== file);
@@ -473,13 +478,17 @@ export function recordNeighbours(worktree, record, recordPaths = []) {
     if (named.has(other) || self === null) return false;
     return recordRefs(readText(join(worktree, other)) ?? '').has(self);
   });
-  return capped([...cited, ...citing.sort(byRecordId)]);
+  return [...cited, ...citing.sort(byRecordId)];
 }
 
 /**
  * The neighbourhood at a birth, where no record exists yet to cite anything.
- * It is derived from the work's own touched paths: every active record that
- * names one of them, then the records those name.
+ *
+ * A touched path that is not a record is read by the path rule: every active
+ * record whose text names that path, then the records those name. A touched
+ * path that is itself a record is read by the record rule, because records cite
+ * each other by id (ADR-0079). A sweep ticket names records alone, and the path
+ * rule answered nothing for it.
  * @returns {{neighbours: string[], dropped: number}}
  */
 export function birthNeighbours(worktree, touchedPaths = [], recordPaths = []) {
@@ -487,6 +496,8 @@ export function birthNeighbours(worktree, touchedPaths = [], recordPaths = []) {
   const paths = touchedPaths
     .map((path) => String(path).replaceAll('\\', '/'))
     .filter((path) => path.length > 0);
+  const records = paths.filter((path) => recordPathIncludes(path, recordPaths));
+  const others = paths.filter((path) => !recordPathIncludes(path, recordPaths));
   const byId = new Map();
   const texts = new Map();
   for (const file of active) {
@@ -495,7 +506,7 @@ export function birthNeighbours(worktree, touchedPaths = [], recordPaths = []) {
     texts.set(file, stripFences(readText(join(worktree, file)) ?? ''));
   }
   const direct = active
-    .filter((file) => paths.some((path) => texts.get(file).includes(path)))
+    .filter((file) => others.some((path) => texts.get(file).includes(path)))
     .sort(byRecordId);
   const found = new Set(direct);
   const named = [];
@@ -507,7 +518,18 @@ export function birthNeighbours(worktree, touchedPaths = [], recordPaths = []) {
       named.push(other);
     }
   }
-  return capped([...direct, ...named]);
+  // A touched path that is itself a record cites by id, and no record's text
+  // holds its path, so the path rule reads nothing for it. Its neighbourhood is
+  // that record's own, both directions (ADR-0079).
+  const cited = [];
+  for (const record of records) {
+    for (const near of rankedNeighbours(worktree, record, recordPaths)) {
+      if (found.has(near)) continue;
+      found.add(near);
+      cited.push(near);
+    }
+  }
+  return capped([...direct, ...named, ...cited]);
 }
 
 /**

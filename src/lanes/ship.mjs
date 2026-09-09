@@ -60,11 +60,12 @@
 // cycle; every other route judges the tree again first. Every handler
 // re-derives its position from the run ledger, the git state, and the forge,
 // so a daemon restart resumes mid-ship without memory.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
   ciEvidenceDir,
   commandLogPath,
+  absorbedTicketPath,
   repairTicketPath,
   reconcileTicketPath,
   runReportPath,
@@ -114,7 +115,7 @@ import { fastPathDecision } from './fastpath.mjs';
 import { runCommand } from './exec.mjs';
 import { probeCredentials, worldConfig } from './probes.mjs';
 import { MERGE_SUITE_SCHEMA } from './story.mjs';
-import { WRITE_SEAT, findingLine } from './records.mjs';
+import { WRITE_SEAT, findingLine, runWindow } from './records.mjs';
 import {
   RECONCILE_STAGE,
   SHIP_WITHOUT_RECORDS,
@@ -125,7 +126,7 @@ import {
   reconcileTicketFromBranch,
 } from './reconcile.mjs';
 import { recordBase, recordsCommitted } from './records-stage.mjs';
-import { recordNeighbours } from './units.mjs';
+import { activeOf, recordNeighbours } from './units.mjs';
 import {
   DEV_SCHEMA,
   triageStep,
@@ -147,6 +148,7 @@ import {
   freezeExclusions,
   invocationCount,
   parkDirective,
+  pushBranch,
   sinceFreshPass,
   GATE_FORMS,
   withAbandonGuard,
@@ -645,7 +647,7 @@ async function fastPathShip(ctx, base, out) {
       // The reconciliation's own ground: the run's records and the records they
       // name, computed at the merge (ADR-0075).
       records: {
-        neighbourhood: recordNeighbourhood(base, events),
+        neighbourhood: await recordNeighbourhood(base),
         recordPaths: base.recordPaths ?? [],
       },
     });
@@ -669,15 +671,19 @@ async function fastPathShip(ctx, base, out) {
 }
 
 /**
- * The reconciliation's ground: this run's own records and the records they name,
- * by path. A record outside it is a record no claim of this run rests on, so the
- * default branch may move it and the reconciliation still stands.
+ * The reconciliation's ground: the active records of this run's own window and
+ * the records they name, by path. A record outside it is a record no claim of
+ * this run rests on, so the default branch may move it and the reconciliation
+ * still stands.
+ *
+ * The window is the run's own work against its merge base, so a record the
+ * default branch gained while the run worked is never this run's ground
+ * (ADR-0079). A closed record leaves the set with its citers: no seat may edit
+ * one, so an incoming change to it asks this run for nothing.
  */
-function recordNeighbourhood(base, events) {
-  const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written');
-  const own = [
-    ...new Set([...(written?.rewritten ?? []), ...(recordsCommitted(events)?.paths ?? [])]),
-  ];
+async function recordNeighbourhood(base) {
+  const window = await runWindow(base);
+  const own = activeOf(base.worktree, window.files).records;
   const out = new Set(own);
   for (const record of own) {
     for (const near of recordNeighbours(base.worktree, record, base.recordPaths ?? []).neighbours) {
@@ -982,21 +988,6 @@ async function labelRequest(ctx, base, pr, labels, atCreation) {
       `and the forge refused: ${applied.reason ?? 'no reason given'}. ` +
       'Define them on the repository, then answer to open the request again.',
   });
-}
-
-async function pushBranch(ctx, base, { expected = null } = {}) {
-  try {
-    // Plain pushes cover the fast-forward cases. A fresh pass rewrites the
-    // run branch's history; that push carries an explicit lease on the
-    // remote head the loop just observed — force over exactly that value.
-    await push(base.worktree, 'origin', base.branch, { lease: expected });
-    return null;
-  } catch (error) {
-    return parkDirective('provisioning-gate', {
-      ...GATE_FORMS,
-      question: `The remote rejected the push of ${base.branch}:\n${error.message}`,
-    });
-  }
 }
 
 // -- the check watcher -------------------------------------------------------
@@ -1635,7 +1626,10 @@ export function recordsLaneCiRed(ctx, base, opened, sha, redChecks) {
       source: 'ci',
       verdict: 'red',
       open: names,
+      // The whole set the last render stood over: what a seat read, and what
+      // its last green review answers for (ADR-0079).
       records: last?.records ?? [],
+      ...(last?.kept?.length > 0 && { kept: last.kept }),
       layers: names.map((layer) => ({ layer, status: 'red' })),
       gist: gist(`the record layers are red in CI: ${names.join(', ')}`),
     });
@@ -2753,6 +2747,54 @@ function residualLine(f) {
 }
 
 /**
+ * The cap ticket of a run that went on and shipped.
+ *
+ * A records-lane run at its cap writes a ticket and parks. The rounds a person
+ * buys there finish the work, and the merge carries it, so the ticket describes
+ * work that shipped. It leaves the tickets directory a person launches from,
+ * and the ledger records both the absorption and a move that failed (ADR-0079).
+ *
+ * The move is the fact and the stamp is the record of it. A stop between the
+ * two leaves the file where the move put it, so a close-out that finds the
+ * ticket gone and the absorbed one there stamps the absorption and moves
+ * nothing.
+ */
+export function absorbCapTicket(ctx, events, ticketed) {
+  const bought = events.some(
+    (e) => e.event === 'reconcile-cap-extended' && e.seq > ticketed.seq,
+  );
+  if (!bought) return;
+  const absorbed = absorbedTicketPath(ctx.paths, ticketed.ticket);
+  if (existsSync(ticketed.ticket) || !existsSync(absorbed)) {
+    try {
+      mkdirSync(dirname(absorbed), { recursive: true });
+      renameSync(ticketed.ticket, absorbed);
+    } catch (error) {
+      ctx.store.append('reconciliation-judged', {
+        actor: ACTOR,
+        ok: true,
+        owed: false,
+        records: ticketed.records ?? [],
+        reason:
+          'the rounds bought at the record cap wrote the records, and the merge carried them',
+        cause: `the cap ticket could not be moved: ${error.message}`,
+        gist: gist(`the cap ticket stays at ${ticketed.ticket}`),
+      });
+      return;
+    }
+  }
+  ctx.store.append('reconciliation-judged', {
+    actor: ACTOR,
+    ok: true,
+    owed: false,
+    records: ticketed.records ?? [],
+    reason: 'the rounds bought at the record cap wrote the records, and the merge carried them',
+    absorbed,
+    gist: gist(`the cap ticket is absorbed: ${absorbed}`),
+  });
+}
+
+/**
  * The close's half of the reconciliation: the records that did not ride the
  * merge are ticketed here, where the merge commit the ticket names exists.
  *
@@ -2765,9 +2807,10 @@ function reconcileClose(ctx, base, merged) {
   const events = runEvents(ctx);
   const judged = sinceFreshPass(events, (e) => e.event === 'reconciliation-judged');
   if (judged?.ok !== true || judged.owed !== true) return;
-  if (events.some((e) => e.event === 'reconciliation-judged' && typeof e.ticket === 'string')) {
-    return;
-  }
+  const ticketed = events.find(
+    (e) => e.event === 'reconciliation-judged' && typeof e.ticket === 'string',
+  );
+  if (ticketed) return absorbCapTicket(ctx, events, ticketed);
   const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written');
   // The records that rode this merge with a confirmed finding still open. The
   // rewrite ships, because the judge found the old records owed and discarding
@@ -3133,16 +3176,23 @@ async function shipBase(ctx, forgeFor) {
         ? ticket
         : join(worktree, ticket)
       : null;
-  const rangeFrom = passOpeningSha(
-    runEvents(ctx),
-    ctx.payload.baseSha ?? recordsCommitted(runEvents(ctx))?.sha ?? null,
-  );
+  const defaultBranch = ctx.payload.defaultBranch ?? 'main';
+  // The merge base of the run branch and the default branch, computed here.
+  // It is the base CI judges the request against, so the gate command reads one
+  // set in the run and in CI. A read that fails falls back to the sha the pass
+  // opened at (ADR-0079).
+  const rangeFrom =
+    (await runWindow({ worktree, defaultBranch, recordPaths: config.repo.recordPaths ?? [] })).base ??
+    passOpeningSha(
+      runEvents(ctx),
+      ctx.payload.baseSha ?? recordsCommitted(runEvents(ctx))?.sha ?? null,
+    );
   return recordBase({
     forge,
     config,
     worktree,
     branch: ctx.payload.branch,
-    defaultBranch: ctx.payload.defaultBranch ?? 'main',
+    defaultBranch,
     // The project config the run pinned at its launch. It carries the ground of
     // every Tier-1 layer, so the fast path reads a default-branch move of it as
     // ground the certification rests on (ADR-0056).

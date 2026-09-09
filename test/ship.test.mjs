@@ -10,6 +10,7 @@ import { basename, dirname, join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import {
   scaffoldHome,
+  absorbedTicketPath,
   archivedRunLedgerPath,
   repairTicketPath,
   reconcileTicketPath,
@@ -17,6 +18,7 @@ import {
 } from '../src/daemon/home.mjs';
 import { postFreeze, repairLane, restoreAnchor } from '../src/lanes/verdict.mjs';
 import {
+  absorbCapTicket,
   admitted,
   certifiedTrees,
   certifyingStage,
@@ -4786,6 +4788,63 @@ function stamping() {
   };
 }
 
+/**
+ * A run with a home and a ledger behind it: the routes that read the run's own
+ * stamps need one, and a bare stub answers an empty ledger for every read.
+ */
+function runWithLedger(t, lines = []) {
+  const home = tempDir();
+  const paths = scaffoldHome(home);
+  const runId = 'proj-ledger-1';
+  const store = openRunStore(paths, runId);
+  t.after(() => {
+    store.close();
+    removeDir(home);
+  });
+  for (const line of lines) store.append(line.event, { actor: 'daemon', ...line.fields });
+  return { paths, runId, store, events: () => readEvents(runLedgerPath(paths, runId)) };
+}
+
+test('a cap ticket the move already carried is stamped, and moved no second time', (t) => {
+  const ctx = runWithLedger(t);
+  const ticket = reconcileTicketPath(ctx.paths, ctx.runId);
+  const absorbed = absorbedTicketPath(ctx.paths, ticket);
+  const ticketed = { seq: 1, event: 'reconciliation-judged', ticket, records: [ADR_FILE] };
+  const bought = { seq: 2, event: 'reconcile-cap-extended', rounds: 1, cap: 2 };
+
+  // The ordinary move: the ticket is where the cap wrote it.
+  mkdirSync(dirname(ticket), { recursive: true });
+  writeFileSync(ticket, '# the cap ticket\n');
+  absorbCapTicket(ctx, [ticketed, bought], ticketed);
+  assert.equal(existsSync(ticket), false);
+  assert.equal(readFileSync(absorbed, 'utf8'), '# the cap ticket\n');
+  const first = ctx.events().at(-1);
+  assert.equal(first.owed, false);
+  assert.equal(first.absorbed, absorbed);
+  assert.equal(first.cause, undefined);
+
+  // The restart shape: a stop between the move and its stamp leaves the ticket
+  // where the move put it. The close-out that comes back stamps the absorption
+  // and moves nothing, rather than recording a failed move that succeeded.
+  absorbCapTicket(ctx, [ticketed, bought], ticketed);
+  const second = ctx.events().at(-1);
+  assert.equal(second.absorbed, absorbed);
+  assert.equal(second.cause, undefined);
+  assert.equal(readFileSync(absorbed, 'utf8'), '# the cap ticket\n');
+
+  // A ticket that is nowhere is a move that failed, and the stamp says so.
+  rmSync(absorbed, { force: true });
+  absorbCapTicket(ctx, [ticketed, bought], ticketed);
+  const third = ctx.events().at(-1);
+  assert.equal(third.absorbed, undefined);
+  assert.match(third.cause, /the cap ticket could not be moved/);
+
+  // A run that bought no round leaves the ticket and stamps nothing.
+  const quiet = runWithLedger(t);
+  absorbCapTicket(quiet, [ticketed], ticketed);
+  assert.deepEqual(quiet.events(), []);
+});
+
 test('a records-lane CI red on a record layer routes to the stage, and a code red parks', () => {
   const base = { mode: 'records', recordLayers: ['adr-form'] };
   const opened = { pr: 7 };
@@ -4802,6 +4861,7 @@ test('a records-lane CI red on a record layer routes to the stage, and a code re
   assert.equal(rendered.sha, sha);
   assert.deepEqual(rendered.open, ['adr-form']);
   assert.deepEqual(rendered.layers, [{ layer: 'adr-form', status: 'red' }]);
+  assert.deepEqual(rendered.records, []);
 
   // One check that is not a record layer is a code defect this lane holds no
   // seat for, so it parks with the names.
@@ -4821,6 +4881,37 @@ test('a records-lane CI red on a record layer routes to the stage, and a code re
       .park.type,
     'ci-red',
   );
+});
+
+test('a records-lane CI red carries the whole set the last render stood over', (t) => {
+  const kept = 'docs/adr/adr-0002-kept.md';
+  const ctx = runWithLedger(t, [
+    {
+      event: 'reconcile-rendered',
+      fields: {
+        cycle: 1,
+        sha: 'a'.repeat(40),
+        verdict: 'green',
+        open: [],
+        records: [ADR_FILE],
+        kept: [kept],
+      },
+    },
+  ]);
+  const directive = recordsLaneCiRed(
+    ctx,
+    { mode: 'records', recordLayers: ['adr-form'] },
+    { pr: 7 },
+    'b'.repeat(40),
+    [{ name: 'adr-form' }],
+  );
+  assert.deepEqual(directive, { next: 'reconcile' });
+  // The render CI earns is the whole set the last one stood over: what a seat
+  // read, and what its last green review answers for (ADR-0079).
+  const rendered = ctx.events().filter((e) => e.event === 'reconcile-rendered').at(-1);
+  assert.equal(rendered.source, 'ci');
+  assert.deepEqual(rendered.records, [ADR_FILE]);
+  assert.deepEqual(rendered.kept, [kept]);
 });
 
 test('a records-lane update over an uncertified tree goes to the stage that certifies it', () => {

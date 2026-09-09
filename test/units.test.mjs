@@ -425,6 +425,33 @@ test('a birth neighbourhood comes from the touched paths, then from what they na
   });
 });
 
+test('a birth over a touched record reads that record own neighbourhood (W2)', (t) => {
+  const dir = tree(t, {
+    'docs/adr/adr-001-first.md': record('001', { body: 'The decision stands, and ADR-003 follows it.' }),
+    'docs/adr/adr-002-second.md': record('002', { body: 'It relies on ADR-001.' }),
+    'docs/adr/adr-003-third.md': record('003', { body: 'It names src/other.mjs.' }),
+    'docs/adr/adr-004-fourth.md': record('004', { body: 'It decides something else.' }),
+  });
+  // A sweep ticket names records, and records cite by id: the path rule reads
+  // nothing for it, and the record rule reads both directions.
+  assert.deepEqual(birthNeighbours(dir, ['docs/adr/adr-001-first.md'], ['docs/adr']), {
+    neighbours: ['docs/adr/adr-003-third.md', 'docs/adr/adr-002-second.md'],
+    dropped: 0,
+  });
+  // The two rules stand side by side: a ticket that names a path and a record
+  // takes the union, path rule first.
+  assert.deepEqual(
+    birthNeighbours(dir, ['src/other.mjs', 'docs/adr/adr-001-first.md'], ['docs/adr']),
+    {
+      neighbours: [
+        'docs/adr/adr-003-third.md',
+        'docs/adr/adr-002-second.md',
+      ],
+      dropped: 0,
+    },
+  );
+});
+
 test('the siblings of a superseded record leave out the run own scope', (t) => {
   const dir = tree(t, {
     'docs/adr/adr-001-first.md': record('001', { body: 'The decision stands here.' }),
