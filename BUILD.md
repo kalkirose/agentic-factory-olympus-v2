@@ -783,4 +783,11 @@ never carries a project's specifics.
   `unwritten:<record>` until a round writes it. A records-lane run at its cap
   pushes its branch, writes the ticket and parks `reconcile-cap`, where `rounds`
   buys more and `abandon` closes. Record review seats resume by report and stamp
-  as they settle. ADR-0079 is new and supersedes ADR-0078 in part.
+  as they settle. A corrective round asks who owes an answer over the active
+  records alone, so a red layer that names a closed record widens to that set.
+  The write-set lookup takes the round as well as the render, and never a stamp
+  older than the newest bought round. A bought round raises the cap to the
+  rounds spent plus the rounds paid for. The render names the kept records
+  beside the dispatched ones. A cap ticket whose work later ships leaves the
+  tickets directory for `tickets/absorbed`. ADR-0079 is new and supersedes
+  ADR-0078 in part.

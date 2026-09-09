@@ -435,6 +435,26 @@ test('a window read that fails answers the error and never an empty window', asy
   assert.match(window.error, /^merge-base HEAD no-such-branch: /);
 });
 
+test('a run resumed on an inherited freeze holds the records it inherited', async (t) => {
+  // A story launch may start on a prior run's frozen commit. That commit holds
+  // the records the prior run was born with, and the branch carries them, so
+  // the window this run reads holds them beside its own (ADR-0079). The window
+  // is the run's branch against the default branch, and this is what that
+  // means for a resumed run: it reviews what it inherited.
+  const { dir } = windowRepo(t);
+  const inherited = 'docs/adr/adr-010-inherited.md';
+  const own = 'docs/adr/adr-011-own.md';
+  commitTree(dir, { [inherited]: ACCEPTED('010') }, 'records: the run this one resumes wrote it');
+  commitTree(dir, { [own]: ACCEPTED('011') }, 'records: this run writes it');
+  const base = { worktree: dir, defaultBranch: 'main', recordPaths: ['docs/adr'] };
+  const window = await runWindow(base);
+  assert.deepEqual(window.files.slice().sort(), [inherited, own]);
+  assert.deepEqual(
+    (await recordScope(dir, ['docs/adr'], { defaultBranch: 'main' })).files.slice().sort(),
+    [inherited, own],
+  );
+});
+
 // -- the record set (point 5) -------------------------------------------------
 
 test('recordScope reads the run window, and never a record main gained', async (t) => {

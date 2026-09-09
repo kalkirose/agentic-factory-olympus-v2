@@ -105,9 +105,15 @@ costs one review seat and one write seat.
 
 The form of a born record is first read by the record layer at the render, over
 the commit. No command a birth seat can run proves the form of a file it has not
-committed, so the brief states the cost of a defect and the seat reads its own
+committed. So the brief states the cost of a defect, and the seat reads its own
 work against the constitution. A form defect therefore still costs one cycle and
 one corrective round.
+
+A story run that starts on a prior run's frozen commit inherits that run's
+records on its own branch. The window opens at the merge base, so those records
+are in it, and the stage reviews them beside the ones this run writes. That is
+the window's meaning for a resumed run, and it is the safe direction: a record
+the branch carries to the merge is a record this run ships.
 
 ## Rejected options
 
@@ -127,10 +133,10 @@ one corrective round.
 
 ## Fallback path
 
-The alternative is the window alone, with the round range kept for the closure
-and the sibling reads and the cap closing as it did. The switch trigger is a
-supersession refusal on a corrective write over a born replacement, or a cap
-park nobody answers. The reversal cost is one function and one stamp.
+The alternative is the round range every reader took before, with the records
+lane closing at its cap and ticketing from its branch. The switch trigger is a
+window read that fails on every check of a run, which leaves the stage refusing
+closures it cannot judge. The reversal cost is one function and one stamp.
 
 ## References
 

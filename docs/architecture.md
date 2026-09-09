@@ -814,10 +814,10 @@ suite authoring (seat) → adversary → freeze (process).
   worktree. So a record the default branch gained during the run belongs to
   nobody here, a record this run closed in an earlier commit is closed, and the
   in-run gate reads the set CI reads. The first cycle of a pass reviews every
-  active record of that window; a later cycle reviews the records the last round
+  active record of that window. A later cycle reviews the records the last round
   changed and the records an open finding names, and stamps the rest `kept`. A
-  corrective round dispatches the records an open finding or a red layer names,
-  and a dispatch that spends its budget ends itself: the entry carries the
+  corrective round dispatches the active records an open finding or a red layer
+  names. A dispatch that spends its budget ends itself: the entry carries the
   defects, the render carries `unwritten:<record>`, and the next round writes it
   (ADR-0079).
 - **The update stage** (ADR-0033) sits between the reconciliation and the ship.
