@@ -2750,39 +2750,44 @@ function residualLine(f) {
  * buys there finish the work, and the merge carries it, so the ticket describes
  * work that shipped. It leaves the tickets directory a person launches from,
  * and the ledger records both the absorption and a move that failed (ADR-0079).
+ *
+ * The move is the fact and the stamp is the record of it. A stop between the
+ * two leaves the file where the move put it, so a close-out that finds the
+ * ticket gone and the absorbed one there stamps the absorption and moves
+ * nothing.
  */
-function absorbCapTicket(ctx, events, ticketed) {
+export function absorbCapTicket(ctx, events, ticketed) {
   const bought = events.some(
     (e) => e.event === 'reconcile-cap-extended' && e.seq > ticketed.seq,
   );
   if (!bought) return;
   const absorbed = absorbedTicketPath(ctx.paths, ticketed.ticket);
-  let moved = null;
-  try {
-    mkdirSync(dirname(absorbed), { recursive: true });
-    renameSync(ticketed.ticket, absorbed);
-    moved = absorbed;
-  } catch (error) {
-    moved = null;
-    ctx.store.append('reconciliation-judged', {
-      actor: ACTOR,
-      ok: true,
-      owed: false,
-      records: ticketed.records ?? [],
-      reason: 'the rounds bought at the record cap wrote the records, and the merge carried them',
-      cause: `the cap ticket could not be moved: ${error.message}`,
-      gist: gist(`the cap ticket stays at ${ticketed.ticket}`),
-    });
+  if (existsSync(ticketed.ticket) || !existsSync(absorbed)) {
+    try {
+      mkdirSync(dirname(absorbed), { recursive: true });
+      renameSync(ticketed.ticket, absorbed);
+    } catch (error) {
+      ctx.store.append('reconciliation-judged', {
+        actor: ACTOR,
+        ok: true,
+        owed: false,
+        records: ticketed.records ?? [],
+        reason:
+          'the rounds bought at the record cap wrote the records, and the merge carried them',
+        cause: `the cap ticket could not be moved: ${error.message}`,
+        gist: gist(`the cap ticket stays at ${ticketed.ticket}`),
+      });
+      return;
+    }
   }
-  if (moved === null) return;
   ctx.store.append('reconciliation-judged', {
     actor: ACTOR,
     ok: true,
     owed: false,
     records: ticketed.records ?? [],
     reason: 'the rounds bought at the record cap wrote the records, and the merge carried them',
-    absorbed: moved,
-    gist: gist(`the cap ticket is absorbed: ${moved}`),
+    absorbed,
+    gist: gist(`the cap ticket is absorbed: ${absorbed}`),
   });
 }
 
