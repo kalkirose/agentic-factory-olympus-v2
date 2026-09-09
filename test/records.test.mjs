@@ -106,6 +106,7 @@ test('the write schema carries the units, the divergence evidence and the siblin
     'claim',
     'open',
     'rationale',
+    'reference',
   ]);
   assert.deepEqual(base.properties.units.items.properties.verdict.enum, [
     'holds',
@@ -223,6 +224,151 @@ test('unit check 5 refuses a claim filed as rationale', (t) => {
   );
   assert.equal(defects.length, 1);
   assert.match(defects[0], /^unit check 5: .*U2 is filed as rationale and its text reads as a claim/);
+});
+
+// -- the reference kind and its check (plan 41, point 1) ----------------------
+
+const CITING = 'docs/adr/adr-901-the-citing-record.md';
+const CLOSED = 'docs/adr/adr-899-the-closed-record.md';
+
+/** A record whose reference section names a record, a path and a link. */
+function citingText(references) {
+  return [
+    '# ADR-901: The record that cites another',
+    '',
+    '**Status:** Accepted',
+    '',
+    '## Decision',
+    '',
+    'The helper lives at `src/feature.mjs`.',
+    '',
+    '## References',
+    '',
+    ...references,
+    '',
+  ].join('\n');
+}
+
+const CLOSED_TEXT = [
+  '# ADR-899: The record this one replaces',
+  '',
+  '**Status:** Superseded by ADR-901 (2026-09-09)',
+  '',
+  '## Decision',
+  '',
+  'The helper doubled its input.',
+  '',
+].join('\n');
+
+/** A tree that declares its record paths, so the reference check reads them. */
+function citingTree(t, references, files = {}) {
+  return tree(t, { [CITING]: citingText(references), ...files });
+}
+
+const CITING_BASE = (dir) => ({ worktree: dir, recordPaths: ['docs/adr'] });
+
+/** One entry per unit of a record, the enumeration's own kinds kept. */
+function unitsOf(dir, record, over = {}) {
+  return recordUnits(readFileSync(join(dir, record), 'utf8')).map((unit) => {
+    const read = unit.kind ?? (kindTest(unit.head) ? 'claim' : 'rationale');
+    return {
+      record,
+      id: unit.id,
+      kind: read,
+      verdict: 'holds',
+      evidence: read === 'claim' ? 'src/feature.mjs:1' : 'one short sentence',
+      ...(over[unit.id] ?? {}),
+    };
+  });
+}
+
+function citingReport(dir, over = {}) {
+  return {
+    rewritten: [CITING],
+    unchanged: [],
+    units: unitsOf(dir, CITING, over),
+    divergences: [],
+    summary: 'the record states what shipped',
+  };
+}
+
+test('unit check 9 refuses any kind but reference on a unit of the reference section', (t) => {
+  const dir = citingTree(t, ['- ADR-900, the record this one narrows']);
+  const base = CITING_BASE(dir);
+  // The seat's guess, either way it guessed this run: a claim with the cited
+  // record's path as evidence, or rationale.
+  const claimed = unitChecks(base, [CITING], citingReport(dir, { U3: { kind: 'claim' } }));
+  assert.equal(claimed.length, 1);
+  assert.match(claimed[0], /^unit check 9: .*U3 .*stands under "## References" and you file it as "claim"/);
+  const rationale = unitChecks(base, [CITING], citingReport(dir, { U3: { kind: 'rationale' } }));
+  assert.equal(rationale.length, 1);
+  assert.match(rationale[0], /^unit check 9: /);
+  // The kind the enumeration named passes, and nothing else is asked of it.
+  assert.deepEqual(unitChecks(base, [CITING], citingReport(dir)), []);
+});
+
+test('unit check 9 refuses the reference kind on a unit of the body', (t) => {
+  const dir = citingTree(t, ['- ADR-900, the record this one narrows']);
+  const defects = unitChecks(CITING_BASE(dir), [CITING], citingReport(dir, { U2: { kind: 'reference' } }));
+  assert.equal(defects.length, 1);
+  assert.match(defects[0], /^unit check 9: .*U2 .*is filed as "reference" and it stands under no/);
+});
+
+// The gloss the live tree writes on half its reference bullets holds a claim
+// verb. Check 5 read it and refused the report; the kind is the harness's now,
+// so nothing reads the verb.
+test('unit check 5 never fires on a reference unit whose gloss reads as a claim', (t) => {
+  const dir = citingTree(t, ['- ADR-900, the standard this record is written to']);
+  const head = recordUnits(readFileSync(join(dir, CITING), 'utf8')).find((u) => u.id === 'U3').head;
+  assert.equal(kindTest(head), 'claim');
+  assert.deepEqual(unitChecks(CITING_BASE(dir), [CITING], citingReport(dir)), []);
+});
+
+test('unit check 9 refuses a reference to a record id the tree does not hold', (t) => {
+  const dir = citingTree(t, ['- ADR-999, a record nobody wrote']);
+  const defects = unitChecks(CITING_BASE(dir), [CITING], citingReport(dir));
+  assert.equal(defects.length, 1);
+  assert.match(defects[0], /^unit check 9: .*cites ADR-999 and the record tree holds no record of that id/);
+});
+
+test('unit check 9 refuses a reference to a path the worktree does not hold', (t) => {
+  const dir = citingTree(t, ['- `scripts/nowhere.ts`, the checker']);
+  const defects = unitChecks(CITING_BASE(dir), [CITING], citingReport(dir));
+  assert.equal(defects.length, 1);
+  assert.match(defects[0], /^unit check 9: .*cites scripts\/nowhere\.ts and the worktree holds no such path/);
+  // The path the tree does hold passes, in every form a record writes it.
+  for (const bullet of ['- `src/feature.mjs`', '- src/feature.mjs, the helper', '- docs/adr/adr-900-the-helper.md']) {
+    const held = citingTree(t, [bullet]);
+    assert.deepEqual(unitChecks(CITING_BASE(held), [CITING], citingReport(held)), [], bullet);
+  }
+});
+
+// A record cites the record it supersedes, and that record is closed by the
+// same diff. The check reads the whole record tree, at any status.
+test('a reference to a superseded record passes', (t) => {
+  const dir = citingTree(t, ['- ADR-899, the record this one replaces'], { [CLOSED]: CLOSED_TEXT });
+  assert.deepEqual(unitChecks(CITING_BASE(dir), [CITING], citingReport(dir)), []);
+});
+
+// A link names a document outside the repository. The harness says nothing
+// about one, and a reference that names nothing at all is the defect.
+test('unit check 9 takes a link as a name and refuses a reference that names nothing', (t) => {
+  const linked = citingTree(t, ['- [the upstream note](https://example.invalid/notes)']);
+  assert.deepEqual(unitChecks(CITING_BASE(linked), [CITING], citingReport(linked)), []);
+  const bare = citingTree(t, ['- PRD NFR24, the requirement behind this decision']);
+  const defects = unitChecks(CITING_BASE(bare), [CITING], citingReport(bare));
+  assert.equal(defects.length, 1);
+  assert.match(defects[0], /^unit check 9: .*names no record, no path and no link/);
+});
+
+// The proof it can still fail: one record, two bad references, both named in
+// the text the seat is given.
+test('a record citing a missing id and a missing path is refused with both names', (t) => {
+  const dir = citingTree(t, ['- ADR-999, a record nobody wrote', '- `scripts/nowhere.ts`, the checker']);
+  const defects = unitChecks(CITING_BASE(dir), [CITING], citingReport(dir));
+  assert.equal(defects.length, 2);
+  assert.ok(defects.some((d) => d.includes('ADR-999')), defects.join('\n'));
+  assert.ok(defects.some((d) => d.includes('scripts/nowhere.ts')), defects.join('\n'));
 });
 
 // The kind is not the seat's escape: a path, a symbol in backticks or one of

@@ -127,6 +127,106 @@ test('the title is U0 and each head-block line is one unit', () => {
   assert.equal(gate.byId('U0').head.split(/\s+/).length, 8);
 });
 
+// -- the reference kind (plan 41, point 1) ------------------------------------
+
+// A bullet under `## References` states nothing about the tree and gives no
+// reason, so no seat can file it as a claim, an open part or rationale. The
+// harness names it, over the span the form check reads: from the heading to the
+// next heading of the same level or higher.
+test('every unit of the reference section takes the reference kind', () => {
+  const auth = units(fixture('adr-004-admin-auth'));
+  // The heading stands at 133 and the record ends with its bullets.
+  assert.equal(auth.at(133), undefined, 'a heading is no unit');
+  for (let line = 135; line <= 139; line++) {
+    assert.equal(auth.at(line)?.kind, 'reference', String(line));
+  }
+  // Every unit above the heading keeps the kind it had.
+  for (const unit of auth.list) {
+    if (unit.line < 133) assert.notEqual(unit.kind, 'reference', unit.id);
+  }
+
+  const sanity = units(fixture('adr-020-sanity-cms-pattern'));
+  const references = sanity.list.filter((u) => u.kind === 'reference');
+  assert.ok(references.length > 0, 'the fixture holds a reference section');
+  for (const unit of references) assert.ok(unit.line > 241, unit.id);
+});
+
+// The span rule, in the four shapes a record writes: a subheading stays inside
+// the section, the next `##` closes it, a section that runs to the end of the
+// file holds every line after its heading, and a heading that is not the
+// reference heading opens nothing.
+test('the reference span runs to the next section heading and no further', () => {
+  const record = [
+    '# ADR-0900: A record with references',
+    '',
+    'Status: accepted (2026-09-09)',
+    '',
+    '## References',
+    '',
+    '- ADR-0073',
+    '',
+    '### The records this one replaces',
+    '',
+    '- ADR-0072',
+    '',
+    '## Consequences',
+    '',
+    'The tree grows.',
+    '',
+    '## References again',
+    '',
+    '- `src/lanes/units.mjs`',
+    '',
+  ].join('\n');
+  const list = recordUnits(record);
+  assert.deepEqual(
+    list.map((u) => [u.id, u.line, u.kind ?? null]),
+    [
+      ['U0', 1, 'title'],
+      ['U1', 3, 'status'],
+      ['U2', 7, 'reference'],
+      ['U3', 11, 'reference'],
+      ['U4', 15, null],
+      ['U5', 19, null],
+    ],
+  );
+
+  // A reference section that runs to the end of the file, and a heading whose
+  // words only start with the section's name.
+  const tail = recordUnits(
+    ['# ADR-0901: A record', '', 'Status: accepted (2026-09-09)', '', '## References', '', '- ADR-0073', '- `bin/olympus-units.mjs`', ''].join('\n'),
+  );
+  assert.deepEqual(
+    tail.slice(2).map((u) => [u.line, u.kind]),
+    [
+      [7, 'reference'],
+      [8, 'reference'],
+    ],
+  );
+});
+
+// The seat runs the bin and the check runs the module, so the kind the seat
+// reads is the kind the check counts.
+test('olympus-units prints the reference kind in its kind column', () => {
+  const path = join(FIXTURES, 'adr-004-admin-auth.md');
+  const out = execFileSync(process.execPath, [join(ROOT, 'bin/olympus-units.mjs'), path], {
+    encoding: 'utf8',
+  });
+  const printed = out
+    .trim()
+    .split('\n')
+    .slice(0, -1)
+    .map((line) => line.split('\t'));
+  const references = printed.filter((row) => row[2] === 'reference');
+  const counted = recordUnits(readFileSync(path, 'utf8')).filter((u) => u.kind === 'reference');
+  assert.equal(references.length, counted.length);
+  assert.deepEqual(
+    references.map((row) => row[0]),
+    counted.map((u) => u.id),
+  );
+  assert.ok(references.length > 0, 'the fixture holds a reference section');
+});
+
 // The harness's own record tree, read in the tree it describes. The
 // assertions are structural, because this text moves with the harness while
 // the ceq fixtures above stand still.

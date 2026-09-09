@@ -40,7 +40,7 @@ import {
   furyPanel,
   recordCriteriaLines,
 } from './lenses.mjs';
-import { REVIEW_SEAT, UNITS_BIN, unitChecks } from './records.mjs';
+import { REVIEW_SEAT, UNITS_BIN, unitChecks, unitKindLines } from './records.mjs';
 import {
   NEIGHBOUR_CAP,
   UNIT_KINDS,
@@ -1023,16 +1023,7 @@ function unitAnswerLines() {
     '"units" takes one entry per unit above, and the harness refuses a report that misses one,',
     'names a unit the file does not hold, or answers one twice:',
     '- "record": the record path. "id": the unit id above.',
-    '- "kind": "title", "status", "claim", "open" or "rationale". A claim is a present-tense',
-    '  statement about the tree. An open unit states a part the tree does not hold. Rationale is',
-    '  why the decision was taken, what it rejected, what would reverse it, and plain structure.',
-    '  A unit whose text names a repository path, a symbol in backticks, or one of the verbs is,',
-    '  are, reads, returns, runs, writes, serves or exposes is a claim. Filing it as rationale is',
-    '  a defect.',
-    '- "verdict": "holds", "fails" or "not-built". A title, a status and a rationale unit take',
-    '  "holds".',
-    '- "evidence": on a claim, the repo-relative path that answers it, and the line where one',
-    '  exists. The worktree has to hold that path. On any other kind, one short sentence.',
+    ...unitKindLines(),
     'A unit you report "fails" carries a finding that names it. A unit you report "holds" carries',
     'none. The two say one thing.',
   ];
