@@ -1892,6 +1892,47 @@ test('a restart inside a corrective round re-enters that round alone', async (t)
   assert.equal(events.filter((e) => e.event === 'reconcile-rendered').at(-1).verdict, 'green');
 });
 
+// The judged write answers siblings over the same scope the corrective round
+// does: the records the judgment names and the records the birth committed
+// (ADR-0079).
+test('a born peer that cites the judged record is not a sibling', async (t) => {
+  const cites = `${ADR_TWO_TEXT}\nIt follows ADR-0001.\n`;
+  const fx = stageFixture(t, {
+    config: SUPERSEDE_REPO,
+    // The birth writes the pair; the judge owes the first record alone.
+    seed: seedHandler(async (ctx) => {
+      const worktree = ctx.payload.worktree;
+      writeFileSync(join(worktree, ADR), ADR_REWRITTEN);
+      writeFileSync(join(worktree, ADR_TWO), cites);
+      const sha = await commitAll(worktree, 'records: the birth writes the pair');
+      ctx.store.append('records-committed', {
+        actor: 'daemon',
+        sha,
+        paths: [ADR, ADR_TWO],
+        decided: true,
+      });
+    }),
+    seats: {
+      'reconcile-judge': judgeOwed([ADR]),
+      'reconcile-write': writeEveryRound(),
+      'record-review': reviewClean,
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const write = fx.calls.find((c) => c.seat === 'reconcile-write');
+  assert.ok(write.prompt.includes(`- ${ADR}`), write.prompt.slice(0, 200));
+  assert.ok(!write.prompt.includes('These active records cite a record you supersede'));
+  assert.ok(
+    write.prompt.includes('No active record cites a record this write supersedes'),
+    write.prompt,
+  );
+  // The peer is still the record's neighbour, which is where the seat reads it.
+  const neighbourhood = write.prompt.slice(write.prompt.indexOf('The neighbourhood'));
+  assert.ok(neighbourhood.includes(`- ${ADR_TWO}`), neighbourhood.slice(0, 300));
+});
+
 // -- the recheck (point 14) --------------------------------------------------
 
 /**

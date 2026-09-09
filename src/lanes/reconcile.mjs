@@ -561,16 +561,24 @@ async function writeStep(ctx, base, next) {
     records: judged.records ?? [],
   });
   const records = set.records;
+  // The scope the sibling answers stand in: the records this judgment names and
+  // the records the birth committed. A born peer is this run's own record,
+  // answered by the seat that wrote it, and never a sibling of the record
+  // beside it. The corrective round reads the same scope (ADR-0079).
+  const scope = [
+    ...new Set([...(judged.records ?? []), ...(recordsCommitted(runEvents(ctx))?.paths ?? [])]),
+  ];
   const outcome = await writeRound(ctx, roundBase(base, set), {
     records,
     since: judged.seq,
+    scope,
     // The records lane has no code to ship without them, so a refused dispatch
     // there ends itself and the render carries the record it left unwritten.
     isolate: base.mode === 'records',
     buildRole: (record, brief) =>
       writeRole(
         base,
-        { ...judged, records: [record], ...recordContext(base, record, records) },
+        { ...judged, records: [record], ...recordContext(base, record, scope) },
         recheckBrief(recheck, record, brief),
       ),
   });
