@@ -4883,6 +4883,37 @@ test('a records-lane CI red on a record layer routes to the stage, and a code re
   );
 });
 
+test('a records-lane CI red carries the whole set the last render stood over', (t) => {
+  const kept = 'docs/adr/adr-0002-kept.md';
+  const ctx = runWithLedger(t, [
+    {
+      event: 'reconcile-rendered',
+      fields: {
+        cycle: 1,
+        sha: 'a'.repeat(40),
+        verdict: 'green',
+        open: [],
+        records: [ADR_FILE],
+        kept: [kept],
+      },
+    },
+  ]);
+  const directive = recordsLaneCiRed(
+    ctx,
+    { mode: 'records', recordLayers: ['adr-form'] },
+    { pr: 7 },
+    'b'.repeat(40),
+    [{ name: 'adr-form' }],
+  );
+  assert.deepEqual(directive, { next: 'reconcile' });
+  // The render CI earns is the whole set the last one stood over: what a seat
+  // read, and what its last green review answers for (ADR-0079).
+  const rendered = ctx.events().filter((e) => e.event === 'reconcile-rendered').at(-1);
+  assert.equal(rendered.source, 'ci');
+  assert.deepEqual(rendered.records, [ADR_FILE]);
+  assert.deepEqual(rendered.kept, [kept]);
+});
+
 test('a records-lane update over an uncertified tree goes to the stage that certifies it', () => {
   // The update stage's own route, on the base that did not move. A tree no
   // certification covers is certified again before the request opens, and the

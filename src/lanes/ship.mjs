@@ -1626,7 +1626,10 @@ export function recordsLaneCiRed(ctx, base, opened, sha, redChecks) {
       source: 'ci',
       verdict: 'red',
       open: names,
+      // The whole set the last render stood over: what a seat read, and what
+      // its last green review answers for (ADR-0079).
       records: last?.records ?? [],
+      ...(last?.kept?.length > 0 && { kept: last.kept }),
       layers: names.map((layer) => ({ layer, status: 'red' })),
       gist: gist(`the record layers are red in CI: ${names.join(', ')}`),
     });
