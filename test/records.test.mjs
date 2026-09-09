@@ -665,6 +665,9 @@ test('every sibling of a supersession is answered, and a superseded one is repla
   const missing = await siblingChecks(base, siblings, short);
   assert.equal(missing.length, 1);
   assert.match(missing[0], /adr-005-cites\.md cites a record this write supersedes and "siblings" accounts for it nowhere/);
+  // The defect names the whole computed list, so a seat that answered part of
+  // it reads what the harness counted rather than one record of it (ADR-0079).
+  assert.ok(missing[0].includes(`The records that cite what this write closed: ${siblings.join(', ')}.`), missing[0]);
   // A `superseded` answer with no record in the diff is refused.
   const empty = {
     siblings: [

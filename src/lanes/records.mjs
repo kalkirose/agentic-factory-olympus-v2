@@ -136,8 +136,10 @@ export function reconcileWriteSchema({ answered = false, siblings = false, units
         },
       },
       // The sibling answers. The dispatch decides whether the report owes them,
-      // and the shape holds them either way, so a seat that answers a sibling
-      // nobody asked about is never refused for it (ADR-0079).
+      // and the shape holds them either way, so a report that carries the field
+      // where nothing asked for it is still valid. What the entries may say is
+      // the checks' rule: one per sibling, and none for a record that is not
+      // one (ADR-0079).
       siblings: {
         type: 'array',
         items: {
@@ -1306,7 +1308,8 @@ export async function siblingChecks(base, siblings, report, { window = null } = 
       n === 0
         ? `${record} cites a record this write supersedes and "siblings" accounts for it ` +
             'nowhere. Give it one entry: "consistent" with the reason, or "superseded" with the ' +
-            'record that replaces it in this round.'
+            'record that replaces it in this round. The records that cite what this write ' +
+            `closed: ${list.join(', ')}.`
         : `${record} has ${n} entries in "siblings"; each sibling takes exactly one.`,
     );
   }
