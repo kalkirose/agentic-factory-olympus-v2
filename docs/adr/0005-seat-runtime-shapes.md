@@ -1,7 +1,7 @@
 # ADR-0005: Seat runtime shapes
 
 Status: accepted (2026-08-10, seat models and cap 2026-09-03, effort and the
-seat ladder 2026-09-04)
+seat ladder 2026-09-04, the record verifier 2026-09-10)
 
 ## Decision
 
@@ -13,7 +13,10 @@ assembly, and the headless runner — gets these concrete shapes:
   Claude Opus 5 (`claude-opus-5`) at xhigh effort. The certification spine
   (verdict triage, the Fury verifier, the eval seat) runs Claude Fable 5.1
   (`claude-fable-5-1`) at high, named through `CERTIFICATION_MODEL` and
-  `CERTIFICATION_EFFORT`. `FALLBACK_MODEL`
+  `CERTIFICATION_EFFORT`. `record-verifier` is the fourth judgment seat and it
+  runs Opus 5 at xhigh: it is the verifier of a decision-record item, it reads
+  no code diff, and every seat of the records lane runs one model.
+  `FALLBACK_MODEL`
   is the substitute a refused seat degrades to, and it names Claude Opus 5: a
   certification seat whose model is refused runs on Opus 5 at the same effort,
   and a seat already on Opus 5 has no substitute below it, so its rejection is
@@ -234,6 +237,30 @@ decision in the map rather than three ad-hoc overrides. `FALLBACK_MODEL` names
 the same id as `DEFAULT_MODEL`, which is what makes the degrade route
 one-directional: a certification seat that is refused lands on Opus 5, and an
 Opus 5 seat that is refused has nothing below it and fails.
+
+## Why the verifier has two seat names
+
+The verifier is one function: one brief, one schema, one coverage check, one
+contract loop. `verifierFor` in `src/lanes/review.mjs` reads the round's item
+list and names the seat it spawns. A round whose every item is about a decision
+record spawns `record-verifier`; every other round spawns `fury-verifier`. The
+records lane's items are records by construction, because no code lens reads a
+record and no record enters a code list (ADR-0026), so that lane spawns the
+certification seat never and the story lane's record cycle takes the record seat
+as well.
+
+Two names, because a seat name is the key of the attempt budget, the cost series
+and the failure record, and because the model is the seat's. The record verifier
+reads a document and the tree it describes, and it holds no diff. The author,
+the writer and the review all run Opus 5 at xhigh, and one lane that runs two
+models answers one question with two readers.
+The certification spine still holds the three seats that judge code, and moving
+`fury-verifier` itself would change what certifies a code ship.
+
+The record verifier costs more per item than the certification seat, and it is
+one invocation per cycle over every item of that cycle, so the difference is a
+small share of a run. `record-refuted-share` reads its confirm rate, and a rate
+that falls under the certification seat's says the model change costs findings.
 
 ## Why no model is capped by default
 

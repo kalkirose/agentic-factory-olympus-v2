@@ -1,6 +1,6 @@
 # ADR-0073: Enumerate every unit of a record and answer it by id
 
-Status: accepted (2026-09-07)
+Status: accepted (2026-09-07, the reference kind 2026-09-10)
 
 ## Context
 
@@ -27,13 +27,27 @@ harness read one list. Ids are positional, so `matchUnits` carries a
 finding across a write by head text and then by line.
 
 Each report entry names the record, the unit id, a kind, a verdict and the
-evidence. The kinds are `title`, `status`, `claim`, `open` and `rationale`. The
-verdicts are `holds`, `fails` and `not-built`. `unitChecks` in
-`src/lanes/records.mjs` refuses eight numbered defects: a missing entry; an entry
-for no unit of the file; a doubled entry; a claim with no path in the worktree; a
-rationale entry whose text reads as a claim; a writer's `fails`; a review's
-`fails` with no finding; and a finding on a unit the review reported `holds`. A
-refusal buys the seat its one corrective attempt.
+evidence. The kinds are `title`, `status`, `claim`, `open`, `rationale` and
+`reference`. The verdicts are `holds`, `fails` and `not-built`.
+
+The harness names three of the kinds itself. `title` and `status` come from the
+head block. `reference` is every unit inside a reference section: the span runs
+from a `## References` heading to the next heading of the same level or higher,
+or to the end of the file, which is the span the record form gate reads. A
+reference states nothing about the tree and gives no reason, so it is neither a
+claim nor rationale, and one line of `unitKindLines` states that to the birth
+brief, the two write briefs and the review's.
+
+`unitChecks` in `src/lanes/records.mjs` refuses nine numbered defects: a missing
+entry; an entry for no unit of the file; a doubled entry; a claim with no path in
+the worktree; a rationale entry whose text reads as a claim; a writer's `fails`;
+a review's `fails` with no finding; a finding on a unit the review reported
+`holds`; and, as rule 9, a reference the tree does not answer. Rule 9 refuses any
+kind but `reference` on a unit of the section and `reference` on any unit outside
+one, an `ADR-<n>` token that names no record of the record tree at any status, a
+path token the worktree does not hold, and a reference that names no record, no
+path and no link at all. Rule 5 never reads a reference unit. A refusal buys the
+seat its one corrective attempt.
 
 `repo.recordLifecycle` is `rewrite` or `supersede`. Under `supersede` no seat
 edits an accepted record. A change is a new record with a `Supersedes` line. The
@@ -52,6 +66,11 @@ A report grows with the record, one entry per unit. The writer miss rate catches
 a seat that answers `holds` without reading; no check does. A one-word correction
 to an accepted record costs a new record, so the tree grows.
 
+A record that writes a reference bullet outside its reference section files that
+bullet as a claim, as any other sentence. A record that writes prose inside the
+section takes rule 9 on it and is refused for want of a name, which is the form
+gate's own rule for that section.
+
 This record is superseded when the unit check refuses a correct report on more
 than one reconciliation in five. That reading says the enumerator and the seats
 disagree about what a unit is.
@@ -59,6 +78,11 @@ disagree about what a unit is.
 ## Rejected options
 
 - Coverage as a count from the seat: nobody can check a count.
+- A reference filed as a claim, with the cited record's path as its evidence:
+  the rule stays a rule the seat has to remember, and the day a brief is
+  rewritten the guess returns.
+- The reference section out of the enumeration: a cited path that does not exist
+  is a defect worth catching, and the `reference` criterion reads the section.
 - One larger review seat at higher effort: it sampled four records.
 - A second review seat as a coverage adversary: it doubles the sample.
 - Extraction by sentence: a split over paths and code spans is not deterministic.

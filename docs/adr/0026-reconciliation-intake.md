@@ -176,8 +176,8 @@ The review that reads a record used to read it through the panel the project
 judges code with. A security lens asked to find input trust and secrets in a
 markdown document finds something to say about it, and a spec lens asked whether
 the diff implements the validated spec finds that a document does not. While
-those findings were advisory they were noise in the ledger. Once every record
-finding blocks a ship they are a source of wrong blocks.
+those findings were advisory they were noise in the ledger. Once a confirmed one
+blocks a ship they are a source of wrong blocks.
 
 The answer is not a better instruction to the same lenses. It is to stop asking
 them, and to give the record a seat that reads nothing else. The record criteria
