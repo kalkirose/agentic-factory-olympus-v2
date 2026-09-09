@@ -33,17 +33,32 @@ if (!seat || !reportPath) {
   process.exit(3);
 }
 
-// A seat that never answers. The scenario names one when it has to hold a run
-// still at an exact point: the moment after the stage created its worktree and
+// A seat that holds where it is. The scenario names one when it has to stop a
+// run at an exact point: the moment after the stage created its worktree and
 // before anything read it. The pid goes to the marker file first, so the
 // scenario can end this process when it has what it waited for.
+//
+// The hold lifts where the scenario stops naming this seat. A scenario that
+// needs the world to move under a running run holds a seat at the boundary,
+// moves it, and lets the seat answer; a scenario about a crash ends the
+// process instead, and this loop never sees the change.
 if (scenario.stallSeat === seat) {
   writeFileSync(scenario.stallMarker, String(process.pid));
   // The timer holds the loop open. Without it the runtime finds nothing left
-  // to do, ends the process on the pending await, and the stall becomes a
-  // seat that exited rather than a seat that never answered.
-  setInterval(() => {}, 1 << 30);
-  await new Promise(() => {});
+  // to do, ends the process on the pending await, and the hold becomes a seat
+  // that exited rather than a seat that never answered.
+  const beat = setInterval(() => {}, 1 << 30);
+  while (stallNamed()) await new Promise((resolve) => setTimeout(resolve, 50));
+  clearInterval(beat);
+}
+
+/** Whether the scenario, as it stands on disk now, still holds this seat. */
+function stallNamed() {
+  try {
+    return JSON.parse(readFileSync(process.env.OLYMPUS_E2E_SCENARIO, 'utf8')).stallSeat === seat;
+  } catch {
+    return true;
+  }
 }
 
 let work;

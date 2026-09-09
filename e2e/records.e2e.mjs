@@ -37,6 +37,7 @@ import {
   stalled,
   startDaemon,
   stopDaemon,
+  updateScenario,
 } from './fixture.mjs';
 
 const RECORD = 'docs/adr/adr-0001-double-the-base.md';
@@ -758,7 +759,10 @@ const INCOMING_TEXT = [
 test('a moved default branch re-runs the reconciliation on the run own set', async (t) => {
   const fx = buildFixture({
     prefix: 'olympus-e2e-records-moved-',
-    scenario: SCENARIO,
+    // The judge holds the run inside the reconcile stage while the default
+    // branch moves. The birth has committed by then, and the update is two
+    // stages away, so the push lands before anything reads the branch.
+    scenario: { ...SCENARIO, stallSeat: 'reconcile-judge' },
     tree: { [TICKET]: RECORD_TICKET },
   });
   t.after(() => cleanup(fx));
@@ -770,14 +774,15 @@ test('a moved default branch re-runs the reconciliation on the run own set', asy
     () => instanceEvents(fx).find((e) => e.event === 'launch')?.runId,
     { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
   );
-  // The competing work: a record on the default branch, which the update merges
-  // in. It is nobody's in this run, and the re-run reads the run's own set.
   await pollFor(
-    'the record commit',
-    () => runEvents(fx, runId).some((e) => e.event === 'records-committed'),
+    'the judge to reach its hold',
+    () => existsSync(fx.stallMarker),
     { abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
   );
+  // The competing work: a record on the default branch, which the update merges
+  // in. It is nobody's in this run, and the re-run reads the run's own set.
   const moved = pushToMain(fx, INCOMING, INCOMING_TEXT, 'records: main states one more decision');
+  updateScenario(fx, { stallSeat: null });
   await pollFor(
     'the run to close',
     () => runEvents(fx, runId).some((e) => e.event === 'run-closed'),
