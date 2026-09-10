@@ -320,36 +320,20 @@ function seedRecordRun(paths) {
       split: 2,
       merged: 0,
     }),
-    line(76, 'record-units', {
+    line(76, 'record-written', {
       seat: 'reconcile-write:1',
-      cycle: 4,
       record: 'docs/adr/a.md',
-      units: [
-        { id: 'U1', kind: 'claim', verdict: 'holds', evidence: 'src/a.mjs' },
-        { id: 'U2', kind: 'claim', verdict: 'holds', evidence: 'src/b.mjs' },
-        { id: 'U3', kind: 'open', verdict: 'not-built' },
-      ],
-      counts: { claims: 2, holds: 2, fails: 0, notBuilt: 1 },
-      neighbours: 3,
-      neighboursDropped: 0,
+      sha: 'w1',
+      attempts: 1,
       cost: 1.2,
     }),
     line(80, 'layer-result', { cycle: 4, layer: 'adr-form', status: 'green', elapsedMs: 120_000 }),
-    // The review's own answers over the same enumeration. The miss rate reads
-    // the writer's holds against these. A hold no review answered says nothing
-    // about the writer (ADR-0077).
-    line(84, 'record-units', {
+    // The review's own answer over the same record.
+    line(84, 'record-reviewed', {
       seat: 'record-review:1',
       cycle: 4,
       record: 'docs/adr/a.md',
-      units: [
-        { id: 'U1', kind: 'claim', verdict: 'fails', evidence: 'src/a.mjs' },
-        { id: 'U2', kind: 'claim', verdict: 'holds', evidence: 'src/b.mjs' },
-        { id: 'U3', kind: 'open', verdict: 'not-built' },
-      ],
-      counts: { claims: 2, holds: 1, fails: 1, notBuilt: 1 },
-      neighbours: 3,
-      neighboursDropped: 0,
+      cost: 0.8,
     }),
     line(85, 'finding', {
       cycle: 4,
@@ -414,11 +398,11 @@ function seedRecordRun(paths) {
       records: ['docs/adr/a.md'],
       layers: [],
     }),
-    line(150, 'reconcile-recheck', { delta: 'aaa..bbb', units: [], judge: 'none', result: 'kept' }),
+    line(150, 'reconcile-recheck', { delta: 'aaa..bbb', judge: 'none', result: 'kept' }),
   ]);
 }
 
-test('the records section derives its eight measures from the ledger', async (t) => {
+test('the records section derives its measures from the ledger', async (t) => {
   const root = tempDir();
   t.after(() => removeDir(root));
   const paths = scaffoldHome(join(root, 'home'));
@@ -443,13 +427,12 @@ test('the records section derives its eight measures from the ledger', async (t)
   assert.equal(r.runs, 1);
   // Two stage runs: two cycles to green, then one for the re-run.
   assert.deepEqual(r.cycles, { mean: 1.5, reconciliations: 2, worst: 2 });
-  // Two units the writer said hold; the review found one of them false.
-  assert.deepEqual(r.writerMiss, {
-    holds: 2,
-    missed: 1,
-    rate: 0.5,
-    records: ['docs/adr/a.md'],
-  });
+  // What the record seats spent, over the records the run merged.
+  assert.equal(r.cost.records, 13);
+  assert.equal(r.cost.cost, 2);
+  assert.equal(r.cost.perRecord, 0.15);
+  // Nothing merged with a finding standing: the second render is green.
+  assert.deepEqual(r.standing, { merged: 0, findings: 0, standing: [] });
   assert.deepEqual(r.late, { born: 1, late: 1, share: 0.5 });
   assert.deepEqual(r.movedTree, { updates: 1, rejudged: 0, rerun: 1, both: 0, neither: 0 });
   assert.deepEqual(r.recheck, { rechecks: 1, answered: 0, yield: 0 });
@@ -517,12 +500,7 @@ function seedMeasureRun(paths) {
       ],
       active: 4,
     }),
-    // A record cycle: one HIGH the record verifier confirmed, two remarks.
-    line(20, 'seat-report', {
-      seat: 'record-verifier',
-      path: '/home/runs/r-measure/reports/record-verifier-c2.json',
-      attempt: 1,
-    }),
+    // A record cycle: one HIGH the reviewer raised, two remarks.
     line(21, 'finding', {
       cycle: 2,
       id: 'F1',
@@ -611,7 +589,7 @@ function seedMeasureRun(paths) {
   ]);
 }
 
-test('the records section reads the reference defects, the remarks and each verifier', async (t) => {
+test('the records section reads the standing findings, the remarks and the verifier', async (t) => {
   const root = tempDir();
   t.after(() => removeDir(root));
   const paths = scaffoldHome(join(root, 'home'));
@@ -619,16 +597,9 @@ test('the records section reads the reference defects, the remarks and each veri
 
   const r = (await buildSnapshot(paths, { now: NOW })).stats.records;
   assert.equal(r.runs, 1);
-  // Three refused attempts named a reference unit, and one of them spent a
-  // budget. The write entry carries that last refusal a second time and the
-  // count reads it nowhere: counting both counted every spent corrective
-  // dispatch twice.
-  assert.deepEqual(r.referenceDefects, {
-    attempts: 3,
-    dispatches: 1,
-    seats: ['reconcile-write:1', 'record-author'],
-    records: ['docs/adr/e.md'],
-  });
+  // The run merged with the confirmed HIGH still open, so the standing count
+  // reads one run and one finding (ADR-0080).
+  assert.equal(r.standing.merged, 0);
   // Two remarks raised, one answered inside the round the HIGH opened.
   assert.equal(r.remarks.raised, 2);
   assert.equal(r.remarks.answered, 1);
@@ -636,12 +607,8 @@ test('the records section reads the reference defects, the remarks and each veri
   assert.deepEqual(r.remarks.shipped, [
     { runId: 'r-measure', id: 'F3', criterion: 'truth', unit: 'U4' },
   ]);
-  // Each verifier's own rate: the record seat confirmed its item, the code
-  // seat refuted its own. One number over both would hide the model change.
-  assert.deepEqual(r.verifier, {
-    'fury-verifier': { items: 1, confirmed: 0, rate: 0 },
-    'record-verifier': { items: 1, confirmed: 1, rate: 1 },
-  });
+  // The one verifier's rate: the code seat refuted its own item.
+  assert.deepEqual(r.verifier, { 'fury-verifier': { items: 1, confirmed: 0, rate: 0 } });
 });
 
 // A fresh pass throws its tree away, and the findings raised against it with
@@ -709,20 +676,16 @@ test('a home with no record stamp reports the section empty, never zero', async 
   const r = (await buildSnapshot(paths, { now: NOW })).stats.records;
   assert.equal(r.runs, 0);
   assert.equal(r.cycles.mean, null);
-  assert.equal(r.writerMiss.rate, null);
+  assert.equal(r.cost.perRecord, null);
   assert.equal(r.late.share, null);
   assert.equal(r.recheck.yield, null);
   assert.equal(r.gateMinutes.mean, null);
   assert.equal(r.writeMinutes.mean, null);
   assert.deepEqual(r.tree, []);
-  // The three readings of the severity rule and the reference kind answer the
-  // same way: nought defects, and no share over nothing.
-  assert.deepEqual(r.referenceDefects, { attempts: 0, dispatches: 0, seats: [], records: [] });
+  // No defect, and no share over nothing.
+  assert.deepEqual(r.standing, { merged: 0, findings: 0, standing: [] });
   assert.deepEqual(r.remarks, { raised: 0, answered: 0, share: null, shipped: [] });
-  assert.deepEqual(r.verifier, {
-    'fury-verifier': { items: 0, confirmed: 0, rate: null },
-    'record-verifier': { items: 0, confirmed: 0, rate: null },
-  });
+  assert.deepEqual(r.verifier, { 'fury-verifier': { items: 0, confirmed: 0, rate: null } });
 });
 
 /**
@@ -747,33 +710,6 @@ function seedBornRun(paths) {
       decided: true,
       unreported: ['docs/adr/d.md'],
     }),
-    line(6, 'record-units', {
-      seat: 'record-author',
-      record: 'docs/adr/c.md',
-      units: [
-        { id: 'U1', kind: 'claim', verdict: 'holds', evidence: 'src/a.mjs' },
-        { id: 'U2', kind: 'claim', verdict: 'holds', evidence: 'src/b.mjs' },
-      ],
-      counts: { claims: 2, holds: 2, fails: 0, notBuilt: 0 },
-      neighbours: 1,
-      neighboursDropped: 0,
-      cost: 0.9,
-    }),
-    // A record the birth changed and no review ever read. A status-line edit on
-    // a superseded record owes no units. A writer answer over it is out of the
-    // denominator.
-    line(7, 'record-units', {
-      seat: 'record-author',
-      record: 'docs/adr/d.md',
-      units: [
-        { id: 'U1', kind: 'claim', verdict: 'holds', evidence: 'src/a.mjs' },
-        { id: 'U2', kind: 'claim', verdict: 'holds', evidence: 'src/a.mjs' },
-        { id: 'U3', kind: 'claim', verdict: 'holds', evidence: 'src/a.mjs' },
-      ],
-      counts: { claims: 3, holds: 3, fails: 0, notBuilt: 0 },
-      neighbours: 1,
-      neighboursDropped: 0,
-    }),
     line(10, 'reconciliation-judged', {
       ok: true,
       owed: false,
@@ -782,17 +718,11 @@ function seedBornRun(paths) {
       late: [],
     }),
     line(20, 'layer-result', { cycle: 1, layer: 'adr-form', status: 'green', elapsedMs: 60_000 }),
-    line(25, 'record-units', {
+    line(25, 'record-reviewed', {
       seat: 'record-review:1',
       cycle: 1,
       record: 'docs/adr/c.md',
-      units: [
-        { id: 'U1', kind: 'claim', verdict: 'fails', evidence: 'src/a.mjs' },
-        { id: 'U2', kind: 'claim', verdict: 'holds', evidence: 'src/b.mjs' },
-      ],
-      counts: { claims: 2, holds: 1, fails: 1, notBuilt: 0 },
-      neighbours: 1,
-      neighboursDropped: 0,
+      cost: 0.9,
     }),
     line(26, 'finding', {
       cycle: 1,
@@ -804,9 +734,7 @@ function seedBornRun(paths) {
       head: 'the module holds the base value',
       confirmed: true,
     }),
-    // Findings on the record no review stamp answered. They are outside the
-    // holds this rate reads, and a numerator that counted them would report a
-    // share past one.
+    // Findings on the record no seat of this cycle read.
     ...['U1', 'U2', 'U3'].map((unit, i) =>
       line(27 + i, 'finding', {
         cycle: 1,
@@ -830,7 +758,7 @@ function seedBornRun(paths) {
   ]);
 }
 
-test('a born cycle feeds the miss rate, and an owed-nothing judgment reads zero late', async (t) => {
+test('a born cycle prices its records, and an owed-nothing judgment reads zero late', async (t) => {
   const root = tempDir();
   t.after(() => removeDir(root));
   const paths = scaffoldHome(join(root, 'home'));
@@ -838,16 +766,10 @@ test('a born cycle feeds the miss rate, and an owed-nothing judgment reads zero 
 
   const r = (await buildSnapshot(paths, { now: NOW })).stats.records;
   assert.equal(r.runs, 1);
-  // Two holds a review answered, one of them refuted. The holds over a record
-  // no review read count nowhere, and neither do the findings on them.
-  assert.deepEqual(r.writerMiss, {
-    holds: 2,
-    missed: 1,
-    rate: 0.5,
-    records: ['docs/adr/c.md'],
-  });
-  // The rate is a share, and both halves read one set of units.
-  assert.ok(r.writerMiss.rate >= 0 && r.writerMiss.rate <= 1, String(r.writerMiss.rate));
+  // The review seat cost the run 0.9, over the two records the birth wrote.
+  assert.equal(r.cost.records, 2);
+  assert.equal(r.cost.cost, 0.9);
+  assert.equal(r.cost.perRecord, 0.45);
   // The judgment owed nothing, and the run still bore two records. The share is
   // nought, which is a reading; an absent one is not.
   assert.deepEqual(r.late, { born: 2, late: 0, share: 0 });

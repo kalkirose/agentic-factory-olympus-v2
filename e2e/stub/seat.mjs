@@ -7,7 +7,6 @@
 //
 // The scenario file (OLYMPUS_E2E_SCENARIO) holds the artifact texts, so one
 // stub drives every lane.
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 
@@ -107,7 +106,7 @@ function behaviour(name) {
     return { files: scenario.repairFiles, report: { summary: 'the open finding is repaired' } };
   }
   if (name === 'verdict-triage') return triage();
-  if (name === 'fury-verifier' || name === 'record-verifier') return verifier();
+  if (name === 'fury-verifier') return verifier();
   if (name.startsWith('fury-') || name === 'generalist-review') {
     return { report: { findings: [], summary: 'the diff answers the spec' } };
   }
@@ -121,40 +120,11 @@ function behaviour(name) {
   throw new Error(`no fixture behaviour for the ${name} seat`);
 }
 
-// -- the record seats (ADR-0073, ADR-0074, ADR-0075) --------------------------
+// -- the record seats (ADR-0074, ADR-0075, ADR-0080) --------------------------
 //
-// Every one of them answers the harness's own enumeration rather than a list of
-// its own: the unit check counts the file, and a stub that guessed would prove
-// nothing about the check. The brief names the enumerator by absolute path, so
-// the stub runs the same command a real seat is told to run.
-
-/** The units of one record, as `olympus-units` counts them. */
-function unitsOf(record) {
-  const bin = match(/node (\S*olympus-units\.mjs)/)?.[1];
-  if (!bin) throw new Error('the brief names no unit enumerator');
-  const out = execFileSync(process.execPath, [bin, record, '--json'], { encoding: 'utf8' });
-  return JSON.parse(out);
-}
-
-/** One answer per unit: the kind the enumerator gave it, and a path for a claim. */
-function unitAnswers(record, evidence) {
-  return unitsOf(record).map((unit) => ({
-    record,
-    id: unit.id,
-    kind: unit.kind ?? (claimLike(unit.head) ? 'claim' : 'rationale'),
-    verdict: 'holds',
-    evidence: claimLike(unit.head) ? evidence : 'structure',
-  }));
-}
-
-/**
- * Whether a unit head reads as a claim about the tree. The stub mirrors the
- * harness's own kind test rather than importing it: a claim filed as rationale
- * is one of the refusals this fixture must be able to meet.
- */
-function claimLike(head) {
-  return /[\w-]+\/[\w./-]+|`[^`]+`|\b(is|are|reads|returns|runs|writes|serves|exposes)\b/.test(head);
-}
+// None of them hands back a reading of its own sentences. The harness reads no
+// token of a record: the project's form gate reads the form, and one review seat
+// reads the truth.
 
 /** The judgment the scenario states, or a fixture with no record tree at all. */
 function reconcileJudge() {
@@ -185,9 +155,6 @@ function recordAuthor() {
     report: {
       rewritten: paths,
       unchanged: [],
-      units: paths.flatMap((path) => unitAnswers(path, path)),
-      divergences: [],
-      ...(scenario.recordSiblings && { siblings: [] }),
       summary: paths.length > 0 ? 'the records this work decides' : 'the work decides no record',
     },
   };
@@ -217,7 +184,7 @@ function correctiveCalls(record) {
   return priorCalls(
     (call) =>
       call.seat === 'reconcile-write' &&
-      call.prompt.includes('Confirmed findings:') &&
+      call.prompt.includes('Findings:') &&
       call.prompt.includes(`- ${record}`),
   ).length;
 }
@@ -235,33 +202,30 @@ function reviewCalls(record) {
  * One record, rewritten to state the tree. The brief names the one record.
  *
  * A scenario that names a supersession takes the other route: the old record
- * keeps its body and takes its status line, the record that replaces it is
- * added, and the report answers every unit of the replacement. It answers the
- * closed record's units as well, which the harness drops without a defect
- * (ADR-0078).
+ * keeps its body and takes its status line, and the record that replaces it is
+ * added. The project's form gate reads the pairing, and the harness reads
+ * nothing of it (ADR-0080).
  */
 function recordWrite() {
   const record = match(/^- (\S+\.md)$/m)?.[1];
   if (!record) throw new Error('the write brief names no record');
-  const corrective = prompt.includes('Confirmed findings:');
-  // A scenario about a refused dispatch: the report accounts for the judged
-  // record nowhere, which is the check every write is refused on.
+  const corrective = prompt.includes('Findings:');
+  const answered = () => [...prompt.matchAll(/^- \[(F\d+)\]/gm)].map((m) => ({ id: m[1] }));
+  // A scenario about a dispatch that delivers nothing: the seat writes no
+  // record at all, and the round goes on without it.
   const refusals = (scenario.recordRefusals ?? {})[record] ?? 0;
   if (corrective && correctiveCalls(record) <= refusals) {
     return {
       report: {
         rewritten: [],
         unchanged: [],
-        units: [],
-        divergences: [],
-        answered: [...prompt.matchAll(/^- \[(F\d+)\]/gm)].map((m) => m[1]),
-        ...(scenario.recordSiblings && { siblings: [] }),
-        summary: 'the report accounts for the record nowhere',
+        answered: answered(),
+        summary: 'the round could not answer the finding',
       },
     };
   }
   const supersede = (scenario.reconcileSupersedes ?? {})[record];
-  if (supersede) return supersedeWrite(record, supersede);
+  if (supersede) return supersedeWrite(record, supersede, answered);
   // A corrective dispatch answers the finding in the record, which is what
   // moves the text the next cycle reads.
   const text = corrective
@@ -276,26 +240,14 @@ function recordWrite() {
     report: {
       rewritten: text ? [record] : [],
       unchanged: text ? [] : [{ record, reason: 'the record already states the tree' }],
-      units: unitAnswers(record, record),
-      divergences: [
-        {
-          record,
-          state: 'none',
-          statement: 'the record and the tree state one thing',
-          evidence: record,
-        },
-      ],
-      ...(corrective && {
-        answered: [...prompt.matchAll(/^- \[(F\d+)\]/gm)].map((m) => m[1]),
-      }),
-      ...(scenario.recordSiblings && { siblings: [] }),
+      ...(corrective && { answered: answered() }),
       summary: `${record}, as the tree stands`,
     },
   };
 }
 
 /** The supersession one write makes: the old record closed, the new one added. */
-function supersedeWrite(record, { closed, added, text }) {
+function supersedeWrite(record, { closed, added, text }, answered) {
   for (const [path, content] of [
     [record, closed],
     [added, text],
@@ -308,51 +260,30 @@ function supersedeWrite(record, { closed, added, text }) {
     report: {
       rewritten: [added],
       unchanged: [],
-      units: [...unitAnswers(added, added), ...unitAnswers(record, record)],
-      // One entry per record the check counts, and one about the record this
-      // write closed, which the harness reads and never refuses.
-      divergences: [added, record].map((path) => ({
-        record: path,
-        state: 'none',
-        statement: 'the record that replaces this one states the tree',
-        evidence: added,
-      })),
-      ...(prompt.includes('Confirmed findings:') && {
-        answered: [...prompt.matchAll(/^- \[(F\d+)\]/gm)].map((m) => m[1]),
-      }),
-      ...(scenario.recordSiblings && { siblings: [] }),
+      ...(prompt.includes('Findings:') && { answered: answered() }),
       summary: `${record} is superseded by ${added}`,
     },
   };
 }
 
 /**
- * One record, reviewed whole. The brief carries the enumeration it answers.
+ * One record, reviewed whole. The brief carries the addresses of its sentences,
+ * and a finding names one of them.
  *
  * A scenario that names a finding for this record raises it on the first reads
- * of that record and on no later one, so a corrective round can close it. The
- * finding names a unit the same report answers `fails`, which is the rule every
- * record review report is refused on (ADR-0073).
+ * of that record and on no later one, so a corrective round can close it.
  */
 function recordReview() {
   const record = match(/^Review one decision record: (.+)$/m)?.[1]?.trim();
   if (!record) throw new Error('the review brief names no record');
   const units = [...prompt.matchAll(/^- (U\d+) \(line \d+(?:, (\w+))?\): (.+)$/gm)].map(
-    ([, id, kind, head]) => ({
-      record,
-      id,
-      kind: kind ?? (claimLike(head) ? 'claim' : 'rationale'),
-      verdict: 'holds',
-      evidence: claimLike(head) ? record : 'structure',
-      head,
-    }),
+    ([, id, kind, head]) => ({ id, kind, head }),
   );
   const raised = (scenario.recordFindings ?? {})[record];
   const target =
     raised && reviewCalls(record) <= (raised.reads ?? 1)
-      ? (units.find((u) => u.kind === 'claim') ?? units[units.length - 1])
+      ? (units.find((u) => u.kind === undefined) ?? units[units.length - 1])
       : null;
-  if (target) target.verdict = 'fails';
   return {
     report: {
       findings: target
@@ -370,8 +301,7 @@ function recordReview() {
             },
           ]
         : [],
-      units: units.map(({ head: _head, ...rest }) => rest),
-      summary: 'every unit of the record stands',
+      summary: 'the record, read whole',
     },
   };
 }

@@ -1618,7 +1618,10 @@ export function unwrittenOf(events) {
       continue;
     }
     if (e.event !== 'record-written' || e.seq <= since) continue;
-    if (e.failed === true) out.add(e.record);
+    // A dispatch that delivered nothing, and a dispatch whose report claimed a
+    // rewrite the tree does not hold, are one fact here: this record has no
+    // write of this run (ADR-0080).
+    if (e.failed === true || (e.dropped ?? []).includes(e.record)) out.add(e.record);
     else out.delete(e.record);
   }
   return [...out];

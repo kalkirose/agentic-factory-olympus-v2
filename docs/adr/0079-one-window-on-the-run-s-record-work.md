@@ -1,6 +1,6 @@
 # ADR-0079: One window on the run's record work, and a records run that can still act
 
-Status: accepted (2026-09-08)
+Status: superseded by ADR-0080 (2026-09-10)
 
 ## Context
 

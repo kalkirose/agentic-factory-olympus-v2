@@ -1,14 +1,6 @@
 # ADR-0075: Judge the records in a stage of their own
 
 Status: accepted (2026-09-07)
-Superseded in part by ADR-0077: the cycle anchors on the born record stamp,
-and not on the write stamp alone. A judgment that owes nothing over a born
-set still buys the layers, the review seats and the render. The admission gate
-refuses a records-lane tree whose record certification is null.
-Superseded in part by ADR-0078: the set a round or a cycle dispatches over is
-a ledger fact, and a re-entry dispatches that list rather than the tree. A
-dispatch signs its commit with the record as well as the seat, and a record
-the tree has closed takes no seat at all.
 
 ## Context
 
@@ -24,11 +16,19 @@ A stage of its own judges the records, and nothing in it changes a verdict.
 
 `src/lanes/reconcile.mjs` holds the stage. Every lane graph names it between the
 verdict and the update. The records lane names it after its records stage.
-`reconcileStep` derives ten steps from the stage's own stamps since the last
-`fresh-pass`: judge, write, spectrum, review, verify, render, correct, recheck,
-stall, done. A restart at any boundary resumes that step. Each dispatch signs its
-commit with the run, the seat and the round's position, so a restart repeats no
-committed write.
+`reconcileStep` derives nine steps from the stage's own stamps since the last
+`fresh-pass`: judge, write, spectrum, review, render, correct, recheck, stall,
+done. A restart at any boundary resumes that step. Each dispatch signs its
+commit with the run, the seat, the record and the round's position, so a restart
+repeats no committed write. The set a round or a cycle dispatches over is a
+ledger fact, and a re-entry dispatches that list rather than the tree; a record
+the tree has closed takes no seat at all.
+
+The cycle anchors on the born record stamp where the pass wrote nothing. A
+judgment that owes nothing over a born set still buys the layers, the review
+seats and the render, and the admission gate refuses a records-lane tree whose
+record certification is null. The records lane spawns no judge at all: its diff
+is the records, so the birth is the judgment (ADR-0080).
 
 **Two grounds, two shas.** `certifiedTrees` in `src/lanes/ship.mjs` returns two
 trees with two greens: the code tree at the last code commit, the record tree at
@@ -43,24 +43,26 @@ the fast path decides. The update returns `{next: 'ship'}`, `{next: 'verdict'}`
 or `{next: 'reconcile', rerun: true}`. A record re-run spends the update cap.
 
 **The write.** One `reconcile-write:<n>` per record, in sequence, each with its
-own reset, commit, checks and budget. `reconciliation-written` carries one entry
-per record: the seat, the cost, the attempts, the units answered.
+own reset, commit and budget. `record-written` stamps each one right after its
+commit, and the resume reads that stamp and the commit subject and nothing else.
+`reconciliation-written` carries one entry per record: the seat, the cost, the
+attempts.
 
-**The recheck.** Every `claim` unit carries the evidence path that answered it.
-After a repair round past a green render, a fresh judge reads the delta alone.
-The units whose evidence the delta touched are re-answered and reviewed. Every
-other unit keeps its answer. `reconcile-recheck` stamps the delta, the units and
-the result. An empty intersection stamps `kept`.
+**The recheck.** After a repair round past a green render, a fresh judge reads
+the delta alone and says whether it implicates a record this run has not already
+answered. A record it names is re-reviewed whole. `reconcile-recheck` stamps the
+delta, the records and the result, and a delta that implicates none stamps
+`kept`.
 
 **The stall.** A red render buys a corrective round under
-`gates.reconcileRounds`. At the cap the stage takes the fallback and asks nobody.
-`reconcile-stall` is loud. The story and repair lanes ship the code and ticket
-the records: `cause: 'record-cap'`, `partial: true`, `residual`. The records lane
-closes with reason `reconcile-cap` and tickets from the run branch.
+`gates.reconcileRounds`. At the cap the stage takes the fallback and asks nobody,
+on every lane: `cause: 'record-cap'`, `partial: true`, `residual`. The run pushes
+and merges with what is still wrong named in the request body and on the close
+stamp (ADR-0080). `reconcile-stall` is loud.
 
 ## Consequences
 
-A record cycle costs one review seat per record and the verifier. The write is
+A record cycle costs one review seat per record and no verifier. The write is
 sequential, and `record-write-time` says when that stops paying.
 `reconcile-rendered.open` mixes finding ids and layer names, so a reader filters
 by the finding index.
@@ -79,18 +81,19 @@ briefs were already tightened once.
 - The reconciliation on the verdict's ladder: the stale ship above.
 - One certification at the head sha: the record commit moves the head.
 - A stamp between the certifications: a file intersection is checkable.
-- A park at the cap: the owner refused it.
+- A park at the cap: the owner refused it, twice (ADR-0080).
 - Parallel writers in disposable worktrees: the owner refused them.
 
 ## Fallback path
 
-The alternative is one corrective round: `gates.reconcileRounds` set to 1. The
-switch trigger is a reconciliation that costs more than its story. The reversal
-cost is one config value.
+The alternative is more than one corrective round: `gates.reconcileRounds` set
+above its default of one. The switch trigger is a wave in which a second round
+would have closed a finding a run merged standing. The reversal cost is one
+config value.
 
 ## References
 
-- ADR-0007, ADR-0026, ADR-0033, ADR-0056, ADR-0073, ADR-0074
+- ADR-0007, ADR-0026, ADR-0033, ADR-0056, ADR-0074, ADR-0080
 - `src/lanes/reconcile.mjs`
 - `src/lanes/ship.mjs`
 - `src/lanes/fastpath.mjs`

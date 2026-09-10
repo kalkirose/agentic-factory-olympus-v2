@@ -50,22 +50,24 @@ review — gets these concrete shapes:
   corrective invocation, then the `seat-failure` park. A green spectrum
   resolves triage findings mechanically — their evidence is gone.
 - **Findings.** Every finding stamps a `finding` event with a run-scoped id
-  (`F<n>`). The split that decides what the verifier answers is severity, on
-  every lane and whatever the finding is about. A HIGH goes to the verifier; a
-  refuted HIGH stamps `advisory`, and a confirmed HIGH blocks. A finding below
-  HIGH stamps `advisory`, is never verified, and blocks nothing. A finding about
+  (`F<n>`). The split that decides what a round blocks on is severity, on every
+  lane and whatever the finding is about. A HIGH blocks when it is confirmed; a
+  finding below HIGH stamps `advisory` and blocks nothing. A code round confirms
+  a HIGH through the verifier, and a refuted one stamps `confirmed: false`
+  beside the verifier's evidence. A record round confirms a HIGH as its reviewer
+  raised it and spawns no verifier (ADR-0080). A finding about
   a decision record carries `record: true`, the `criterion` it cites, and the
   unit it is about (`unit`, `head`, `line`, and a second place on a `consistent`
   finding), at every grade. A HIGH one enters the open set of the render it
-  belongs to when the verifier confirms it, and carries `confirmed: false` beside
-  the verifier's evidence when it does not. One below HIGH is a remark: the
+  belongs to. One below HIGH is a remark: the
   render lists it under `advisory`, the corrective round that writes that record
   for a HIGH hands it to the writer, and the run records what it ships with at
-  the close. A run that ships its records whole names the remarks it left
-  standing on `run-closed.remarks`, by id, and writes no ticket: a ticket is a
-  run's spec, and a remark buys no run. A run that leaves a finding open writes
-  the ticket it already owed, and the remarks ride it under "Remarks not
-  answered". A record finding is raised by the record review of the reconcile
+  the close. Every run names on `run-closed.remarks` the findings it left
+  standing, by id: the remarks, and the confirmed HIGHs no round answered. The
+  finding stamp keeps `confirmed: true` on the second kind, so a reader tells
+  them apart, and the merged request's body lists them under two headings. A
+  ticket is owed for a record the judge owed and no round wrote, and for nothing
+  else. A record finding is raised by the record review of the reconcile
   stage and by no code lens (ADR-0026, ADR-0075). The verdict's own open set
   travels in `verdict-rendered.open`. The record file
   (`runs/<id>/verdict-<cycle>.json`) carries the spectrum, the open and
@@ -153,8 +155,8 @@ review — gets these concrete shapes:
   the daemon appends the paired `resolved` line. At the close of a merged run,
   in both lanes, the harness counts the HIGH findings that carry
   `advisory: true` on a file under `repo.recordPaths`. The count is always zero,
-  because every HIGH reaches the verifier and a refuted one carries the
-  verifier's evidence and no advisory word. A count above zero stamps
+  because a HIGH on a record is confirmed as its reviewer raised it and takes no
+  advisory word. A count above zero stamps
   `gate-integrity` under the `record-finding-shipped` kind: loud, and owned by a
   person. It says the split above stopped classifying, or that the project's
   record paths name a tree its reviews do not read. A remark on a record is
@@ -198,14 +200,19 @@ a definition and not a feeling; the close records the remarks that shipped; and
 the eval seat reads that set by criterion and unit, where a `truth` remark on a
 sentence of a Decision is the reading that says the grade rule needs tightening.
 
-The verifier answers every HIGH, and it is the guard against a wrong block. A
+A confirmed HIGH the round could not answer ships the same way. The harness
+blocks no run on a record (ADR-0080), so the ending is a merge with the finding
+named: the request body lists it under "Findings not answered", the close stamps
+its id, and the finding stamp keeps `confirmed: true`. The eval question is
+whether a later run raises the same unit again.
+
+The guard against a wrong block on a record is the writer's own dispute. A
 review can read a record's own explanation of an inversion as the inversion, and
-a rule that blocked on every sentence a review seat wrote would block a ship on a
-finding the record itself refutes. A refutation is not advice: a second seat read
-the tree and wrote down, with evidence, why the record is right, under the
-finding's own id. The tripwires in ADR-0010 read that share over the findings the
-verifier answered, and a window in which most of them are refuted says the review
-seat is noisy about documents.
+a writer that reads the finding and finds the record right says so under the
+finding's id, in one sentence. The next cycle's reviewer reads that record fresh
+and either raises the finding again or does not. On a code round the guard is
+still the verifier: the tripwires in ADR-0010 read the refuted share over the
+findings it answered.
 
 ## Why this ladder counts one cap
 
