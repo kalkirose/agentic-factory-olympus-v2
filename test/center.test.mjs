@@ -671,6 +671,52 @@ test('the remark share reads the pass the run holds and not the one it discarded
   ]);
 });
 
+// The track spends one review seat per record and no verifier behind it. The
+// centre reads whether the first read is the read: what that cycle caught, and
+// what a later cycle raised on a record the first cycle passed (ADR-0080).
+test('the first read reads its cycle, and a later cycle on a record it passed', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const paths = scaffoldHome(join(root, 'home'));
+  let seq = 0;
+  const line = (event, fields = {}) => ({ seq: ++seq, ts: REC(seq), event, actor: ACTOR, ...fields });
+  const high = (id, file, cycle) => ({
+    lens: 'record',
+    record: true,
+    severity: 'HIGH',
+    criterion: 'truth',
+    confirmed: true,
+    file,
+    cycle,
+    id,
+  });
+  writeRunLedger(paths, 'r-first', [
+    line('run-launched', { project: 'alpha', lane: 'records' }),
+    line('records-committed', { sha: 'b1', paths: ['docs/adr/a.md', 'docs/adr/b.md'], decided: true }),
+    line('reconciliation-judged', { ok: true, owed: false, born: ['docs/adr/a.md', 'docs/adr/b.md'], late: [] }),
+    // The first cycle reads both records and raises one HIGH, on a.
+    line('reconcile-review-set', { cycle: 1, records: ['docs/adr/a.md', 'docs/adr/b.md'], skipped: [] }),
+    line('finding', high('F1', 'docs/adr/a.md', 1)),
+    line('reconcile-rendered', { cycle: 1, sha: 'c1', verdict: 'red', open: ['F1'], records: ['docs/adr/a.md', 'docs/adr/b.md'], layers: [] }),
+    // The second cycle raises one on b, which the first cycle read and passed,
+    // and one on a, which the first cycle already named.
+    line('reconcile-review-set', { cycle: 2, records: ['docs/adr/a.md', 'docs/adr/b.md'], skipped: [] }),
+    line('finding', high('F2', 'docs/adr/b.md', 2)),
+    line('finding', high('F3', 'docs/adr/a.md', 2)),
+    line('reconcile-rendered', { cycle: 2, sha: 'c2', verdict: 'red', open: ['F2', 'F3'], records: ['docs/adr/a.md', 'docs/adr/b.md'], layers: [] }),
+  ]);
+
+  const r = (await buildSnapshot(paths, { now: NOW })).stats.records;
+  assert.equal(r.firstRead.born, 2);
+  assert.equal(r.firstRead.firstRead, 1);
+  assert.equal(r.firstRead.perRecord, 0.5);
+  // One only: the second HIGH on `a` is on a record the first read named.
+  assert.equal(r.firstRead.later, 1);
+  assert.deepEqual(r.firstRead.runs, [
+    { runId: 'r-first', born: 2, firstRead: 1, later: 1 },
+  ]);
+});
+
 test('a home with no record stamp reports the section empty, never zero', async (t) => {
   const { paths } = seededHome(t);
   const r = (await buildSnapshot(paths, { now: NOW })).stats.records;

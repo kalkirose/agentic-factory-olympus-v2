@@ -495,6 +495,7 @@ function recordsView(allRuns, pinTs) {
     },
     cost: recordCost(runs),
     standing: standingFindings(runs),
+    firstRead: firstReadYield(runs),
     remarks: remarkShare(runs),
     verifier: verifierConfirmRate(runs),
     late: lateShare(runs),
@@ -586,6 +587,64 @@ function standingFindings(runs) {
     }
   }
   return { merged, findings: findings.length, standing: findings };
+}
+
+/**
+ * What one read of a record catches, and what a read after it catches.
+ *
+ * `firstRead` is every confirmed HIGH the run's first record cycle raised, over
+ * the records the run's birth committed: the rate at which one seat reading one
+ * document whole finds the contradiction it is there to find. `later` is every
+ * confirmed HIGH a cycle after the first raised on a record the first cycle read
+ * and passed.
+ *
+ * The track spends one review seat per record and no verifier behind it, so the
+ * question it turns on is whether the first read is the read. A `later` that
+ * grows against a flat `firstRead` is the reading that answers no (ADR-0080).
+ */
+function firstReadYield(runs) {
+  let born = 0;
+  let firstRead = 0;
+  let later = 0;
+  const perRun = [];
+  for (const { runId, events } of runs) {
+    const since = recordPassSeq(events);
+    const sets = events.filter((e) => e.event === 'reconcile-review-set' && e.seq > since);
+    if (sets.length === 0) continue;
+    // The records the first cycle read. A record drops off it as soon as that
+    // cycle raises a HIGH on it, so what stays is what the first read passed.
+    const passed = new Set(sets[0].records ?? []);
+    let mine = 0;
+    let after = 0;
+    for (const e of events) {
+      if (e.event !== 'finding' || e.record !== true || e.seq <= since) continue;
+      if (e.severity !== 'HIGH' || e.confirmed !== true) continue;
+      if (e.cycle === sets[0].cycle) {
+        mine += 1;
+        passed.delete(e.file);
+      } else if (passed.has(e.file)) {
+        after += 1;
+      }
+    }
+    const count = bornRecords(events);
+    born += count;
+    firstRead += mine;
+    later += after;
+    if (count > 0) perRun.push({ runId, born: count, firstRead: mine, later: after });
+  }
+  return {
+    born,
+    firstRead,
+    later,
+    perRecord: born > 0 ? round(firstRead / born) : null,
+    runs: perRun,
+  };
+}
+
+/** How many records one run's birth committed. */
+function bornRecords(events) {
+  const born = [...events].reverse().find((e) => e.event === 'records-committed');
+  return (born?.paths ?? []).length;
 }
 
 /**

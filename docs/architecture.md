@@ -1522,14 +1522,14 @@ every 60 s (display cadence only), and has a manual refresh. Content: status
 chips, loud strip, run cards with stage pipeline, escalations, build health,
 run-time statistics, the record section, ledger tail. Dark command-center look.
 
-The record section carries ten measures off the run ledgers alone: the cycles
+The record section carries twelve measures off the run ledgers alone: the cycles
 per reconciliation, what a shipped record cost, how many runs merged with a
-confirmed finding still standing, the share of remarks a round answered, the
-verifier's confirm rate, the late share of the born records, what a moved
-default branch cost in re-judgments and re-runs, the recheck yield, the
-record-diff gate time, the write wall clock, and the tree series with its
-supersessions, splits and merges. Each carries its own denominator, so a quiet
-window reads as nothing rather than as zero.
+confirmed finding still standing, the first read with its later count, the share
+of remarks a round answered, the verifier's confirm rate, the late share of the
+born records, what a moved default branch cost in re-judgments and re-runs, the
+recheck yield, the record-diff gate time, the write wall clock, and the tree
+series with its supersessions, splits and merges. Each carries its own
+denominator, so a quiet window reads as nothing rather than as zero.
 
 ## Proof
 

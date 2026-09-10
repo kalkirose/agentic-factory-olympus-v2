@@ -697,6 +697,10 @@ function renderRecords(box, r) {
   tiles.appendChild(tile("Merged with findings", String(r.standing.merged), null,
     sub([r.standing.findings + " confirmed findings still standing"]),
     "Runs that merged with a confirmed HIGH no round answered. A record never blocks a run; this is what that costs."));
+  tiles.appendChild(tile("First read", fmtNum(r.firstRead.perRecord, 2), null,
+    sub([r.firstRead.firstRead + " HIGH on " + r.firstRead.born + " born records · " +
+      r.firstRead.later + " raised later on a record the first read passed"]),
+    "Confirmed HIGH per born record at the first record cycle. A later count that grows against a flat first read says one read of a document is not enough."));
   tiles.appendChild(tile("Remarks answered", fmtShare(r.remarks.share), null,
     sub([r.remarks.answered + " of " + r.remarks.raised + " remarks · " + r.remarks.shipped.length + " shipped"]),
     "Record findings below HIGH a writer answered inside a round opened for a HIGH. A remark opens no round of its own."));

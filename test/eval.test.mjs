@@ -263,11 +263,13 @@ test('the brief states the record stage as the harness now stamps it', async (t)
   }
   // The measures the center derives, by name, so the eval reads them
   // rather than re-deriving them.
-  assert.match(prompt, /The command center derives ten measures/);
+  assert.match(prompt, /The command center derives twelve measures/);
   for (const measure of [
     'record cycles',
     'the cost of a shipped record',
     'confirmed finding still standing',
+    'the first read',
+    'verifier confirm rate',
     'late share',
     'moved-tree cost',
     'recheck yield',
