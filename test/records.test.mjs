@@ -16,6 +16,7 @@ import {
   findingLine,
   kindTest,
   parseRecordList,
+  pathTokens,
   reconcileWriteSchema,
   recordScope,
   remarkLine,
@@ -427,6 +428,81 @@ test('the kind test reads a path, a symbol and the closed verb list', () => {
   assert.equal(kindTest('Reversal trigger: a second consumer of the same table.'), null);
   // A word with a slash is not a path.
   assert.equal(kindTest('The trade holds either way, and/or costs nothing.'), null);
+});
+
+// -- the one path split (plan 42, point 1) ------------------------------------
+
+/** A route path of the shape a framework writes: a bracket, a group, a plus. */
+const ROUTE = 'web/src/routes/[lang=lang]/(shop)/cart/+page.svelte';
+
+// The harness reads a cited path as the record form gate reads it: one split on
+// whitespace, the markup off, the sentence's punctuation off the two ends of a
+// token, and everything else the token's own. A gate that accepts a path the
+// harness refuses costs the seat an attempt on a record that is right, so the
+// table pins the harness's answer to the gate's rule.
+test('the path tokens of a text are the tokens the form gate names', () => {
+  const rows = [
+    // A path in backticks, ending the sentence.
+    { text: `The cart page is \`${ROUTE}\`.`, tokens: [ROUTE] },
+    // The same path bare.
+    { text: `The cart page is ${ROUTE}`, tokens: [ROUTE] },
+    // A path the sentence wraps in parentheses.
+    { text: 'The rule stands in (see `scripts/form.ts`) today.', tokens: ['scripts/form.ts'] },
+    // A path a comma follows.
+    { text: `${ROUTE}, the cart page`, tokens: [ROUTE] },
+    // A path with a line suffix, as a piece of evidence writes one. The suffix
+    // is the token's; the evidence reader strips it, and check 4 pins that.
+    { text: `${ROUTE}:12`, tokens: [`${ROUTE}:12`] },
+    // Two paths in one bullet, in the order they stand.
+    {
+      text: `Both \`${ROUTE}\` and \`web/src/lib/cart.ts\` hold it.`,
+      tokens: [ROUTE, 'web/src/lib/cart.ts'],
+    },
+    // A link: the label ends at "](", so the target stands alone.
+    { text: '- [the upstream note](https://example.invalid/notes)', tokens: ['https://example.invalid/notes'] },
+    // A word with a slash is no path.
+    { text: 'The trade holds either way, and/or costs nothing.', tokens: [] },
+  ];
+  for (const row of rows) assert.deepEqual(pathTokens(row.text), row.tokens, row.text);
+});
+
+test('the path split is one function: no second tokenizer stands beside it', () => {
+  // Two readers of one rule is the shape that let the gate accept a path the
+  // harness refused. Every check reads the tokens of the one function.
+  const source = readFileSync(join(import.meta.dirname, '..', 'src/lanes/records.mjs'), 'utf8');
+  assert.ok(!source.includes('split(/[\\s,;()'), 'records.mjs still holds a second path split');
+});
+
+// Check 9 names the whole path in its defect, so the seat reads what the tree
+// answered and not the directory in front of it.
+test('unit check 9 reads a bracketed route path whole', (t) => {
+  const bullet = `- \`${ROUTE}\`, the cart page`;
+  const held = citingTree(t, [bullet], { [ROUTE]: '<script>\n</script>\n' });
+  assert.deepEqual(unitChecks(CITING_BASE(held), [CITING], citingReport(held)), []);
+  const missing = citingTree(t, [bullet]);
+  const defects = unitChecks(CITING_BASE(missing), [CITING], citingReport(missing));
+  assert.equal(defects.length, 1);
+  assert.ok(
+    defects[0].includes(`cites ${ROUTE} and the worktree holds no such path`),
+    defects[0],
+  );
+});
+
+test('unit check 4 reads a bracketed evidence path whole', (t) => {
+  const evidence = `${ROUTE}:12`;
+  const held = tree(t, { [ROUTE]: '<script>\n</script>\n' });
+  assert.deepEqual(
+    unitChecks({ worktree: held }, [RECORD], reportWith(completeUnits({ U2: { evidence } }))),
+    [],
+  );
+  const missing = tree(t);
+  const defects = unitChecks(
+    { worktree: missing },
+    [RECORD],
+    reportWith(completeUnits({ U2: { evidence } })),
+  );
+  assert.equal(defects.length, 1);
+  assert.ok(defects[0].includes(`cites ${ROUTE} and the worktree holds no such path`), defects[0]);
 });
 
 test('unit check 6 refuses a writer report that leaves a unit failing', (t) => {
