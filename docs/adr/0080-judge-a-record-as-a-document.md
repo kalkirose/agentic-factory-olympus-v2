@@ -122,6 +122,13 @@ spent. `record-reviewed` and `record-unreviewed` are the review's boundary.
 lane runs the `needs` closure of `gates.recordLayers` once in the worktree, so
 the seat that is told to run the form gate has what the gate needs.
 
+**Every reader of the run's record work opens at one window.** `runWindow` in
+`src/lanes/records.mjs` is the merge base of the run branch and the default
+branch, computed at the read. The record scope, the closure rule and the layer
+plan read that window and not a round's own range. So a default branch that
+moves during the run costs the run's readers nothing, and a record another run
+merged meanwhile belongs to that run.
+
 ## Consequences
 
 A lazy reviewer is caught later rather than sooner. The unit list made a skipped

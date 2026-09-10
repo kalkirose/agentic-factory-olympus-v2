@@ -441,9 +441,9 @@ export function isActiveRecord(text) {
  * is asked for a unit, a finding or a report entry on one.
  *
  * Two shapes stay in the list on purpose. A file the worktree cannot read stays,
- * so the "not enumerable" defect of the unit check still fires on a record a
- * seat deleted. A file with no status line stays, because a record nobody
- * marked is a record nobody closed.
+ * so a record a seat deleted still reaches a seat that reports it gone. A file
+ * with no status line stays, because a record nobody marked is a record nobody
+ * closed.
  *
  * The drop is never silent: `skipped` carries the status word each dropped
  * record read, and the stage stamps it beside the list it dispatched.

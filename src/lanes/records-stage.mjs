@@ -11,9 +11,10 @@
 // before its dev seat, and the record paths are frozen for that seat.
 //
 // One seat writes the whole set. The count of records is not known before the
-// seat runs, so a per-record dispatch has nothing to dispatch on; the harness
-// enumerates every file the seat wrote and answers the unit check per file
-// instead, and one defect refuses the whole report (ADR-0073).
+// seat runs, so a per-record dispatch has nothing to dispatch on. The harness
+// reads what the seat left in the tree and refuses nothing about it: a file
+// outside the record tree goes back, and a record the report claims and the
+// tree does not hold drops off the list (ADR-0080).
 //
 // The stage derives its step from its own stamps and never from memory. No
 // spawn is a dispatch; a spawn with no report is a seat that died mid-write, so

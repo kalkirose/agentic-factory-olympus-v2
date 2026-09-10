@@ -149,9 +149,9 @@ export function recordReviewSchema() {
           type: 'object',
           additionalProperties: false,
           properties: {
-            // The seat's own label, so the unit checks and the brief can name
-            // one finding. The ledger id is the harness's, assigned at the
-            // stamp, because ids are unique across a run and not across a seat.
+            // The seat's own label, so the writer's `answered` list can name one
+            // finding. The ledger id is the harness's, assigned at the stamp,
+            // because ids are unique across a run and not across a seat.
             id: { type: 'string' },
             criterion: { type: 'string', enum: [...RECORD_CRITERION_KEYS] },
             severity: { type: 'string', enum: [...SEVERITIES] },

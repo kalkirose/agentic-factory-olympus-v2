@@ -636,10 +636,10 @@ function remarkShare(runs) {
  * The verifier's confirm rate, per seat: the items it confirmed over the items
  * it answered.
  *
- * Two seats answer items, on two models: the record verifier over a round of
- * record items and the code verifier over every other round (ADR-0005). The
- * rate is read per seat, because the question the reading exists for is whether
- * the model change costs findings, and one number over both would hide it.
+ * One seat answers items: the code verifier over a code round (ADR-0005). A
+ * record round spawns no verifier, so no record item reaches this rate. The
+ * rate stays per seat, because the question the reading exists for is whether a
+ * model change costs findings, and one number over several seats would hide it.
  *
  * A finding that reached a verifier carries `confirmed`; a remark carries none.
  * The join is the cycle: one verifier answers one cycle's items, and its report
