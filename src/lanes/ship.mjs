@@ -755,10 +755,11 @@ function shipHandler({ forgeFor, pollMs }) {
         // the reconcile stage's corrective round (ADR-0075).
         return { next: certifyingStage(base) };
       }
-      // The stage's own red, from a CI check on a record layer. It resumes the
-      // same way: the render is the stage's and the stage answers it.
-      const lastRecordRender = lastRendered(events);
-      if (lastRecordRender?.verdict === 'red') return { next: RECONCILE_STAGE };
+      // The stage's own red, with nothing behind it. A red render the stage
+      // answered with a fallback is the stage's last word and never a bounce:
+      // the run merges with what is still wrong named (ADR-0080).
+      const records = reconcileCertification(events);
+      if (records && records.ok !== true) return { next: RECONCILE_STAGE };
       if (findLast(events, 'merged')) return { next: 'close-out' };
       // A fresh pass interrupted between its stamp and its dev seat resumes
       // here too; finish it before touching the forge.

@@ -97,14 +97,15 @@ const SCENARIO = {
 
 // The other shape: a judge that owes the record. The stage then writes it
 // against the tree before it reviews it.
-const SCENARIO_OWED = {
+// A finding on the born record: the review raises it once, the corrective
+// round writes the record, and the second cycle is green.
+const SCENARIO_CORRECTED = {
   bornRecords: { [RECORD]: RECORD_TEXT },
-  reconcileJudge: {
-    owed: true,
-    records: [RECORD],
-    reason: 'the run writes the record this ticket decides',
+  recordFindings: {
+    [RECORD]: { summary: 'the record states a module the tree does not hold', reads: 1 },
   },
   reconcileWrites: { [RECORD]: RECORD_RECONCILED },
+  confirmFindings: true,
 };
 
 test('a record-only ticket ships through the records lane', async (t) => {
@@ -277,13 +278,12 @@ test('a record-only ticket ships through the records lane', async (t) => {
   await stopDaemon(fx);
 });
 
-test('a judge that owes the born record writes it, and the write rides the merge', async (t) => {
-  // The other shape of the same lane. The judge names the born record, so the
-  // stage writes it before the review reads it. The write stamp is the anchor
-  // of that cycle, as it always was (ADR-0075).
+test('a finding on the born record buys a round, and the write rides the merge', async (t) => {
+  // The other shape of the same lane. The birth is the judgment, the review
+  // raises a HIGH on the record it wrote, and one corrective round answers it.
   const fx = buildFixture({
     prefix: 'olympus-e2e-records-owed-',
-    scenario: SCENARIO_OWED,
+    scenario: SCENARIO_CORRECTED,
     tree: { [TICKET]: RECORD_TICKET },
   });
   t.after(() => cleanup(fx));
@@ -415,30 +415,25 @@ ${HEIRS[1]}
 \`\`\`
 `;
 
-// The birth writes all three files and reports all three in "rewritten",
-// answering every unit of every one of them. The harness drops the answers
-// about the record the write closed, and refuses nothing.
+// The birth writes all three files and reports all three in "rewritten". The
+// harness reads no token of any of them and refuses nothing (ADR-0080).
 const SCENARIO_SUPERSEDE = {
   bornRecords: {
     [RECORD]: RECORD_CLOSED,
     [HEIRS[0]]: HEIR_TEXT[HEIRS[0]],
     [HEIRS[1]]: HEIR_TEXT[HEIRS[1]],
   },
-  reconcileJudge: {
-    owed: false,
-    records: [],
-    reason: 'the records this run wrote state what the tree holds',
-  },
 };
 
-// The reconcile stage's own supersession: the birth decides nothing, the judge
-// owes the accepted record, and the write closes it and adds its replacement.
+// The reconcile stage's own supersession: the birth writes the record, the
+// review raises a HIGH on it, and the corrective round closes it and adds its
+// replacement. The records lane spawns no judge (ADR-0080).
 const SCENARIO_WRITE_SUPERSEDE = {
-  reconcileJudge: {
-    owed: true,
-    records: [RECORD],
-    reason: 'the diff moved past what this record states',
+  bornRecords: { [RECORD]: RECORD_TEXT },
+  recordFindings: {
+    [RECORD]: { summary: 'the record states a module the tree does not hold', reads: 1 },
   },
+  confirmFindings: true,
   reconcileSupersedes: {
     [RECORD]: {
       closed: RECORD_TEXT.replace(
@@ -498,7 +493,7 @@ test('a birth that supersedes one record with two ships on one attempt', async (
   // The birth commit holds all three files, and the stamp names them.
   const born = events.find((e) => e.event === 'records-committed');
   assert.deepEqual(born.paths.slice().sort(), [RECORD, ...HEIRS].sort());
-  assert.deepEqual(born.unreported, [RECORD]);
+  assert.equal(born.decided, true);
 
   // One review seat per active record, and none for the record the write
   // closed.
@@ -532,15 +527,12 @@ test('a birth that supersedes one record with two ships on one attempt', async (
   await stopDaemon(fx);
 });
 
-test('a judged write supersedes its record and answers the replacement', async (t) => {
+test('a corrective write supersedes its record and adds the replacement', async (t) => {
   const fx = buildFixture({
     prefix: 'olympus-e2e-records-write-supersede-',
     scenario: SCENARIO_WRITE_SUPERSEDE,
-    tree: {
-      '.olympus/project.json': SUPERSEDE_PROJECT,
-      [TICKET]: RECORD_TICKET,
-      [RECORD]: RECORD_TEXT,
-    },
+    // The birth writes the record this run then supersedes.
+    tree: { '.olympus/project.json': SUPERSEDE_PROJECT, [TICKET]: RECORD_TICKET },
   });
   t.after(() => cleanup(fx));
 
@@ -561,9 +553,10 @@ test('a judged write supersedes its record and answers the replacement', async (
   assertNoWiringFailure(assert, fx, runId);
   assertMilestones(assert, events, [
     'reconciliation-judged',
+    'reconcile-rendered',
     'reconcile-write-set',
     'reconciliation-written',
-    'reconcile-rendered',
+    'reconcile-round',
     'merged',
     'run-closed',
   ]);
@@ -590,9 +583,8 @@ test('a judged write supersedes its record and answers the replacement', async (
     [RECORD],
   );
 
-  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
-  assert.equal(rendered.at(-1).verdict, 'green');
-  assert.deepEqual(rendered.at(-1).records, [HEIRS[0]]);
+  // Nobody was asked anything, and both records rode the merge.
+  assert.deepEqual(events.filter((e) => e.event === 'park').map((e) => e.type), []);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   const tree = originTree(fx, 'main');
   for (const path of [RECORD, HEIRS[0]]) assert.ok(tree.includes(path), path);
@@ -628,7 +620,7 @@ const SCENARIO_CORRECTIVE = {
   confirmFindings: true,
 };
 
-test('a corrective round over a born supersession survives a refused seat', async (t) => {
+test('a corrective round over a born supersession merges what it could not answer', async (t) => {
   const fx = buildFixture({
     prefix: 'olympus-e2e-records-corrective-',
     scenario: SCENARIO_CORRECTIVE,
@@ -661,39 +653,36 @@ test('a corrective round over a born supersession survives a refused seat', asyn
   assert.equal(author.length, 1);
   assert.match(author[0].baseSha ?? '', /^[0-9a-f]{40}$/);
 
-  // One round dispatched both heirs; one wrote, and one spent its budget.
+  // One round dispatched both heirs; one wrote, and one answered nothing.
   const rounds = events.filter((e) => e.event === 'reconcile-round');
-  assert.equal(rounds.length, 2);
+  assert.equal(rounds.length, 1, 'the cap is one round on every lane (ADR-0080)');
   assert.deepEqual(rounds[0].records.slice().sort(), HEIRS.slice().sort());
-  assert.deepEqual(rounds[0].failed, [HEIRS[1]]);
   const written = events.filter((e) => e.event === 'reconciliation-written');
-  const failed = written[0].records.find((r) => r.record === HEIRS[1]);
-  assert.equal(failed.failed, true);
-  assert.equal(failed.attempts, 2);
-  assert.ok(failed.defects.length > 0);
-  // The only seat failure is that dispatch, and the run neither closed nor
-  // parked on it.
+  assert.ok(written[0].rewritten.includes(HEIRS[0]));
+  assert.ok(!written[0].rewritten.includes(HEIRS[1]));
+  // Nothing parked, and the stall is the stage's own last word.
   assert.deepEqual(
-    events.filter((e) => e.event === 'seat-failure').map((e) => e.reason),
-    ['work-product-defect'],
+    events.filter((e) => e.event === 'park').map((e) => e.type),
+    [],
   );
-  assert.ok(!events.some((e) => e.event === 'park'));
+  const stall = events.find((e) => e.event === 'reconcile-stall');
+  assert.equal(stall.rounds, 1);
+  assert.equal(written.at(-1).ok, false);
+  assert.equal(written.at(-1).cause, 'record-cap');
 
-  // The render that followed named the record no write answered, and the next
-  // round dispatched that record alone.
-  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
-  assert.ok(rendered[1].open.includes(`unwritten:${HEIRS[1]}`), rendered[1].open.join(', '));
-  assert.deepEqual(rounds[1].records, [HEIRS[1]]);
-  assert.equal(rendered.at(-1).verdict, 'green');
-
-  // The third cycle read the record that moved and kept the one that did not.
-  const cycles = events.filter((e) => e.event === 'reconcile-review-set');
-  assert.equal(cycles.length, 3);
-  assert.deepEqual(cycles[2].records, [HEIRS[1]]);
-  assert.deepEqual(
-    (cycles[2].kept ?? []).map((k) => k.record),
-    [HEIRS[0]],
-  );
+  // The run merged with the finding on the record no round answered, named in
+  // the request body and on the close stamp (ADR-0080).
+  const closed = events.find((e) => e.event === 'run-closed');
+  assert.equal(closed.state, 'shipped');
+  const standing = events
+    .filter((e) => e.event === 'finding' && e.confirmed === true && e.file === HEIRS[1])
+    .map((e) => e.id);
+  assert.ok(standing.length > 0, 'no finding stood on the record no round wrote');
+  for (const id of standing) assert.ok(closed.remarks.includes(id), id);
+  const create = forgeCalls(fx).find((c) => c.handled === 'pr-create');
+  const body = create.argv[create.argv.indexOf('--body') + 1];
+  assert.match(body, /## Findings not answered/);
+  assert.match(body, new RegExp(`\\[${standing[0]}\\]`));
 
   // The supersession rode the merge.
   const tree = originTree(fx, 'main');
@@ -743,10 +732,11 @@ const INCOMING_TEXT = [
 test('a moved default branch re-runs the reconciliation on the run own set', async (t) => {
   const fx = buildFixture({
     prefix: 'olympus-e2e-records-moved-',
-    // The judge holds the run inside the reconcile stage while the default
+    // The review holds the run inside the reconcile stage while the default
     // branch moves. The birth has committed by then, and the update is two
-    // stages away, so the push lands before anything reads the branch.
-    scenario: { ...SCENARIO, stallSeat: 'reconcile-judge' },
+    // stages away, so the push lands before anything reads the branch. The
+    // records lane spawns no judge to hold (ADR-0080).
+    scenario: { ...SCENARIO, stallSeat: 'record-review' },
     tree: { [TICKET]: RECORD_TICKET },
   });
   t.after(() => cleanup(fx));
@@ -759,7 +749,7 @@ test('a moved default branch re-runs the reconciliation on the run own set', asy
     { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
   );
   await pollFor(
-    'the judge to reach its hold',
+    'the review to reach its hold',
     () => existsSync(fx.stallMarker),
     { abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
   );

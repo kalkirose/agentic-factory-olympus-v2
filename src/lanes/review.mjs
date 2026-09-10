@@ -639,7 +639,7 @@ async function settleFindings(
   } else if (!verify) {
     // The round's own answer, in the shape the verifier's is read in.
     results = new Map(
-      items.map((item) => [item.id, { verdict: raisedVerdict(item, verifiable, read) }]),
+      items.map((item) => [item.id, { verdict: raisedVerdict(item, verifiable, read, base) }]),
     );
   }
   const events = runEvents(ctx);
@@ -742,11 +742,18 @@ async function settleFindings(
  * is resolved where a fresh seat read that record this cycle and raised nothing
  * on the same sentence. A record no seat read this cycle resolves nothing,
  * because nobody looked (ADR-0080).
+ *
+ * A record the tree has since closed resolves every finding against it. A
+ * closed record states what was known then, no seat may edit it, and a round
+ * that superseded it answered the finding by writing the record that replaces
+ * it (ADR-0078).
  */
-function raisedVerdict(item, raised, read) {
+function raisedVerdict(item, raised, read, base) {
   if (item.mode === 'confirm') return 'confirmed';
   const record = recordPathOf(item.finding);
-  if (record === null || !(read instanceof Set) || !read.has(record)) return 'unresolved';
+  if (record === null) return 'unresolved';
+  if (closedRecord(base, record)) return 'resolved';
+  if (!(read instanceof Set) || !read.has(record)) return 'unresolved';
   const unit = item.finding.unit ?? null;
   return raised.some((f) => recordPathOf(f) === record && (f.unit ?? null) === unit)
     ? 'unresolved'
