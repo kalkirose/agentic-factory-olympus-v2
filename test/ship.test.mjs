@@ -154,6 +154,8 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
     // The labels each create call carried, so a test can say which call
     // labelled the request.
     createLabels: [],
+    // The bodies the run wrote, in the order it opened requests.
+    bodies: [],
     // The CI secret names the parity read asks for; null is a forge that
     // would not answer at all.
     ciSecrets: [],
@@ -223,11 +225,14 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
         requiredChecks: state.requiredChecks,
       };
     },
-    async openPr({ head: headBranch, base, labels = [] }) {
+    async openPr({ head: headBranch, base, body = '', labels = [] }) {
       const fresh = !state.pr || state.pr.state === 'closed';
       if (fresh) {
         state.pr = { number: 7, head: headBranch, base, armed: false, state: 'open', mergeSha: null };
       }
+      // The body the run wrote, kept where a scenario about what a merged
+      // request says can read it (ADR-0080).
+      state.bodies.push(body);
       // The create carries the labels, the way `gh pr create --label` does. A
       // repository that defines none refuses that create and the adapter opens
       // the request bare, which is the state this leaves behind; a create that
@@ -728,7 +733,7 @@ const reviewClean = () => ({ report: { findings: [], summary: 'the record stands
 
 /** The units a record brief names, as addresses: the id, the kind, the head. */
 function briefUnits(prompt) {
-  return [...prompt.matchAll(/^- (Ud+) (line d+(?:, (w+))?): (.+)$/gm)].map(
+  return [...prompt.matchAll(/^- (U\d+) \(line \d+(?:, (\w+))?\): (.+)$/gm)].map(
     ([, id, kind, head]) => ({ id, kind, head }),
   );
 }
@@ -965,11 +970,48 @@ test('a crashed write seat leaves its record unwritten, and the run merges', asy
   assert.equal(written.ok, false);
   assert.equal(written.cause, 'seat-failure');
   // The request body and the close stamp both name the record nobody wrote.
-  assert.match(fx.forge.state.prs[0].body, /## Records not written/);
-  assert.match(fx.forge.state.prs[0].body, new RegExp(ADR_FILE.replaceAll('/', '\\/')));
+  assert.match(fx.forge.state.bodies[0], /## Records not written/);
+  assert.match(fx.forge.state.bodies[0], new RegExp(ADR_FILE.replaceAll('/', '\\/')));
   assert.deepEqual(events.find((e) => e.event === 'run-closed').unwritten, [ADR_FILE]);
   // And the close writes the ticket the sweep launches for it.
   assert.equal(owedReconciliations(fx.paths, 'proj').length, 1);
+});
+
+// Two runs that both rewrote one record is the shape a hub supersession makes.
+// The merge takes the default branch's version of the conflicted record, the
+// code ships, and the record rides the close under "Records not written". No
+// seat of this run can settle a document another run already merged, and the
+// dev seat may not touch a record at all (ADR-0074, ADR-0080).
+test('a record conflict at the merge drops the run own change and ships the code', async (t) => {
+  const fx = reconcileFixture(t, { seats: reconcileSeats() });
+  fx.forge.state.autoChecks = () => [running()];
+  fx.forge.state.conflictMode = true;
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  // The default branch gains its own rewrite of the same record.
+  const theirs = ADR_TEXT.replace(
+    'The module src/feature.mjs will double the input.',
+    'The module src/feature.mjs doubles every input it is given.',
+  );
+  commitTree(fx.origin, { [ADR_FILE]: theirs }, 'a competing rewrite of one record');
+  const update = await waitEvent(fx.paths, runId, (e) => e.event === 'branch-update', 'branch-update');
+  fx.forge.setChecks(update.toSha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+
+  // Nothing parked, no fresh pass, and no second stall.
+  assert.deepEqual(events.filter((e) => e.event === 'park').map((e) => e.type), []);
+  assert.ok(!events.some((e) => e.event === 'fresh-pass'));
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The merge round resolved, and it names the record it dropped.
+  const round = events.find((e) => e.event === 'merge-round');
+  assert.equal(round.resolved, true);
+  assert.deepEqual(round.recordsDropped, [ADR_FILE]);
+  // No seat was asked to settle the document: the merge arm is gone.
+  const ship = readFileSync(join(import.meta.dirname, '..', 'src/lanes/ship.mjs'), 'utf8');
+  assert.ok(!ship.includes('recordConflictRole'), 'the record conflict seat is still there');
+  // The default branch keeps its own version, and the close names the record.
+  assert.equal(gitSync(['show', `main:${ADR_FILE}`], fx.origin), theirs);
+  assert.deepEqual(events.find((e) => e.event === 'run-closed').unwritten, [ADR_FILE]);
 });
 
 test('a ticket the close cannot write is loud, and the kind names it', async (t) => {
@@ -2052,43 +2094,6 @@ test('textual conflicts take the merge round; test hunks go to the suite seat', 
     conflictCall.denyTools.some((rule) => rule.includes('docs/adr')),
     'the merge-conflict dev seat could reach the record tree',
   );
-});
-
-// A conflict on a record file is the record writer's work. The dev seat may not
-// touch a record in any lane, so a route that sent this one there would leave
-// the markers in the file and stall the merge (ADR-0074).
-test('a record conflict takes the record writer, and no dev seat sees it', async (t) => {
-  const fx = shipFixture(t, {
-    files: { [ADR_FILE]: ADR_TEXT },
-    seats: {
-      ...reconcileSeats(),
-      // The merge-conflict dispatch resolves the markers and reports a summary,
-      // which is the dev seat's shape: this is a merge, not a reconciliation.
-      'reconcile-write': ({ prompt }) =>
-        prompt.includes('conflicts in decision records')
-          ? { files: { [ADR_FILE]: ADR_REWRITTEN }, report: { summary: 'the record is merged' } }
-          : writeClean(),
-    },
-  });
-  fx.forge.state.autoChecks = () => [running()];
-  const runId = await fx.launch();
-  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
-  // Main moves the same record the run rewrote: the merge conflicts on it.
-  commitTree(fx.origin, { [ADR_FILE]: `${ADR_TEXT}\nMain states it its own way.\n` }, 'records: main');
-  const round = await waitEvent(fx.paths, runId, (e) => e.event === 'merge-round', 'merge-round');
-  assert.equal(round.resolved, true);
-  assert.deepEqual(round.conflicts, [ADR_FILE]);
-  fx.forge.setChecks(round.sha, [green()]);
-  const events = await waitClosed(fx.paths, runId);
-  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
-  // The seat that resolved it is the record writer, under its own slot, and no
-  // dev seat was dispatched for the conflict at all.
-  const merge = fx.calls.find((c) => c.prompt.includes('conflicts in decision records'));
-  assert.equal(merge.seat, 'reconcile-write');
-  assert.match(merge.named, /^reconcile-write:\d+$/);
-  assert.ok(!fx.calls.some((c) => c.seat === 'dev' && c.prompt.includes('textual conflicts')));
-  // The brief states the one rule the merge cannot break.
-  assert.match(merge.prompt, /An accepted record is never edited away/);
 });
 
 test('an admin merge over red checks is a breach: ticket, stamp, enqueue', async (t) => {

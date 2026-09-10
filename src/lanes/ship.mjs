@@ -119,6 +119,7 @@ import { WRITE_SEAT, findingLine, remarkLine, runWindow } from './records.mjs';
 import {
   RECONCILE_STAGE,
   REMARKS_HEADING,
+  lastRendered,
   reconcileCertification,
   reconcileHandler,
   runRemarks,
