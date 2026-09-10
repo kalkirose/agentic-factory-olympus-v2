@@ -811,7 +811,7 @@ test('a finding on a superseded record is returned to the seat', async (t) => {
   assert.ok(!fx.ctx.briefs.some((b) => b.seat === 'fury-verifier'));
 });
 
-test('each record seat stamps what it answered, unit by unit, with its cost', async (t) => {
+test('each record seat stamps the record it read, with its cycle and its cost', async (t) => {
   const worktree = recordTree(t);
   const fx = seatsFixture(
     t,
