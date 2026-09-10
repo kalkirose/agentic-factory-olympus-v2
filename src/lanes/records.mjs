@@ -272,8 +272,8 @@ export function correctiveRole(base, judged, { findings, divergences, advisory =
     ...(advisory.length > 0
       ? [
           '',
-          'These remarks hold no render red. Answer each one in this write, or state under',
-          '"answered" why the record is right:',
+          'These remarks hold no render red. Answer each one in this write, or list its id under',
+          '"answered" where the record is right as written:',
           ...advisory.map((f) => `- ${remarkLine(f)}`),
         ]
       : []),

@@ -976,10 +976,20 @@ test('the corrective brief states the remarks and what answering one means', () 
     brief: null,
   });
   assert.ok(brief.includes('These remarks hold no render red.'), brief);
+  // The second route is the field the schema holds: `answered` is a list of
+  // ids, so the brief asks for an id and never for a sentence the report has
+  // nowhere to put.
   assert.ok(
-    brief.includes('Answer each one in this write, or state under\n"answered" why the record is right:'),
+    brief.includes(
+      'Answer each one in this write, or list its id under\n"answered" where the record is right as written:',
+    ),
     brief,
   );
+  assert.ok(!brief.includes('state under\n"answered" why'), brief);
+  assert.deepEqual(reconcileWriteSchema({ answered: true }).properties.answered, {
+    type: 'array',
+    items: { type: 'string' },
+  });
   assert.ok(brief.includes(`- ${remarkLine(remark)}`), brief);
   // The grade rides the remark's line and never a confirmed finding's: every
   // confirmed finding blocks, and the grade would say nothing there.

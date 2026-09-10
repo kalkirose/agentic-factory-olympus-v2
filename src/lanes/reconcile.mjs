@@ -1462,8 +1462,9 @@ async function correctStep(ctx, base, next) {
   if (outcome.stopped) return null;
   if (outcome.fallback) return fallbackStep(ctx, base, { cause: outcome.fallback, next });
   // The remarks the writers say they answered ride the stamp beside the
-  // findings the round was opened for. A later round reads that list and hands
-  // over what it does not name, so a remark is offered once (ADR-0007).
+  // findings the round was opened for. A later round hands over every remark
+  // this list does not name, so a remark stands until a writer answers it and
+  // never after (ADR-0007).
   const handed = new Set(set.advisory.flatMap((entry) => entry.ids));
   const answered = [...new Set(outcome.reports.flatMap((r) => r.answered ?? []))].filter((id) =>
     handed.has(id),
