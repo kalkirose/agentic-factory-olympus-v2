@@ -965,6 +965,10 @@ export function unitChecks(
       continue;
     }
     const units = recordUnits(text);
+    // The lines of the file, for the checks that read a whole one. A head is
+    // the first eight words, and a reference names its record or its path
+    // wherever the sentence puts it (ADR-0073).
+    const lines = String(text).replace(/\r\n/g, '\n').split('\n');
     const counts = new Map();
     for (const entry of grouped.get(record) ?? []) {
       counts.set(entry.id, (counts.get(entry.id) ?? 0) + 1);
@@ -973,7 +977,11 @@ export function unitChecks(
     for (const unit of units) {
       heads.set(unitKey(record, unit.id), unit.head);
       named.set(unitKey(record, unit.id), unit.kind ?? null);
-      if (unit.kind === 'reference') defects.push(...referenceDefects(base, tree, record, unit));
+      if (unit.kind === 'reference') {
+        defects.push(
+          ...referenceDefects(base, tree, record, unit, lines[unit.line - 1] ?? unit.head),
+        );
+      }
       const n = counts.get(unit.id) ?? 0;
       if (n === 0) {
         defects.push(
@@ -1072,11 +1080,17 @@ export function unitChecks(
  * the same diff. A path resolves against the worktree. A link resolves against
  * nothing: it names a document outside this repository, and the harness says
  * nothing about one.
+ *
+ * The tokens come from the bullet's whole line and not from the eight-word head
+ * the unit stands by. A reference states its gloss first as often as last, so a
+ * head would refuse a bullet whose id is its ninth word for naming nothing, and
+ * would read no id there to check (ADR-0073). The head still names the unit in
+ * the defect text, because that is the text the seat matches to its own list.
  */
-function referenceDefects(base, tree, record, unit) {
+function referenceDefects(base, tree, record, unit, line) {
   const defects = [];
-  const ids = [...recordRefs(unit.head)];
-  const tokens = pathTokens(unit.head);
+  const ids = [...recordRefs(line)];
+  const tokens = pathTokens(line);
   const links = tokens.filter(isLink);
   const paths = tokens.filter((token) => !isLink(token));
   for (const id of ids) {

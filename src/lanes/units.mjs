@@ -145,16 +145,31 @@ export function recordUnits(text) {
  * A record may carry more than one such heading, so every one of them opens a
  * span. The heading line itself is structure and is outside its span, because a
  * heading is no unit.
+ *
+ * A fenced block is skipped whole, as `scanBody` skips one. A fence holds code
+ * and examples, so a heading inside one is text: it opens no section and ends
+ * none. A record that shows the form of a reference section in a fence would
+ * otherwise name every bullet under it a reference (ADR-0073).
  * @returns {Array<{from: number, to: number}>}
  */
 function referenceSpans(lines) {
   const spans = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (!REFERENCES_HEADING.test(lines[i])) continue;
-    let end = i + 1;
-    while (end < lines.length && !SECTION_HEADING.test(lines[end])) end++;
-    spans.push({ from: i + 1, to: end });
+  let open = null;
+  let i = 0;
+  while (i < lines.length) {
+    const fence = FENCE.exec(lines[i]);
+    if (fence) {
+      i = fenceEnd(lines, i, fence[2]);
+      continue;
+    }
+    if (open !== null && SECTION_HEADING.test(lines[i])) {
+      spans.push({ from: open, to: i });
+      open = null;
+    }
+    if (REFERENCES_HEADING.test(lines[i])) open = i + 1;
+    i++;
   }
+  if (open !== null) spans.push({ from: open, to: lines.length });
   return spans;
 }
 

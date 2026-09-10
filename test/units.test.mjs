@@ -205,6 +205,74 @@ test('the reference span runs to the next section heading and no further', () =>
   );
 });
 
+// A fence holds code and examples. The enumerator reads one as a block, and so
+// does the span: a heading inside a fence is text, and it neither opens a
+// reference section nor ends one.
+test('a fenced heading under References neither ends the span nor opens one', () => {
+  const inside = recordUnits(
+    [
+      '# ADR-0902: A record whose references hold a fence',
+      '',
+      'Status: accepted (2026-09-10)',
+      '',
+      '## References',
+      '',
+      '- ADR-0073',
+      '',
+      '```md',
+      '## Consequences',
+      '```',
+      '',
+      '- `src/lanes/units.mjs`',
+      '',
+      '## Consequences',
+      '',
+      'The tree grows.',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    inside.map((u) => [u.id, u.line, u.kind ?? null]),
+    [
+      ['U0', 1, 'title'],
+      ['U1', 3, 'status'],
+      ['U2', 7, 'reference'],
+      // The fenced block is one unit, inside the section that holds it.
+      ['U3', 9, 'reference'],
+      ['U4', 13, 'reference'],
+      ['U5', 17, null],
+    ],
+  );
+
+  // The other direction: a reference heading inside a fence is an example of
+  // one, and the bullet under it is an ordinary unit.
+  const fenced = recordUnits(
+    [
+      '# ADR-0903: A record that shows the form',
+      '',
+      'Status: accepted (2026-09-10)',
+      '',
+      '## Decision',
+      '',
+      '```md',
+      '## References',
+      '```',
+      '',
+      '- the bullet after the fence',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    fenced.map((u) => [u.id, u.line, u.kind ?? null]),
+    [
+      ['U0', 1, 'title'],
+      ['U1', 3, 'status'],
+      ['U2', 7, null],
+      ['U3', 11, null],
+    ],
+  );
+});
+
 // The seat runs the bin and the check runs the module, so the kind the seat
 // reads is the kind the check counts.
 test('olympus-units prints the reference kind in its kind column', () => {

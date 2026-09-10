@@ -332,6 +332,27 @@ test('unit check 9 refuses a reference to a record id the tree does not hold', (
   assert.match(defects[0], /^unit check 9: .*cites ADR-999 and the record tree holds no record of that id/);
 });
 
+// The check reads the bullet, not the eight words the enumeration stands it by.
+// A record writes its gloss first and its id last, and a token past word eight
+// is the token most references carry.
+test('unit check 9 reads the whole bullet and not the head alone', (t) => {
+  const late = '- The standard this record is written to, whole and unamended, is ADR-999';
+  const dir = citingTree(t, [late]);
+  const head = recordUnits(readFileSync(join(dir, CITING), 'utf8')).find((u) => u.id === 'U3').head;
+  assert.ok(!head.includes('ADR-999'), head);
+  const defects = unitChecks(CITING_BASE(dir), [CITING], citingReport(dir));
+  assert.equal(defects.length, 1);
+  assert.match(defects[0], /cites ADR-999 and the record tree holds no record of that id/);
+  // The same token, naming a record the tree holds, passes.
+  const held = citingTree(t, [late.replace('ADR-999', 'ADR-900')]);
+  assert.deepEqual(unitChecks(CITING_BASE(held), [CITING], citingReport(held)), []);
+  // And a path past word eight is read the same way.
+  const path = citingTree(t, ['- The checker this record is written against is `scripts/nowhere.ts`']);
+  const missing = unitChecks(CITING_BASE(path), [CITING], citingReport(path));
+  assert.equal(missing.length, 1);
+  assert.match(missing[0], /cites scripts\/nowhere\.ts and the worktree holds no such path/);
+});
+
 test('unit check 9 refuses a reference to a path the worktree does not hold', (t) => {
   const dir = citingTree(t, ['- `scripts/nowhere.ts`, the checker']);
   const defects = unitChecks(CITING_BASE(dir), [CITING], citingReport(dir));
