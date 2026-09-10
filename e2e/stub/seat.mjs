@@ -8,7 +8,7 @@
 // The scenario file (OLYMPUS_E2E_SCENARIO) holds the artifact texts, so one
 // stub drives every lane.
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 
 const argv = process.argv.slice(2);
 const prompt = argv[argv.length - 1] ?? '';
@@ -20,10 +20,17 @@ const ANSWERED = 'The corrective round answered the finding.';
 
 // A seat name may carry a slot suffix (`reconcile-write:2`). The suffix is the
 // dispatch's identity and not a seat, so the behaviour table reads the base.
-const named = match(/You are the (\S+) seat in an Olympus run/)?.[1] ?? null;
+//
+// The corrective prompt of an invalid report names no seat: it is the same seat
+// session, told what its report failed. Its report path names the seat, with the
+// slot suffix flattened to a dash, so a scenario about a spent ladder answers as
+// the same seat instead of exiting as an unknown one.
+const reportPath = reportPathFrom(prompt);
+const named =
+  match(/You are the (\S+) seat in an Olympus run/)?.[1] ??
+  (reportPath === null ? null : basename(reportPath, '.json').replace(/-(\d+)$/, ':$1'));
 const seat = named === null ? null : named.split(':')[0];
 const slot = named === null ? null : (named.split(':')[1] ?? null);
-const reportPath = reportPathFrom(prompt);
 
 record();
 
@@ -144,6 +151,10 @@ function reconcileJudge() {
 
 /** The birth: the records the scenario decides, or a work that decides none. */
 function recordAuthor() {
+  // A birth that delivers nothing the schema names, on every attempt. It is the
+  // one refusal a record write still takes, and a scenario about a spent ladder
+  // needs the seat to keep taking it (ADR-0080).
+  if (scenario.birthInvalid === true) return { report: { born: 'nothing the schema names' } };
   const records = scenario.bornRecords ?? {};
   const paths = Object.keys(records);
   for (const [path, content] of Object.entries(records)) {

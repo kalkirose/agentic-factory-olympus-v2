@@ -14,6 +14,7 @@ import { runCost } from '../src/ledger/cost.mjs';
 import {
   CARD_PATH,
   PROJECT,
+  PROJECT_CONFIG,
   SMOKE_CEILING_MB,
   SMOKE_HELD_MB,
   assertMilestones,
@@ -521,4 +522,151 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
     instance.find((e) => e.event === 'workspace-released' && e.runId === runId).ok,
     true,
   );
+});
+
+// -- the record track on the story lane (ADR-0080) ---------------------------
+
+const RECORD = 'docs/adr/adr-0001-double-the-input.md';
+
+// The record the card decides. Every claim names a path the tree holds.
+const RECORD_TEXT = [
+  '# ADR-0001: Double the input',
+  '',
+  '**Status:** Accepted',
+  '',
+  '## Decision',
+  '',
+  'The module src/feature.mjs answers twice the number it is given.',
+  '',
+  '## Consequences',
+  '',
+  'The suite asserts the doubling on one value.',
+  '',
+].join('\n');
+
+/** The project the record cases run against: one corrective round, no more. */
+const ONE_ROUND =
+  JSON.stringify(
+    { ...PROJECT_CONFIG, gates: { ...PROJECT_CONFIG.gates, reconcileRounds: 1 } },
+    null,
+    2,
+  ) + '\n';
+
+/** The story run that reaches a close, with whatever the record keys add. */
+async function shipStory(t, { prefix, scenario }) {
+  const fx = buildFixture({
+    prefix,
+    scenario: { ...SCENARIO, ...scenario },
+    tree: { '.olympus/project.json': ONE_ROUND },
+  });
+  t.after(() => cleanup(fx));
+  await startDaemon(fx);
+  ctl(fx, ['launch', '--project', PROJECT, '--card', CARD_PATH]);
+  const runId = await pollFor(
+    'the launch stamp',
+    () => instanceEvents(fx).find((e) => e.event === 'launch')?.runId,
+    { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
+  );
+  await pollFor(
+    'the open-decisions park',
+    () => runEvents(fx, runId).some((e) => e.event === 'park' && e.type === 'open-decisions'),
+    { abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  ctl(fx, ['answer', '--run', runId, '--text', 'No; f trusts the value it is given.']);
+  await pollFor(
+    'the run to close',
+    () => runEvents(fx, runId).some((e) => e.event === 'run-closed'),
+    { attempts: 1800, abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  return { fx, events: runEvents(fx, runId) };
+}
+
+// A finding no round closes, on a lane that ships code beside the record. The
+// run spends its one round, stalls loud and merges with the finding named. The
+// code ships: a record blocks no run (ADR-0080).
+test('a story run at its record cap ships the code with the finding named', async (t) => {
+  const { fx, events } = await shipStory(t, {
+    prefix: 'olympus-e2e-story-cap-',
+    scenario: {
+      bornRecords: { [RECORD]: RECORD_TEXT },
+      reconcileJudge: {
+        owed: false,
+        records: [],
+        reason: 'the record this run wrote states what the tree holds',
+      },
+      recordFindings: {
+        [RECORD]: { summary: 'the record states a module the tree does not hold', reads: 9 },
+      },
+      confirmFindings: true,
+    },
+  });
+
+  // The one park is the card's own decision; nothing else asked anybody.
+  assert.deepEqual(events.filter((e) => e.event === 'park').map((e) => e.type), ['open-decisions']);
+  const closed = events.find((e) => e.event === 'run-closed');
+  assert.equal(closed.state, 'shipped');
+  // One round, then the stall and the fallback on this lane too.
+  assert.equal(events.filter((e) => e.event === 'reconcile-round').length, 1);
+  const stall = events.find((e) => e.event === 'reconcile-stall');
+  assert.equal(stall.stream, 'loud');
+  const written = events.filter((e) => e.event === 'reconciliation-written').at(-1);
+  assert.equal(written.ok, false);
+  assert.equal(written.cause, 'record-cap');
+  // The finding rode the close stamp and the request body.
+  assert.deepEqual(closed.remarks, stall.open);
+  const create = forgeCalls(fx).find((c) => c.handled === 'pr-create');
+  assert.match(create.argv[create.argv.indexOf('--body') + 1], /## Findings not answered/);
+  // The code and the record both rode the merge.
+  const tree = originTree(fx, 'main');
+  assert.ok(tree.includes('src/feature.mjs'), 'the code did not ride the merge');
+  assert.ok(tree.includes(RECORD), 'the record did not ride the merge');
+  // No ticket: the round wrote the record, and the finding rides the close.
+  assert.ok(!events.some((e) => e.event === 'reconciliation-judged' && e.ticket));
+  assert.equal(seatCalls(fx).filter((c) => c.seat.endsWith('-verifier')).length, 0);
+
+  await stopDaemon(fx);
+});
+
+// A birth that spends its ladder on a lane that ships code. The stage stamps the
+// failure and the run goes on to its freeze; the judge names the record late,
+// and the reconcile stage writes it before the request (ADR-0074, ADR-0080).
+test('a story birth that spends its ladder ships, and the judge names the record late', async (t) => {
+  const { fx, events } = await shipStory(t, {
+    prefix: 'olympus-e2e-story-birth-',
+    scenario: {
+      birthInvalid: true,
+      reconcileJudge: {
+        owed: true,
+        records: [RECORD],
+        reason: 'the diff decides what no record states',
+      },
+      reconcileWrites: { [RECORD]: RECORD_TEXT },
+    },
+  });
+
+  // The birth failed and stamped it; no park, and the run reached its freeze.
+  const born = events.find((e) => e.event === 'records-committed');
+  assert.equal(born.birthFailed, true);
+  assert.equal(born.decided, false);
+  assert.equal(born.cause, 'seat-failure');
+  assert.deepEqual(events.filter((e) => e.event === 'park').map((e) => e.type), ['open-decisions']);
+  assert.ok(born.seq < events.find((e) => e.event === 'freeze').seq);
+
+  // The judge named the record late, and the stage wrote it before the request.
+  const judged = events.find((e) => e.event === 'reconciliation-judged');
+  assert.equal(judged.owed, true);
+  assert.deepEqual(judged.records, [RECORD]);
+  const write = events.find((e) => e.event === 'record-written');
+  assert.equal(write.record, RECORD);
+  assert.equal(write.failed, undefined);
+  assert.ok(write.seq < events.find((e) => e.event === 'pr-opened').seq);
+
+  // The run shipped, and the record rode the merge with the code.
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const tree = originTree(fx, 'main');
+  assert.ok(tree.includes(RECORD), 'the record did not ride the merge');
+  assert.ok(tree.includes('src/feature.mjs'), 'the code did not ride the merge');
+  assert.ok(!events.some((e) => e.event === 'reconciliation-judged' && e.ticket));
+
+  await stopDaemon(fx);
 });
