@@ -1171,9 +1171,16 @@ function neighboursFor(base, records) {
 }
 
 /**
- * The units this round moved, per record: the ids whose head text the write
- * changed since the tree the last cycle judged. The review's brief names them,
- * so a seat reads the sentences that moved before it reads the rest (ADR-0073).
+ * What one write did to a record's units, per record: `moved` is the ids whose
+ * head text the write changed since the tree the last cycle judged, and `map`
+ * carries every id the write kept, from the number the last cycle used to the
+ * number this one uses.
+ *
+ * The review's brief names the moved ones, so a seat reads the sentences that
+ * moved before it reads the rest (ADR-0073). The round reads the map, so a
+ * finding a fresh seat raises on a sentence a prior finding already named is one
+ * finding and not two: ids are positional and a write above a sentence renumbers
+ * it (ADR-0080).
  *
  * The comparison sha is the previous render's own, and the window's base on the
  * first cycle. Both are commits the run holds, so the read survives a restart
@@ -1187,7 +1194,7 @@ async function movedFor(base, records, priorRender, window = null) {
     const after = readText(join(base.worktree, record));
     if (after === null) continue;
     const before = await showAt(base.worktree, from, record);
-    out[record] = before === null ? [] : matchUnits(before, after).moved;
+    out[record] = before === null ? { moved: [], map: new Map() } : matchUnits(before, after);
   }
   return out;
 }

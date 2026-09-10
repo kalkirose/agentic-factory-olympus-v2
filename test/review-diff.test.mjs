@@ -675,7 +675,7 @@ test('a record review brief carries the units and no diff', async (t) => {
   await recordReviewRound(fx.ctx, recordBase(worktree), {
     records: [RECORD_FILE],
     neighbours: { [RECORD_FILE]: { neighbours: [OTHER_RECORD], dropped: 8 } },
-    moved: { [RECORD_FILE]: ['U3'] },
+    moved: { [RECORD_FILE]: { moved: ['U3'], map: new Map() } },
     spec: { key: 's-1', path: 'specs/s-1.md', text: 'The price doubles.' },
     cycle: 2,
   });
@@ -809,6 +809,47 @@ test('a finding on a superseded record is returned to the seat', async (t) => {
   const retry = fx.ctx.briefs[1].roleBlock;
   assert.ok(retry.includes('whose status line reads superseded or retired'), retry);
   assert.ok(!fx.ctx.briefs.some((b) => b.seat === 'fury-verifier'));
+});
+
+// Unit ids are positional, so a write above a sentence renumbers it. A round
+// that compared ids alone would read one sentence raised twice as two findings:
+// the prior one resolves and the new one confirms, and the record carries both
+// (ADR-0080).
+test('a re-raised sentence is one finding, whatever the write did to its number', async (t) => {
+  const worktree = recordTree(t);
+  const prior = { ...claimFinding(), id: 'F1', unit: 'U3', confirmed: true };
+  // The write of the round before this one added a sentence above the claim, so
+  // the claim's unit is U4 now and was U3 when the finding was raised.
+  const moved = { [RECORD_FILE]: { moved: [], map: new Map([['U3', 'U4']]) } };
+  const fx = seatsFixture(t, () =>
+    recordReport(worktree, RECORD_FILE, {
+      findings: [{ ...claimFinding(), id: 'r1', unit: 'U4' }],
+    }),
+  );
+
+  const outcome = await recordReviewRound(fx.ctx, recordBase(worktree), {
+    records: [RECORD_FILE],
+    cycle: 2,
+    priorConfirmed: [prior],
+    moved,
+  });
+
+  // The prior finding stands: this cycle raised the same sentence again.
+  assert.deepEqual(outcome.resolved, []);
+  assert.equal(outcome.confirmed.length, 1);
+
+  // Without the write between them, the same numbers are two sentences.
+  const other = seatsFixture(t, () =>
+    recordReport(worktree, RECORD_FILE, {
+      findings: [{ ...claimFinding(), id: 'r1', unit: 'U4' }],
+    }),
+  );
+  const apart = await recordReviewRound(other.ctx, recordBase(worktree), {
+    records: [RECORD_FILE],
+    cycle: 2,
+    priorConfirmed: [prior],
+  });
+  assert.deepEqual(apart.resolved, ['F1']);
 });
 
 test('each record seat stamps the record it read, with its cycle and its cost', async (t) => {

@@ -346,7 +346,7 @@ export async function recordReviewRound(
         since,
         units: unitsOf(base, units, record),
         neighbours: neighboursOf(base, neighbours, record),
-        moved: byRecord(moved, record) ?? [],
+        moved: byRecord(moved, record)?.moved ?? [],
         spec,
       }),
     ),
@@ -376,6 +376,9 @@ export async function recordReviewRound(
     // costs less as the writer's own dispute (ADR-0080).
     verify: false,
     read: new Set(outcomes.filter((o) => !o.unreviewed).map((o) => o.record)),
+    // Where the write of the round before this one renumbered a unit, from the
+    // number the prior finding carries to the number this cycle's seat used.
+    moved,
   });
   return settled.fail ? settled : { ...settled, unreviewed };
 }
@@ -608,7 +611,7 @@ function byRecord(value, record) {
 async function settleFindings(
   ctx,
   base,
-  { cycle, collected, priorConfirmed, diffTruncated = false, verify = true, read = null },
+  { cycle, collected, priorConfirmed, diffTruncated = false, verify = true, read = null, moved = null },
 ) {
   const allowlist = base.allowlistPaths ?? [];
   const recordPaths = base.recordPaths ?? [];
@@ -639,7 +642,10 @@ async function settleFindings(
   } else if (!verify) {
     // The round's own answer, in the shape the verifier's is read in.
     results = new Map(
-      items.map((item) => [item.id, { verdict: raisedVerdict(item, verifiable, read, base) }]),
+      items.map((item) => [
+        item.id,
+        { verdict: raisedVerdict(item, verifiable, read, base, moved) },
+      ]),
     );
   }
   const events = runEvents(ctx);
@@ -743,18 +749,26 @@ async function settleFindings(
  * on the same sentence. A record no seat read this cycle resolves nothing,
  * because nobody looked (ADR-0080).
  *
+ * "The same sentence" is read through the write that stands between the two
+ * cycles. Unit ids are positional, so a write above a sentence renumbers it, and
+ * an id comparison would read one sentence raised twice as two: the prior
+ * finding resolves and the new one confirms, and the record carries both. The
+ * map `matchUnits` builds carries the prior id to the one this cycle used.
+ *
  * A record the tree has since closed resolves every finding against it. A
  * closed record states what was known then, no seat may edit it, and a round
  * that superseded it answered the finding by writing the record that replaces
  * it (ADR-0078).
  */
-function raisedVerdict(item, raised, read, base) {
+function raisedVerdict(item, raised, read, base, moved = null) {
   if (item.mode === 'confirm') return 'confirmed';
   const record = recordPathOf(item.finding);
   if (record === null) return 'unresolved';
   if (closedRecord(base, record)) return 'resolved';
   if (!(read instanceof Set) || !read.has(record)) return 'unresolved';
-  const unit = item.finding.unit ?? null;
+  const map = byRecord(moved, record)?.map;
+  const prior = item.finding.unit ?? null;
+  const unit = (map instanceof Map ? (map.get(prior) ?? null) : null) ?? prior;
   return raised.some((f) => recordPathOf(f) === record && (f.unit ?? null) === unit)
     ? 'unresolved'
     : 'resolved';
