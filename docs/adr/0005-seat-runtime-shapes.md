@@ -246,9 +246,8 @@ that one name.
 A record round spawns none. It confirms a HIGH as its reviewer raised it, and a
 writer that reads the finding and finds the record right disputes it in its own
 report; the next fresh reviewer either raises it again or does not (ADR-0080).
-The seat that used to verify a record item answered forty-nine items across
-three runs and confirmed forty-nine, at about three dollars a cycle and one
-resume boundary.
+The seat that used to verify a record item confirmed every item it was ever
+given, at a cycle's cost and one resume boundary.
 
 A code round that names a record file still reaches this seat, because a code
 lens may name one and the item is then a code round's item.

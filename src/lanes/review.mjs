@@ -7,10 +7,10 @@
 // only confirmed items enter the verdict.
 //
 // A record round confirms a HIGH as its reviewer raised it and spawns no
-// verifier. The verifier over record items answered 49 of 49 and refuted none,
-// and the guard it gave against a wrong block costs less as the writer's own
-// dispute: a writer that reads the finding and finds the record right says so,
-// and the next fresh reviewer either raises it again or does not (ADR-0080).
+// verifier. The verifier over record items confirmed every item it was ever
+// given, and the guard it gave against a wrong block costs less as the writer's
+// own dispute: a writer that reads the finding and finds the record right says
+// so, and the next fresh reviewer either raises it again or does not (ADR-0080).
 //
 // The item list is severity, on every lane. A HIGH blocks a round. A finding
 // below HIGH never blocks: it lands in the run ledger as a remark. A remark on a
@@ -372,8 +372,8 @@ export async function recordReviewRound(
     collected,
     priorConfirmed,
     // A record round confirms a HIGH as its reviewer raised it. The verifier
-    // answered 49 of 49 items on this lane and refuted none, and the guard it
-    // gave costs less as the writer's own dispute (ADR-0080).
+    // confirmed every item it was ever given on this lane, and the guard it gave
+    // costs less as the writer's own dispute (ADR-0080).
     verify: false,
     read: new Set(outcomes.filter((o) => !o.unreviewed).map((o) => o.record)),
   });
@@ -599,11 +599,11 @@ function byRecord(value, record) {
  * every other round drops them and reports them to its caller.
  *
  * `verify` is what the caller says about its own round. A code round verifies:
- * a lane finding never blocks alone. A record round does not: across three runs
- * the record verifier answered 49 items and confirmed 49, and the guard it gave
- * against a wrong block costs less as the writer's own dispute, which the next
- * fresh reviewer either raises again or does not (ADR-0080). A HIGH of a
- * round that does not verify is confirmed as raised.
+ * a lane finding never blocks alone. A record round does not: the record
+ * verifier confirmed every item it was ever given, and the guard it gave against
+ * a wrong block costs less as the writer's own dispute, which the next fresh
+ * reviewer either raises again or does not (ADR-0080). A HIGH of a round that
+ * does not verify is confirmed as raised.
  */
 async function settleFindings(
   ctx,

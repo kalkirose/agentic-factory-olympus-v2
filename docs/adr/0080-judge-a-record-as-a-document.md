@@ -11,10 +11,10 @@ that mirror the gate's pairing. The review seat read the record a fourth time to
 file a kind, a verdict and a path for every sentence.
 
 Every mirror disagreed with the gate somewhere, and every disagreement refused a
-record that was right. Of thirty-one refusals since the refusal stamp exists,
-twenty-eight were on records the gate accepted and a person would accept. Three
-builds tuned the tokenizer against the gate and each found the next difference.
-A mirror that has to equal the gate is the gate, written twice.
+record that was right. Almost every refusal the stamp recorded was on a record
+the gate accepted and a person would accept. Each round of tuning the tokenizer
+against the gate found the next difference. A mirror that has to equal the gate
+is the gate, written twice.
 
 The seat that filed a reading of every sentence answered a question nothing can
 check: a sentence's kind is a reading of the sentence, and the harness can only
@@ -82,10 +82,12 @@ the stage still buys the cycle over it rather than shipping it unread.
 
 **A record round spawns no verifier.** `settleFindings` takes a `verify` flag;
 the record round passes `false` and a HIGH is confirmed as its reviewer raised
-it. Across three runs the record verifier answered forty-nine items and
-confirmed forty-nine; the guard it gave against a wrong block costs less as the
-writer's own dispute. A prior confirmed finding resolves when a fresh seat reads
-that record in a later cycle and raises nothing on the same sentence.
+it. The record verifier confirmed every item it was ever given, so the guard it
+gave against a wrong block costs less as the writer's own dispute. A prior
+confirmed finding resolves when a fresh seat reads that record in a later cycle
+and raises nothing on the same sentence. The centre reads the first-read measure
+beside the standing findings, so a reader sees what one read of a record catches
+and what a later cycle catches after it.
 
 **One corrective round on record content.** `DEFAULT_RECONCILE_ROUNDS` is one,
 on every lane that reads a record. A second round asks a second writer the same
@@ -159,9 +161,8 @@ records request's merge waits on what it says.
 
 ## Rejected options
 
-- Keep the unit contract and tune the tokenizer. Three builds did that, and each
-  found the next difference. The class is the second reader, and a tuning keeps
-  the reader.
+- Keep the unit contract and tune the tokenizer. Every round of tuning found the
+  next difference. The class is the second reader, and a tuning keeps the reader.
 - Keep the units and make every check advisory. A check that refuses nothing
   measures a list nobody reads, and the seat still files four hundred entries.
 - Move the tokenizer into a package the gate and the harness both import. The

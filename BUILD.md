@@ -6,6 +6,13 @@ generically. Work the milestones in order — each one depends on the ones
 above it. Update the status line and the session log in the same commit as
 the work.
 
+This repository is public and every file in it is generic. A rule states what
+it is and why it is that, and never how many times a private run met the
+condition behind it: a count of runs nobody outside can read is evidence a
+reader cannot check, and it dates the sentence that carries it. The measured
+evidence stays in the design outside this repository, and what stands here is
+the rule and its reason.
+
 Status: `open` · `in progress` · `done`
 
 ## M0 — Foundation — done

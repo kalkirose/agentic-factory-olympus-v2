@@ -81,8 +81,10 @@ briefs were already tightened once.
 - The reconciliation on the verdict's ladder: the stale ship above.
 - One certification at the head sha: the record commit moves the head.
 - A stamp between the certifications: a file intersection is checkable.
-- A park at the cap: the owner refused it, twice (ADR-0080).
-- Parallel writers in disposable worktrees: the owner refused them.
+- A park at the cap: a record blocks no run, so what stands at the cap is the
+  merge with the finding named (ADR-0080).
+- Parallel writers in disposable worktrees: one tree, one write at a time, is
+  what a resume can read off the tree it holds.
 
 ## Fallback path
 

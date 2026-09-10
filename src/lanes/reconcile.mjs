@@ -1387,9 +1387,9 @@ export function recordPassSeq(events) {
  * The records a corrective round owes a seat: every record an open finding
  * names, and every record a red layer names in the output it captured.
  *
- * Seven of sixteen seats owed nothing on the run this rule comes from. A seat
- * over a record no finding names reads the record, writes nothing, and costs
- * the round a dispatch (ADR-0079).
+ * A round that dispatched every record spent most of its seats on records no
+ * finding named. A seat over such a record reads the record, writes nothing, and
+ * costs the round a dispatch (ADR-0079).
  *
  * A red layer that names no active record of the set dispatches nothing. The
  * widening it used to buy sent every record of a batch to a writer over a red no
