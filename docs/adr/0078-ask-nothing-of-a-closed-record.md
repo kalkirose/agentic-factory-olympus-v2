@@ -1,11 +1,6 @@
 # ADR-0078: Ask nothing of a closed record, and dispatch the set you stamped
 
 Status: superseded by ADR-0080 (2026-09-10)
-Superseded in part by ADR-0079: every reader of the run's record work opens at
-one window, the merge base of the run branch and the default branch computed at
-the read. The closure rule and the sibling answers read that window and not the
-round's own range. A red render the dispatch set cannot answer parks on the
-records lane rather than closing the run.
 
 ## Context
 

@@ -788,34 +788,36 @@ test('activeOf keeps the active records of a list and names what it dropped', (t
   assert.deepEqual(activeOf(dir, [list[2], list[0]]).records, [list[0]]);
 });
 
-// The harness supersedes a record of its own in one form: the accepted line
-// stays where it stands and a supersession line is added under it. The form is
-// pinned here, and so is what the status reader answers for it (ADR-0078).
-test('the harness supersession form keeps the accepted line under the record', () => {
-  const closed = harness('0078-ask-nothing-of-a-closed-record');
-  const lines = (name) => harness(name).split('\n');
+// The harness supersedes a record of its own in one form: one status line that
+// names the record which replaces it, and no line under it. The form is pinned
+// here, and so is what the status reader answers for it (ADR-0080).
+test('the harness supersession form is one status line naming the replacement', () => {
+  const closed = harness('0080-judge-a-record-as-a-document');
   for (const name of [
-    '0075-judge-the-records-in-a-stage-of-their-own',
+    '0073-enumerate-every-unit-of-a-record',
     '0077-judge-the-record-set-the-pass-holds',
+    '0078-ask-nothing-of-a-closed-record',
+    '0079-one-window-on-the-run-s-record-work',
   ]) {
     const text = harness(name);
-    const head = lines(name);
-    assert.match(head[2], /^Status: accepted \(\d{4}-\d{2}-\d{2}\)$/, name);
-    assert.ok(
-      head.slice(3).some((line) => line.startsWith('Superseded in part by ADR-0078:')),
-      `${name} names no supersession by ADR-0078`,
-    );
-    // The reader answers the status line, and the accepted line is the status
-    // line. So the record stays active for every reader of this tree, and the
-    // supersession under it is prose a person reads.
-    assert.equal(statusOf(text).word, 'accepted', name);
-    assert.equal(isActiveRecord(text), true, name);
+    const head = text.split('\n');
+    assert.match(head[2], /^Status: superseded by ADR-0080 \(\d{4}-\d{2}-\d{2}\)$/, name);
+    // The line under the status line is blank. A closed record carries no
+    // amendment trail: what stands is in the record that replaced it.
+    assert.equal(head[3], '', name);
+    // The reader answers the status line, so every reader of this tree passes
+    // the record over and asks nothing of it.
+    assert.equal(statusOf(text).word, 'superseded', name);
+    assert.equal(isActiveRecord(text), false, name);
     // The status line is the second unit, as it is in every record here.
     assert.equal(recordUnits(text)[1].line, statusOf(text).line, name);
   }
   // The record that supersedes them stands accepted and names them back.
   assert.equal(statusOf(closed).word, 'accepted');
-  assert.ok(closed.includes('- ADR-0073, ADR-0074, ADR-0075, ADR-0077'));
+  assert.equal(isActiveRecord(closed), true);
+  for (const name of ['ADR-0073', 'ADR-0077', 'ADR-0078', 'ADR-0079']) {
+    assert.ok(closed.includes(name), name);
+  }
   // A decision record is standalone fact: no em dash, and no reference to the
   // work that produced it.
   assert.ok(!closed.includes('—'));

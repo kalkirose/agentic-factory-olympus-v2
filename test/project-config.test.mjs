@@ -161,9 +161,10 @@ test('gates.recordLayers names gates.tier1 layers, and defaults to none', () => 
 // never moves it: the two work products have different seats and different
 // costs (ADR-0007).
 test('gates.reconcileRounds is an optional positive integer', () => {
-  // Five. A record round is one seat and the layers a record diff reaches; the
-  // route behind the cap is a whole repair run with a full spectrum.
-  assert.equal(DEFAULT_RECONCILE_ROUNDS, 5);
+  // One. A second round asks a second writer the same question about a document
+  // one writer already answered, and what stands behind the cap is a merge and
+  // not a park (ADR-0080).
+  assert.equal(DEFAULT_RECONCILE_ROUNDS, 1);
   const declared = valid();
   declared.gates.reconcileRounds = 2;
   assert.deepEqual(validateProjectConfig(declared), []);

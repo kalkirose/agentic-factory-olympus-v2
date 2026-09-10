@@ -185,6 +185,7 @@ reversal cost is one flag and one park type.
 ## References
 
 - ADR-0007, ADR-0026, ADR-0038, ADR-0074, ADR-0075, ADR-0076
+- Superseded by this record: ADR-0073, ADR-0077, ADR-0078, ADR-0079
 - `src/lanes/records.mjs`
 - `src/lanes/records-stage.mjs`
 - `src/lanes/reconcile.mjs`
