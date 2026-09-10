@@ -811,6 +811,26 @@ test('a finding on a superseded record is returned to the seat', async (t) => {
   assert.ok(!fx.ctx.briefs.some((b) => b.seat === 'fury-verifier'));
 });
 
+// A closed record states what was known then, and no seat may edit it. A round
+// that superseded the record answered the finding by writing the record that
+// replaces it, so the finding resolves and the round raises nothing (ADR-0078).
+test('a prior finding on a record the round superseded resolves, and nothing stands', async (t) => {
+  const closed = 'docs/adr/0003-cache.md';
+  const worktree = recordTree(t, { [closed]: SUPERSEDED_TEXT });
+  const prior = { ...claimFinding({ file: closed }), id: 'F1', confirmed: true };
+  const fx = seatsFixture(t, () => recordReport(worktree, RECORD_FILE));
+
+  const outcome = await recordReviewRound(
+    fx.ctx,
+    recordBase(worktree, { recordLifecycle: 'supersede' }),
+    { records: [RECORD_FILE], cycle: 2, priorConfirmed: [prior] },
+  );
+
+  assert.deepEqual(outcome.resolved, ['F1']);
+  assert.deepEqual(outcome.confirmed, []);
+  assert.deepEqual(outcome.unreviewed, []);
+});
+
 // Unit ids are positional, so a write above a sentence renumbers it. A round
 // that compared ids alone would read one sentence raised twice as two findings:
 // the prior one resolves and the new one confirms, and the record carries both

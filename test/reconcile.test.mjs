@@ -15,6 +15,7 @@ import { readEvents } from '../src/ledger/ledger.mjs';
 import { commitAll, headSha } from '../src/isolation/tree.mjs';
 import {
   correctiveRecords,
+  reconcileCertification,
   reconcileStep,
   runRemarks,
   unreviewedOf,
@@ -2343,6 +2344,29 @@ function closedSeed(text = ADR_RETIRED) {
     ctx.store.append('records-committed', { actor: 'daemon', sha, paths: [ADR], decided: true });
   });
 }
+
+// The stage's certification is what the ship stage bounces on. A red render the
+// stage answered with a fallback is the stage's last word, so the run merges
+// with what is still wrong named; a red render with nothing behind it is a stage
+// that never finished, and the ship stage hands the run back (ADR-0080).
+test('a red render a fallback answered certifies, and a bare red render does not', () => {
+  const red = { event: 'reconcile-rendered', cycle: 1, sha: 'r1', verdict: 'red', open: ['F1'] };
+  const green = { event: 'reconcile-rendered', cycle: 2, sha: 'r2', verdict: 'green', open: [] };
+  const fallback = { event: 'reconciliation-written', ok: false, cause: 'record-cap' };
+  // Nothing rendered: the run owes no reconciliation at all.
+  assert.equal(reconcileCertification(ledger()), null);
+  // A red with nothing behind it. The ship stage reads this and hands back.
+  assert.deepEqual(reconcileCertification(ledger(red)), { sha: 'r1', ok: false });
+  // The same red with the stall's own fallback behind it.
+  assert.deepEqual(reconcileCertification(ledger(red, fallback)), {
+    sha: 'r1',
+    ok: true,
+    fallback: 'record-cap',
+  });
+  // A fallback in front of the render answers a render that is past it.
+  assert.deepEqual(reconcileCertification(ledger(fallback, red)), { sha: 'r1', ok: false });
+  assert.deepEqual(reconcileCertification(ledger(red, fallback, green)), { sha: 'r2', ok: true });
+});
 
 // What the run says it never wrote is read over this pass alone, and per record
 // and never per dispatch (ADR-0080).
