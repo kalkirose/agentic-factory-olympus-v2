@@ -33,9 +33,10 @@ evidence. The kinds are `title`, `status`, `claim`, `open`, `rationale` and
 The harness names three of the kinds itself. `title` and `status` come from the
 head block. `reference` is every unit inside a reference section: the span runs
 from a `## References` heading to the next heading of the same level or higher,
-or to the end of the file, which is the span the record form gate reads. A
-reference states nothing about the tree and gives no reason, so it is neither a
-claim nor rationale, and one line of `unitKindLines` states that to the birth
+or to the end of the file, and a fenced block inside it is skipped whole, so a
+heading in a fence opens no section and ends none. A reference states nothing
+about the tree and gives no reason, so it is neither a claim nor rationale, and
+one line of `unitKindLines` states that to the birth
 brief, the two write briefs and the review's.
 
 `unitChecks` in `src/lanes/records.mjs` refuses nine numbered defects: a missing
@@ -68,8 +69,7 @@ to an accepted record costs a new record, so the tree grows.
 
 A record that writes a reference bullet outside its reference section files that
 bullet as a claim, as any other sentence. A record that writes prose inside the
-section takes rule 9 on it and is refused for want of a name, which is the form
-gate's own rule for that section.
+section takes rule 9 on it and is refused for want of a name.
 
 This record is superseded when the unit check refuses a correct report on more
 than one reconciliation in five. That reading says the enumerator and the seats

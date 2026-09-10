@@ -70,10 +70,10 @@ const RECORD_REF = /adr-0*(\d+)/gi;
 /**
  * The heading that opens the reference section, and the heading that closes it.
  *
- * The span is the form check's own: from the heading to the next heading of the
- * same level or higher, or the end of the file. The two readers share one rule,
- * so a bullet the form check holds to the section's rule is a bullet the
- * harness names `reference` (ADR-0073).
+ * The span runs from the heading to the next heading of the same level or
+ * higher, or to the end of the file. A project gate over the form of a record
+ * reads the section by that rule, so a bullet the gate holds to the section's
+ * rule is a bullet the harness names `reference` (ADR-0073).
  */
 const REFERENCES_HEADING = /^ {0,3}##\s+references\s*$/i;
 const SECTION_HEADING = /^ {0,3}#{1,2}(\s|$)/;

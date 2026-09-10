@@ -175,47 +175,44 @@ confirmed one buys the round that answers it. Everything below HIGH is a remark:
 it is worth less than a round, so nobody must act on it, and the rule reads the
 same whether the finding is about a diff or about a document.
 
-The rule used to read severity **or** record, and a record finding was verified
-at every grade. One records-lane run paid for that in one cycle. Its review
-confirmed twenty-five findings across fourteen records, and two of them were
-HIGH. All fourteen records took a corrective writer and all fourteen were read
-again by the next cycle, for two sentences the tree contradicts and twenty-three
-remarks about wording. Under the one rule that round dispatches two records and
-the cycle reads two.
+A rule that read severity **or** record buys a round for every grade a review
+writes about a document. A cycle over a set of records raises a few sentences the
+tree contradicts and many remarks about wording, and each of them dispatches a
+writer over its record and buys the cycle that reads it again. The work is the
+few; the cost is the many. Under the one rule the round dispatches the records a
+HIGH names and the cycle reads those.
 
 A remark is not thrown away, which is the other half of the rule. It is stamped
 with the record word, the criterion and the unit, so it names one sentence. The
 corrective round that writes its record for a HIGH is handed it in the same
 brief, under one line that says it holds no render red; the writer answers it in
-the write it is making anyway, or says under `answered` why the record is right.
-The render it belongs to lists it under `advisory`, and a ticket that leaves the
-run lists it under "Remarks not answered". A remark thrown away is a finding the
-next run raises again, at whatever grade that run reads it.
+the write it is making anyway, or lists its id under `answered` where the record
+is right as written. The render it belongs to lists it under `advisory`, and the
+run records at its close what it shipped standing. A remark thrown away is a
+finding the next run raises again, at whatever grade that run reads it.
 
 What this accepts is that MED is the grade nobody must answer. A record can ship
 with a sentence the tree contradicts, if a review graded that sentence MED. Three
 things stand against it: the review brief states what HIGH means, so the grade is
-a definition and not a feeling; the close-out prints the remarks that shipped;
-and the eval seat reads the shipped set by criterion and unit, where a `truth`
-remark on a sentence of a Decision is the reading that says the grade rule needs
-tightening.
+a definition and not a feeling; the close records the remarks that shipped; and
+the eval seat reads that set by criterion and unit, where a `truth` remark on a
+sentence of a Decision is the reading that says the grade rule needs tightening.
 
-The verifier still answers every HIGH, and it is the guard against a wrong block.
-One record finding of that run said a budget line was wrong, and the record
-explains that exact inversion in the paragraph below the line the finding quoted.
-The verifier refuted it. A refutation is not advice: a second seat read the tree
-and wrote down, with evidence, why the record is right, under the finding's own
-id. The tripwires in ADR-0010 read that share over the findings the verifier
-answered, and a window in which most of them are refuted says the review seat is
-noisy about documents.
+The verifier answers every HIGH, and it is the guard against a wrong block. A
+review can read a record's own explanation of an inversion as the inversion, and
+a rule that blocked on every sentence a review seat wrote would block a ship on a
+finding the record itself refutes. A refutation is not advice: a second seat read
+the tree and wrote down, with evidence, why the record is right, under the
+finding's own id. The tripwires in ADR-0010 read that share over the findings the
+verifier answered, and a window in which most of them are refuted says the review
+seat is noisy about documents.
 
 ## Why this ladder counts one cap
 
 A round that rewrites a document and a round that rewrites code are two kinds of
-work under one name, and each has its own number. The cap used to read the diff
-of the render it judged, because both rounds ran on this ladder. They do not any
-more: the record rounds run in a stage of their own, over a tree of their own, at
-a sha of their own (ADR-0075). So this ladder judges code and counts one cap.
+work under one name, and each has its own number. The record rounds run in a
+stage of their own, over a tree of their own, at a sha of their own (ADR-0075),
+so this ladder judges code and counts one cap.
 
 Three is the number for that work. A code round buys a dev seat over a candidate
 tree and a full cycle behind it, and a fourth round that has closed nothing says
@@ -242,14 +239,13 @@ The pass is the expensive thing on this ladder. A repair round is one seat
 over a tree that already exists; a fresh pass throws that tree away and buys
 the whole implementation again, and it is the run's only one.
 
-The ledger says what the immediate discard cost. One confirmed interface-lens
-finding about a single form input discarded a pass that had twelve other
-findings open against it. Every one of those twelve was work the repair round
-would have carried, and none of them reached the tree that replaced it: the
-fresh pass began from the freeze with a stall brief, and the twelve came back
-as whatever the new implementation raised. The run bought a second
+An immediate discard costs every other finding the render left open. One
+confirmed finding about one input can stand beside a dozen the repair round
+would have carried, and none of them reaches the tree that replaces it: the
+fresh pass begins from the freeze with a stall brief, and the rest come back as
+whatever the new implementation raises. The run then buys a second
 implementation to answer a finding a repair round could have answered, and it
-spent its one pass on it, so the stall that came later had nothing left to buy.
+spends its one pass on it, so a stall that comes later has nothing left to buy.
 
 The severity of a structural finding is real, and it is answered by saying so
 in the brief rather than by discarding the work. A repair seat told that the
