@@ -84,7 +84,6 @@ test('the seat list is exactly these names', () => {
     'fury-operational',
     'fury-interface',
     'fury-verifier',
-    'record-verifier',
     'generalist-review',
     'card-sweep',
     'reconcile-judge',
@@ -107,25 +106,16 @@ test('the two record seats take the policy of the seats they stand beside', () =
   assert.equal(seatDef('record-review').effort, DEFAULT_EFFORT);
 });
 
-// The records lane runs one model. The verifier of a record item is the seat
-// that used to be the exception, and it takes the lane's model with the code
-// verifier's tool policy (plan 41, point 3).
-test('the record verifier runs Opus 5 at xhigh, and the code verifier is unchanged', () => {
-  assert.equal(seatDef('record-verifier').model, DEFAULT_MODEL);
-  assert.equal(seatDef('record-verifier').effort, DEFAULT_EFFORT);
+// One verifier is left. A record round confirms a HIGH as its reviewer raised
+// it, so no seat verifies a record item on the records lane; a code round that
+// names a record file still reaches the code verifier (ADR-0080).
+test('the one verifier is the code verifier, on the certification model', () => {
+  assert.equal(SEATS['record-verifier'], undefined);
   assert.equal(seatDef('fury-verifier').model, CERTIFICATION_MODEL);
   assert.equal(seatDef('fury-verifier').effort, 'high');
-  // One policy, two names: the model and the effort are the whole difference.
-  assert.deepEqual(
-    { ...SEATS['record-verifier'], model: null, effort: null },
-    { ...SEATS['fury-verifier'], model: null, effort: null },
-  );
-  assert.equal(seatDef('record-verifier').web, false);
-  assert.equal(seatDef('record-verifier').explore, 0);
-  assert.equal(seatExecutesSuite('record-verifier'), false);
-  // The replay probe is open to it, as it is to the code verifier (ADR-0042).
-  assert.ok(PROBE_SEATS.has('record-verifier'));
-  assert.ok(PROBE_SEATS.has('fury-verifier'));
+  assert.equal(seatExecutesSuite('fury-verifier'), false);
+  // The replay probe is open to it, and to no record seat (ADR-0042).
+  assert.deepEqual([...PROBE_SEATS].sort(), ['fury-verifier', 'verdict-triage']);
 });
 
 // A stage that dispatches one seat per record gives each dispatch a slot, and

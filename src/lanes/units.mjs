@@ -2,10 +2,10 @@
 // write, the neighbourhood a record is judged beside, and the status line that
 // says whether a record is still active (ADR-0026).
 //
-// One enumeration, in one place. The harness reads it here and a seat reads it
-// through `bin/olympus-units.mjs`, so the list the seat answers and the list
-// the check counts are the same list. A seat that counts its own units answers
-// a number nobody can check, which is the sample this module removes.
+// One enumeration, in one place. The harness reads it here and a person reads
+// it through `bin/olympus-units.mjs`. It is an address book: a finding names
+// the unit, the head and the line of the sentence it is about, so a writer and
+// a reader reach one sentence by one name (ADR-0080).
 //
 // The split is deterministic before it is fine-grained. Markdown holds four
 // things a reader answers one at a time: a paragraph, a list item, a table row
@@ -37,19 +37,6 @@ const HEAD_WORDS = 8;
  * a silence.
  */
 export const NEIGHBOUR_CAP = 12;
-
-/** The kinds a seat may put on a unit. Closed, and the schema states them. */
-export const UNIT_KINDS = Object.freeze([
-  'title',
-  'status',
-  'claim',
-  'open',
-  'rationale',
-  'reference',
-]);
-
-/** The verdicts a seat may put on a unit. Closed. */
-export const UNIT_VERDICTS = Object.freeze(['holds', 'fails', 'not-built']);
 
 /** The status words a record's status line may open with. Closed. */
 export const STATUS_WORDS = Object.freeze(['accepted', 'superseded', 'retired']);
@@ -95,13 +82,15 @@ const COMMENT_OPEN = /^\s*<!--/;
  * The title is `U0` and the rest run from `U1` in document order. Each unit
  * carries the line it starts on and its first eight words. A head is taken
  * after the list marker, so a renumbered list does not read as rewritten text.
- * The harness names three kinds itself, `title`, `status` and `reference`; the
- * rest are the seat's to name.
  *
- * A unit inside the reference section is a `reference`. It states nothing about
- * the tree and gives no reason, so it is neither a claim nor rationale, and a
- * seat asked to choose between them guesses. The harness names it and a check
- * answers it (ADR-0073).
+ * The list is a list of addresses. A finding names a unit, a head and a line,
+ * and a brief lists the units so a seat and a reader name one sentence by one
+ * name. No seat answers a unit and no check reads one (ADR-0080).
+ *
+ * Three kinds ride the list because they are the enumeration's own reading of
+ * the document: `title`, `status`, and `reference` for a unit inside a
+ * reference section. They name a unit more exactly in a brief; nothing refuses
+ * a report on one.
  * @param {string} text
  * @returns {Array<{id: string, line: number, head: string, kind?: string}>}
  */

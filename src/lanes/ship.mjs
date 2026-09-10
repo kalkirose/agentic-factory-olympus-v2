@@ -65,7 +65,6 @@ import { dirname, isAbsolute, join } from 'node:path';
 import {
   ciEvidenceDir,
   commandLogPath,
-  absorbedTicketPath,
   repairTicketPath,
   reconcileTicketPath,
   runReportPath,
@@ -99,6 +98,7 @@ import {
   cherryPick,
   commitAll,
   resetHard,
+  restorePaths,
 } from '../isolation/tree.mjs';
 import { editDenyRules } from '../seats/boundary.mjs';
 import { attemptOrder, noLogReason, PartialLogRefusal } from '../ship/forge.mjs';
@@ -119,13 +119,11 @@ import { WRITE_SEAT, findingLine, remarkLine, runWindow } from './records.mjs';
 import {
   RECONCILE_STAGE,
   REMARKS_HEADING,
-  SHIP_WITHOUT_RECORDS,
-  lastRendered,
-  nextCycle,
   reconcileCertification,
   reconcileHandler,
-  reconcileTicketFromBranch,
   runRemarks,
+  unreviewedOf,
+  unwrittenOf,
 } from './reconcile.mjs';
 import { recordBase, recordsCommitted } from './records-stage.mjs';
 import { activeOf, recordNeighbours } from './units.mjs';
@@ -201,10 +199,6 @@ export const CANCELLED_POLLS = 20;
  * takes the update, exactly as it did before the pre-verdict one existed.
  */
 export const UPDATE_CAP = 2;
-
-// The stage's own answer at a failed write, re-exported where the console and
-// the tests have always read it.
-export { SHIP_WITHOUT_RECORDS, reconcileTicketFromBranch };
 
 /**
  * Stamps one gate-integrity record under a closed defect kind. Every stamp on
@@ -849,6 +843,47 @@ function laneWord(base) {
   return LANE_TITLE_WORD[base?.mode] ?? 'repair';
 }
 
+/**
+ * The request body: the run, the spec, the head, the records this run holds, and
+ * everything about them that is still wrong.
+ *
+ * No record blocks a run, so the merged request is where the owner reads what
+ * stood. A confirmed finding no round answered rides under "Findings not
+ * answered" with its unit and its evidence; a finding below HIGH rides under
+ * "Remarks not answered"; a record no round wrote and a record no seat read ride
+ * under their own headings. The close stamp carries the same four sets by id and
+ * by path (ADR-0080).
+ */
+export function requestBody(ctx, base, sha) {
+  const events = runEvents(ctx);
+  const records = recordsCommitted(events)?.paths ?? [];
+  const index = findingIndex(events);
+  const standing = (lastRendered(events)?.open ?? [])
+    .map((id) => index.get(id))
+    .filter((f) => f && f.confirmed === true);
+  const remarks = runRemarks(events);
+  const unwritten = unwrittenOf(events);
+  const unreviewed = unreviewedOf(events);
+  return [
+    `Olympus run ${ctx.runId}.`,
+    `Spec: ${base.specRef}`,
+    `Head: ${sha}`,
+    ...(records.length > 0 ? ['', '## Records', '', ...records.map((r) => `- ${r}`)] : []),
+    ...(standing.length > 0
+      ? ['', '## Findings not answered', '', ...standing.map((f) => `- ${findingLine(f)}`)]
+      : []),
+    ...(remarks.length > 0
+      ? ['', REMARKS_HEADING, '', ...remarks.map((f) => `- ${remarkLine(f)}`)]
+      : []),
+    ...(unwritten.length > 0
+      ? ['', '## Records not written', '', ...unwritten.map((r) => `- ${r}`)]
+      : []),
+    ...(unreviewed.length > 0
+      ? ['', '## Records not reviewed', '', ...unreviewed.map((r) => `- ${r}`)]
+      : []),
+  ].join('\n');
+}
+
 async function openPr(ctx, base) {
   // The credential gate comes first: a CI round is the most expensive way to
   // learn that a key went stale since the launch proved it (ADR-0027).
@@ -902,7 +937,7 @@ async function openPr(ctx, base) {
     title: base.storyKey
       ? `${base.storyKey}: ${base.cardTitle ?? 'ship'}`
       : `${laneWord(base)}: ${ctx.runId}`,
-    body: [`Olympus run ${ctx.runId}.`, `Spec: ${base.specRef}`, `Head: ${sha}`].join('\n'),
+    body: requestBody(ctx, base, sha),
     labels,
   });
   // Labels before the arm: a required-label check gates the merge, so the
@@ -1521,11 +1556,20 @@ async function ciTriage(ctx, base, opened, sha, redChecks, waited = null) {
   const notDone = await runsNotDone(base, redChecks);
   if (notDone.length > 0) return stampWait(ctx, opened, sha, notDone, redChecks);
   // The records lane has no dev seat, so no triage of it can end in a repair.
-  // A red that is a record layer and nothing else is the reconcile stage's, and
-  // every other red is a person's: the lane cannot answer a code check at all,
-  // and a triage that rendered one would route the run to a stage the lane does
-  // not hold (ADR-0075).
-  if (base.mode === 'records') return recordsLaneCiRed(ctx, base, opened, sha, redChecks);
+  // No CI job runs the record form gate: the harness ran it at the render over
+  // the same bytes, and a merge never waits on a second reading of one rule
+  // (ADR-0076, ADR-0080). So a red on a records request is a check the change
+  // did not touch, which is a broken workflow and a person's to answer.
+  if (base.mode === 'records') {
+    return parkDirective('ci-red', {
+      ...GATE_FORMS,
+      question:
+        `PR #${opened.pr} is red on ${redChecks.map((r) => r.name).join(', ')}. This run writes ` +
+        'decision records and holds no seat that may repair code, and no required check of a ' +
+        'records-only diff runs. Repair the workflow, then answer.',
+      detail: { pr: opened.pr, sha, checks: redChecks.map((r) => r.name) },
+    });
+  }
   const events = runEvents(ctx);
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   const cycle = renders.length + 1;
@@ -1601,49 +1645,6 @@ async function ciTriage(ctx, base, opened, sha, redChecks, waited = null) {
     ...(waited != null && { waited }),
   });
   return { next: 'verdict' };
-}
-
-/**
- * The records lane's answer to a red pull-request check.
- *
- * Every failed check that is a record layer routes to the reconcile stage: the
- * layer judges the record diff, the stage owns the seat that answers it, and the
- * corrective round is the repair. One failed check that is not a record layer is
- * a code check the lane has no seat for, so it parks with the names.
- */
-export function recordsLaneCiRed(ctx, base, opened, sha, redChecks) {
-  const events = runEvents(ctx);
-  const names = redChecks.map((r) => r.name);
-  const layers = new Set(base.recordLayers ?? []);
-  const foreign = names.filter((name) => !layers.has(name));
-  if (foreign.length === 0 && names.length > 0) {
-    // A red record layer is a red render with the layer named in `open`, whether
-    // the harness ran it or CI did. The stage answers its own red, and the
-    // corrective round is the repair (ADR-0075).
-    const last = lastRendered(events);
-    ctx.store.append('reconcile-rendered', {
-      actor: ACTOR,
-      cycle: nextCycle(events),
-      sha,
-      source: 'ci',
-      verdict: 'red',
-      open: names,
-      // The whole set the last render stood over: what a seat read, and what
-      // its last green review answers for (ADR-0079).
-      records: last?.records ?? [],
-      ...(last?.kept?.length > 0 && { kept: last.kept }),
-      layers: names.map((layer) => ({ layer, status: 'red' })),
-      gist: gist(`the record layers are red in CI: ${names.join(', ')}`),
-    });
-    return { next: RECONCILE_STAGE };
-  }
-  return parkDirective('ci-red', {
-    ...GATE_FORMS,
-    question:
-      `PR #${opened.pr} is red on ${foreign.join(', ')}. This run writes decision records ` +
-      'and holds no seat that may repair code. Repair the check, then answer.',
-    detail: { pr: opened.pr, sha, checks: names },
-  });
 }
 
 // -- green but no merge ------------------------------------------------------
@@ -1818,9 +1819,14 @@ async function mergeRound(
     });
     if (!result.ok) cause = 'dev seat failed';
   }
-  if (!cause && recordConflicts.length > 0) {
-    const result = await recordConflictSeat(ctx, base, recordConflicts, brief);
-    if (!result.ok) cause = 'record write seat failed';
+  if (recordConflicts.length > 0) {
+    // The run's own change to a conflicted record is dropped: the file takes the
+    // default branch's version, the code ships, and the record rides the close
+    // under "Records not written". No seat here can settle a document two runs
+    // rewrote, the dev seat may not touch a record at all (ADR-0074), and a
+    // fresh pass over the code answers nothing about one. A record never blocks
+    // a lane (ADR-0080).
+    await dropConflictedRecords(base, recordConflicts, mainSha);
   }
   if (!cause && testConflicts.length > 0) {
     // Conflict hunks in test files are the suite seat's work — the test-edit
@@ -1881,51 +1887,38 @@ async function mergeRound(
     mainSha,
     conflicts,
     ...(testConflicts.length > 0 && { testFiles: testConflicts }),
+    // The records this merge dropped the run's own change to. The close names
+    // them under "Records not written" (ADR-0080).
+    ...(recordConflicts.length > 0 && { recordsDropped: recordConflicts }),
   });
   if (stamp) ctx.store.append('branch-update', { actor: ACTOR, fromSha, toSha: sha, mainSha });
   return { fromSha, toSha: sha, mainSha };
 }
 
 /**
- * The record conflict arm: one `reconcile-write` seat over the conflicted record
- * files, with the incoming brief and no dev seat.
+ * The record conflict arm: the run's own change to each conflicted record is
+ * dropped, and the file takes the default branch's version.
  *
- * The seat resolves the markers and nothing else. It writes no report the stage
- * reads, because this is a merge and not a reconciliation: the round's own
- * marker check is what says the resolution stands, and the reconcile stage
- * judges the merged tree behind it (ADR-0075).
+ * Two runs that both rewrote one record is the shape a hub supersession makes,
+ * and no seat of this run can settle it: the record the other run merged is the
+ * record that now stands, and this run's version was written against a tree that
+ * no longer exists. So the merge takes the default branch's file, the code
+ * ships, and the record is named on the close for the run that reconciles it
+ * (ADR-0080).
  */
-function recordConflictSeat(ctx, base, conflicts, brief) {
-  const n = invocationCount(runEvents(ctx), WRITE_SEAT) + 1;
-  return ctx.runSeat({
-    seat: `${WRITE_SEAT}:${n}`,
-    roleBlock: recordConflictRole(base, conflicts, brief),
-    reportPath: runReportPath(ctx.paths, ctx.runId, `${WRITE_SEAT}-merge-${n}`),
-    schema: DEV_SCHEMA,
-    cwd: base.worktree,
-    env: base.env,
-    constitution: base.constitution,
-    styleFiles: base.styleFiles,
-  });
+async function dropConflictedRecords(base, conflicts, mainSha) {
+  await restorePaths(base.worktree, mainSha, conflicts);
 }
 
 // A failed merge round is a stall: the run's one fresh pass is born on
 // updated main, where the conflict dissolves. A second stall parks.
+//
+// A record conflict never reaches it. The merge round drops the run's own change
+// to a conflicted record before it asks a seat anything, so `cause` is set by a
+// code conflict or a test conflict alone, and the records lane holds neither
+// (ADR-0080).
 async function mergeStall(ctx, base, failedRound) {
   const events = runEvents(ctx);
-  // The records lane implements nothing, so a fresh pass there has no seat to
-  // dispatch and no code to rebuild. Its merge conflict is a stage precondition
-  // a person settles, and the answer resumes the stage (ADR-0075).
-  if (base.mode === 'records') {
-    return blocked(
-      ctx,
-      'merge-conflict',
-      `The merge round could not resolve the conflicts with ${base.defaultBranch} ` +
-        `(${failedRound.cause}). Conflicted files:\n` +
-        failedRound.conflicts.map((f) => `- ${f}`).join('\n') +
-        '\nResolve them on the run branch, then answer "retry".',
-    );
-  }
   let stall = [...events]
     .reverse()
     .find((e) => e.event === 'stall' && e.reason === 'merge-conflict' && e.seq > failedRound.seq);
@@ -2042,12 +2035,19 @@ function closeOutHandler({ forgeFor, pollMs, enqueueRepair }) {
     // of one line of `run-closed` sees, and the trade the flag makes is worth
     // seeing there (ADR-0056).
     const fast = fastPathTaken(runEvents(ctx));
-    // The remarks this run shipped with, by id. A remark blocks nothing and
-    // buys no ticket, so a green ship writes none, and the close record is
-    // where the run says which sentences it left standing. The partial ship
-    // says the same thing on its ticket, under "Remarks not answered"
-    // (ADR-0007).
-    const remarks = runRemarks(runEvents(ctx)).map((f) => f.id);
+    // What this run shipped with. A record blocks nothing, so the close record
+    // is where the run says what is still wrong: every finding below HIGH no
+    // write answered, every confirmed HIGH that stood after the round, and the
+    // records no round wrote and no seat read. The finding stamp keeps
+    // `confirmed: true`, so a reader tells the two kinds of remark apart
+    // (ADR-0007, ADR-0080).
+    const events = runEvents(ctx);
+    const index = findingIndex(events);
+    const standing = (lastRendered(events)?.open ?? [])
+      .filter((id) => index.get(id)?.confirmed === true);
+    const remarks = [...new Set([...runRemarks(events).map((f) => f.id), ...standing])];
+    const unwritten = unwrittenOf(events);
+    const unreviewed = unreviewedOf(events);
     return {
       close: {
         state: 'shipped',
@@ -2055,6 +2055,8 @@ function closeOutHandler({ forgeFor, pollMs, enqueueRepair }) {
         mergeSha: merged.mergeSha,
         ...(fast && { fastPath: true }),
         ...(remarks.length > 0 && { remarks }),
+        ...(unwritten.length > 0 && { unwritten }),
+        ...(unreviewed.length > 0 && { unreviewed }),
       },
     };
   };
@@ -2773,54 +2775,6 @@ function residualLine(f) {
 }
 
 /**
- * The cap ticket of a run that went on and shipped.
- *
- * A records-lane run at its cap writes a ticket and parks. The rounds a person
- * buys there finish the work, and the merge carries it, so the ticket describes
- * work that shipped. It leaves the tickets directory a person launches from,
- * and the ledger records both the absorption and a move that failed (ADR-0079).
- *
- * The move is the fact and the stamp is the record of it. A stop between the
- * two leaves the file where the move put it, so a close-out that finds the
- * ticket gone and the absorbed one there stamps the absorption and moves
- * nothing.
- */
-export function absorbCapTicket(ctx, events, ticketed) {
-  const bought = events.some(
-    (e) => e.event === 'reconcile-cap-extended' && e.seq > ticketed.seq,
-  );
-  if (!bought) return;
-  const absorbed = absorbedTicketPath(ctx.paths, ticketed.ticket);
-  if (existsSync(ticketed.ticket) || !existsSync(absorbed)) {
-    try {
-      mkdirSync(dirname(absorbed), { recursive: true });
-      renameSync(ticketed.ticket, absorbed);
-    } catch (error) {
-      ctx.store.append('reconciliation-judged', {
-        actor: ACTOR,
-        ok: true,
-        owed: false,
-        records: ticketed.records ?? [],
-        reason:
-          'the rounds bought at the record cap wrote the records, and the merge carried them',
-        cause: `the cap ticket could not be moved: ${error.message}`,
-        gist: gist(`the cap ticket stays at ${ticketed.ticket}`),
-      });
-      return;
-    }
-  }
-  ctx.store.append('reconciliation-judged', {
-    actor: ACTOR,
-    ok: true,
-    owed: false,
-    records: ticketed.records ?? [],
-    reason: 'the rounds bought at the record cap wrote the records, and the merge carried them',
-    absorbed,
-    gist: gist(`the cap ticket is absorbed: ${absorbed}`),
-  });
-}
-
-/**
  * The close's half of the reconciliation: the records that did not ride the
  * merge are ticketed here, where the merge commit the ticket names exists.
  *
@@ -2833,21 +2787,18 @@ function reconcileClose(ctx, base, merged) {
   const events = runEvents(ctx);
   const judged = sinceFreshPass(events, (e) => e.event === 'reconciliation-judged');
   if (judged?.ok !== true || judged.owed !== true) return;
-  const ticketed = events.find(
-    (e) => e.event === 'reconciliation-judged' && typeof e.ticket === 'string',
-  );
-  if (ticketed) return absorbCapTicket(ctx, events, ticketed);
   const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written');
-  // The records that rode this merge with a confirmed finding still open. The
-  // rewrite ships, because the judge found the old records owed and discarding
-  // it would ship those; the ticket carries the short list of what is still
-  // wrong, and the run behind it is small (ADR-0075).
+  // A ticket is owed for a record the judge owed and no round wrote, and for
+  // nothing else. A confirmed finding that stands on a record this run did write
+  // rides the request body and the close stamp: the record shipped, and a ticket
+  // to launch a run over it would ask a second run for what one already answered
+  // (ADR-0080).
+  const unwritten = new Set(unwrittenOf(events));
+  const records = (judged.records ?? []).filter(
+    (record) => unwritten.has(record) || written?.ok !== true,
+  );
+  if (records.length === 0) return;
   const residual = residualDetail(events, written);
-  // The records rode this merge whole: the stage rendered them green, or the
-  // seat read them and found nothing to change. A remark buys no ticket of its
-  // own: it holds nothing red, and it rides the ticket a finding earned.
-  if (residual.length === 0 && written?.ok === true) return;
-  const records = judged.records ?? [];
   // The remarks over the record set the pass held, and never the judge's list:
   // under the supersede lifecycle a remark sits on the record a birth or a
   // round added, and the judge named the record it replaces. It is the
@@ -3077,20 +3028,6 @@ function conflictRole(base, conflicts, brief) {
  * break: an accepted record is never edited, so a conflict on one is resolved by
  * keeping both sides' facts and never by dropping either (ADR-0073).
  */
-function recordConflictRole(base, conflicts, brief) {
-  return [
-    `A merge of ${base.defaultBranch} into the run branch left conflicts in decision records.`,
-    'Resolve the conflict markers in these files; keep the facts of both sides:',
-    ...conflicts.map((f) => `- ${f}`),
-    `The spec of this run: ${base.specRef}`,
-    'An accepted record is never edited away. Where the two sides decide one unbuilt part',
-    'differently, the newer decision stands and the older record keeps its own body.',
-    'Change conflicted record files only. Do not edit source, tests or config.',
-    'Do not commit; the orchestrator concludes the merge.',
-    ...briefLines(brief),
-  ].join('\n');
-}
-
 function testConflictRole(base, conflicts, brief) {
   return [
     `A merge of ${base.defaultBranch} into the run branch left conflicts in test files.`,

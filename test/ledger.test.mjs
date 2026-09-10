@@ -126,7 +126,7 @@ test('the vocabulary says which record carries each kind, and the two sets are d
   // The frozen surface a take-back names, beside the kind that classifies it.
   // A dev seat that reached a test and one that reached a decision record are
   // two defects with two repairs, and one word for both counts neither.
-  assert.deepEqual([...RECAPTURE_CLASSES].sort(), ['record', 'test']);
+  assert.deepEqual([...RECAPTURE_CLASSES].sort(), ['record', 'record-seat', 'test']);
   for (const cls of RECAPTURE_CLASSES) assert.equal(assertRecaptureClass(cls), cls);
   assert.throws(() => assertRecaptureClass('adr'), /unknown recapture class/);
   assert.throws(() => assertRecaptureClass(undefined), /unknown recapture class/);
@@ -141,7 +141,9 @@ test('the record stage stamps every fact it is asked for', (t) => {
   // the whole of the stage in front of it.
   for (const event of [
     'records-committed',
-    'record-units',
+    'record-written',
+    'record-reviewed',
+    'record-unreviewed',
     'reconcile-write-set',
     'reconcile-review-set',
     'reconcile-round',
@@ -179,13 +181,14 @@ test('the record stage stamps every fact it is asked for', (t) => {
 });
 
 test('the fallback causes are closed, and one of them is retired', () => {
-  // The cap is the only way records with open findings leave a run: under the
-  // record rule a confirmed finding blocks, so the partial ship the retired
-  // word named cannot happen. It stays declared while a reader of an archived
+  // The cap is how a run with a standing finding ends: it pushes and merges,
+  // with the finding named on the close stamp and in the request body
+  // (ADR-0080). The retired word stays declared while a reader of an archived
   // ledger still meets it, and no stamp may carry it.
   assert.deepEqual([...RECONCILE_CAUSES].sort(), [
     'operator',
     'record-cap',
+    'seat-failure',
     'work-product-defect',
   ]);
   assert.equal(RECORD_CAP, 'record-cap');

@@ -438,12 +438,16 @@ function statsView(allRuns, ships, pinTs) {
 
 // -- the record tree ----------------------------------------------------------
 //
-// The eleven measures of the record stage, derived here because nothing else
-// derives them: the eval seat reads ledgers and reports proposals, the
-// close-out seat writes the story's own lesson, and a measure that lives in
-// neither is a measure somebody re-derives by hand every time (ADR-0075).
+// The measures of the record stage, derived here because nothing else derives
+// them: the eval seat reads ledgers and reports proposals, the close-out seat
+// writes the story's own lesson, and a measure that lives in neither is a
+// measure somebody re-derives by hand every time (ADR-0075).
 //
-// One window for all eleven: the last runs that hold a record stamp of any
+// The three the design of the record track is judged by: what a shipped record
+// costs, how many cycles a reconciliation takes, and how many runs merged with a
+// finding still standing (ADR-0080). The rest are the stage's own economics.
+//
+// One window for all of them: the last runs that hold a record stamp of any
 // kind. A run that touched no record says nothing about the stage, and a window
 // of them would read a quiet quarter as a healthy one.
 
@@ -452,18 +456,15 @@ const RECORDS_WINDOW = 10;
 // A run is in the record window when it holds one of these.
 const RECORD_STAMPS = new Set([
   'records-committed',
-  'record-units',
+  'record-written',
+  'record-reviewed',
+  'record-unreviewed',
   'reconcile-round',
   'reconcile-rendered',
   'reconcile-recheck',
   'reconciliation-judged',
   'reconciliation-written',
 ]);
-
-// The record seat that reviews. Every other record seat writes, and the miss
-// rate is the writers' answers against the review's findings. A dispatch is
-// one seat per record, so the stamped name carries a slot suffix (ADR-0075).
-const RECORD_REVIEW_SEAT = 'record-review';
 
 function recordsView(allRuns, pinTs) {
   const runs = allRuns
@@ -492,8 +493,8 @@ function recordsView(allRuns, pinTs) {
       reconciliations: cycles.detail.reconciliations,
       ...(cycles.detail.worst !== undefined && { worst: cycles.detail.worst }),
     },
-    writerMiss: writerMissRate(runs),
-    referenceDefects: referenceDefects(runs),
+    cost: recordCost(runs),
+    standing: standingFindings(runs),
     remarks: remarkShare(runs),
     verifier: verifierConfirmRate(runs),
     late: lateShare(runs),
@@ -510,110 +511,81 @@ function recordsView(allRuns, pinTs) {
 }
 
 /**
- * The writer's miss rate: the units a write seat reported `holds` that the
- * review then raised a finding on, over every unit a writer reported `holds`.
+ * What a shipped record costs: the cost of every record seat of a run, over the
+ * records the run merged.
  *
- * It is the one reading that catches a seat which answered every unit without
- * reading it. The evidence check catches a fabricated path and the kind test
- * catches a claim filed as rationale; neither catches a lazy `holds`, and this
- * does, per unit (ADR-0073).
- *
- * The join is the record and the unit id. Both seats read one enumeration of
- * one file at one sha, so the ids are the same list; the head a finding carries
- * beside its id is what matches a finding across a write, which is a different
- * question.
- *
- * A unit no review ever answered is out of the denominator. The rate is the
- * share of the writer's `holds` a reader refuted. A hold nobody read reports
- * nothing about the writer. It would only make the rate look better
- * (ADR-0077).
+ * It is the number the design of this track is judged by. A batch above eight
+ * dollars a record is the reading that asks why (ADR-0080). The denominator is
+ * the records the run's own birth committed and the run still holds active at
+ * the merge, because a record the run wrote and then superseded is one record's
+ * worth of decision and two files.
  */
-function writerMissRate(runs) {
-  let holds = 0;
-  let missed = 0;
-  const records = new Set();
+function recordCost(runs) {
+  let cost = 0;
+  let records = 0;
+  const perRun = [];
   for (const { runId, events } of runs) {
-    const answers = new Map();
-    const read = new Set();
+    let spent = 0;
     for (const e of events) {
-      const key = (unit) => `${runId}|${e.record}|${unit.id}`;
-      if (reviewSeat(e.seat)) {
-        if (e.event === 'record-units') for (const unit of e.units ?? []) read.add(key(unit));
-        continue;
-      }
-      if (e.event !== 'record-units') continue;
-      for (const unit of e.units ?? []) answers.set(key(unit), unit.verdict);
+      if (!recordSeat(e.seat) || typeof e.cost !== 'number') continue;
+      spent += e.cost;
     }
-    holds += [...answers].filter(([key, verdict]) => verdict === 'holds' && read.has(key)).length;
-    for (const e of events) {
-      if (e.event !== 'finding' || e.record !== true || e.unit === undefined) continue;
-      const key = `${runId}|${e.file}|${e.unit}`;
-      // The numerator takes the denominator's guard. A finding on a unit no
-      // review stamp answered is outside the holds this rate reads. A count of
-      // it could put the share past one (ADR-0077).
-      if (answers.get(key) !== 'holds' || !read.has(key)) continue;
-      missed += 1;
-      records.add(e.file);
+    const shipped = shippedRecords(events);
+    cost += spent;
+    records += shipped;
+    if (shipped > 0) perRun.push({ runId, cost: round(spent), records: shipped });
+  }
+  return {
+    cost: round(cost),
+    records,
+    perRecord: records > 0 ? round(cost / records) : null,
+    runs: perRun,
+  };
+}
+
+/** Whether a stamped seat name is a record seat's, slot suffix and all. */
+function recordSeat(seat) {
+  return typeof seat === 'string' && RECORD_SEATS.has(seat.split(':')[0]);
+}
+
+const RECORD_SEATS = new Set(['record-author', 'record-review', 'reconcile-write']);
+
+/** How many records one run's last write stamp says the tree holds active. */
+function shippedRecords(events) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.event === 'reconciliation-written' && typeof e.active === 'number') return e.active;
+  }
+  const born = [...events].reverse().find((e) => e.event === 'records-committed');
+  return (born?.paths ?? []).length;
+}
+
+/**
+ * The runs that merged with a confirmed finding still standing, and how many
+ * such findings they carried.
+ *
+ * No record blocks a run, so this is the count that says what the rule costs. A
+ * later run that raises the same unit again is the eval seat's question; this is
+ * the number it reads first (ADR-0080).
+ */
+function standingFindings(runs) {
+  let merged = 0;
+  const findings = [];
+  for (const { runId, events } of runs) {
+    const closed = [...events].reverse().find((e) => e.event === 'run-closed');
+    if (closed?.state !== 'shipped') continue;
+    const index = new Map(
+      events.filter((e) => e.event === 'finding').map((e) => [e.id, e]),
+    );
+    const standing = (closed.remarks ?? []).filter((id) => index.get(id)?.confirmed === true);
+    if (standing.length === 0) continue;
+    merged += 1;
+    for (const id of standing) {
+      const f = index.get(id);
+      findings.push({ runId, id, criterion: f.criterion ?? null, unit: f.unit ?? null });
     }
   }
-  return { holds, missed, rate: holds > 0 ? round(missed / holds) : null, records: [...records] };
-}
-
-/** Whether a stamped seat name is the record review's, slot suffix and all. */
-function reviewSeat(seat) {
-  return typeof seat === 'string' && seat.split(':')[0] === RECORD_REVIEW_SEAT;
-}
-
-/**
- * What the reference rule cost a run: the attempts a rule-9 defect refused, and
- * the dispatches it ended.
- *
- * The harness names the kind of a reference and checks what it names, so no
- * seat guesses at one and the target is nought. A count above it says the
- * enumeration and the seats disagree about the section, or that the record tree
- * moved under a record that cites it (ADR-0073).
- *
- * `attempts` is every refused attempt whose defects named a reference unit,
- * from `seat-refused`, so the reading holds the refusals a seat answered as
- * well as the ones that spent a budget. `dispatches` is the budgets that were
- * spent on one, from `seat-failure`. The write entry's own copy of that last
- * refusal is read nowhere here: it is the same text under a second name, and
- * counting both counted every spent corrective dispatch twice.
- */
-function referenceDefects(runs) {
-  let attempts = 0;
-  let dispatches = 0;
-  const seats = new Set();
-  const records = new Set();
-  for (const { events } of runs) {
-    for (const e of events) {
-      if (e.event !== 'seat-refused' && e.event !== 'seat-failure') continue;
-      const hit = (e.defects ?? []).filter(isReferenceDefect);
-      if (hit.length === 0) continue;
-      if (e.event === 'seat-refused') attempts += 1;
-      else dispatches += 1;
-      seats.add(e.seat);
-      for (const record of hit.map(defectRecord).filter(Boolean)) records.add(record);
-    }
-  }
-  return { attempts, dispatches, seats: [...seats], records: [...records] };
-}
-
-/**
- * Whether one defect text is the reference check's. The rule number opens the
- * text, so the count reads a rule and never a wording (ADR-0073).
- */
-function isReferenceDefect(defect) {
-  return typeof defect === 'string' && defect.startsWith('unit check 9:');
-}
-
-/**
- * The record a unit-check defect is about. Every one of them opens with the
- * rule, the record and the unit id, which is what makes the text readable to a
- * count as well as to the seat it was written for.
- */
-function defectRecord(defect) {
-  return /^unit check \d+: (\S+) U\d+/.exec(defect)?.[1] ?? null;
+  return { merged, findings: findings.length, standing: findings };
 }
 
 /**

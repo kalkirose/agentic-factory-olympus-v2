@@ -164,10 +164,16 @@ export const RUN_EVENTS = new Set([
   //
   // A shipped run adds `pr` and `mergeSha`, `fastPath: true` where the ship
   // carried its certification over a moved base (ADR-0056), and `remarks`, the
-  // ids of the record findings below HIGH that no write answered. A remark
-  // blocks nothing and buys no ticket, so this is where a green ship records
-  // the sentences it left standing; a partial ship names the same set on its
-  // ticket (ADR-0007).
+  // ids of the record findings no write answered. A remark blocks nothing, and
+  // this is where a ship records the sentences it left standing (ADR-0007).
+  //
+  // `remarks` holds two kinds under one word: the findings below HIGH, and the
+  // confirmed HIGHs that stood after the round. The `finding` stamp keeps
+  // `confirmed: true` on the second kind, so a reader tells them apart, and the
+  // request body lists them under two headings. `unwritten` and `unreviewed`
+  // name the records no round wrote and no seat read. The harness never blocks
+  // a run on a record, so this line is where the run says what is still wrong
+  // (ADR-0080).
   'run-closed',
   ...SEAT_EVENTS,
   // One read-only probe of one external credential, at the launch gate or at
@@ -512,18 +518,18 @@ export const RUN_EVENTS = new Set([
   //
   // One writer runs per record, in sequence, each with its own seat identity
   // (ADR-0075). So `records` carries one entry per record, `{record, seat,
-  // cost, attempts, unitsAnswered}`, and a reader prices one record. An entry
-  // with `failed: true` carries the `defects` that ended that dispatch and no
-  // write: the seat spent its budget, the round went on to the next record, and
-  // the render carries `unwritten:<record>` until a round writes it (ADR-0079).
-  // A divergence entry carries `evidence`, the path that shows the
-  // shift, so a later eval can ask how many recorded shifts were wrong without
-  // re-reading the run. `siblings` is what the write answered for every active
-  // record that cited a superseded one, and `superseded` the pairs it replaced.
-  // `active`, `supersededCount`, `split` and `merged` are the tree after the
-  // write: the record count grows under the supersede lifecycle, and the series
-  // is the only thing that says by how much (ADR-0073). A fallback carries
-  // `partial: true` and `residual`, the findings that went to the ticket.
+  // cost, attempts}`, and a reader prices one record. An entry with
+  // `failed: true` carries the `reason` and the `defects` that ended that
+  // dispatch and no write: the round went on to the next record, and the render
+  // carries `unwritten:<record>` until a round writes it (ADR-0079).
+  //
+  // `superseded` is the pairs the write replaced, and `active`,
+  // `supersededCount`, `split` and `merged` are the tree after it: the record
+  // count grows under the supersede lifecycle, and the series is the only thing
+  // that says by how much. `dropped` names a record the report listed as
+  // rewritten that the tree did not change; it is a note and never a refusal
+  // (ADR-0080). A fallback carries `partial: true` and `residual`, the findings
+  // that stood.
   'reconciliation-written',
   // The set one write round dispatched over: the `round`, the `since` the
   // round opened at, the `sha` the tree stood at, the `records` in dispatch
@@ -547,22 +553,36 @@ export const RUN_EVENTS = new Set([
   // the `skipped` the active filter dropped, and the `kept` this cycle did not
   // read again, each with the cycle whose review it stands on. It is the write
   // set's rule on the review side: one seat per record, named by its index, and
-  // one `record-units` stamp per seat per cycle. A cycle re-entered after the
-  // tree closed a record reviews the set it stamped (ADR-0078). A cycle after
+  // one `record-reviewed` or `record-unreviewed` stamp per seat per cycle. A
+  // cycle re-entered after the tree closed a record reviews the set it stamped
+  // (ADR-0078). A cycle after
   // the first reads the records the last round changed and the records an open
   // finding names; a fresh seat over an unchanged green record raises findings
   // on unchanged sentences and spends the cap (ADR-0079).
   'reconcile-review-set',
   // reconciliation (the stage, ADR-0075)
-  // What one record seat answered, for one record, unit by unit: the `seat`
-  // that ran with its slot suffix, the `cycle` where the stage had one, the
-  // `record`, the `units` as `{id, kind, verdict, evidence}`, the `counts`
-  // behind them, the `neighbours` it read with the `neighboursDropped` above
-  // the cap, and the `cost`. The per-unit list is the fact the writer miss
-  // rate joins on: a review `fails` on a unit the writer called `not-built`
-  // and one on a unit the writer called `holds` are two different reports, and
-  // counts alone cannot tell them apart (ADR-0073).
-  'record-units',
+  // One record write, stamped right after the commit that carries it: the
+  // `seat` with its slot suffix, the `record`, the `sha` where the write
+  // changed the tree, the `attempts` it took and what it `cost`. A dispatch
+  // that could not deliver stamps `failed: true` with its `reason` and its
+  // `defects`, and the round goes on to the next record.
+  //
+  // The resume reads this stamp and the round's commit subject, and nothing
+  // else. A failed entry is stepped over with its entry copied, so a stop
+  // inside a round never re-dispatches a record the round already spent
+  // (ADR-0080).
+  'record-written',
+  // One record read by one review seat: the `seat` with its slot suffix, the
+  // `record`, the `cycle` and the `cost`. The cycle derivation counts these
+  // against the set the cycle dispatched, so a stop inside the fan-out costs
+  // the seats that had not answered and no others.
+  'record-reviewed',
+  // One record no seat of this cycle could read: the `seat`, the `record`, the
+  // `cycle` and the `reason` its dispatch ended with. The render lists the
+  // record under `unreviewed` and the next cycle dispatches it again. A review
+  // that failed is about the reviewer, never about the record, so it parks
+  // nothing (ADR-0080).
+  'record-unreviewed',
   // One corrective round of the reconcile stage: the `round`, the `records` it
   // dispatched a writer for, the `findings` it was answering, and the `failed`
   // records whose dispatch spent its budget. It counts against
@@ -573,7 +593,8 @@ export const RUN_EVENTS = new Set([
   // the run's own counter so `runId#cycle` stays unique across both renders,
   // the `sha` of the record commit it judged, the `base` of the window it read
   // that sha through, the `verdict`, what it left `open`, the `records` it read,
-  // the `kept` it stood over and did not read again, and the `layers` it ran.
+  // the `kept` it stood over and did not read again, the `unreviewed` no seat of
+  // the cycle could read, and the `layers` it ran.
   // An `open` entry is a finding id, a red layer name, or `unwritten:<record>`
   // for a record no write of the round answered. `advisory` is the remarks the
   // cycle raised on its records: they hold nothing red, and a reader of a green
@@ -591,21 +612,13 @@ export const RUN_EVENTS = new Set([
   // park asks anybody first. The ticket is the answer, so the close-out
   // `reconciliation-judged` that names one owns this record.
   'reconcile-stall',
-  // The rounds a person bought at a `reconcile-cap` park: the `parkSeq` the
-  // answer belongs to, the `rounds` it names, and the `cap` this pass is judged
-  // against from here. The step derivation reads it, and the stage re-enters
-  // its corrective round on the newest one whatever ended the round before it
-  // (ADR-0079).
-  'reconcile-cap-extended',
   // The recheck a repair round owes a green reconciliation: the `delta` the
-  // round committed, the `units` whose evidence paths it touched, what the
-  // `judge` said about a record not already owed, and the `result`. A repair
-  // changes the diff a green reconciliation answered, and the intersection is
-  // what keeps that from costing a whole stage again (ADR-0075). `result` is
-  // `kept` where the delta touched no evidence path and implicated no record.
-  // That one is stamped too: a recheck that found nothing is the evidence that
-  // the rule is not too narrow, and the yield reads every other word as work
-  // the recheck did.
+  // round committed, the `records` it re-reviews whole, what the `judge` said
+  // about a record not already owed, and the `result`. A repair changes the
+  // diff a green reconciliation answered (ADR-0075). `result` is `kept` where
+  // the delta implicated no record. That one is stamped too: a recheck that
+  // found nothing is the evidence that the rule is not too narrow, and the
+  // yield reads every other word as work the recheck did.
   'reconcile-recheck',
   // The close-out learning artifact a project asks for in its config: `ok`
   // with the artifact paths the seat reported, or ok:false with the reason
@@ -896,12 +909,6 @@ export const PARK_TYPES = new Set([
   // writes decision records and dispatches no dev seat, so a red on anything but
   // a record layer is a code defect nobody in the run may repair (ADR-0075).
   'ci-red',
-  // A records-lane run whose record rounds are spent with findings still open.
-  // The lane has no code to ship, so the fallback every other lane takes would
-  // close the run and lose the branch, the ledger and the findings. The branch
-  // is pushed, the ticket is written, and the park offers the rounds that
-  // finish the work or the abandon that closes the run (ADR-0079).
-  'reconcile-cap',
   // Terminal-state discipline (ADR-0015): a recoverable failure parks with
   // `retry` / `abandon` instead of closing the run.
   'seat-failure', // a seat work product past its machine retry allowance
@@ -1011,7 +1018,12 @@ export const DEFECT_KINDS = new Set([...GATE_INTEGRITY_KINDS, ...OBSERVED_DEFECT
 // kinds above are: a dev seat that reached a test and one that reached a
 // decision record are two defects with two repairs, and a word each writer
 // spells its own way counts as nothing (ADR-0074).
-export const RECAPTURE_CLASSES = new Set(['test', 'record']);
+//
+// `record-seat` is the third direction: a record seat that wrote outside the
+// record tree. The write is reverted and the round goes on, because a record run
+// ships no code and a refusal there costs a dispatch and buys nothing
+// (ADR-0080).
+export const RECAPTURE_CLASSES = new Set(['test', 'record', 'record-seat']);
 
 /** The class, or a throw naming it. The only way one reaches a stamp. */
 export function assertRecaptureClass(cls) {
@@ -1025,27 +1037,36 @@ export function assertRecaptureClass(cls) {
  * tripwire counts them, and a count that reads a word one writer spells its own
  * way is a count of nothing (ADR-0008).
  *
- * `record-cap` is the stall: the stage spent its rounds with findings still
- * open, so the records ride with `partial: true` and the `residual` goes to a
- * ticket, or a records-lane run closes on the cap and the ticket names its
- * branch. It is the only way records with open findings leave a run.
+ * `record-cap` is the stall: the stage spent its round with findings still
+ * open, so the run pushes and merges with `partial: true`, and the standing
+ * findings ride the request body and the close stamp. Every lane takes it
+ * (ADR-0080).
  *
- * `operator` is a person's answer at the write seat's failure park, and
- * `work-product-defect` is a write that could not pass its own checks past its
- * corrective attempt. Neither asks anybody twice: the code ships and the ticket
- * carries the records.
+ * `seat-failure` is a write dispatch that delivered no report at all. The round
+ * goes on, the record rides the render as unwritten, and the story lane's own
+ * ending ships the code beside it.
+ *
+ * `operator` is a person's answer at a park, and `work-product-defect` is a
+ * write that could not pass its own checks past its corrective attempt. Both
+ * stay declared: an archived ledger still holds them, and the code lanes still
+ * reach the second.
  *
  * `record-layer-red` is retired: a red record layer is now a red render that a
- * corrective round answers, and the whole-rewrite discard it named no longer
- * happens. It stays declared so an archived ledger still reads.
+ * corrective round answers. It stays declared so an archived ledger still reads.
  */
 export const RECORD_CAP = 'record-cap';
 export const OPERATOR = 'operator';
 export const WORK_PRODUCT_DEFECT = 'work-product-defect';
+export const SEAT_FAILURE = 'seat-failure';
 export const RECORD_LAYER_RED = 'record-layer-red';
 
 /** The closed causes a `reconciliation-written` fallback carries. */
-export const RECONCILE_CAUSES = new Set([RECORD_CAP, OPERATOR, WORK_PRODUCT_DEFECT]);
+export const RECONCILE_CAUSES = new Set([
+  RECORD_CAP,
+  OPERATOR,
+  WORK_PRODUCT_DEFECT,
+  SEAT_FAILURE,
+]);
 
 /** The cause, or a throw naming it. The only way one reaches a stamp. */
 export function assertReconcileCause(cause) {

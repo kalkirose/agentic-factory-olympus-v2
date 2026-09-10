@@ -60,12 +60,6 @@ export const SEATS = Object.freeze({
   'fury-operational': seat(),
   'fury-interface': seat(),
   'fury-verifier': seat({ model: CERTIFICATION_MODEL, effort: CERTIFICATION_EFFORT }),
-  // The verifier of a record item. It is the one verifier that reads no code
-  // diff: it reads a decision record whole and the tree the record describes,
-  // and it takes the model the rest of the records lane runs on. Its tool
-  // policy is the code verifier's, the replay probe included (ADR-0005,
-  // ADR-0042).
-  'record-verifier': seat(),
   'generalist-review': seat(),
   // ship
   'card-sweep': seat(),

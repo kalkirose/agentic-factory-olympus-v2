@@ -25,7 +25,6 @@ import {
   ticketPathClass,
   withReconcileStage,
 } from '../src/lanes/records-stage.mjs';
-import { kindTest } from '../src/lanes/records.mjs';
 import { recordUnits } from '../src/lanes/units.mjs';
 import { commitAll, headSha, resetHard } from '../src/isolation/tree.mjs';
 import {
@@ -97,22 +96,11 @@ const RECORD_TEXT = [
   '',
 ].join('\n');
 
-function unitAnswers(record = RECORD_PATH) {
-  return [
-    { record, id: 'U0', kind: 'title', verdict: 'holds', evidence: 'the title' },
-    { record, id: 'U1', kind: 'status', verdict: 'holds', evidence: 'accepted' },
-    { record, id: 'U2', kind: 'claim', verdict: 'holds', evidence: 'src/base.mjs' },
-    { record, id: 'U3', kind: 'open', verdict: 'not-built', evidence: 'nothing holds it yet' },
-  ];
-}
-
 /** The birth report of a run that writes one record. */
 function bornReport(record = RECORD_PATH) {
   return {
     rewritten: [record],
     unchanged: [],
-    units: unitAnswers(record),
-    divergences: [],
     summary: 'one record born',
   };
 }
@@ -121,8 +109,6 @@ function bornReport(record = RECORD_PATH) {
 const NOTHING_DECIDED = {
   rewritten: [],
   unchanged: [],
-  units: [],
-  divergences: [],
   summary: 'the work decides no record the tree does not hold',
 };
 
@@ -183,11 +169,19 @@ function seatScript({ reportPath, model, report, files = {}, hang = false, probe
 
 function seatFixture(seats) {
   const calls = [];
+  // The corrective prompt of an invalid report names no seat: it is the same
+  // seat session, told what its report failed. So the last seat stands.
+  let last = null;
   const commandFor = (opts) => {
-    const seat = /You are the (\S+) seat/.exec(opts.prompt)[1];
+    const seat = /You are the (\S+) seat/.exec(opts.prompt)?.[1] ?? last;
+    last = seat;
     const lines = opts.prompt.split('\n');
     const contract = lines.findIndex((l) => l.includes('write your JSON report to this file'));
-    const reportPath = lines[contract + 1];
+    // The corrective prompt names the same file on the line that asks for it.
+    const reportPath =
+      contract === -1
+        ? /report to the same file, then stop: (.+)$/m.exec(opts.prompt)[1].trim()
+        : lines[contract + 1];
     calls.push({
       seat,
       label: basename(reportPath, '.json'),
@@ -509,20 +503,9 @@ test('a story commits the records it decides before the freeze, and stamps them'
   // The frozen sha carries them, so the dev seat reads them as it reads the
   // tests (ADR-0074).
   assert.match(fx.closed[0].frozenRecord, /ADR-0002/);
-  // One `record-units` stamp per record, with the per-unit answers the writer
-  // miss rate joins on, and the dispatch's cost once.
-  const units = events.filter((e) => e.event === 'record-units');
-  assert.equal(units.length, 1);
-  assert.equal(units[0].seat, 'record-author');
-  assert.equal(units[0].record, RECORD_PATH);
-  assert.deepEqual(
-    units[0].units.map((u) => u.id),
-    ['U0', 'U1', 'U2', 'U3'],
-  );
-  assert.deepEqual(units[0].counts, { claims: 1, holds: 3, fails: 0, notBuilt: 1 });
-  assert.equal(units[0].neighbours, 1);
-  assert.equal(units[0].neighboursDropped, 0);
-  assert.equal(typeof units[0].cost, 'number');
+  // The birth stamp carries the dispatch's cost, and no reading of the text.
+  assert.equal(typeof born.cost, 'number');
+  assert.equal(events.filter((e) => e.event === 'record-units').length, 0);
   // The brief carries the neighbourhood by path and no diff.
   const brief = fx.calls.find((c) => c.seat === 'record-author').prompt;
   assert.match(brief, /docs\/adr\/adr-0001-keep-one-entry-point\.md/);
@@ -634,15 +617,8 @@ test('a record-only ticket is judged to the end of the stage, and the render exi
     config: RECORD_LAYER_CONFIG,
     seats: {
       'record-author': () => ({ files: { [RECORD_PATH]: RECORD_TEXT }, report: bornReport() }),
-      'reconcile-judge': () => ({
-        report: { owed: false, records: [], reason: 'the record this run wrote still stands' },
-      }),
-      'record-review': ({ prompt }) => ({
-        report: {
-          findings: [],
-          units: reviewedUnits(prompt),
-          summary: 'the record stands against the tree',
-        },
+      'record-review': () => ({
+        report: { findings: [], summary: 'the record stands against the tree' },
       }),
     },
     files: { 'tickets/records.md': ticketText([RECORD_PATH]) },
@@ -651,17 +627,25 @@ test('a record-only ticket is judged to the end of the stage, and the render exi
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
 
+  // The records lane spawns no judge: the diff is the records, so the birth is
+  // the judgment (ADR-0080).
+  assert.equal(fx.calls.filter((c) => c.seat === 'reconcile-judge').length, 0);
   const judged = events.find((e) => e.event === 'reconciliation-judged');
   assert.equal(judged.owed, false);
+  assert.equal(judged.source, 'born');
   assert.deepEqual(judged.born, [RECORD_PATH]);
   assert.deepEqual(judged.late, []);
-  // No writer: the birth wrote the record and the judge owes none.
   assert.ok(!events.some((e) => e.event === 'reconciliation-written'));
 
-  // One review seat over the born record, and the record layer over its commit.
+  // One review seat over the born record, and no verifier behind it.
   const reviews = fx.calls.filter((c) => c.seat.startsWith('record-review'));
   assert.equal(reviews.length, 1);
   assert.ok(reviews[0].prompt.includes(`Review one decision record: ${RECORD_PATH}`));
+  assert.equal(fx.calls.filter((c) => c.seat.includes('verifier')).length, 0);
+  assert.equal(
+    events.filter((e) => e.event === 'record-reviewed').map((e) => e.record).join(),
+    RECORD_PATH,
+  );
   assert.deepEqual(
     events.filter((e) => e.event === 'layer-result').map((e) => [e.layer, e.status]),
     [['adr-form', 'green']],
@@ -672,20 +656,6 @@ test('a record-only ticket is judged to the end of the stage, and the render exi
   assert.deepEqual(rendered.open, []);
   assert.deepEqual(rendered.records, [RECORD_PATH]);
 });
-
-/** The unit answers a review seat reports, read off the brief it was given. */
-function reviewedUnits(prompt) {
-  const record = /^Review one decision record: (.+)$/m.exec(prompt)?.[1]?.trim() ?? RECORD_PATH;
-  return [...prompt.matchAll(/^- (U\d+) \(line \d+(?:, (\w+))?\): (.+)$/gm)].map(
-    ([, id, kind, head]) => ({
-      record,
-      id,
-      kind: kind ?? (kindTest(head) ?? 'rationale'),
-      verdict: 'holds',
-      evidence: kind ? 'structure' : (kindTest(head) ? 'src/base.mjs' : 'structure'),
-    }),
-  );
-}
 
 // A reconciliation ticket names its records in prose under a heading and
 // carries no fenced block. The paths the work touches are those records, so
@@ -725,7 +695,7 @@ function citingTree(count = 23, id = '0001') {
   return out;
 }
 
-test('the birth brief carries the siblings, the neighbours and the render (W2, W3, W4)', async (t) => {
+test('the birth brief names the gate command, and the readiness stage installs what it needs', async (t) => {
   const touched = 'docs/adr/adr-0001-keep-one-entry-point.md';
   const probe = join(tempDir(), 'birth-env.json');
   const fx = laneFixture(t, {
@@ -734,57 +704,38 @@ test('the birth brief carries the siblings, the neighbours and the render (W2, W
     seats: {
       'record-author': () => ({
         files: { [RECORD_PATH]: RECORD_TEXT },
-        report: { ...bornReport(), siblings: [] },
+        report: bornReport(),
         probe,
       }),
     },
   });
   const { runId } = await fx.launch({ lane: 'records', ticket: 'tickets/records.md' });
-  await waitClosed(fx.paths, runId);
+  const events = await waitClosed(fx.paths, runId);
   const brief = fx.calls.find((c) => c.seat === 'record-author').prompt;
 
-  // The siblings the check computes afterwards, computed before the seat runs.
-  // The list is not capped: every record that cites a superseded one owes an
-  // answer, and a batch of this shape has 23 of them.
-  assert.match(brief, /These active records cite a record you supersede/);
-  const cites = Object.keys(citingTree());
-  assert.equal(cites.length, 23);
-  for (const path of cites) assert.ok(brief.includes(`- ${path}`), path);
-  // The neighbourhood of a touched record is that record's own, and it is
-  // capped by rank with the count above the cap stated.
+  // The neighbourhood of a touched record is that record's own, capped by rank
+  // with the count above the cap stated.
   assert.match(brief, /The neighbourhood\. Read each one whole/);
   assert.match(brief, /11 more active records cite these or are cited by them/);
-  // What reads the form of these files, and when. No command proves the form of
-  // an uncommitted record, so the brief names the layer and the cost.
-  assert.match(brief, /These layers read your files after the commit, at the render: adr-form\./);
-  assert.match(brief, /A form defect there costs the run a cycle and a corrective round\./);
-  assert.match(brief, /check your own files before you report/);
-  // No command: the brief names the layer and never a line the seat could run
-  // over uncommitted files. The code layers of the project are not named at all.
-  assert.ok(!brief.includes('node -e'), brief);
-  assert.ok(!brief.includes('lockfile'), brief);
+  // The gate command, by name, and the duty to run it before reporting. It is a
+  // brief line and not a check: the harness reads no token of a record
+  // (ADR-0080).
+  assert.match(brief, /The project form gate reads the files you leave/);
+  assert.match(brief, /node -e process\.exit\(0\)/);
+  assert.match(brief, /A red at the render costs the run a cycle/);
+  // The sibling table and the divergence table are gone; the direction stays.
+  assert.ok(!brief.includes('"siblings"'), brief);
+  assert.match(brief, /Read every active record that cites the one you supersede/);
+  // The layer the gate needs ran once at readiness, before the seat.
+  const lockfile = events.filter((e) => e.event === 'layer-result' && e.layer === 'lockfile');
+  assert.equal(lockfile.length, 1);
+  assert.equal(lockfile[0].cycle, 0);
+  const spawned = events.find((e) => e.event === 'seat-spawned' && e.seat === 'record-author');
+  assert.ok(lockfile[0].seq < spawned.seq, 'the gate prerequisite ran after the seat');
   // The environment carries the base the gate reads.
   assert.match(JSON.parse(readFileSync(probe, 'utf8')), /^[0-9a-f]{40}$/);
   // One dispatch: the report answered the shape the brief asked for.
   assert.equal(fx.calls.filter((c) => c.seat === 'record-author').length, 1);
-});
-
-test('a birth over records nothing cites asks for no sibling entry (W13)', async (t) => {
-  const fx = laneFixture(t, {
-    config: SUPERSEDE_LAYERS,
-    files: { 'tickets/records.md': ticketText(['docs/adr/adr-0001-keep-one-entry-point.md']) },
-    seats: {
-      // The report carries no `siblings`, and the schema does not ask for one.
-      'record-author': () => ({ files: { [RECORD_PATH]: RECORD_TEXT }, report: bornReport() }),
-    },
-  });
-  const { runId } = await fx.launch({ lane: 'records', ticket: 'tickets/records.md' });
-  const events = await waitClosed(fx.paths, runId);
-  const brief = fx.calls.find((c) => c.seat === 'record-author').prompt;
-  assert.match(brief, /No active record cites a record this write supersedes/);
-  assert.equal(fx.calls.filter((c) => c.seat === 'record-author').length, 1);
-  assert.ok(!events.some((e) => e.event === 'seat-failure'));
-  assert.equal(events.find((e) => e.event === 'records-committed').decided, true);
 });
 
 test('a ticket with no block gives the birth the records it names', async (t) => {
@@ -1024,17 +975,6 @@ const REPLACEMENT_TEXT = [
   '',
 ].join('\n');
 
-/** Every unit of one text, answered as the harness counts them. */
-function answersOf(record, text) {
-  return recordUnits(text).map((unit) => ({
-    record,
-    id: unit.id,
-    kind: unit.kind ?? (kindTest(unit.head) ? 'claim' : 'rationale'),
-    verdict: 'holds',
-    evidence: unit.kind ? 'structure' : kindTest(unit.head) ? 'src/base.mjs' : 'the reason',
-  }));
-}
-
 const SUPERSEDE_CONFIG = {
   repo: {
     testPaths: ['tests'],
@@ -1044,9 +984,9 @@ const SUPERSEDE_CONFIG = {
 };
 
 // The sweep shape, at one record. The birth closes the record it replaces and
-// writes the replacement. The status-line edit owes no unit, so nothing asks
-// the seat for one and nothing stamps one (ADR-0078).
-test('a birth that supersedes a record answers the replacement alone', async (t) => {
+// writes the replacement. Nothing in the harness reads the pairing: the project
+// form gate is the one implementation of the lifecycle's mechanics (ADR-0080).
+test('a birth that supersedes a record is committed on its first attempt', async (t) => {
   const fx = laneFixture(t, {
     config: SUPERSEDE_CONFIG,
     seats: {
@@ -1058,9 +998,6 @@ test('a birth that supersedes a record answers the replacement alone', async (t)
         report: {
           rewritten: [RECORD_PATH],
           unchanged: [],
-          units: answersOf(RECORD_PATH, REPLACEMENT_TEXT),
-          divergences: [],
-          siblings: [],
           summary: 'the decision moves to a new record',
         },
       }),
@@ -1072,14 +1009,8 @@ test('a birth that supersedes a record answers the replacement alone', async (t)
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   // One attempt, and no refusal: the write is right and the harness says so.
   assert.equal(fx.calls.filter((c) => c.seat === 'record-author').length, 1);
+  assert.ok(!events.some((e) => e.event === 'seat-refused'));
   assert.ok(!events.some((e) => e.event === 'seat-failure'));
-  // One unit stamp, for the record the seat wrote. The closed record owes none.
-  const stamps = events.filter((e) => e.event === 'record-units');
-  assert.deepEqual(
-    stamps.map((e) => e.record),
-    [RECORD_PATH],
-  );
-  assert.ok(stamps[0].units.length > 0);
   // The born stamp still names every record path the commit changed, and marks
   // the one the seat did not report. That is what the reconcile stage reads.
   const born = events.find((e) => e.event === 'records-committed');
@@ -1094,99 +1025,70 @@ test('a birth that supersedes a record answers the replacement alone', async (t)
   assert.ok(brief.includes('A status-line change of an old record is not a rewrite.'), brief);
 });
 
-// The other half of the closure rule. A record this write closed with neither a
-// replacement nor a reason is a judged record discharged unread, and the seat
-// buys its one corrective attempt for it (ADR-0078).
-test('a birth that closes a record with no route is refused once and answers', async (t) => {
-  let attempt = 0;
+// -- a birth that delivers nothing (ADR-0080) ---------------------------------
+
+// The story lane ships code beside its records. A birth that spent its ladder
+// there used to park the run before its freeze, for a document. It stamps
+// `birthFailed` instead and the run goes on: the judge names the records late
+// in the reconcile stage, which is ADR-0074's own fallback path.
+test('a story birth that spends its ladder stamps birthFailed and the run goes on', async (t) => {
   const fx = laneFixture(t, {
-    config: SUPERSEDE_CONFIG,
     seats: {
-      'record-author': () => {
-        attempt += 1;
-        const bare = attempt === 1;
-        return {
-          files: {
-            'docs/adr/adr-0001-keep-one-entry-point.md': EXISTING_RECORD.replace(
-              '**Status:** Accepted',
-              '**Status:** Retired (2026-09-08): the entry point this record named is gone.',
-            ),
-            [RECORD_PATH]: RECORD_TEXT,
-          },
-          report: {
-            rewritten: [RECORD_PATH],
-            unchanged: bare
-              ? []
-              : [
-                  {
-                    record: 'docs/adr/adr-0001-keep-one-entry-point.md',
-                    reason: 'the entry point this record named is gone',
-                  },
-                ],
-            units: answersOf(RECORD_PATH, RECORD_TEXT),
-            divergences: [],
-            siblings: [],
-            summary: 'one record retired, one written',
-          },
-        };
-      },
+      ...storySeats(() => ({ report: { rewritten: [], unchanged: [] } })),
+      dev: () => ({
+        files: { 'src/feature.mjs': 'export const f = (x) => 2 * x;\n' },
+        report: { summary: 'implemented' },
+      }),
     },
-    files: { 'tickets/records.md': ticketText([RECORD_PATH]) },
   });
-  const { runId } = await fx.launch({ lane: 'records', ticket: 'tickets/records.md' });
+  const { runId } = await fx.launch({ lane: 'story', card: CARD_PATH });
   const events = await waitClosed(fx.paths, runId);
-  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
-  // Two dispatches: the first was refused for the bare closure, and the
-  // correction brief carried the defect.
-  const calls = fx.calls.filter((c) => c.seat === 'record-author');
-  assert.equal(calls.length, 2);
-  assert.match(calls[1].prompt, /is closed in this diff and nothing accounts for it/);
-  assert.match(calls[1].prompt, /report it in "unchanged" with the reason you retired it/);
-  // The correction brief enumerates the record the seat still owes units for,
-  // and never the one it closed.
-  assert.ok(calls[1].prompt.includes(`The units of ${RECORD_PATH}, as the harness counts them:`));
-  assert.ok(!calls[1].prompt.includes('The units of docs/adr/adr-0001-keep-one-entry-point.md'));
-  // The retired record takes no unit stamp on either attempt.
+  // The seat spent its ladder on a report the schema refuses, which is the one
+  // refusal a record write still takes.
   assert.deepEqual(
-    [...new Set(events.filter((e) => e.event === 'record-units').map((e) => e.record))],
-    [RECORD_PATH],
+    events.filter((e) => e.seat === 'record-author').map((e) => [e.event, e.reason ?? '']),
+    [
+      ['seat-spawned', ''],
+      ['seat-spawned', ''],
+      ['seat-failure', 'report-invalid'],
+    ],
+  );
+  const born = events.find((e) => e.event === 'records-committed');
+  assert.equal(born.birthFailed, true);
+  assert.equal(born.decided, false);
+  assert.equal(born.cause, 'seat-failure');
+  // No park, and the run reached its freeze and its close.
+  assert.deepEqual(events.filter((e) => e.event === 'park').map((e) => e.type), []);
+  assert.ok(events.some((e) => e.event === 'suite-committed'));
+  assert.deepEqual(
+    events.filter((e) => e.event === 'stage-entered').map((e) => e.stage),
+    [
+      'readiness',
+      'spec-birth',
+      'spec-gate',
+      'records',
+      'suite',
+      'adversary',
+      'freeze',
+      'implementation',
+      'verdict',
+      'done',
+    ],
   );
 });
 
-// The stamp follows the set the check counted, and never the answers alone. A
-// record the enumeration finds no unit in is still a record the dispatch was
-// answerable for, so it takes its stamp with an empty list (ADR-0078).
-test('a counted record with no unit takes its stamp all the same', async (t) => {
-  const bare = 'docs/adr/adr-0003-bare.md';
+// The records lane keeps the park: a birth that delivered nothing leaves that
+// lane no record, and a lane with no work has nothing to merge.
+test('a records-lane birth that spends its ladder parks', async (t) => {
   const fx = laneFixture(t, {
-    seats: {
-      'record-author': () => ({
-        files: { [RECORD_PATH]: RECORD_TEXT, [bare]: '' },
-        report: {
-          rewritten: [RECORD_PATH, bare],
-          unchanged: [],
-          units: unitAnswers(),
-          divergences: [],
-          summary: 'one record, and one file the enumeration finds nothing in',
-        },
-      }),
-    },
-    files: { 'tickets/records.md': ticketText([RECORD_PATH, bare]) },
+    seats: { 'record-author': () => ({ report: { rewritten: [], unchanged: [] } }) },
+    files: { 'tickets/records.md': ticketText([RECORD_PATH]) },
   });
   const { runId } = await fx.launch({ lane: 'records', ticket: 'tickets/records.md' });
-  const events = await waitClosed(fx.paths, runId);
-  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
-  // One dispatch, no refusal: an empty unit list is legal.
-  assert.equal(fx.calls.filter((c) => c.seat === 'record-author').length, 1);
-  assert.ok(!events.some((e) => e.event === 'seat-failure'));
-  const stamps = events.filter((e) => e.event === 'record-units');
-  assert.deepEqual(
-    stamps.map((e) => e.record),
-    [RECORD_PATH, bare],
+  const parked = await waitFor(
+    () => readEvents(runLedgerPath(fx.paths, runId)).find((e) => e.event === 'park'),
+    { label: 'the birth park', attempts: 900, intervalMs: 100 },
   );
-  assert.deepEqual(stamps[1].units, []);
-  assert.deepEqual(stamps[1].counts, { claims: 0, holds: 0, fails: 0, notBuilt: 0 });
-  // The cost rides the first stamp, as it always did.
-  assert.equal(typeof stamps[0].cost, 'number');
-  assert.equal(stamps[1].cost, undefined);
+  assert.equal(parked.type, 'seat-failure');
+  assert.match(parked.detail.seat, /record-author/);
 });
