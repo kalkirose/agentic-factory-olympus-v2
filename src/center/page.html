@@ -694,9 +694,9 @@ function renderRecords(box, r) {
   tiles.appendChild(tile("Writer miss rate", fmtShare(r.writerMiss.rate), null,
     sub([r.writerMiss.missed + " of " + r.writerMiss.holds + " units answered holds"]),
     "Units a write seat reported holds that the review then found false."));
-  tiles.appendChild(tile("Reference defects", String(r.referenceDefects.defects), null,
+  tiles.appendChild(tile("Reference defects", String(r.referenceDefects.attempts), null,
     sub([r.referenceDefects.dispatches + " dispatches ended · " + r.referenceDefects.records.length + " records"]),
-    "Rule-9 defects: a reference unit filed as another kind, or a reference the tree does not answer. The target is nought."));
+    "Attempts a rule-9 defect refused: a reference unit filed as another kind, or a reference the tree does not answer. The target is nought."));
   tiles.appendChild(tile("Remarks answered", fmtShare(r.remarks.share), null,
     sub([r.remarks.answered + " of " + r.remarks.raised + " remarks · " + r.remarks.shipped.length + " shipped"]),
     "Record findings below HIGH a writer answered inside a round opened for a HIGH. A remark opens no round of its own."));

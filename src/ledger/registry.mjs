@@ -7,6 +7,15 @@ const SEAT_EVENTS = [
   'seat-spawned',
   'seat-progress',
   'seat-report',
+  // One attempt a deterministic check refused: the `seat`, the `attempt`
+  // number and the `defects` the seat was handed back. Every refused attempt
+  // stamps one, the answered ones included, so a reading that counts a class
+  // of defect counts the attempts it really bought. Without it a refusal the
+  // next attempt answered is in no ledger, and the only refusals a reader can
+  // see are the ones that spent a whole budget. Quiet: the corrective loop is
+  // the contract working, and the spent budget stamps `seat-failure` beside it
+  // (ADR-0073).
+  'seat-refused',
   'seat-failure',
   'seat-terminated',
   'model-substituted',

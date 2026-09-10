@@ -1555,7 +1555,22 @@ export function remarksOf(events, records, since) {
  * @returns {object[]}
  */
 export function runRemarks(events) {
-  return remarksOf(events, null, judgment(events)?.seq ?? 0);
+  return remarksOf(events, null, recordPassSeq(events));
+}
+
+/**
+ * The seq the pass's record work opens at: its own judgment, which is the
+ * ticketless one since the last `fresh-pass`.
+ *
+ * Every reading over the pass's findings starts here, in this module and in the
+ * center's own. A reading that started at nought would count a discarded pass's
+ * findings as this pass's, and a reading that started at the close-out's
+ * ticketed stamp would count none at all (ADR-0077).
+ * @param {object[]} events the run's ledger, in order
+ * @returns {number}
+ */
+export function recordPassSeq(events) {
+  return judgment(events)?.seq ?? 0;
 }
 
 /**

@@ -48,7 +48,9 @@ kind but `reference` on a unit of the section and `reference` on any unit outsid
 one, an `ADR-<n>` token that names no record of the record tree at any status, a
 path token the worktree does not hold, and a reference that names no record, no
 path and no link at all. Rule 5 never reads a reference unit. A refusal buys the
-seat its one corrective attempt.
+seat its one corrective attempt, and every refused attempt stamps `seat-refused`
+with the seat, the attempt number and the defects, so a reading counts the
+refusals a seat answered as well as the budgets one spent.
 
 `repo.recordLifecycle` is `rewrite` or `supersede`. Under `supersede` no seat
 edits an accepted record. A change is a new record with a `Supersedes` line. The

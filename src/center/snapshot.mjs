@@ -36,6 +36,7 @@ import { parseProjectConfig } from '../config/project.mjs';
 import { PRE_FREEZE_STAGES } from '../lanes/story.mjs';
 import { RECORDS_LANE_STAGES } from '../lanes/records-stage.mjs';
 import { VERIFIER_SEATS } from '../lanes/review.mjs';
+import { recordPassSeq } from '../lanes/reconcile.mjs';
 
 // The design-given target for one shipped story, in hours of active time —
 // the run's own hours, with the waiting on a human taken out (ADR-0036). The
@@ -564,44 +565,38 @@ function reviewSeat(seat) {
 }
 
 /**
- * The rule-9 defects the run bought: a reference unit a record seat filed
- * wrong, or a reference the tree does not answer.
+ * What the reference rule cost a run: the attempts a rule-9 defect refused, and
+ * the dispatches it ended.
  *
  * The harness names the kind of a reference and checks what it names, so no
  * seat guesses at one and the target is nought. A count above it says the
  * enumeration and the seats disagree about the section, or that the record tree
  * moved under a record that cites it (ADR-0073).
  *
- * The reading is over the defect texts the ledger holds: the `seat-failure` a
- * spent budget stamps, and the defects a write stamp carries for a dispatch
- * that ended with none. A refused attempt the seat then answered leaves no text
- * behind, so it is counted where it cost a dispatch and nowhere else.
+ * `attempts` is every refused attempt whose defects named a reference unit,
+ * from `seat-refused`, so the reading holds the refusals a seat answered as
+ * well as the ones that spent a budget. `dispatches` is the budgets that were
+ * spent on one, from `seat-failure`. The write entry's own copy of that last
+ * refusal is read nowhere here: it is the same text under a second name, and
+ * counting both counted every spent corrective dispatch twice.
  */
 function referenceDefects(runs) {
-  let defects = 0;
+  let attempts = 0;
   let dispatches = 0;
   const seats = new Set();
   const records = new Set();
   for (const { events } of runs) {
     for (const e of events) {
-      if (e.event === 'seat-failure') {
-        const hit = (e.defects ?? []).filter(isReferenceDefect);
-        if (hit.length === 0) continue;
-        defects += hit.length;
-        seats.add(e.seat);
-        continue;
-      }
-      if (e.event !== 'reconciliation-written') continue;
-      for (const entry of e.records ?? []) {
-        const hit = (entry.defects ?? []).filter(isReferenceDefect);
-        if (hit.length === 0) continue;
-        defects += hit.length;
-        dispatches += 1;
-        records.add(entry.record);
-      }
+      if (e.event !== 'seat-refused' && e.event !== 'seat-failure') continue;
+      const hit = (e.defects ?? []).filter(isReferenceDefect);
+      if (hit.length === 0) continue;
+      if (e.event === 'seat-refused') attempts += 1;
+      else dispatches += 1;
+      seats.add(e.seat);
+      for (const record of hit.map(defectRecord).filter(Boolean)) records.add(record);
     }
   }
-  return { defects, dispatches, seats: [...seats], records: [...records] };
+  return { attempts, dispatches, seats: [...seats], records: [...records] };
 }
 
 /**
@@ -613,6 +608,15 @@ function isReferenceDefect(defect) {
 }
 
 /**
+ * The record a unit-check defect is about. Every one of them opens with the
+ * rule, the record and the unit id, which is what makes the text readable to a
+ * count as well as to the seat it was written for.
+ */
+function defectRecord(defect) {
+  return /^unit check \d+: (\S+) U\d+/.exec(defect)?.[1] ?? null;
+}
+
+/**
  * The remark share: the record findings below HIGH a writer answered inside a
  * round, over the ones the reviews raised.
  *
@@ -621,12 +625,18 @@ function isReferenceDefect(defect) {
  * rule actually collects. A share near nought over many remarks says the
  * remarks sit on records no HIGH ever reaches, and the answer is either the
  * grade rule or a round of their own (ADR-0007).
+ *
+ * The window inside a run is the pass's own record work, from the seq the run's
+ * remarks are read from. A fresh pass throws its tree away and the findings
+ * raised against it with it, and a reading that counted them would count
+ * remarks against records this run no longer holds (ADR-0077).
  */
 function remarkShare(runs) {
   let raised = 0;
   let answered = 0;
   const shipped = [];
   for (const { runId, events } of runs) {
+    const since = recordPassSeq(events);
     const named = new Set();
     for (const e of events) {
       if (e.event !== 'reconciliation-written') continue;
@@ -634,6 +644,7 @@ function remarkShare(runs) {
     }
     for (const e of events) {
       if (e.event !== 'finding' || e.record !== true || e.advisory !== true) continue;
+      if (e.seq <= since) continue;
       raised += 1;
       if (named.has(e.id)) answered += 1;
       else shipped.push({ runId, id: e.id, criterion: e.criterion ?? null, unit: e.unit ?? null });
@@ -702,7 +713,7 @@ function verifierConfirmRate(runs) {
  * corrective invocation behind it (ADR-0042).
  */
 function verifierCycle(path) {
-  const match = /-c(\d+)(?:-[pr]\d*)?\.json$/.exec(String(path ?? ''));
+  const match = /-c(\d+)(?:-p\d+)?(?:-r)?\.json$/.exec(String(path ?? ''));
   return match ? Number(match[1]) : null;
 }
 

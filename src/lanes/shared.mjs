@@ -761,6 +761,11 @@ export async function seatWithChecks(
     if (!result.ok) return { fail: seatFail(ctx, seat, result, park) };
     const defects = await checks(result.report);
     if (defects.length === 0) return { report: result.report, cost: result.cost };
+    // Every refused attempt, whether the next one answers it or not. A refusal
+    // the seat then answered used to live in this loop's own memory and
+    // nowhere else, so a reading that counts a class of defect could only see
+    // the refusals that spent a whole budget (ADR-0073).
+    ctx.store.append('seat-refused', { actor: ACTOR, seat, attempt, defects });
     if (attempt >= limit) {
       ctx.store.append('seat-failure', { actor: ACTOR, seat, reason: defectReason, defects });
       return { fail: seatFail(ctx, seat, { reason: defectReason }, park) };

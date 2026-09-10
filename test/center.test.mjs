@@ -492,7 +492,24 @@ function seedMeasureRun(paths) {
       born: [],
       late: [],
     }),
-    // The dispatch that ended with no write, and the defect that ended it.
+    // One dispatch that spent its budget on the reference check: a refusal per
+    // attempt, the failure behind them, and the write entry's own copy of that
+    // last refusal. The copy is the same text under a second name.
+    line(6, 'seat-refused', {
+      seat: 'reconcile-write:1',
+      attempt: 1,
+      defects: [reference],
+    }),
+    line(7, 'seat-refused', {
+      seat: 'reconcile-write:1',
+      attempt: 2,
+      defects: [reference],
+    }),
+    line(8, 'seat-failure', {
+      seat: 'reconcile-write:1',
+      reason: 'work-product-defect',
+      defects: [reference],
+    }),
     line(10, 'reconciliation-written', {
       ok: true,
       records: [
@@ -558,9 +575,11 @@ function seedMeasureRun(paths) {
       active: 4,
     }),
     // A code cycle of the same run: the code verifier refuted its one item.
+    // Its label carries a replay round and the corrective invocation behind
+    // it, which is the longest form a verifier report takes.
     line(40, 'seat-report', {
       seat: 'fury-verifier',
-      path: '/home/runs/r-measure/reports/fury-verifier-c3-r.json',
+      path: '/home/runs/r-measure/reports/fury-verifier-c3-p1-r.json',
       attempt: 1,
     }),
     line(41, 'finding', {
@@ -571,10 +590,12 @@ function seedMeasureRun(paths) {
       file: 'src/pay.mjs',
       confirmed: false,
     }),
-    // The seat that spent its budget on the same defect class.
-    line(50, 'seat-failure', {
+    // A refusal another seat answered on its next attempt: it bought an
+    // attempt and ended no dispatch, and the ledger holds it either way. The
+    // second defect is another rule, and no reading of this one counts it.
+    line(50, 'seat-refused', {
       seat: 'record-author',
-      reason: 'work-product-defect',
+      attempt: 1,
       defects: [reference, 'unit check 1: docs/adr/e.md U9 has no entry in "units".'],
     }),
     line(60, 'reconcile-rendered', {
@@ -598,12 +619,14 @@ test('the records section reads the reference defects, the remarks and each veri
 
   const r = (await buildSnapshot(paths, { now: NOW })).stats.records;
   assert.equal(r.runs, 1);
-  // The rule-9 texts the ledger holds: one on the dispatch it ended, one on
-  // the seat-failure behind a spent budget. The other defect is another rule.
+  // Three refused attempts named a reference unit, and one of them spent a
+  // budget. The write entry carries that last refusal a second time and the
+  // count reads it nowhere: counting both counted every spent corrective
+  // dispatch twice.
   assert.deepEqual(r.referenceDefects, {
-    defects: 2,
+    attempts: 3,
     dispatches: 1,
-    seats: ['record-author'],
+    seats: ['reconcile-write:1', 'record-author'],
     records: ['docs/adr/e.md'],
   });
   // Two remarks raised, one answered inside the round the HIGH opened.
@@ -621,6 +644,66 @@ test('the records section reads the reference defects, the remarks and each veri
   });
 });
 
+// A fresh pass throws its tree away, and the findings raised against it with
+// it. The remark share reads the pass the run holds, from the seq the run's own
+// remarks are read from (fix round 2, finding N2).
+test('the remark share reads the pass the run holds and not the one it discarded', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const paths = scaffoldHome(join(root, 'home'));
+  let seq = 0;
+  const line = (event, fields = {}) => ({ seq: ++seq, ts: REC(seq), event, actor: ACTOR, ...fields });
+  const remark = (id, unit) => ({
+    lens: 'record',
+    record: true,
+    advisory: true,
+    severity: 'MED',
+    criterion: 'fact',
+    file: 'docs/adr/f.md',
+    cycle: 1,
+    id,
+    unit,
+  });
+  writeRunLedger(paths, 'r-pass', [
+    line('run-launched', { project: 'alpha', lane: 'story' }),
+    // The pass the run discarded, and the remarks it raised against a tree
+    // that no longer exists.
+    line('reconciliation-judged', { ok: true, owed: true, records: ['docs/adr/f.md'] }),
+    line('finding', remark('F1', 'U2')),
+    line('finding', remark('F2', 'U3')),
+    line('fresh-pass', { pass: 2 }),
+    // The pass the run holds.
+    line('reconciliation-judged', { ok: true, owed: true, records: ['docs/adr/f.md'] }),
+    line('finding', remark('F3', 'U4')),
+    line('finding', remark('F4', 'U5')),
+    line('reconciliation-written', {
+      ok: true,
+      corrective: true,
+      answered: ['F3'],
+      rewritten: ['docs/adr/f.md'],
+      records: [{ record: 'docs/adr/f.md', seat: 'reconcile-write:1' }],
+      active: 2,
+    }),
+    line('reconcile-rendered', {
+      cycle: 1,
+      sha: 'p1',
+      verdict: 'green',
+      open: [],
+      advisory: ['F4'],
+      records: ['docs/adr/f.md'],
+      layers: [],
+    }),
+  ]);
+
+  const r = (await buildSnapshot(paths, { now: NOW })).stats.records;
+  assert.equal(r.remarks.raised, 2);
+  assert.equal(r.remarks.answered, 1);
+  assert.equal(r.remarks.share, 0.5);
+  assert.deepEqual(r.remarks.shipped, [
+    { runId: 'r-pass', id: 'F4', criterion: 'fact', unit: 'U5' },
+  ]);
+});
+
 test('a home with no record stamp reports the section empty, never zero', async (t) => {
   const { paths } = seededHome(t);
   const r = (await buildSnapshot(paths, { now: NOW })).stats.records;
@@ -634,7 +717,7 @@ test('a home with no record stamp reports the section empty, never zero', async 
   assert.deepEqual(r.tree, []);
   // The three readings of the severity rule and the reference kind answer the
   // same way: nought defects, and no share over nothing.
-  assert.deepEqual(r.referenceDefects, { defects: 0, dispatches: 0, seats: [], records: [] });
+  assert.deepEqual(r.referenceDefects, { attempts: 0, dispatches: 0, seats: [], records: [] });
   assert.deepEqual(r.remarks, { raised: 0, answered: 0, share: null, shipped: [] });
   assert.deepEqual(r.verifier, {
     'fury-verifier': { items: 0, confirmed: 0, rate: null },
