@@ -20,6 +20,7 @@ import {
   recordUnits,
   statusOf,
   supersedesOf,
+  unitText,
 } from '../src/lanes/units.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -125,6 +126,254 @@ test('the title is U0 and each head-block line is one unit', () => {
   assert.equal(gate.byId('U0').kind, 'title');
   assert.equal(gate.byId('U0').head, '# ADR-058: Launch gate: env-armed coming-soon takeover; go-live');
   assert.equal(gate.byId('U0').head.split(/\s+/).length, 8);
+});
+
+// -- the reference kind (plan 41, point 1) ------------------------------------
+
+// A bullet under `## References` states nothing about the tree and gives no
+// reason, so no seat can file it as a claim, an open part or rationale. The
+// harness names it, over the span the form check reads: from the heading to the
+// next heading of the same level or higher.
+test('every unit of the reference section takes the reference kind', () => {
+  const auth = units(fixture('adr-004-admin-auth'));
+  // The heading stands at 133 and the record ends with its bullets.
+  assert.equal(auth.at(133), undefined, 'a heading is no unit');
+  for (let line = 135; line <= 139; line++) {
+    assert.equal(auth.at(line)?.kind, 'reference', String(line));
+  }
+  // Every unit above the heading keeps the kind it had.
+  for (const unit of auth.list) {
+    if (unit.line < 133) assert.notEqual(unit.kind, 'reference', unit.id);
+  }
+
+  const sanity = units(fixture('adr-020-sanity-cms-pattern'));
+  const references = sanity.list.filter((u) => u.kind === 'reference');
+  assert.ok(references.length > 0, 'the fixture holds a reference section');
+  for (const unit of references) assert.ok(unit.line > 241, unit.id);
+});
+
+// The span rule, in the four shapes a record writes: a subheading stays inside
+// the section, the next `##` closes it, a section that runs to the end of the
+// file holds every line after its heading, and a heading that is not the
+// reference heading opens nothing.
+test('the reference span runs to the next section heading and no further', () => {
+  const record = [
+    '# ADR-0900: A record with references',
+    '',
+    'Status: accepted (2026-09-09)',
+    '',
+    '## References',
+    '',
+    '- ADR-0073',
+    '',
+    '### The records this one replaces',
+    '',
+    '- ADR-0072',
+    '',
+    '## Consequences',
+    '',
+    'The tree grows.',
+    '',
+    '## References again',
+    '',
+    '- `src/lanes/units.mjs`',
+    '',
+  ].join('\n');
+  const list = recordUnits(record);
+  assert.deepEqual(
+    list.map((u) => [u.id, u.line, u.kind ?? null]),
+    [
+      ['U0', 1, 'title'],
+      ['U1', 3, 'status'],
+      ['U2', 7, 'reference'],
+      ['U3', 11, 'reference'],
+      ['U4', 15, null],
+      ['U5', 19, null],
+    ],
+  );
+
+  // A reference section that runs to the end of the file, and a heading whose
+  // words only start with the section's name.
+  const tail = recordUnits(
+    ['# ADR-0901: A record', '', 'Status: accepted (2026-09-09)', '', '## References', '', '- ADR-0073', '- `bin/olympus-units.mjs`', ''].join('\n'),
+  );
+  assert.deepEqual(
+    tail.slice(2).map((u) => [u.line, u.kind]),
+    [
+      [7, 'reference'],
+      [8, 'reference'],
+    ],
+  );
+});
+
+// A fence holds code and examples. The enumerator reads one as a block, and so
+// does the span: a heading inside a fence is text, and it neither opens a
+// reference section nor ends one.
+test('a fenced heading under References neither ends the span nor opens one', () => {
+  const inside = recordUnits(
+    [
+      '# ADR-0902: A record whose references hold a fence',
+      '',
+      'Status: accepted (2026-09-10)',
+      '',
+      '## References',
+      '',
+      '- ADR-0073',
+      '',
+      '```md',
+      '## Consequences',
+      '```',
+      '',
+      '- `src/lanes/units.mjs`',
+      '',
+      '## Consequences',
+      '',
+      'The tree grows.',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    inside.map((u) => [u.id, u.line, u.kind ?? null]),
+    [
+      ['U0', 1, 'title'],
+      ['U1', 3, 'status'],
+      ['U2', 7, 'reference'],
+      // The fenced block is one unit, inside the section that holds it.
+      ['U3', 9, 'reference'],
+      ['U4', 13, 'reference'],
+      ['U5', 17, null],
+    ],
+  );
+
+  // The other direction: a reference heading inside a fence is an example of
+  // one, and the bullet under it is an ordinary unit.
+  const fenced = recordUnits(
+    [
+      '# ADR-0903: A record that shows the form',
+      '',
+      'Status: accepted (2026-09-10)',
+      '',
+      '## Decision',
+      '',
+      '```md',
+      '## References',
+      '```',
+      '',
+      '- the bullet after the fence',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    fenced.map((u) => [u.id, u.line, u.kind ?? null]),
+    [
+      ['U0', 1, 'title'],
+      ['U1', 3, 'status'],
+      ['U2', 7, null],
+      ['U3', 11, null],
+    ],
+  );
+});
+
+// A comment is structure wherever it stands, and the span reads it the way the
+// enumeration does (fix round 2, finding N5).
+test('a heading inside an HTML comment under References does not end the span', () => {
+  const list = recordUnits(
+    [
+      '# ADR-0904: A record whose references hold a note',
+      '',
+      'Status: accepted (2026-09-10)',
+      '',
+      '## References',
+      '',
+      '- ADR-0073',
+      '',
+      '<!--',
+      '## Consequences',
+      '-->',
+      '',
+      '- `src/lanes/units.mjs`',
+      '',
+      '## Consequences',
+      '',
+      'The tree grows.',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    list.map((u) => [u.id, u.line, u.kind ?? null]),
+    [
+      ['U0', 1, 'title'],
+      ['U1', 3, 'status'],
+      ['U2', 7, 'reference'],
+      ['U3', 13, 'reference'],
+      ['U4', 17, null],
+    ],
+  );
+});
+
+// A record wraps its bullets at eighty columns, so the sentence one states runs
+// over two lines as often as one. The head stands for the unit; the text is
+// every line the enumeration folded into it (fix round 2, finding N4).
+test('a unit holds the lines the enumeration folded into it', () => {
+  const lines = [
+    '# ADR-0905: A record with a wrapped bullet',
+    '',
+    'Status: accepted (2026-09-10)',
+    '',
+    '## References',
+    '',
+    '- The standard this record is written to, whole and',
+    '  unamended, is ADR-0073',
+    '- `src/lanes/units.mjs`',
+    '',
+    '## Consequences',
+    '',
+    'The tree grows.',
+    '',
+  ];
+  const units = recordUnits(lines.join('\n'));
+  assert.deepEqual(
+    units.map((u) => [u.id, u.line]),
+    [
+      ['U0', 1],
+      ['U1', 3],
+      ['U2', 7],
+      ['U3', 9],
+      ['U4', 13],
+    ],
+  );
+  // The head stops at word eight and the text holds the continuation.
+  assert.ok(!units[2].head.includes('ADR-0073'), units[2].head);
+  assert.equal(
+    unitText(lines, units, 2),
+    '- The standard this record is written to, whole and   unamended, is ADR-0073',
+  );
+  // The next unit bounds it, and so do a blank line and a heading.
+  assert.equal(unitText(lines, units, 3), '- `src/lanes/units.mjs`');
+  assert.equal(unitText(lines, units, 4), 'The tree grows.');
+  assert.equal(unitText(lines, units, 0), lines[0]);
+});
+
+// The seat runs the bin and the check runs the module, so the kind the seat
+// reads is the kind the check counts.
+test('olympus-units prints the reference kind in its kind column', () => {
+  const path = join(FIXTURES, 'adr-004-admin-auth.md');
+  const out = execFileSync(process.execPath, [join(ROOT, 'bin/olympus-units.mjs'), path], {
+    encoding: 'utf8',
+  });
+  const printed = out
+    .trim()
+    .split('\n')
+    .slice(0, -1)
+    .map((line) => line.split('\t'));
+  const references = printed.filter((row) => row[2] === 'reference');
+  const counted = recordUnits(readFileSync(path, 'utf8')).filter((u) => u.kind === 'reference');
+  assert.equal(references.length, counted.length);
+  assert.deepEqual(
+    references.map((row) => row[0]),
+    counted.map((u) => u.id),
+  );
+  assert.ok(references.length > 0, 'the fixture holds a reference section');
 });
 
 // The harness's own record tree, read in the tree it describes. The

@@ -1,7 +1,8 @@
 # ADR-0007: Verdict, repair, and review shapes
 
 Status: accepted (2026-08-10, the approach finding and the repair heading
-2026-09-04, the records out of the verdict 2026-09-07)
+2026-09-04, the records out of the verdict 2026-09-07, one severity rule
+2026-09-10)
 
 ## Decision
 
@@ -49,18 +50,24 @@ review — gets these concrete shapes:
   corrective invocation, then the `seat-failure` park. A green spectrum
   resolves triage findings mechanically — their evidence is gone.
 - **Findings.** Every finding stamps a `finding` event with a run-scoped id
-  (`F<n>`). The split that decides what the verifier answers is severity **or**
-  record. A HIGH goes to the verifier; a refuted HIGH stamps `advisory`, and a
-  confirmed HIGH blocks. A sub-HIGH review finding that is not about a decision
-  record stamps `advisory` and is never verified or blocked on. A finding about
-  a decision record goes to the verifier at every grade. It carries
-  `record: true`, the `criterion` it cites, and the unit it is about (`unit`,
-  `head`, `line`, and a second place on a `consistent` finding), and it never
-  carries `advisory`: a confirmed one enters the open set of the render it
-  belongs to, and a refuted one blocks nothing and carries `confirmed: false`
-  beside the verifier's evidence. A record finding is raised by the record review
-  of the reconcile stage and by no code lens (ADR-0026, ADR-0075). The verdict's
-  own open set travels in `verdict-rendered.open`. The record file
+  (`F<n>`). The split that decides what the verifier answers is severity, on
+  every lane and whatever the finding is about. A HIGH goes to the verifier; a
+  refuted HIGH stamps `advisory`, and a confirmed HIGH blocks. A finding below
+  HIGH stamps `advisory`, is never verified, and blocks nothing. A finding about
+  a decision record carries `record: true`, the `criterion` it cites, and the
+  unit it is about (`unit`, `head`, `line`, and a second place on a `consistent`
+  finding), at every grade. A HIGH one enters the open set of the render it
+  belongs to when the verifier confirms it, and carries `confirmed: false` beside
+  the verifier's evidence when it does not. One below HIGH is a remark: the
+  render lists it under `advisory`, the corrective round that writes that record
+  for a HIGH hands it to the writer, and the run records what it ships with at
+  the close. A run that ships its records whole names the remarks it left
+  standing on `run-closed.remarks`, by id, and writes no ticket: a ticket is a
+  run's spec, and a remark buys no run. A run that leaves a finding open writes
+  the ticket it already owed, and the remarks ride it under "Remarks not
+  answered". A record finding is raised by the record review of the reconcile
+  stage and by no code lens (ADR-0026, ADR-0075). The verdict's own open set
+  travels in `verdict-rendered.open`. The record file
   (`runs/<id>/verdict-<cycle>.json`) carries the spectrum, the open and
   just-resolved findings, and the flake list. It holds confirmed findings only;
   advisory material stays in the ledger.
@@ -144,11 +151,14 @@ review — gets these concrete shapes:
 - **Gate integrity.** A harness-class triage finding also stamps
   `gate-integrity` (loud, streamed). When the finding leaves the open set,
   the daemon appends the paired `resolved` line. At the close of a merged run,
-  in both lanes, the harness counts the findings that carry `advisory: true` on
-  a file under `repo.recordPaths`. The count is always zero. A count above zero
-  stamps `gate-integrity` under the `record-finding-shipped` kind: loud, and
-  owned by a person. It says the split above stopped classifying, or that the
-  project's record paths name a tree its reviews do not read.
+  in both lanes, the harness counts the HIGH findings that carry
+  `advisory: true` on a file under `repo.recordPaths`. The count is always zero,
+  because every HIGH reaches the verifier and a refuted one carries the
+  verifier's evidence and no advisory word. A count above zero stamps
+  `gate-integrity` under the `record-finding-shipped` kind: loud, and owned by a
+  person. It says the split above stopped classifying, or that the project's
+  record paths name a tree its reviews do not read. A remark on a record is
+  outside this count: it is advisory by rule, and the ticket carries it.
 - **Test-edit boundary, both directions.** Story-lane dev seats carry the deny
   rules over the test paths and the record paths, and the evaluation path
   restores the test paths from the frozen sha before every commit and every
@@ -158,42 +168,51 @@ review — gets these concrete shapes:
   the liveness invariant, kill, and stop cover every child of a parallel
   fan-out.
 
-## Why a finding on a decision record is never advisory
+## Why one severity rule covers every lane
 
-The severity ladder was written for code. A small remark about a diff is worth
-less than the round it would cost, so a sub-HIGH finding lands in the ledger and
-nobody must act on it. Applied to a decision record the same rule says the
-opposite of what it is for. A record states how the product works and why. A
-sentence of it that the tree does not do is a false statement in the product's
-own documentation, and the ledger holds twelve such sentences across two
-reconciliation runs. Every one of them was stamped advisory, none was verified,
-and both runs were free to ship.
+The grade is what a round costs. A HIGH says the finding must block, and a
+confirmed one buys the round that answers it. Everything below HIGH is a remark:
+it is worth less than a round, so nobody must act on it, and the rule reads the
+same whether the finding is about a diff or about a document.
 
-The verifier still answers them, and it answers all of them. It is the one seat
-that reads the code and says whether a claim about the code is true, and a
-record finding is exactly that kind of claim: the record says X, the tree does Y.
-It is also the one guard against a wrong block. One of those twelve findings
-said a record's budget line was wrong, and the record explains that exact
-inversion in the paragraph below the line the finding quoted. A rule that
-blocked on every sentence a review seat wrote would have blocked a ship on a
-finding the record itself refutes.
+A rule that read severity **or** record buys a round for every grade a review
+writes about a document. A cycle over a set of records raises a few sentences the
+tree contradicts and many remarks about wording, and each of them dispatches a
+writer over its record and buys the cycle that reads it again. The work is the
+few; the cost is the many. Under the one rule the round dispatches the records a
+HIGH names and the cycle reads those.
 
-The cost of asking is one seat. The verifier is one invocation per cycle over
-every item, so twelve record findings cost one invocation and not twelve.
+A remark is not thrown away, which is the other half of the rule. It is stamped
+with the record word, the criterion and the unit, so it names one sentence. The
+corrective round that writes its record for a HIGH is handed it in the same
+brief, under one line that says it holds no render red; the writer answers it in
+the write it is making anyway, or lists its id under `answered` where the record
+is right as written. The render it belongs to lists it under `advisory`, and the
+run records at its close what it shipped standing. A remark thrown away is a
+finding the next run raises again, at whatever grade that run reads it.
 
-A refutation is not advice. A second seat read the tree and wrote down, with
-evidence, why the record is right, under the finding's own id. The tripwires in
-ADR-0010 read that: a window in which most record findings are refuted says the
-review seat is noisy about documents, and the answer is the criteria and the
-brief.
+What this accepts is that MED is the grade nobody must answer. A record can ship
+with a sentence the tree contradicts, if a review graded that sentence MED. Three
+things stand against it: the review brief states what HIGH means, so the grade is
+a definition and not a feeling; the close records the remarks that shipped; and
+the eval seat reads that set by criterion and unit, where a `truth` remark on a
+sentence of a Decision is the reading that says the grade rule needs tightening.
+
+The verifier answers every HIGH, and it is the guard against a wrong block. A
+review can read a record's own explanation of an inversion as the inversion, and
+a rule that blocked on every sentence a review seat wrote would block a ship on a
+finding the record itself refutes. A refutation is not advice: a second seat read
+the tree and wrote down, with evidence, why the record is right, under the
+finding's own id. The tripwires in ADR-0010 read that share over the findings the
+verifier answered, and a window in which most of them are refuted says the review
+seat is noisy about documents.
 
 ## Why this ladder counts one cap
 
 A round that rewrites a document and a round that rewrites code are two kinds of
-work under one name, and each has its own number. The cap used to read the diff
-of the render it judged, because both rounds ran on this ladder. They do not any
-more: the record rounds run in a stage of their own, over a tree of their own, at
-a sha of their own (ADR-0075). So this ladder judges code and counts one cap.
+work under one name, and each has its own number. The record rounds run in a
+stage of their own, over a tree of their own, at a sha of their own (ADR-0075),
+so this ladder judges code and counts one cap.
 
 Three is the number for that work. A code round buys a dev seat over a candidate
 tree and a full cycle behind it, and a fourth round that has closed nothing says
@@ -220,14 +239,13 @@ The pass is the expensive thing on this ladder. A repair round is one seat
 over a tree that already exists; a fresh pass throws that tree away and buys
 the whole implementation again, and it is the run's only one.
 
-The ledger says what the immediate discard cost. One confirmed interface-lens
-finding about a single form input discarded a pass that had twelve other
-findings open against it. Every one of those twelve was work the repair round
-would have carried, and none of them reached the tree that replaced it: the
-fresh pass began from the freeze with a stall brief, and the twelve came back
-as whatever the new implementation raised. The run bought a second
+An immediate discard costs every other finding the render left open. One
+confirmed finding about one input can stand beside a dozen the repair round
+would have carried, and none of them reaches the tree that replaces it: the
+fresh pass begins from the freeze with a stall brief, and the rest come back as
+whatever the new implementation raises. The run then buys a second
 implementation to answer a finding a repair round could have answered, and it
-spent its one pass on it, so the stall that came later had nothing left to buy.
+spends its one pass on it, so a stall that comes later has nothing left to buy.
 
 The severity of a structural finding is real, and it is answered by saying so
 in the brief rather than by discarding the work. A repair seat told that the
@@ -264,12 +282,12 @@ and wait, never self-clear.
 
 ## Fallback paths
 
-If the record split proves to block ships on remarks, return record findings to
-the severity ladder: the split reads severity alone, and a sub-HIGH record
-finding stamps `advisory` again. Trigger: `record-refuted-share` breaching over
-a window whose criteria and brief were already tightened once. Reversal cost:
-low, one condition in the split, and the `record` word stays on the finding
-either way.
+If the one severity rule proves to ship contradictions as remarks, grade by
+criterion instead: a `truth` finding on a sentence of a Decision is a HIGH by
+rule, whatever the seat wrote. Trigger: a shipped remark that a later run raises
+again as a confirmed HIGH on the same unit. Reversal cost: low, one condition in
+the split, and the `record` word and the criterion stay on the finding either
+way.
 
 If the reconcile stage proves too expensive for the story that pays it, set
 `gates.reconcileRounds` to 1: one corrective round, then the fallback and the

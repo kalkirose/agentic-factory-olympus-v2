@@ -229,6 +229,44 @@ test('a corrective round returns the cost of the attempt that passed the checks'
   assert.deepEqual(calls[1].roleBlock, 'ROLE');
 });
 
+// Every refused attempt is in the ledger, the answered ones as well. A refusal
+// that lived in the loop's own memory was a refusal no reading could count, and
+// the only ones a reader could see were the budgets they spent (fix round 2,
+// finding N1).
+test('a refused attempt the next one answers stamps its own refusal and no failure', async (t) => {
+  let round = 0;
+  const { ctx, events } = harness(t, [
+    { ok: true, report: { summary: 'first' }, cost: 1 },
+    { ok: true, report: { summary: 'second' }, cost: 1 },
+  ]);
+  const out = await seatWithChecks(
+    ctx,
+    opts({ seat: 'record-author', checks: () => (++round === 1 ? ['unit check 9: a.md U3 ()'] : []) }),
+  );
+  assert.equal(out.report.summary, 'second');
+  const refused = events().filter((e) => e.event === 'seat-refused');
+  assert.equal(refused.length, 1);
+  assert.equal(refused[0].seat, 'record-author');
+  assert.equal(refused[0].attempt, 1);
+  assert.deepEqual(refused[0].defects, ['unit check 9: a.md U3 ()']);
+  // The attempt was answered, so nothing failed and nobody is asked.
+  assert.ok(!events().some((e) => e.event === 'seat-failure'));
+});
+
+test('a spent budget stamps one refusal per attempt and one failure behind them', async (t) => {
+  const { ctx, events } = harness(t, [
+    { ok: true, report: { summary: 'first' }, cost: 1 },
+    { ok: true, report: { summary: 'second' }, cost: 1 },
+  ]);
+  await seatWithChecks(ctx, opts({ seat: 'reconcile-write:1', checks: () => ['U1 fails'] }));
+  const refused = events().filter((e) => e.event === 'seat-refused');
+  assert.deepEqual(
+    refused.map((e) => e.attempt),
+    [1, 2],
+  );
+  assert.equal(events().filter((e) => e.event === 'seat-failure').length, 1);
+});
+
 // The slot suffix is a colon, which a Windows path reads as a stream
 // separator. The ledger keeps the identity whole and the report file flattens
 // it, so a fan-out writes one readable report per slot.

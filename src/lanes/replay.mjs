@@ -47,11 +47,15 @@ import { runCommand } from './exec.mjs';
 import { ACTOR, runEvents } from './shared.mjs';
 
 /**
- * The seats the probe is open to: the two that judge a red they did not
+ * The seats the probe is open to: the ones that judge a red they did not
  * produce and cannot otherwise reproduce. Closed like the seat map itself — a
  * seat enters by a decision recorded in an ADR, never from a call site.
+ *
+ * The verifier is here under both its names. One function spawns it, and the
+ * seat name says which model reads the items; what the seat may reach for is
+ * the same question either way (ADR-0005).
  */
-export const PROBE_SEATS = new Set(['verdict-triage', 'fury-verifier']);
+export const PROBE_SEATS = new Set(['verdict-triage', 'fury-verifier', 'record-verifier']);
 
 /**
  * Replay rounds one seat session may spend. Each round costs a whole Tier-1

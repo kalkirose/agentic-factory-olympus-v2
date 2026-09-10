@@ -232,6 +232,12 @@ test('the brief states the record stage as the harness now stamps it', async (t)
   // The two caps, each with the round that counts against it.
   assert.match(prompt, /A corrective round on a decision\nrecord is a `reconcile-round`/);
   assert.ok(!prompt.includes('phase: "reconcile"'));
+  // One severity rule for every lane: a record finding below HIGH is a remark
+  // the render lists and the writer is handed (plan 41, point 2).
+  assert.match(prompt, /One below HIGH is a remark/);
+  assert.match(prompt, /the remarks that shipped unanswered/);
+  assert.match(prompt, /a `truth`\nremark on a sentence of a Decision/);
+  assert.ok(!prompt.includes('the verifier answers it at every grade'));
   // The fallback shapes: every cause counts, and the discard is gone.
   assert.match(prompt, /`reconciliation-written` with `ok: false` and a `cause`/);
   assert.ok(!prompt.includes('record-layer-red'));

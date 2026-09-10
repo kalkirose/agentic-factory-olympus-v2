@@ -39,7 +39,14 @@ const HEAD_WORDS = 8;
 export const NEIGHBOUR_CAP = 12;
 
 /** The kinds a seat may put on a unit. Closed, and the schema states them. */
-export const UNIT_KINDS = Object.freeze(['title', 'status', 'claim', 'open', 'rationale']);
+export const UNIT_KINDS = Object.freeze([
+  'title',
+  'status',
+  'claim',
+  'open',
+  'rationale',
+  'reference',
+]);
 
 /** The verdicts a seat may put on a unit. Closed. */
 export const UNIT_VERDICTS = Object.freeze(['holds', 'fails', 'not-built']);
@@ -60,6 +67,17 @@ export const SUPERSEDES_LINE = /^\s*(\*\*)?supersedes(\*\*)?\s*:\s*(.*)$/i;
 /** A reference to a record by id, in both trees' spellings. */
 const RECORD_REF = /adr-0*(\d+)/gi;
 
+/**
+ * The heading that opens the reference section, and the heading that closes it.
+ *
+ * The span runs from the heading to the next heading of the same level or
+ * higher, or to the end of the file. A project gate over the form of a record
+ * reads the section by that rule, so a bullet the gate holds to the section's
+ * rule is a bullet the harness names `reference` (ADR-0073).
+ */
+const REFERENCES_HEADING = /^ {0,3}##\s+references\s*$/i;
+const SECTION_HEADING = /^ {0,3}#{1,2}(\s|$)/;
+
 const FENCE = /^(\s*)(`{3,}|~{3,})(.*)$/;
 const HEADING = /^ {0,3}#{1,6}(\s|$)/;
 const TITLE = /^#\s+\S/;
@@ -77,18 +95,25 @@ const COMMENT_OPEN = /^\s*<!--/;
  * The title is `U0` and the rest run from `U1` in document order. Each unit
  * carries the line it starts on and its first eight words. A head is taken
  * after the list marker, so a renumbered list does not read as rewritten text.
- * The harness names two kinds itself, `title` and `status`; the rest are the
- * seat's to name.
+ * The harness names three kinds itself, `title`, `status` and `reference`; the
+ * rest are the seat's to name.
+ *
+ * A unit inside the reference section is a `reference`. It states nothing about
+ * the tree and gives no reason, so it is neither a claim nor rationale, and a
+ * seat asked to choose between them guesses. The harness names it and a check
+ * answers it (ADR-0073).
  * @param {string} text
  * @returns {Array<{id: string, line: number, head: string, kind?: string}>}
  */
 export function recordUnits(text) {
   const lines = splitLines(text);
   const status = statusOf(text);
+  const references = referenceSpans(lines);
   const units = [];
   let next = 1;
   const add = (index, head, kind) => {
-    units.push({ id: `U${next++}`, line: index + 1, head, ...(kind && { kind }) });
+    const named = kind ?? (inSpans(references, index) ? 'reference' : undefined);
+    units.push({ id: `U${next++}`, line: index + 1, head, ...(named && { kind: named }) });
   };
   const title = titleIndex(lines);
   let i = 0;
@@ -112,6 +137,77 @@ export function recordUnits(text) {
   }
   scanBody(lines, i, add);
   return units;
+}
+
+/**
+ * The lines the reference sections of one record hold, as half-open spans.
+ *
+ * A record may carry more than one such heading, so every one of them opens a
+ * span. The heading line itself is structure and is outside its span, because a
+ * heading is no unit.
+ *
+ * A fenced block and an HTML comment are skipped whole, as `scanBody` skips
+ * both. A fence holds code and examples and a comment holds a note nobody
+ * ships, so a heading inside either is text: it opens no section and ends none.
+ * A record that shows the form of a reference section in a fence would
+ * otherwise name every bullet under it a reference (ADR-0073).
+ * @returns {Array<{from: number, to: number}>}
+ */
+function referenceSpans(lines) {
+  const spans = [];
+  let open = null;
+  let i = 0;
+  while (i < lines.length) {
+    const fence = FENCE.exec(lines[i]);
+    if (fence) {
+      i = fenceEnd(lines, i, fence[2]);
+      continue;
+    }
+    if (COMMENT_OPEN.test(lines[i])) {
+      i = commentEnd(lines, i);
+      continue;
+    }
+    if (open !== null && SECTION_HEADING.test(lines[i])) {
+      spans.push({ from: open, to: i });
+      open = null;
+    }
+    if (REFERENCES_HEADING.test(lines[i])) open = i + 1;
+    i++;
+  }
+  if (open !== null) spans.push({ from: open, to: lines.length });
+  return spans;
+}
+
+function inSpans(spans, index) {
+  return spans.some((span) => index >= span.from && index < span.to);
+}
+
+/**
+ * The whole text of one unit: the line it opens on, and the lines the
+ * enumeration folded into it.
+ *
+ * A list item is one unit whatever it holds, and a record wraps its items at
+ * eighty columns, so the sentence a bullet states runs over two physical lines
+ * as often as one. The head is the first eight words and stands for the unit; a
+ * check that asks what the unit names reads this. The fold ends where the
+ * enumeration ended it: at a blank line, at a heading, or at the line the next
+ * unit opens on (ADR-0073).
+ * @param {string[]} lines the record's lines, as `recordUnits` split them
+ * @param {Array<{line: number}>} units the enumeration, in document order
+ * @param {number} index which unit
+ * @returns {string}
+ */
+export function unitText(lines, units, index) {
+  const unit = units[index];
+  if (!unit) return '';
+  const next = units[index + 1];
+  const end = next ? Math.min(next.line - 1, lines.length) : lines.length;
+  const held = [];
+  for (let i = unit.line - 1; i < end; i++) {
+    if (i > unit.line - 1 && (isBlank(lines[i]) || HEADING.test(lines[i]))) break;
+    held.push(lines[i]);
+  }
+  return held.join(' ');
 }
 
 /** The body, under the precedence rule stated at the head of this module. */

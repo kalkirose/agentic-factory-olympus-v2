@@ -198,7 +198,9 @@ Two levels; the ownership test decides placement.
 
 - **Seat map.** Seats run Claude Opus 5 (`claude-opus-5`) at xhigh effort. The
   certification spine (verdict triage, the Fury verifier, the eval seat) runs
-  Claude Fable 5.1 (`claude-fable-5-1`) at high. Opus 5 is also the fallback model, so
+  Claude Fable 5.1 (`claude-fable-5-1`) at high. The verifier of a
+  decision-record item is a seat of its own, `record-verifier`, on Opus 5 at
+  xhigh: the records lane runs one model. Opus 5 is also the fallback model, so
   a refused certification seat degrades to it and a refused Opus 5 seat has no
   substitute (ADR-0005). `max_tokens` = model max; effort is the cost control.
   Effort stays constant inside a seat session.
@@ -293,8 +295,9 @@ Two levels; the ownership test decides placement.
   failures it is: a value that never changed and a service that now refuses it,
   or a value that changed on this host. A home that names no store inherits as
   it always did and stamps none of these (ADR-0064).
-- **The replay probe.** A stripped judgment seat (verdict triage, the Fury
-  verifier) may ask the daemon to run one Tier-1 layer of its own run again and
+- **The replay probe.** A stripped judgment seat (verdict triage, the verifier
+  under either of its names) may ask the daemon to run one Tier-1 layer of its
+  own run again and
   read the output. It names a layer, never a command; the daemon runs it as the
   spectrum does, with the host environment whole; the seat gets the output with
   every value this host calls a secret replaced by the name it came from, and
@@ -1456,7 +1459,7 @@ last five stage runs, and breaches above two, which is the number that says the
 mechanism works. `record-write-time` reads the mean wall clock of the record
 write over the same window, and breaches above twenty minutes; its answer is a
 review of whether the writers should run in parallel. `record-refuted-share`
-reads how often the verifier has to kill a record finding, and
+reads how often the verifier has to kill a record HIGH, and
 `reconcile-fallbacks-window` reads how often the in-run rewrite ended in a
 fallback. Two ledger shapes feed the first, the third and the fourth: an archived
 ledger holds a record render as a `verdict-rendered` behind a `phase: 'reconcile'`

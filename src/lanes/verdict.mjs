@@ -3495,6 +3495,24 @@ export function findingIndex(events) {
   return index;
 }
 
+/**
+ * Every advisory finding by id, rebuilt from the ledger, with the cycle that
+ * raised it.
+ *
+ * A remark holds nothing red, so no ladder reads this. The reconcile stage
+ * does: a remark about a record rides the brief of the round that writes that
+ * record for a HIGH, and the round rebuilds it here from the one derivation
+ * (ADR-0007).
+ */
+export function advisoryIndex(events) {
+  const index = new Map();
+  for (const e of events) {
+    if (e.event !== 'finding' || !e.advisory) continue;
+    index.set(e.id, { ...findingFromEvent(e), ...(e.cycle !== undefined && { cycle: e.cycle }) });
+  }
+  return index;
+}
+
 function findingFromEvent(e) {
   return {
     id: e.id,

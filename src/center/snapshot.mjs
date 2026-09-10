@@ -35,6 +35,8 @@ import { cloneDir, readBlobFromBranch } from '../isolation/clones.mjs';
 import { parseProjectConfig } from '../config/project.mjs';
 import { PRE_FREEZE_STAGES } from '../lanes/story.mjs';
 import { RECORDS_LANE_STAGES } from '../lanes/records-stage.mjs';
+import { VERIFIER_SEATS } from '../lanes/review.mjs';
+import { recordPassSeq } from '../lanes/reconcile.mjs';
 
 // The design-given target for one shipped story, in hours of active time —
 // the run's own hours, with the waiting on a human taken out (ADR-0036). The
@@ -436,14 +438,14 @@ function statsView(allRuns, ships, pinTs) {
 
 // -- the record tree ----------------------------------------------------------
 //
-// The eight measures of the record stage, derived here because nothing else
+// The eleven measures of the record stage, derived here because nothing else
 // derives them: the eval seat reads ledgers and reports proposals, the
 // close-out seat writes the story's own lesson, and a measure that lives in
 // neither is a measure somebody re-derives by hand every time (ADR-0075).
 //
-// One window for all eight: the last runs that hold a record stamp of any kind.
-// A run that touched no record says nothing about the stage, and a window of
-// them would read a quiet quarter as a healthy one.
+// One window for all eleven: the last runs that hold a record stamp of any
+// kind. A run that touched no record says nothing about the stage, and a window
+// of them would read a quiet quarter as a healthy one.
 
 const RECORDS_WINDOW = 10;
 
@@ -491,6 +493,9 @@ function recordsView(allRuns, pinTs) {
       ...(cycles.detail.worst !== undefined && { worst: cycles.detail.worst }),
     },
     writerMiss: writerMissRate(runs),
+    referenceDefects: referenceDefects(runs),
+    remarks: remarkShare(runs),
+    verifier: verifierConfirmRate(runs),
     late: lateShare(runs),
     movedTree: movedTreeCost(runs),
     recheck: recheckYield(runs),
@@ -557,6 +562,159 @@ function writerMissRate(runs) {
 /** Whether a stamped seat name is the record review's, slot suffix and all. */
 function reviewSeat(seat) {
   return typeof seat === 'string' && seat.split(':')[0] === RECORD_REVIEW_SEAT;
+}
+
+/**
+ * What the reference rule cost a run: the attempts a rule-9 defect refused, and
+ * the dispatches it ended.
+ *
+ * The harness names the kind of a reference and checks what it names, so no
+ * seat guesses at one and the target is nought. A count above it says the
+ * enumeration and the seats disagree about the section, or that the record tree
+ * moved under a record that cites it (ADR-0073).
+ *
+ * `attempts` is every refused attempt whose defects named a reference unit,
+ * from `seat-refused`, so the reading holds the refusals a seat answered as
+ * well as the ones that spent a budget. `dispatches` is the budgets that were
+ * spent on one, from `seat-failure`. The write entry's own copy of that last
+ * refusal is read nowhere here: it is the same text under a second name, and
+ * counting both counted every spent corrective dispatch twice.
+ */
+function referenceDefects(runs) {
+  let attempts = 0;
+  let dispatches = 0;
+  const seats = new Set();
+  const records = new Set();
+  for (const { events } of runs) {
+    for (const e of events) {
+      if (e.event !== 'seat-refused' && e.event !== 'seat-failure') continue;
+      const hit = (e.defects ?? []).filter(isReferenceDefect);
+      if (hit.length === 0) continue;
+      if (e.event === 'seat-refused') attempts += 1;
+      else dispatches += 1;
+      seats.add(e.seat);
+      for (const record of hit.map(defectRecord).filter(Boolean)) records.add(record);
+    }
+  }
+  return { attempts, dispatches, seats: [...seats], records: [...records] };
+}
+
+/**
+ * Whether one defect text is the reference check's. The rule number opens the
+ * text, so the count reads a rule and never a wording (ADR-0073).
+ */
+function isReferenceDefect(defect) {
+  return typeof defect === 'string' && defect.startsWith('unit check 9:');
+}
+
+/**
+ * The record a unit-check defect is about. Every one of them opens with the
+ * rule, the record and the unit id, which is what makes the text readable to a
+ * count as well as to the seat it was written for.
+ */
+function defectRecord(defect) {
+  return /^unit check \d+: (\S+) U\d+/.exec(defect)?.[1] ?? null;
+}
+
+/**
+ * The remark share: the record findings below HIGH a writer answered inside a
+ * round, over the ones the reviews raised.
+ *
+ * A remark opens no round of its own. It is handed to the writer a HIGH already
+ * dispatched on its record, so the share says how much of that material the
+ * rule actually collects. A share near nought over many remarks says the
+ * remarks sit on records no HIGH ever reaches, and the answer is either the
+ * grade rule or a round of their own (ADR-0007).
+ *
+ * The window inside a run is the pass's own record work, from the seq the run's
+ * remarks are read from. A fresh pass throws its tree away and the findings
+ * raised against it with it, and a reading that counted them would count
+ * remarks against records this run no longer holds (ADR-0077).
+ */
+function remarkShare(runs) {
+  let raised = 0;
+  let answered = 0;
+  const shipped = [];
+  for (const { runId, events } of runs) {
+    const since = recordPassSeq(events);
+    const named = new Set();
+    for (const e of events) {
+      if (e.event !== 'reconciliation-written') continue;
+      for (const id of e.answered ?? []) named.add(id);
+    }
+    for (const e of events) {
+      if (e.event !== 'finding' || e.record !== true || e.advisory !== true) continue;
+      if (e.seq <= since) continue;
+      raised += 1;
+      if (named.has(e.id)) answered += 1;
+      else shipped.push({ runId, id: e.id, criterion: e.criterion ?? null, unit: e.unit ?? null });
+    }
+  }
+  return {
+    raised,
+    answered,
+    share: raised > 0 ? round(answered / raised) : null,
+    // The set the eval reads by criterion and unit: a `truth` remark on a
+    // sentence of a Decision is a contradiction that shipped as a remark.
+    shipped,
+  };
+}
+
+/**
+ * The verifier's confirm rate, per seat: the items it confirmed over the items
+ * it answered.
+ *
+ * Two seats answer items, on two models: the record verifier over a round of
+ * record items and the code verifier over every other round (ADR-0005). The
+ * rate is read per seat, because the question the reading exists for is whether
+ * the model change costs findings, and one number over both would hide it.
+ *
+ * A finding that reached a verifier carries `confirmed`; a remark carries none.
+ * The join is the cycle: one verifier answers one cycle's items, and its report
+ * label names the cycle it answered.
+ */
+function verifierConfirmRate(runs) {
+  const counts = new Map();
+  for (const { events } of runs) {
+    const seatOf = new Map();
+    for (const e of events) {
+      if (e.event !== 'seat-report' || !VERIFIER_SEATS.includes(e.seat)) continue;
+      const cycle = verifierCycle(e.path);
+      if (cycle !== null) seatOf.set(cycle, e.seat);
+    }
+    for (const e of events) {
+      if (e.event !== 'finding' || e.confirmed === undefined) continue;
+      const seat = seatOf.get(e.cycle);
+      if (!seat) continue;
+      const seen = counts.get(seat) ?? { items: 0, confirmed: 0 };
+      seen.items += 1;
+      if (e.confirmed === true) seen.confirmed += 1;
+      counts.set(seat, seen);
+    }
+  }
+  return Object.fromEntries(
+    VERIFIER_SEATS.map((seat) => {
+      const seen = counts.get(seat) ?? { items: 0, confirmed: 0 };
+      return [
+        seat,
+        {
+          items: seen.items,
+          confirmed: seen.confirmed,
+          rate: seen.items > 0 ? round(seen.confirmed / seen.items) : null,
+        },
+      ];
+    }),
+  );
+}
+
+/**
+ * The cycle a verifier report answered, from the label its path carries. The
+ * label is `<seat>-c<cycle>`, with `-p<n>` for a replay round and `-r` for the
+ * corrective invocation behind it (ADR-0042).
+ */
+function verifierCycle(path) {
+  const match = /-c(\d+)(?:-p\d+)?(?:-r)?\.json$/.exec(String(path ?? ''));
+  return match ? Number(match[1]) : null;
 }
 
 /**

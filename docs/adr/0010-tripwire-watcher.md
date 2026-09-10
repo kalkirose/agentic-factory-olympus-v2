@@ -159,15 +159,17 @@ proposals get these concrete shapes:
     the detail: a window in which no story touched an allowlist says nothing at
     all about whether anybody reads them, and a floor that breached on it would
     breach on every quiet window of every project from the day it armed.
-  - `record-refuted-share`: refuted record findings over all record findings,
-    across the last N record renders that carried one, keyed on
-    `verdict-rendered`. A finding joins a render by the run, the render's own
+  - `record-refuted-share`: refuted record findings over the record findings the
+    verifier answered, across the last N record renders that carried one, keyed
+    on `verdict-rendered`. A finding joins a render by the run, the render's own
     event name and the cycle: a record cycle 2 and a code cycle 2 are two
     judgments about two trees, and a key of run and cycle alone would join the
-    first to the second (ADR-0075). Every finding on a decision record reaches the verifier
-    and a confirmed one blocks the ship (ADR-0007), so the verifier is the one
-    place a wrong remark can die and this is the reading of how often it has to
-    kill one. Above a half the review seat is reading documents the way it reads
+    first to the second (ADR-0075). A HIGH on a decision record reaches the
+    verifier and a confirmed one blocks the ship (ADR-0007), so the verifier is
+    the one place a wrong block can die and this is the reading of how often it
+    has to kill one. A finding that carries `advisory: true` is outside both
+    counts: it never reached the verifier, so it was neither confirmed nor
+    refuted. Above a half the review seat is reading documents the way it reads
     code, and the answer is the record criteria and the brief, which is a
     prompt-only change. The window is the renders that hold a record finding
     and not every render: a project whose stories touch no record says nothing

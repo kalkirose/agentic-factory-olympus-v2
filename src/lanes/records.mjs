@@ -37,10 +37,13 @@ import {
   activeOf,
   isActiveRecord,
   readText,
+  recordFiles,
   recordId,
+  recordRefs,
   recordUnits,
   statusOf,
   supersedesOf,
+  unitText,
 } from './units.mjs';
 import { againstClause, underAny, briefLines } from './shared.mjs';
 
@@ -247,8 +250,14 @@ export function writeRole(base, judged, brief) {
  * the verifier's own evidence, so the seat answers a claim about the tree
  * rather than a remark. A finding is one of the units, and every other unit of
  * the record is the seat's as well.
+ *
+ * The remarks ride the same brief. A finding below HIGH holds no render red and
+ * buys no round of its own, so it is handed to the writer this round dispatches
+ * on its record anyway: that seat is already reading the record, and a remark
+ * thrown away is a finding the next run raises again at a higher grade
+ * (ADR-0007).
  */
-export function correctiveRole(base, judged, { findings, divergences, brief }) {
+export function correctiveRole(base, judged, { findings, divergences, advisory = [], brief }) {
   const records = judged.records ?? [];
   return [
     'The decision records you rewrote were reviewed, and these findings were confirmed',
@@ -261,6 +270,14 @@ export function correctiveRole(base, judged, { findings, divergences, brief }) {
     '',
     'List the ids you answered in "answered". Answer them in the records, not in the report.',
     'A finding names one unit. Every other unit of the record is yours as well.',
+    ...(advisory.length > 0
+      ? [
+          '',
+          'These remarks hold no render red. Answer each one in this write, or list its id under',
+          '"answered" where the record is right as written:',
+          ...advisory.map((f) => `- ${remarkLine(f)}`),
+        ]
+      : []),
     '',
     'Records to reconcile:',
     ...records.map((r) => `- ${r}`),
@@ -307,6 +324,17 @@ export function findingLine(f) {
 }
 
 /**
+ * One remark, as a brief and a ticket state it: the grade rides the line.
+ *
+ * A remark is answered at the writer's judgment rather than by rule, so the
+ * grade is part of what the seat is told. A confirmed finding needs no grade
+ * on its line: every one of them blocks (ADR-0007).
+ */
+export function remarkLine(f) {
+  return `[${f.severity ?? 'MED'}] ${findingLine(f)}`;
+}
+
+/**
  * The rules the record tree binds its editors to, in all three briefs.
  *
  * The first of them is the criteria list itself, verbatim, because it is the
@@ -343,18 +371,37 @@ function unitDutyLines() {
     'The harness enumerates the same list and refuses a report that misses one unit, names a',
     'unit the file does not hold, or answers one unit twice.',
     '"units" takes one entry per unit per record:',
-    '- "kind": "title", "status", "claim", "open" or "rationale". A claim is a present-tense',
-    '  statement about the tree. An open unit states a part the tree does not hold. Rationale is',
-    '  why the decision was taken, what it rejected, what would reverse it, and plain structure.',
-    '  A unit whose text names a repository path, a symbol in backticks, or one of the verbs is,',
-    '  are, reads, returns, runs, writes, serves or exposes is a claim. Filing it as rationale is',
-    '  a defect.',
-    '- "verdict": "holds", "fails" or "not-built". A title, a status and a rationale unit take',
-    '  "holds".',
-    '- "evidence": on a claim, the repo-relative path that answers it, and the line where one',
-    '  exists. The worktree has to hold that path. On any other kind, one short sentence.',
+    ...unitKindLines(),
     'A unit you report as "fails" is a unit you have not finished. Answer it in the record and',
     'report it again.',
+  ];
+}
+
+/**
+ * What a unit entry says, in one place for the three record briefs and the
+ * review's.
+ *
+ * The kinds are a closed list and the enumeration names three of them itself,
+ * so a brief that stated its own list would teach one seat a vocabulary the
+ * check does not hold. A reference is the case that made this one text: it
+ * states nothing about the tree and gives no reason, so a seat asked to choose
+ * between claim and rationale guesses, and the harness answers it instead
+ * (ADR-0073).
+ */
+export function unitKindLines() {
+  return [
+    '- "kind": "title", "status", "claim", "open", "rationale" or "reference". A claim is a',
+    '  present-tense statement about the tree. An open unit states a part the tree does not hold.',
+    '  Rationale is why the decision was taken, what it rejected, what would reverse it, and plain',
+    '  structure. A unit whose text names a repository path, a symbol in backticks, or one of the',
+    '  verbs is, are, reads, returns, runs, writes, serves or exposes is a claim. Filing it as',
+    '  rationale is a defect.',
+    '- A unit the enumeration marks "reference" takes that kind, "holds", and one short sentence;',
+    '  the harness answers it.',
+    '- "verdict": "holds", "fails" or "not-built". A title, a status, a rationale and a reference',
+    '  unit take "holds".',
+    '- "evidence": on a claim, the repo-relative path that answers it, and the line where one',
+    '  exists. The worktree has to hold that path. On any other kind, one short sentence.',
   ];
 }
 
@@ -858,13 +905,20 @@ export async function countedRecords(base, records, report, added = null) {
 }
 
 /**
- * The eight refusals over a unit report, numbered as the plan and the tests
- * name them. Rules 1 to 5 bind every record seat, rule 6 the writer, rules 7
- * and 8 the review.
+ * The nine refusals over a unit report, numbered as the plan and the tests
+ * name them. Rules 1 to 5 and rule 9 bind every record seat, rule 6 the writer,
+ * rules 7 and 8 the review.
  *
  * The kind is not the seat's escape. A seat that calls every unit `rationale`
  * owes no path and passes a check that reads the kinds it was given, so rule 5
  * reads the unit's own text and refuses the label.
+ *
+ * Rule 9 is the harness's own answer where the kind is the harness's. A unit
+ * under `## References` is a `reference`, and the check reads what it names:
+ * every record id it cites stands in the record tree, every path it cites
+ * stands in the worktree, and a reference that names nothing at all is a
+ * defect. Rule 5 never fires on one, because the kind is not the seat's to
+ * choose (ADR-0073).
  *
  * `dropped` names the records the active filter took out of the set. An answer
  * about one of them is dropped with it and never refused: the brief tells the
@@ -903,6 +957,8 @@ export function unitChecks(
     grouped.get(record).push(entry);
   }
   const heads = new Map();
+  const named = new Map();
+  const tree = recordTree(base);
   for (const record of known) {
     const text = readText(join(base.worktree, record));
     if (text === null) {
@@ -910,13 +966,24 @@ export function unitChecks(
       continue;
     }
     const units = recordUnits(text);
+    // The lines of the file, for the checks that read a whole unit. A head is
+    // the first eight words, and a reference names its record or its path
+    // wherever the sentence puts it, on the bullet's second line as readily as
+    // its first (ADR-0073).
+    const lines = String(text).replace(/\r\n/g, '\n').split('\n');
     const counts = new Map();
     for (const entry of grouped.get(record) ?? []) {
       counts.set(entry.id, (counts.get(entry.id) ?? 0) + 1);
     }
     const ids = new Set(units.map((unit) => unit.id));
-    for (const unit of units) {
+    for (const [at, unit] of units.entries()) {
       heads.set(unitKey(record, unit.id), unit.head);
+      named.set(unitKey(record, unit.id), unit.kind ?? null);
+      if (unit.kind === 'reference') {
+        defects.push(
+          ...referenceDefects(base, tree, record, unit, unitText(lines, units, at) || unit.head),
+        );
+      }
       const n = counts.get(unit.id) ?? 0;
       if (n === 0) {
         defects.push(
@@ -942,6 +1009,23 @@ export function unitChecks(
     const record = posix(entry.record);
     const head = heads.get(unitKey(record, entry.id));
     if (head === undefined) continue;
+    const kind = named.get(unitKey(record, entry.id));
+    if (kind === 'reference' && entry.kind !== 'reference') {
+      defects.push(
+        `unit check 9: ${record} ${entry.id} ("${head}") stands under "## References" and you ` +
+          `file it as "${entry.kind}". A reference takes the kind "reference", the verdict ` +
+          '"holds" and one short sentence; the harness answers what it names.',
+      );
+      continue;
+    }
+    if (kind !== 'reference' && entry.kind === 'reference') {
+      defects.push(
+        `unit check 9: ${record} ${entry.id} ("${head}") is filed as "reference" and it stands ` +
+          'under no "## References" heading. That kind is the enumeration\'s own.',
+      );
+      continue;
+    }
+    if (entry.kind === 'reference') continue;
     if (entry.kind === 'claim') defects.push(...evidenceDefects(base, record, entry, head));
     if (entry.kind === 'rationale' && kindTest(head) === 'claim') {
       defects.push(
@@ -990,6 +1074,72 @@ export function unitChecks(
   return defects;
 }
 
+/**
+ * Rule 9: a reference names something, and what it names is there.
+ *
+ * A record id resolves against the whole record tree and not the active half of
+ * it, because a record cites the record it supersedes and that one is closed by
+ * the same diff. A path resolves against the worktree. A link resolves against
+ * nothing: it names a document outside this repository, and the harness says
+ * nothing about one.
+ *
+ * The tokens come from the unit's whole text and not from the eight-word head
+ * the unit stands by. A reference states its gloss first as often as last, so a
+ * head would refuse a bullet whose id is its ninth word for naming nothing, and
+ * would read no id there to check; a record wraps its bullets, so the text is
+ * every line the enumeration folded into the unit (ADR-0073). The head still
+ * names the unit in the defect text, because that is the text the seat matches
+ * to its own list.
+ */
+function referenceDefects(base, tree, record, unit, line) {
+  const defects = [];
+  const ids = [...recordRefs(line)];
+  const tokens = pathTokens(line);
+  const links = tokens.filter(isLink);
+  const paths = tokens.filter((token) => !isLink(token));
+  for (const id of ids) {
+    if (tree.has(id)) continue;
+    defects.push(
+      `unit check 9: ${record} ${unit.id} ("${unit.head}") cites ADR-${id} and the record tree ` +
+        'holds no record of that id. Cite a record this tree holds, or drop the reference.',
+    );
+  }
+  for (const path of paths) {
+    if (existsSync(join(base.worktree, path))) continue;
+    defects.push(
+      `unit check 9: ${record} ${unit.id} ("${unit.head}") cites ${path} and the worktree holds ` +
+        'no such path.',
+    );
+  }
+  if (ids.length === 0 && paths.length === 0 && links.length === 0) {
+    defects.push(
+      `unit check 9: ${record} ${unit.id} ("${unit.head}") stands under "## References" and ` +
+        'names no record, no path and no link. A reference names something.',
+    );
+  }
+  return defects;
+}
+
+/** The record ids the worktree holds, at any status, read once per report. */
+function recordTree(base) {
+  let ids = null;
+  return {
+    has(id) {
+      ids ??= new Set(
+        recordFiles(base?.worktree ?? '', base?.recordPaths ?? [])
+          .map((file) => recordId(file))
+          .filter((found) => found !== null),
+      );
+      return ids.has(id);
+    },
+  };
+}
+
+/** Whether a token names a document outside this repository. */
+function isLink(token) {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(token);
+}
+
 /** Rule 4: a claim carries the path in the worktree that answers it. */
 function evidenceDefects(base, record, entry, head) {
   const path = evidencePath(entry.evidence);
@@ -1035,14 +1185,20 @@ export function kindTest(head) {
   return null;
 }
 
-/** A token that reads as a repository path: two segments and a suffix, or three. */
-function namesPath(text) {
+/** The tokens of a text that read as repository paths, in the order they stand. */
+function pathTokens(text) {
+  const found = [];
   for (const token of String(text).split(/[\s,;()[\]"']+/)) {
     const bare = token.replaceAll('`', '').replaceAll('*', '').replace(/[.,;:]+$/, '');
     if (!bare.includes('/')) continue;
-    if (bare.split('/').filter(Boolean).length > 2 || /\.\w{1,6}$/.test(bare)) return true;
+    if (bare.split('/').filter(Boolean).length > 2 || /\.\w{1,6}$/.test(bare)) found.push(bare);
   }
-  return false;
+  return found;
+}
+
+/** A token that reads as a repository path: two segments and a suffix, or three. */
+function namesPath(text) {
+  return pathTokens(text).length > 0;
 }
 
 /** The path a piece of evidence names, without its line suffix, or null. */

@@ -69,7 +69,7 @@ function behavior(name) {
     return { files: plan().devFiles, report: { summary: 'the spec is implemented' } };
   }
   if (name === 'verdict-triage') return triage();
-  if (name === 'fury-verifier') return verifier();
+  if (name === 'fury-verifier' || name === 'record-verifier') return verifier();
   if (name.startsWith('fury-') || name === 'generalist-review') {
     return { report: { findings: [], summary: 'the diff answers the spec' } };
   }

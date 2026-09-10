@@ -612,11 +612,15 @@ export function allowlistFindingsReading(paths, project, { window = 5, runs } = 
  * The share of record findings the verifier refuted, across the runs holding
  * the last `window` record renders that carried a record finding.
  *
- * Every finding on a decision record reaches the verifier, at every grade, and
- * a confirmed one blocks the ship (ADR-0007). The guard that keeps a wrong
- * remark from blocking is the verifier itself, and this is the reading of how
- * often it has to use it. Above a half the review seat is reading documents the
- * way it reads code, and the answer is the record criteria and the brief.
+ * A HIGH on a decision record reaches the verifier and a confirmed one blocks
+ * the ship (ADR-0007). The guard that keeps a wrong block from landing is the
+ * verifier itself, and this is the reading of how often it has to use it. Above
+ * a half the review seat is reading documents the way it reads code, and the
+ * answer is the record criteria and the brief.
+ *
+ * A remark is out of both counts. A finding below HIGH is never put to the
+ * verifier, so it can be neither confirmed nor refuted, and counting one as a
+ * refutation would read the split as noise from the seat.
  *
  * The window is the record renders that hold a record finding, not every
  * render: a project whose stories touch no record says nothing about how its
@@ -634,7 +638,7 @@ export function recordRefutedReading(paths, project, { window = 10, runs, pinTs 
   const key = (runId, render) => `${runId}#${render.event}#${render.cycle}`;
   const rendered = new Map();
   for (const { runId, events } of all) {
-    const findings = events.filter((f) => f.event === 'finding' && f.record === true);
+    const findings = events.filter((f) => f.event === 'finding' && verified(f));
     for (const render of recordRenders(events, pinTs)) {
       rendered.set(`${runId}#${render.cycle}`, render);
       if (findings.some((f) => f.cycle === render.cycle)) {
@@ -650,7 +654,7 @@ export function recordRefutedReading(paths, project, { window = 10, runs, pinTs 
   const runIds = new Set();
   for (const { runId, events } of all) {
     for (const e of events) {
-      if (e.event !== 'finding' || e.record !== true) continue;
+      if (e.event !== 'finding' || !verified(e)) continue;
       const render = rendered.get(`${runId}#${e.cycle}`);
       if (!render || !keys.has(key(runId, render))) continue;
       raised += 1;
@@ -669,6 +673,11 @@ export function recordRefutedReading(paths, project, { window = 10, runs, pinTs 
       runs: [...runIds],
     },
   };
+}
+
+/** A record finding the verifier answered: a HIGH, and never a remark. */
+function verified(e) {
+  return e.record === true && e.advisory !== true;
 }
 
 /**

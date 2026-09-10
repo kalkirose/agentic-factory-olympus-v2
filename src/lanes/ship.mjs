@@ -115,15 +115,17 @@ import { fastPathDecision } from './fastpath.mjs';
 import { runCommand } from './exec.mjs';
 import { probeCredentials, worldConfig } from './probes.mjs';
 import { MERGE_SUITE_SCHEMA } from './story.mjs';
-import { WRITE_SEAT, findingLine, runWindow } from './records.mjs';
+import { WRITE_SEAT, findingLine, remarkLine, runWindow } from './records.mjs';
 import {
   RECONCILE_STAGE,
+  REMARKS_HEADING,
   SHIP_WITHOUT_RECORDS,
   lastRendered,
   nextCycle,
   reconcileCertification,
   reconcileHandler,
   reconcileTicketFromBranch,
+  runRemarks,
 } from './reconcile.mjs';
 import { recordBase, recordsCommitted } from './records-stage.mjs';
 import { activeOf, recordNeighbours } from './units.mjs';
@@ -2040,12 +2042,19 @@ function closeOutHandler({ forgeFor, pollMs, enqueueRepair }) {
     // of one line of `run-closed` sees, and the trade the flag makes is worth
     // seeing there (ADR-0056).
     const fast = fastPathTaken(runEvents(ctx));
+    // The remarks this run shipped with, by id. A remark blocks nothing and
+    // buys no ticket, so a green ship writes none, and the close record is
+    // where the run says which sentences it left standing. The partial ship
+    // says the same thing on its ticket, under "Remarks not answered"
+    // (ADR-0007).
+    const remarks = runRemarks(runEvents(ctx)).map((f) => f.id);
     return {
       close: {
         state: 'shipped',
         pr: merged.pr,
         mergeSha: merged.mergeSha,
         ...(fast && { fastPath: true }),
+        ...(remarks.length > 0 && { remarks }),
       },
     };
   };
@@ -2687,8 +2696,20 @@ function noteWritten(worktree, note) {
  * worktree of the default branch and can see nothing else, so the ticket
  * carries the shipped diff's identity, the judged records, and the rewrite
  * rules the record tree binds its editors to.
+ *
+ * It is exported for the reading its text is, as the branch ticket beside it
+ * is: the two are one document in two lanes, and a heading that moved in one of
+ * them is a heading a person has to find twice.
  */
-function reconcileTicket({ ctx, base, merged, records, reason, residual = [] }) {
+export function reconcileTicket({
+  ctx,
+  base,
+  merged,
+  records,
+  reason,
+  residual = [],
+  remarks = [],
+}) {
   const partial = residual.length > 0;
   return [
     `# Reconciliation ticket: run ${ctx.runId}`,
@@ -2714,6 +2735,11 @@ function reconcileTicket({ ctx, base, merged, records, reason, residual = [] }) 
     '',
     `Judged reason: ${reason}`,
     ...(partial ? ['', '## Findings to answer', '', ...residual.map((f) => `- ${residualLine(f)}`)] : []),
+    // The remarks the run shipped with. They blocked nothing and they are the
+    // work the next write of these records carries (ADR-0007).
+    ...(remarks.length > 0
+      ? ['', REMARKS_HEADING, '', ...remarks.map((f) => `- ${remarkLine(f)}`)]
+      : []),
     '',
     '## The shipped diff',
     '',
@@ -2818,14 +2844,20 @@ function reconcileClose(ctx, base, merged) {
   // wrong, and the run behind it is small (ADR-0075).
   const residual = residualDetail(events, written);
   // The records rode this merge whole: the stage rendered them green, or the
-  // seat read them and found nothing to change.
+  // seat read them and found nothing to change. A remark buys no ticket of its
+  // own: it holds nothing red, and it rides the ticket a finding earned.
   if (residual.length === 0 && written?.ok === true) return;
   const records = judged.records ?? [];
+  // The remarks over the record set the pass held, and never the judge's list:
+  // under the supersede lifecycle a remark sits on the record a birth or a
+  // round added, and the judge named the record it replaces. It is the
+  // derivation the cap's own ticket reads (ADR-0007).
+  const remarks = runRemarks(events);
   try {
     const ticket = reconcileTicketPath(ctx.paths, ctx.runId);
     writeFileSync(
       ticket,
-      reconcileTicket({ ctx, base, merged, records, reason: judged.reason, residual }),
+      reconcileTicket({ ctx, base, merged, records, reason: judged.reason, residual, remarks }),
     );
     // The ticket before the stamp: a stamped ticket always exists to launch
     // from (the owed-set ordering, ADR-0024).
@@ -2866,16 +2898,17 @@ function residualDetail(events, written) {
 }
 
 /**
- * The one reading that says the record rule regressed: a finding on a file the
- * project calls a decision record, stamped advisory, in a run that merged.
+ * The one reading that says the record rule regressed: a HIGH finding on a file
+ * the project calls a decision record, stamped advisory, in a run that merged.
  *
- * After the record rule there is no such finding. Every review finding on a
- * record path goes to the verifier at every grade, and a refuted one carries
- * the verifier's evidence and no advisory word (ADR-0007). So a non-zero count
- * here says one of two things, and both need a person: the rule stopped
- * classifying, or `repo.recordPaths` names a tree the reviews are not reading.
- * It is stamped in both lanes, because both lanes review diffs that touch
- * records.
+ * A finding below HIGH is a remark on every lane. It is stamped advisory, it
+ * blocks nothing, and the ticket carries it out of the run, so counting one
+ * here would count the rule working. A HIGH is different: every HIGH goes to
+ * the verifier, and a refuted one carries the verifier's evidence and no
+ * advisory word (ADR-0007). So a non-zero count here says one of two things,
+ * and both need a person: the split stopped classifying, or `repo.recordPaths`
+ * names a tree the reviews are not reading. It is stamped in both lanes,
+ * because both lanes review diffs that touch records.
  */
 function recordFindingsShipped(ctx, base, merged) {
   const paths = base.recordPaths ?? [];
@@ -2888,6 +2921,7 @@ function recordFindingsShipped(ctx, base, merged) {
     (e) =>
       e.event === 'finding' &&
       e.advisory === true &&
+      e.severity === 'HIGH' &&
       typeof e.file === 'string' &&
       // The record tree's own membership test: an `!` entry names a file that
       // is not a record, and a plain prefix match cannot see one (ADR-0073).
@@ -2900,8 +2934,8 @@ function recordFindingsShipped(ctx, base, merged) {
     findings: shipped.map((e) => e.id),
     records: [...new Set(shipped.map((e) => e.file))],
     detail:
-      `PR #${merged.pr} merged with ${shipped.length} advisory finding(s) on a decision ` +
-      'record. A finding on a record is never advisory: the rule that routes them to the ' +
+      `PR #${merged.pr} merged with ${shipped.length} advisory HIGH finding(s) on a decision ` +
+      'record. A HIGH on a record is never advisory: the rule that routes them to the ' +
       'verifier did not classify these, or repo.recordPaths names the wrong tree.',
     gist: gist(`advisory record findings shipped on PR #${merged.pr}`),
   });
