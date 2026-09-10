@@ -43,6 +43,7 @@ import {
   recordUnits,
   statusOf,
   supersedesOf,
+  unitText,
 } from './units.mjs';
 import { againstClause, underAny, briefLines } from './shared.mjs';
 
@@ -965,21 +966,22 @@ export function unitChecks(
       continue;
     }
     const units = recordUnits(text);
-    // The lines of the file, for the checks that read a whole one. A head is
+    // The lines of the file, for the checks that read a whole unit. A head is
     // the first eight words, and a reference names its record or its path
-    // wherever the sentence puts it (ADR-0073).
+    // wherever the sentence puts it, on the bullet's second line as readily as
+    // its first (ADR-0073).
     const lines = String(text).replace(/\r\n/g, '\n').split('\n');
     const counts = new Map();
     for (const entry of grouped.get(record) ?? []) {
       counts.set(entry.id, (counts.get(entry.id) ?? 0) + 1);
     }
     const ids = new Set(units.map((unit) => unit.id));
-    for (const unit of units) {
+    for (const [at, unit] of units.entries()) {
       heads.set(unitKey(record, unit.id), unit.head);
       named.set(unitKey(record, unit.id), unit.kind ?? null);
       if (unit.kind === 'reference') {
         defects.push(
-          ...referenceDefects(base, tree, record, unit, lines[unit.line - 1] ?? unit.head),
+          ...referenceDefects(base, tree, record, unit, unitText(lines, units, at) || unit.head),
         );
       }
       const n = counts.get(unit.id) ?? 0;
@@ -1081,11 +1083,13 @@ export function unitChecks(
  * nothing: it names a document outside this repository, and the harness says
  * nothing about one.
  *
- * The tokens come from the bullet's whole line and not from the eight-word head
+ * The tokens come from the unit's whole text and not from the eight-word head
  * the unit stands by. A reference states its gloss first as often as last, so a
  * head would refuse a bullet whose id is its ninth word for naming nothing, and
- * would read no id there to check (ADR-0073). The head still names the unit in
- * the defect text, because that is the text the seat matches to its own list.
+ * would read no id there to check; a record wraps its bullets, so the text is
+ * every line the enumeration folded into the unit (ADR-0073). The head still
+ * names the unit in the defect text, because that is the text the seat matches
+ * to its own list.
  */
 function referenceDefects(base, tree, record, unit, line) {
   const defects = [];

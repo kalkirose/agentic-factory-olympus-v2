@@ -20,6 +20,7 @@ import {
   recordUnits,
   statusOf,
   supersedesOf,
+  unitText,
 } from '../src/lanes/units.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -271,6 +272,86 @@ test('a fenced heading under References neither ends the span nor opens one', ()
       ['U3', 11, null],
     ],
   );
+});
+
+// A comment is structure wherever it stands, and the span reads it the way the
+// enumeration does (fix round 2, finding N5).
+test('a heading inside an HTML comment under References does not end the span', () => {
+  const list = recordUnits(
+    [
+      '# ADR-0904: A record whose references hold a note',
+      '',
+      'Status: accepted (2026-09-10)',
+      '',
+      '## References',
+      '',
+      '- ADR-0073',
+      '',
+      '<!--',
+      '## Consequences',
+      '-->',
+      '',
+      '- `src/lanes/units.mjs`',
+      '',
+      '## Consequences',
+      '',
+      'The tree grows.',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    list.map((u) => [u.id, u.line, u.kind ?? null]),
+    [
+      ['U0', 1, 'title'],
+      ['U1', 3, 'status'],
+      ['U2', 7, 'reference'],
+      ['U3', 13, 'reference'],
+      ['U4', 17, null],
+    ],
+  );
+});
+
+// A record wraps its bullets at eighty columns, so the sentence one states runs
+// over two lines as often as one. The head stands for the unit; the text is
+// every line the enumeration folded into it (fix round 2, finding N4).
+test('a unit holds the lines the enumeration folded into it', () => {
+  const lines = [
+    '# ADR-0905: A record with a wrapped bullet',
+    '',
+    'Status: accepted (2026-09-10)',
+    '',
+    '## References',
+    '',
+    '- The standard this record is written to, whole and',
+    '  unamended, is ADR-0073',
+    '- `src/lanes/units.mjs`',
+    '',
+    '## Consequences',
+    '',
+    'The tree grows.',
+    '',
+  ];
+  const units = recordUnits(lines.join('\n'));
+  assert.deepEqual(
+    units.map((u) => [u.id, u.line]),
+    [
+      ['U0', 1],
+      ['U1', 3],
+      ['U2', 7],
+      ['U3', 9],
+      ['U4', 13],
+    ],
+  );
+  // The head stops at word eight and the text holds the continuation.
+  assert.ok(!units[2].head.includes('ADR-0073'), units[2].head);
+  assert.equal(
+    unitText(lines, units, 2),
+    '- The standard this record is written to, whole and   unamended, is ADR-0073',
+  );
+  // The next unit bounds it, and so do a blank line and a heading.
+  assert.equal(unitText(lines, units, 3), '- `src/lanes/units.mjs`');
+  assert.equal(unitText(lines, units, 4), 'The tree grows.');
+  assert.equal(unitText(lines, units, 0), lines[0]);
 });
 
 // The seat runs the bin and the check runs the module, so the kind the seat

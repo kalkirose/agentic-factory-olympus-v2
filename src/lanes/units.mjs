@@ -146,9 +146,10 @@ export function recordUnits(text) {
  * span. The heading line itself is structure and is outside its span, because a
  * heading is no unit.
  *
- * A fenced block is skipped whole, as `scanBody` skips one. A fence holds code
- * and examples, so a heading inside one is text: it opens no section and ends
- * none. A record that shows the form of a reference section in a fence would
+ * A fenced block and an HTML comment are skipped whole, as `scanBody` skips
+ * both. A fence holds code and examples and a comment holds a note nobody
+ * ships, so a heading inside either is text: it opens no section and ends none.
+ * A record that shows the form of a reference section in a fence would
  * otherwise name every bullet under it a reference (ADR-0073).
  * @returns {Array<{from: number, to: number}>}
  */
@@ -160,6 +161,10 @@ function referenceSpans(lines) {
     const fence = FENCE.exec(lines[i]);
     if (fence) {
       i = fenceEnd(lines, i, fence[2]);
+      continue;
+    }
+    if (COMMENT_OPEN.test(lines[i])) {
+      i = commentEnd(lines, i);
       continue;
     }
     if (open !== null && SECTION_HEADING.test(lines[i])) {
@@ -175,6 +180,34 @@ function referenceSpans(lines) {
 
 function inSpans(spans, index) {
   return spans.some((span) => index >= span.from && index < span.to);
+}
+
+/**
+ * The whole text of one unit: the line it opens on, and the lines the
+ * enumeration folded into it.
+ *
+ * A list item is one unit whatever it holds, and a record wraps its items at
+ * eighty columns, so the sentence a bullet states runs over two physical lines
+ * as often as one. The head is the first eight words and stands for the unit; a
+ * check that asks what the unit names reads this. The fold ends where the
+ * enumeration ended it: at a blank line, at a heading, or at the line the next
+ * unit opens on (ADR-0073).
+ * @param {string[]} lines the record's lines, as `recordUnits` split them
+ * @param {Array<{line: number}>} units the enumeration, in document order
+ * @param {number} index which unit
+ * @returns {string}
+ */
+export function unitText(lines, units, index) {
+  const unit = units[index];
+  if (!unit) return '';
+  const next = units[index + 1];
+  const end = next ? Math.min(next.line - 1, lines.length) : lines.length;
+  const held = [];
+  for (let i = unit.line - 1; i < end; i++) {
+    if (i > unit.line - 1 && (isBlank(lines[i]) || HEADING.test(lines[i]))) break;
+    held.push(lines[i]);
+  }
+  return held.join(' ');
 }
 
 /** The body, under the precedence rule stated at the head of this module. */

@@ -353,6 +353,26 @@ test('unit check 9 reads the whole bullet and not the head alone', (t) => {
   assert.match(missing[0], /cites scripts\/nowhere\.ts and the worktree holds no such path/);
 });
 
+// A record wraps its bullets, and the enumeration folds the continuation into
+// the same unit. The check reads what the unit holds, so a token on the second
+// line is a token the check answers (fix round 2, finding N4).
+test('unit check 9 reads a reference whose name sits on the bullet second line', (t) => {
+  const wrapped = ['- The standard this record is written to, whole and', '  unamended, is ADR-900'];
+  const dir = citingTree(t, wrapped);
+  assert.deepEqual(unitChecks(CITING_BASE(dir), [CITING], citingReport(dir)), []);
+  // The same bullet naming a record nobody wrote is refused, with the id.
+  const missing = citingTree(t, [wrapped[0], '  unamended, is ADR-999']);
+  const defects = unitChecks(CITING_BASE(missing), [CITING], citingReport(missing));
+  assert.equal(defects.length, 1);
+  assert.match(defects[0], /cites ADR-999 and the record tree holds no record of that id/);
+  // The continuation belongs to its own bullet and to no other: the next
+  // bullet's own name is what answers it.
+  const two = citingTree(t, [...wrapped, '- `scripts/nowhere.ts`, the checker']);
+  const both = unitChecks(CITING_BASE(two), [CITING], citingReport(two));
+  assert.equal(both.length, 1);
+  assert.match(both[0], /U4 .*cites scripts\/nowhere\.ts/);
+});
+
 test('unit check 9 refuses a reference to a path the worktree does not hold', (t) => {
   const dir = citingTree(t, ['- `scripts/nowhere.ts`, the checker']);
   const defects = unitChecks(CITING_BASE(dir), [CITING], citingReport(dir));
