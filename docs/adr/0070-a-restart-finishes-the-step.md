@@ -152,7 +152,7 @@ spawn stamp.
 
 If the commit message proves an unsafe resume key for the record write, because
 a project rewrites history under a live run and the message goes with it, the
-stage reads its own `record-units` stamp alone and re-dispatches a write whose
+stage reads its own `record-written` stamp alone and re-dispatches a write whose
 stamp is missing. Trigger: one record written twice in one round. Reversal cost:
 low, one condition in the write loop; the stamp is already the first half of the
 reading.

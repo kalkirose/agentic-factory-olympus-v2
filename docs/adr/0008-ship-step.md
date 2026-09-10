@@ -431,10 +431,10 @@ writes a take-back record. Neither defect was invisible — what was missing was
 the word, and a second record for the same fact would have bought the count at
 the price of an alert per occurrence.
 
-Both were already answered. A window of five ships met the truncated-evidence
-class five times across three runs under two fingerprints, and the stale
-screenshot take-backs in four runs of five. Every one of those cost the owner a
-gate touch, and standing acknowledgments now hold the classes. A loud record
+Both were already answered. Inside one window of ships the truncated-evidence
+class recurred under two fingerprints, and the stale screenshot take-backs
+recurred in almost every run of it. Every one of those cost the owner a gate
+touch, and standing acknowledgments now hold the classes. A loud record
 per occurrence would have re-raised, once per cycle, exactly what the owner had
 already answered.
 

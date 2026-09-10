@@ -4,7 +4,7 @@
 // `worktreeRoot` moves them off the home, which is how a machine with a low
 // path ceiling keeps a run's deepest test artifact inside it.
 import { appendFileSync, mkdirSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 
 /**
  * @param {string} home
@@ -98,16 +98,6 @@ export function repairTicketPath(paths, escapeSeq) {
  */
 export function reconcileTicketPath(paths, runId) {
   return join(paths.tickets, `reconcile-${runId}.md`);
-}
-
-/**
- * Where a ticket goes when the work it describes shipped after all. The tickets
- * directory is what a person launches from, so a ticket nobody owes leaves it
- * and stays readable beside it (ADR-0079).
- * @param {ReturnType<typeof homePaths>} paths
- */
-export function absorbedTicketPath(paths, ticket) {
-  return join(paths.tickets, 'absorbed', basename(ticket));
 }
 
 /** @param {ReturnType<typeof homePaths>} paths */

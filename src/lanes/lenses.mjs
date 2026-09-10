@@ -42,23 +42,19 @@ export const RECORD_LENS = 'record';
  * project's gate, not a criterion here.
  */
 export const RECORD_CRITERIA = Object.freeze({
-  fact: 'fact: implemented parts read as standalone present-tense fact; the rationale and the fallback paths stay.',
   truth:
     'truth: every present-tense claim in the record is true against the tree as it stands: what ' +
-    'the code does, where it lives, what it is called. A claim the tree contradicts fails, ' +
-    'whether the sentence changed in this diff or not.',
-  open:
-    'open: a part the tree does not implement is stated as not implemented, in an open section ' +
-    'or a sentence that says so. A future part written as present fact fails truth, not open.',
-  divergence:
-    'divergence: a divergence between the tree and the record is named in the record, verbatim, never absorbed.',
-  reference:
-    'reference: every name, path and symbol the record cites exists in the tree it describes.',
-  whole: 'whole: the record reads as one document, not as a trail of amendments.',
+    'the code does, where it lives, what it is called. A part the tree does not hold is stated ' +
+    'as not built. A divergence between the tree and the decision is named in the record. Every ' +
+    'name the record cites means what the record says it means. A claim the tree contradicts ' +
+    'fails, whether the sentence changed in this diff or not.',
   consistent:
     'consistent: an open part of this record does not contradict an open part of any active ' +
     'record in its neighbourhood. The tree settles what is built and settles nothing about ' +
     'what is not, so two active records can decide one unbuilt part two ways.',
+  form:
+    'form: a defect of the project standard the form gate cannot read, by rule number. The gate ' +
+    'reads the form it can read, at every render; this criterion is what is left.',
 });
 
 /** The criterion keys, in the order the briefs and the schema state them. */
@@ -77,8 +73,8 @@ export const RECORD_CRITERION_KEYS = Object.freeze(Object.keys(RECORD_CRITERIA))
  *
  * The last sentence names the sentences that claim nothing. A record states why
  * it decided, what it rejected and what would reverse it, and none of those is
- * a claim about the tree. The unit schema calls them `rationale`, and the rule
- * says so here, where the seat reads it, so the rule and the schema agree.
+ * a claim about the tree. It is rationale, and the criteria say nothing against
+ * it.
  */
 export const RECORD_RULE =
   'A record never conflicts with the code. Everything it states is either true of the tree now, ' +

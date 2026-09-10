@@ -23,7 +23,8 @@ The diff a judgment seat reads is produced by `reviewDiff()` in
   `src/lanes/review.mjs` builds both forms, and every code review brief carries
   it: every seat of the Fury panel, and the generalist seat.
 - **A record review seat gets no diff at all.** The seat that reads one decision
-  record is briefed with the file, the harness's unit list and the neighbourhood,
+  record is briefed with the file, the harness's unit list as addresses and the
+  neighbourhood,
   and with no diff text in any form (ADR-0026). A brief that ends with a diff
   anchors the seat on the hunks, and a record is judged whole. The absolute-path
   habit is the same one: that brief names `bin/olympus-units.mjs` by absolute

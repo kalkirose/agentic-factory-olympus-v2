@@ -234,10 +234,15 @@ test('the brief states the record stage as the harness now stamps it', async (t)
   assert.ok(!prompt.includes('phase: "reconcile"'));
   // One severity rule for every lane: a record finding below HIGH is a remark
   // the render lists and the writer is handed (plan 41, point 2).
-  assert.match(prompt, /One below HIGH is a remark/);
-  assert.match(prompt, /the remarks that shipped unanswered/);
+  assert.match(prompt, /One\nbelow HIGH is a remark/);
+  assert.ok(prompt.includes('remarks'));
+  assert.ok(prompt.includes('that shipped unanswered'));
   assert.match(prompt, /a `truth`\nremark on a sentence of a Decision/);
   assert.ok(!prompt.includes('the verifier answers it at every grade'));
+  // A record round spawns no verifier (ADR-0080).
+  assert.match(prompt, /a record round spawns no verifier/);
+  assert.ok(prompt.includes('runs that merged with one still standing'));
+  assert.ok(prompt.includes('`run-closed.unwritten` and `run-closed.unreviewed`'));
   // The fallback shapes: every cause counts, and the discard is gone.
   assert.match(prompt, /`reconciliation-written` with `ok: false` and a `cause`/);
   assert.ok(!prompt.includes('record-layer-red'));
@@ -256,12 +261,15 @@ test('the brief states the record stage as the harness now stamps it', async (t)
   ]) {
     assert.ok(prompt.includes('`' + metric + '`'), metric);
   }
-  // The eight measures the center derives, by name, so the eval reads them
+  // The measures the center derives, by name, so the eval reads them
   // rather than re-deriving them.
-  assert.match(prompt, /The command center derives eight measures/);
+  assert.match(prompt, /The command center derives twelve measures/);
   for (const measure of [
     'record cycles',
-    'writer miss rate',
+    'the cost of a shipped record',
+    'confirmed finding still standing',
+    'the first read',
+    'verifier confirm rate',
     'late share',
     'moved-tree cost',
     'recheck yield',

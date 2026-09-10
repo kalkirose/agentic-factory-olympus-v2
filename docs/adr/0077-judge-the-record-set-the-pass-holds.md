@@ -1,10 +1,6 @@
 # ADR-0077: Judge the record set the pass holds, born or written
 
-Status: accepted (2026-09-07)
-Superseded in part by ADR-0078: the cycle reviews the set it stamped, and not
-the anchor's own list. A record the pass closed is on that list and takes no
-seat, so it leaves no unit stamp and no unit answer. `record-units` carries one
-entry per record the check counted, replacements included.
+Status: superseded by ADR-0080 (2026-09-10)
 
 ## Context
 

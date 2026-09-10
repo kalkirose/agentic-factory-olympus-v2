@@ -64,27 +64,24 @@ test('the record lens is outside the panel vocabulary and rides no seat', () => 
   assert.deepEqual(furyPanel([...DEFAULT_LENSES, RECORD_LENS]), furyPanel([...DEFAULT_LENSES]));
 });
 
-test('the record criteria are seven keyed lines, and each line opens with its key', () => {
-  assert.deepEqual(RECORD_CRITERION_KEYS, [
-    'fact',
-    'truth',
-    'open',
-    'divergence',
-    'reference',
-    'whole',
-    'consistent',
-  ]);
+test('the record criteria are three keyed lines, and each line opens with its key', () => {
+  // Three, because a criterion a seat cannot decide from the record and the
+  // tree is a criterion nobody can answer. The old `open`, `divergence` and
+  // `reference` keys are readings of the truth of a record, and the truth
+  // criterion states all three; `fact` and `whole` are form, and the project
+  // gate reads the form it can read (ADR-0080).
+  assert.deepEqual(RECORD_CRITERION_KEYS, ['truth', 'consistent', 'form']);
   for (const key of RECORD_CRITERION_KEYS) {
     assert.ok(RECORD_CRITERIA[key].startsWith(`${key}: `), key);
   }
-  // The rule opens the table and the six keyed lines follow it.
+  // The rule opens the table and the keyed lines follow it.
   const lines = recordCriteriaLines();
   assert.equal(lines[0], RECORD_RULE);
   assert.equal(lines.length, RECORD_CRITERION_KEYS.length + 1);
   for (const line of lines.slice(1)) assert.ok(line.startsWith('- '), line);
 });
 
-// The rule the criteria serve. A seat given six keys and no rule grades each
+// The rule the criteria serve. A seat given the keys and no rule grades each
 // sentence against the nearest key; the rule is what says a sentence about work
 // nobody has done yet is legal, and that the same sentence as present fact is
 // not (ADR-0038).
@@ -92,8 +89,7 @@ test('the criteria open with the rule that a record never conflicts with the cod
   assert.ok(RECORD_RULE.includes('A record never conflicts with the code.'));
   assert.ok(RECORD_RULE.includes('true of the tree now, or marked as not yet built'));
   assert.ok(RECORD_RULE.includes('There is no third kind of claim.'));
-  // And the rule names the sentences that claim nothing, so it and the unit
-  // schema's `rationale` kind state one thing.
+  // And the rule names the sentences that claim nothing.
   assert.ok(
     RECORD_RULE.includes(
       'A sentence that states why, or what was rejected, or what would trigger a reversal, ' +
@@ -103,29 +99,36 @@ test('the criteria open with the rule that a record never conflicts with the cod
   );
   // `truth` is about the present tense, and it holds over the whole record: an
   // unchanged sentence the tree contradicts fails it exactly as a changed one
-  // does (ADR-0026).
+  // does (ADR-0026). It states the three readings that used to be keys of their
+  // own: a part not built, a divergence named, and a name that means what the
+  // record says it means (ADR-0080).
   assert.ok(RECORD_CRITERIA.truth.includes('every present-tense claim'));
   assert.ok(
     RECORD_CRITERIA.truth.includes('whether the sentence changed in this diff or not'),
     RECORD_CRITERIA.truth,
   );
-  // And `open` is the other half of the rule: a future part is stated as one,
-  // and a future part written as present fact is a `truth` defect.
-  assert.ok(RECORD_CRITERIA.open.includes('stated as not implemented'));
-  assert.ok(RECORD_CRITERIA.open.includes('fails truth, not open'), RECORD_CRITERIA.open);
+  assert.ok(RECORD_CRITERIA.truth.includes('stated as not built'), RECORD_CRITERIA.truth);
+  assert.ok(RECORD_CRITERIA.truth.includes('divergence'), RECORD_CRITERIA.truth);
+  assert.ok(RECORD_CRITERIA.truth.includes('means what the record says'), RECORD_CRITERIA.truth);
 });
 
-// The seventh criterion. The tree settles what is built and settles nothing
+// The second criterion. The tree settles what is built and settles nothing
 // about what is not, so two active records can decide one unbuilt part two
 // ways, and no code check can see it (ADR-0026).
-test('the seventh criterion holds a record against its neighbourhood', () => {
-  assert.equal(RECORD_CRITERION_KEYS[6], 'consistent');
+test('the second criterion holds a record against its neighbourhood', () => {
+  assert.equal(RECORD_CRITERION_KEYS[1], 'consistent');
   assert.ok(RECORD_CRITERIA.consistent.includes('does not contradict an open part'));
   assert.ok(RECORD_CRITERIA.consistent.includes('active record in its neighbourhood'));
+});
+
+// The third. What is left of form once the project's own gate has read every
+// rule a gate can read: a defect of the standard the gate cannot see, named by
+// its rule number (ADR-0080).
+test('the third criterion is the form the project gate cannot read', () => {
+  assert.equal(RECORD_CRITERION_KEYS[2], 'form');
+  assert.ok(RECORD_CRITERIA.form.includes('rule number'), RECORD_CRITERIA.form);
+  assert.ok(RECORD_CRITERIA.form.includes('at every render'), RECORD_CRITERIA.form);
   // It rides every brief and every schema, because the keys are one list.
   const lines = recordCriteriaLines();
-  assert.equal(lines[lines.length - 1], `- ${RECORD_CRITERIA.consistent}`);
-  // The six texts before it are unchanged by the seventh.
-  assert.ok(RECORD_CRITERIA.fact.startsWith('fact: implemented parts read as standalone'));
-  assert.ok(RECORD_CRITERIA.whole.endsWith('not as a trail of amendments.'));
+  assert.equal(lines[lines.length - 1], `- ${RECORD_CRITERIA.form}`);
 });

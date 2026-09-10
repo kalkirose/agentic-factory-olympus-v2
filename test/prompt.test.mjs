@@ -73,7 +73,6 @@ test('the authority order reaches exactly the judging seats', () => {
     'fury-operational',
     'fury-interface',
     'fury-verifier',
-    'record-verifier',
     'generalist-review',
     'verdict-triage',
     'reconcile-judge',
@@ -91,9 +90,9 @@ test('the authority order names the ranking and refuses enforcement of a beaten 
   assert.match(text, /blocking finding against the spec/);
 });
 
-// Both verifier names take it: one seat function, two models (plan 41, point 3).
+// The one verifier takes it. A record round spawns none (ADR-0080).
 test('only the verifier is told what the order means for confirming a finding', () => {
-  const verifiers = new Set(['fury-verifier', 'record-verifier']);
+  const verifiers = new Set(['fury-verifier']);
   for (const seat of Object.keys(SEATS)) {
     assert.equal(prompt(seat, POLICY).includes(VERIFIER_AUTHORITY), verifiers.has(seat), seat);
   }

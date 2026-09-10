@@ -1,6 +1,6 @@
 # ADR-0079: One window on the run's record work, and a records run that can still act
 
-Status: accepted (2026-09-08)
+Status: superseded by ADR-0080 (2026-09-10)
 
 ## Context
 
@@ -124,8 +124,8 @@ the branch carries to the merge is a record this run ships.
   replacement, and the pairing has to hold for it.
 - Keep the whole-set review on every cycle. A fresh reader of an unchanged green
   record raises findings on unchanged sentences and spends the cap on them.
-- Dispatch every record every round. Seven of sixteen seats owed nothing on the
-  run this record comes from, and each cost a dispatch.
+- Dispatch every record every round. Most seats of such a round owe nothing, and
+  each one costs a dispatch.
 - Close at the cap and continue from the branch in a new run. No launch shape
   continues a records run, and one would need a second inheritance path, a
   second ledger and a re-judge.

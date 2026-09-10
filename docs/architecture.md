@@ -198,12 +198,12 @@ Two levels; the ownership test decides placement.
 
 - **Seat map.** Seats run Claude Opus 5 (`claude-opus-5`) at xhigh effort. The
   certification spine (verdict triage, the Fury verifier, the eval seat) runs
-  Claude Fable 5.1 (`claude-fable-5-1`) at high. The verifier of a
-  decision-record item is a seat of its own, `record-verifier`, on Opus 5 at
-  xhigh: the records lane runs one model. Opus 5 is also the fallback model, so
-  a refused certification seat degrades to it and a refused Opus 5 seat has no
-  substitute (ADR-0005). `max_tokens` = model max; effort is the cost control.
-  Effort stays constant inside a seat session.
+  Claude Fable 5.1 (`claude-fable-5-1`) at high. The records lane runs one
+  model, Opus 5 at xhigh, and it spawns no certification seat: a record round
+  confirms a HIGH as its reviewer raised it (ADR-0080). Opus 5 is also the
+  fallback model, so a refused certification seat degrades to it and a refused
+  Opus 5 seat has no substitute (ADR-0005). `max_tokens` = model max; effort is
+  the cost control. Effort stays constant inside a seat session.
 - **File contracts.** No structured-output tool anywhere. The seat writes its
   JSON report to the named ledger path; a deterministic process validates it
   (flat, draft-07-safe schemas). One corrective re-prompt, then seat-failure.
@@ -378,8 +378,8 @@ suite authoring (seat) → adversary → freeze (process).
   the run. The round stamp carries the identities.
 - **Records** (ADR-0074): one `record-author` seat writes the decision records
   the validated spec decides, before the suite is written and by a seat that will
-  never write the code. It answers every unit of every record it writes
-  (ADR-0073), commits them as `records: <key>` and stamps `records-committed`
+  never write the code. It hands back the records it wrote and no reading of its
+  own sentences (ADR-0080), commits them as `records: <key>` and stamps `records-committed`
   with the sha, the paths and whether the spec decided anything at all. The
   frozen sha therefore carries the records, and the dev seat reads them as it
   reads the tests. A project with no record tree spends no seat here.
@@ -807,9 +807,10 @@ suite authoring (seat) → adversary → freeze (process).
   certifications over two trees at two shas. The cycle stands on the record set
   the pass holds. That set comes from its `reconciliation-written` stamp, or
   from its `records-committed` stamp where it wrote none. So a born record is
-  judged even where the judge owes nothing (ADR-0077). No seat is asked for a
-  unit, a finding or a report entry on a record whose status line reads
-  superseded or retired. The filtered set a round or a cycle dispatched over is
+  judged even where the judge owes nothing, and the records lane spawns no judge
+  at all: its diff is the records, so the birth is the judgment (ADR-0080). No
+  seat is asked for a finding or a report entry on a record whose status line
+  reads superseded or retired. The filtered set a round or a cycle dispatched over is
   stamped before its first seat spawns, so a restart dispatches the list the
   ledger names and never the tree a seat has moved since (ADR-0078). Every read
   of what the run did to the record tree opens at one window: the merge base of
@@ -1052,23 +1053,21 @@ suite authoring (seat) → adversary → freeze (process).
 - **Reconciliation** (ADR-0026): a fresh-context seat judges whether the
   run's own diff implements or contradicts any decision record, in the
   reconcile stage and in front of the ship token. Owed sends one fresh write
-  seat per judged record to rewrite them on the run branch, under checks that
-  hold every write inside the record tree and answer every unit of it; the record
+  seat per judged record to rewrite them on the run branch, under a reading that
+  reverts a write outside the record tree and refuses nothing; the record
   layers then run over the record commit, one review seat per record judges it
   against the criteria, and one pull request carries the code and the records.
   Not-owed and a failed judgment stamp too: an unjudged ship is a recorded
-  miss, never a silent skip. A write nobody can make ships the certified sha
-  and leaves the ticket, and the close writes that ticket where the records did
-  not ride the merge whole, or stamps `reconciliation-lost` where it cannot.
-  The `merged` stamp carries `reconciled` where the records rode. A stall at
-  `gates.reconcileRounds` is loud on every route to it, and the lane decides
-  what follows. The story and repair lanes take the fallback on their own and
-  ask nobody: the code ships and the residual goes to a ticket. The records lane
-  holds no code to ship, so it pushes the run branch to the origin, writes the
-  ticket with every record, every open finding and every failed dispatch, and
-  parks `reconcile-cap`. An answered `rounds` raises the cap by that count and
-  the stage re-enters its corrective round; `abandon` closes the run and leaves
-  the branch and the ticket for a later one (ADR-0079).
+  miss, never a silent skip. A write nobody can make leaves its record
+  unwritten and the round goes on, and the close writes a ticket for a record
+  the judge owed and no round wrote, or stamps `reconciliation-lost` where it
+  cannot. The `merged` stamp carries `reconciled` where the records rode. A
+  stall at `gates.reconcileRounds` is loud on every route to it, and every lane
+  takes the same one: the fallback, then the push and the merge. What is still
+  wrong rides the request body under "Findings not answered", "Remarks not
+  answered", "Records not written" and "Records not reviewed", and the close
+  stamps the same four sets by id and by path. No record parks a lane
+  (ADR-0080).
 - **Learning artifact** (ADR-0031): optional, by project config
   (`closeout.learning`: an instructions file and a workspace directory, both
   absolute). A fresh-context seat writes a human-readable lesson about the
@@ -1523,10 +1522,11 @@ every 60 s (display cadence only), and has a manual refresh. Content: status
 chips, loud strip, run cards with stage pipeline, escalations, build health,
 run-time statistics, the record section, ledger tail. Dark command-center look.
 
-The record section carries eight measures off the run ledgers alone: the cycles
-per reconciliation, the writer's miss rate (a review `fails` on a unit the writer
-reported `holds`, joined by record and unit id), the late share of the born
-records, what a moved default branch cost in re-judgments and re-runs, the
+The record section carries twelve measures off the run ledgers alone: the cycles
+per reconciliation, what a shipped record cost, how many runs merged with a
+confirmed finding still standing, the first read with its later count, the share
+of remarks a round answered, the verifier's confirm rate, the late share of the
+born records, what a moved default branch cost in re-judgments and re-runs, the
 recheck yield, the record-diff gate time, the write wall clock, and the tree
 series with its supersessions, splits and merges. Each carries its own
 denominator, so a quiet window reads as nothing rather than as zero.

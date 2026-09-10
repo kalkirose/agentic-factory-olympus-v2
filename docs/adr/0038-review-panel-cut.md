@@ -16,27 +16,30 @@ is smaller than the vocabulary.
   other.
 - **The record criteria sit beside the code lenses and outside the panel.** The
   same registry holds `record` and its criteria, `RECORD_CRITERIA`: a keyed list
-  of seven, data only. A record is held to standalone present-tense fact for the
-  implemented parts, to truth against the tree as it stands for every
-  present-tense claim in it, to a plain statement that a part is not implemented
-  where the tree does not implement it, to a divergence named in the record and
-  never absorbed, to every name and path and symbol it cites existing in the
-  tree, to reading as one document rather than a trail of amendments, and to no
-  open part of it contradicting an open part of an active record in its
-  neighbourhood. The list is the harness's own and holds no project rule.
-- **The criteria carry the rule they serve.** `RECORD_RULE` sits above the seven
+  of three, data only. `truth` holds every present-tense claim of the record
+  against the tree as it stands: a part the tree does not hold is stated as not
+  built, a divergence between the tree and the decision is named in the record,
+  and every name the record cites means what the record says it means.
+  `consistent` holds an open part of the record against the open parts of the
+  active records beside it. `form` is a defect of the project standard the
+  project's form gate cannot read, by rule number. The list is the harness's own
+  and holds no project rule.
+- **Three, because a criterion nobody can decide is a criterion nobody can
+  answer.** The keys that left were readings of one question. A part not built,
+  a divergence absorbed and a name that means something else are three ways for
+  a present-tense claim to be untrue, and `truth` states all three; a record
+  that reads as a trail of amendments and a record whose implemented parts do
+  not read as fact are form, and the project's gate reads the form it can read
+  (ADR-0080). A finding whose criterion a seat had to choose between two near
+  keys named the same defect twice.
+- **The criteria carry the rule they serve.** `RECORD_RULE` sits above them
   wherever they are stated: a record never conflicts with the code, everything
   it states is either true of the tree now or marked as not yet built, there
   is no third kind of claim, and a sentence that states why, or what was
-  rejected, or what would trigger a reversal, is rationale and is neither. The
-  last sentence is what makes the rule and the unit schema agree, because that
-  schema calls such a sentence `rationale` (ADR-0073). The two criteria that
-  share the boundary say which side each case falls on. A claim the tree
-  contradicts fails `truth`, whether or not the sentence changed in the diff
-  under review. A part the tree does not implement satisfies `open` when the
-  record says it is not implemented, and a part not yet built that is written as
-  present fact fails `truth` rather than `open`.
-- **The seventh criterion is about two records.** `consistent` asks whether an
+  rejected, or what would trigger a reversal, is rationale and is neither. A
+  claim the tree contradicts fails `truth`, whether or not the sentence changed
+  in the diff under review.
+- **The second criterion is about two records.** `consistent` asks whether an
   open part of this record contradicts an open part of an active record in its
   neighbourhood. The tree settles what is built and settles nothing about what is
   not, so two active records can decide one unbuilt part two ways and no code
@@ -44,11 +47,11 @@ is smaller than the vocabulary.
   `file2`, `unit2` and `head2`, and a finding that names one record is a
   work-product defect rather than a finding.
 - **One definition of the criteria, four readers.** The record review seat's
-  brief, the verifier's brief for a record item, and the birth, reconciliation
-  and corrective briefs of the seats that write records all state the list from
-  the registry. A writer is a reader because it is judged against it: a
-  paraphrase in the brief that writes the records and the list in the brief that
-  reviews them are two statements of one rule, and the writer would meet a
+  brief, the verifier's brief for a record item of a code round, and the birth,
+  reconciliation and corrective briefs of the seats that write records all state
+  the list from the registry. A writer is a reader because it is judged against
+  it: a paraphrase in the brief that writes the records and the list in the brief
+  that reviews them are two statements of one rule, and the writer would meet a
   criterion at the review that its own brief never named.
 - **A record is judged by a seat of its own, and never by a lens.** `record` is
   outside `ALL_LENSES`, so `review.lenses` cannot name it and the project-config
@@ -180,17 +183,15 @@ that the operational seat saw the diff for and did not raise. Reversal cost:
 low, and the panel config does not change.
 
 If the record criteria prove too narrow, and real record defects fall outside all
-seven, a criterion joins `RECORD_CRITERIA` with its line. The key is what the
-verifier judges against, so a defect nobody can key is a defect nobody can
-confirm. Trigger: refutations for want of evidence on findings a reader agrees
-with. Reversal cost: one entry in the registry; the schema enum and every brief
-read the list.
+three, a criterion joins `RECORD_CRITERIA` with its line. The key is what a
+reader judges a finding against, so a defect nobody can key is a defect nobody
+can weigh. Trigger: findings a reader agrees with that name no key. Reversal
+cost: one entry in the registry; the schema enum and every brief read the list.
 
 If the seat per record proves too expensive on a wide reconciliation, the round
-batches: one seat over several records, with the unit lists of all of them.
+batches: one seat over several records, with the addresses of all of them.
 Trigger: a stage whose review seats cost more than the ship they hold.
-Reversal cost: moderate, one loop in `recordReviewRound`, and the unit checks
-already take a list of records.
+Reversal cost: moderate, one loop in `recordReviewRound`.
 
 If the security dimensions crowd the adversary's spec-behavior probing instead
 of adding to it — kill rates fall while survivors cluster on security wrongness

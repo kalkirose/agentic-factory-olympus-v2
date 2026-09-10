@@ -1222,6 +1222,32 @@ export function recordLayerSet(layers, prior, named) {
 }
 
 /**
+ * What the record layers need, and nothing they are needed by: the transitive
+ * `needs` closure of `gates.recordLayers`, minus the record layers themselves.
+ *
+ * A record seat runs the form gate in its own shell before it reports, and a
+ * worktree with no dependencies installed cannot run it. The readiness stage
+ * runs this set once, so the seat has what the gate needs and the gate is the
+ * one mechanical reader of a record's form (ADR-0080).
+ * @param {Array<{name: string, needs?: string[]}>} layers
+ * @param {Set<string>} named the project's `gates.recordLayers`
+ * @returns {Set<string>}
+ */
+export function recordLayerNeeds(layers, named) {
+  const by = new Map(layers.map((layer) => [layer.name, layer]));
+  const needed = new Set();
+  const queue = layers.filter((layer) => named.has(layer.name)).map((layer) => layer.name);
+  for (let i = 0; i < queue.length; i++) {
+    for (const need of by.get(queue[i])?.needs ?? []) {
+      if (needed.has(need) || named.has(need) || !by.has(need)) continue;
+      needed.add(need);
+      queue.push(need);
+    }
+  }
+  return needed;
+}
+
+/**
  * The layers a narrowed set neither runs nor may carry: they hold no proven
  * green, and this cycle's attribution says the diff cannot reach them. A cycle
  * that ran them would buy the whole spectrum back for a diff the project

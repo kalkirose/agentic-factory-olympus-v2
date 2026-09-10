@@ -74,15 +74,6 @@ const RECORD_TEXT = [
   '',
 ].join('\n');
 
-function recordUnitAnswers() {
-  return [
-    { record: RECORD_PATH, id: 'U0', kind: 'title', verdict: 'holds', evidence: 'the title' },
-    { record: RECORD_PATH, id: 'U1', kind: 'status', verdict: 'holds', evidence: 'accepted' },
-    { record: RECORD_PATH, id: 'U2', kind: 'claim', verdict: 'holds', evidence: 'src/base.mjs' },
-    { record: RECORD_PATH, id: 'U3', kind: 'claim', verdict: 'holds', evidence: 'src/base.mjs' },
-  ];
-}
-
 // -- fixture machinery -------------------------------------------------------
 
 function specPathFrom(prompt) {
@@ -331,8 +322,6 @@ test('a resume inherits a real freeze and enters the post-freeze stage seatless'
       report: {
         rewritten: [RECORD_PATH],
         unchanged: [],
-        units: recordUnitAnswers(),
-        divergences: [],
         summary: 'one record born',
       },
     }),

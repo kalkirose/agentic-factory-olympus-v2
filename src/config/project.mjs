@@ -86,18 +86,19 @@ export const RECORD_LIFECYCLES = Object.freeze(['rewrite', 'supersede']);
 export const DEFAULT_RECORD_LIFECYCLE = 'rewrite';
 
 /**
- * How many rounds a repair over decision records may spend: the corrective
- * record rewrites of one implementation pass, and the repair rounds of a run
- * whose diff is decision records and nothing else.
+ * How many corrective rounds a run spends on record content: the record
+ * rewrites of one implementation pass, and the rounds of a run whose diff is
+ * decision records and nothing else.
  *
- * Five, and it is not the code repair cap. A record round is one seat and the
- * layers the record diff reaches, which on a project with declared grounds is
- * one layer; what stands behind the cap is a whole repair run with a full
- * spectrum, or a fresh pass over certified code. So five rounds cost less than
- * one of those endings, and the progress rule stops a round that closes nothing
- * at once (ADR-0007).
+ * One, on every lane that reads a record. A round is a fresh writer over the
+ * record with the findings the review raised; a second round asks a second
+ * writer the same question about a document one writer already answered. What
+ * stands behind the cap is a merge, not a park: the run pushes, the request body
+ * names every finding that still stands, and the close stamps them (ADR-0080).
+ * A project that sets `gates.reconcileRounds` gets the number it names, and the
+ * code repair cap is a different number.
  */
-export const DEFAULT_RECONCILE_ROUNDS = 5;
+export const DEFAULT_RECONCILE_ROUNDS = 1;
 
 export function defaultProjectConfig() {
   return {

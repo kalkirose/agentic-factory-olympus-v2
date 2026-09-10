@@ -10,15 +10,25 @@ that nothing will ever close.
 
 ## Decision: how a run ends
 
-A run reaches `run-closed` through three routes only:
+A run reaches `run-closed` through four routes only:
 
 1. the ship step's close-out, which closes `shipped`;
 2. a human kill, which closes `killed`;
-3. a human answering any park with `abandon`, which closes `failed`.
+3. a human answering any park with `abandon`, which closes `failed`;
+4. a records-lane birth that decided no record, which closes `failed` with
+   reason `nothing-born`.
 
 Every other condition that a lane meets on its own parks the run. A refusal
 that happens before provisioning throws at the console or at the daemon
 handler and opens no run at all, so it stamps nothing.
+
+The fourth route is the one condition a lane meets on its own and ends on. The
+records lane writes decision records and nothing else, so a birth that decided
+none leaves it no work: no record to review, nothing to put in a request and
+nothing to merge. A park would ask a person a question whose only answer is a
+different ticket, and the ticket the run was launched from stands where it was,
+so a person edits it and launches again. Every other lane keeps the park,
+because every other lane still holds code to ship (ADR-0080).
 
 - **Every park type offers the abandon.** The engine writes it into the
   answer-forms declaration of every park record, so no park site can raise a

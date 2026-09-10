@@ -51,11 +51,10 @@ import { ACTOR, runEvents } from './shared.mjs';
  * produce and cannot otherwise reproduce. Closed like the seat map itself — a
  * seat enters by a decision recorded in an ADR, never from a call site.
  *
- * The verifier is here under both its names. One function spawns it, and the
- * seat name says which model reads the items; what the seat may reach for is
- * the same question either way (ADR-0005).
+ * The record round spawns no verifier, so no record seat is here: the review
+ * reads the record and the tree, and it asks for no layer run (ADR-0080).
  */
-export const PROBE_SEATS = new Set(['verdict-triage', 'fury-verifier', 'record-verifier']);
+export const PROBE_SEATS = new Set(['verdict-triage', 'fury-verifier']);
 
 /**
  * Replay rounds one seat session may spend. Each round costs a whole Tier-1

@@ -10,20 +10,18 @@ import { basename, dirname, join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import {
   scaffoldHome,
-  absorbedTicketPath,
   archivedRunLedgerPath,
   repairTicketPath,
   reconcileTicketPath,
   runLedgerPath,
 } from '../src/daemon/home.mjs';
 import { postFreeze, repairLane, restoreAnchor } from '../src/lanes/verdict.mjs';
+import { recordsLane } from '../src/lanes/records-stage.mjs';
 import {
-  absorbCapTicket,
   admitted,
   certifiedTrees,
   certifyingStage,
   reconcileTicket,
-  recordsLaneCiRed,
   unjudgedRecords,
   UNJUDGED_RECORDS_QUESTION,
   checksByName,
@@ -51,8 +49,6 @@ import { owedRepairs } from '../src/frontier/repairs.mjs';
 import { owedReconciliations, reconciliationLaunch } from '../src/frontier/reconciliations.mjs';
 import { blocked, sinceFreshPass } from '../src/lanes/shared.mjs';
 import { runParkForms } from '../src/ledger/parks.mjs';
-import { kindTest } from '../src/lanes/records.mjs';
-import { recordUnits } from '../src/lanes/units.mjs';
 import {
   tempDir,
   removeDir,
@@ -159,6 +155,12 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
     // The labels each create call carried, so a test can say which call
     // labelled the request.
     createLabels: [],
+    // The bodies the run wrote, in the order it wrote them: the create's, and
+    // every rewrite a later merge round made.
+    bodies: [],
+    // The body rewrites alone, and whether the forge takes one at all.
+    edits: [],
+    editAccepts: true,
     // The CI secret names the parity read asks for; null is a forge that
     // would not answer at all.
     ciSecrets: [],
@@ -208,8 +210,22 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
     const pr = state.pr;
     pr.headShaAtMerge = head(pr.head);
     gitSync(['merge', '--squash', pr.head], origin);
+    // `--allow-empty`, because a request whose net diff is empty is a request a
+    // forge merges. A records run whose one record conflicted took the default
+    // branch's version of it, so what is left to squash is nothing (ADR-0080).
     gitSync(
-      ['-c', 'user.email=f@f', '-c', 'user.name=forge', '-c', 'commit.gpgsign=false', 'commit', '-m', `squash ${pr.head}`],
+      [
+        '-c',
+        'user.email=f@f',
+        '-c',
+        'user.name=forge',
+        '-c',
+        'commit.gpgsign=false',
+        'commit',
+        '--allow-empty',
+        '-m',
+        `squash ${pr.head}`,
+      ],
       origin,
     );
     pr.mergeSha = head('main');
@@ -228,11 +244,14 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
         requiredChecks: state.requiredChecks,
       };
     },
-    async openPr({ head: headBranch, base, labels = [] }) {
+    async openPr({ head: headBranch, base, body = '', labels = [] }) {
       const fresh = !state.pr || state.pr.state === 'closed';
       if (fresh) {
         state.pr = { number: 7, head: headBranch, base, armed: false, state: 'open', mergeSha: null };
       }
+      // The body the run wrote, kept where a scenario about what a merged
+      // request says can read it (ADR-0080).
+      state.bodies.push(body);
       // The create carries the labels, the way `gh pr create --label` does. A
       // repository that defines none refuses that create and the adapter opens
       // the request bare, which is the state this leaves behind; a create that
@@ -244,6 +263,13 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
       }
       return { number: state.pr.number, url: `fake://pr/${state.pr.number}`, labelled: carried };
     },
+    async editBody(number, body) {
+      if (!state.editAccepts) return { edited: false, reason: 'refused (fixture)' };
+      state.bodies.push(body);
+      state.edits.push({ number, body });
+      return { edited: true };
+    },
+
     async ciSecrets() {
       return state.ciSecrets;
     },
@@ -358,15 +384,22 @@ function seatScript({ reportPath, model, report, files = {}, exitCode = 0 }) {
 
 function seatFixture(seats) {
   const calls = [];
+  let lastSeat = null;
   const commandFor = (opts) => {
     // A seat name may carry a slot suffix (`reconcile-write:2`). The suffix is
     // the dispatch's identity and not a seat, so the table reads the base name
     // and the call record keeps the whole of it (ADR-0075).
-    const named = /You are the (\S+) seat/.exec(opts.prompt)[1];
+    // The corrective prompt of an invalid report names no seat: it is the same
+    // seat session, told what its report failed.
+    const named = /You are the (\S+) seat/.exec(opts.prompt)?.[1] ?? lastSeat;
+    lastSeat = named;
     const seat = named.split(':')[0];
     const lines = opts.prompt.split('\n');
     const contract = lines.findIndex((l) => l.includes('write your JSON report to this file'));
-    const reportPath = lines[contract + 1];
+    const reportPath =
+      contract === -1
+        ? /report to the same file, then stop: (.+)$/m.exec(opts.prompt)[1].trim()
+        : lines[contract + 1];
     const label = basename(reportPath, '.json');
     calls.push({
       seat,
@@ -498,6 +531,9 @@ function shipFixture(
     story: { stages: ['seed', ...post.stages], handlers: { seed: seedHandler(seedExtra), ...post.handlers } },
     repair: repairShips ? repairship : repairLane({ afterVerdict: done }),
     repairship,
+    // The whole records lane, with the same ship stages behind it: a records
+    // request opens, merges and closes exactly where a story request does.
+    records: recordsLane({ afterRecords: shipLane, forgeFor: () => forge }),
   };
   // The launch door asks the same forge the ship step asks: a credential with a
   // declared CI surface is proven before a slot is taken (ADR-0068).
@@ -711,89 +747,45 @@ const judgeOwed = () => ({
   },
 });
 
-/** One entry per unit of a record, in the kinds the enumerator gives them. */
-function unitAnswers(record, text) {
-  return recordUnits(text).map((unit) => ({
-    record,
-    id: unit.id,
-    kind: unit.kind ?? kindTest(unit.head) ?? 'rationale',
-    verdict: 'holds',
-    evidence: 'src/feature.mjs',
-  }));
-}
-
-/** What a write seat says when it found nothing to declare about one record. */
-const NO_DIVERGENCE = [
-  {
-    record: ADR_FILE,
-    state: 'none',
-    statement: 'the record and the diff say the same thing',
-    evidence: 'src/feature.mjs',
-  },
-];
-
-/** A write seat that rewrites the record and answers every unit of it. */
+/** A write seat that rewrites the record it was given. */
 const writeClean = () => ({
   files: { [ADR_FILE]: ADR_REWRITTEN },
   report: {
     rewritten: [ADR_FILE],
     unchanged: [],
-    units: unitAnswers(ADR_FILE, ADR_REWRITTEN),
-    divergences: NO_DIVERGENCE,
     summary: 'the record states what shipped',
   },
 });
 
-/** A record review seat that answers every unit and raises nothing. */
-const reviewClean = ({ prompt }) => ({
-  report: {
-    findings: [],
-    units: [...prompt.matchAll(/^- (U\d+) \(line \d+(?:, (\w+))?\): (.+)$/gm)].map(
-      ([, id, kind, head]) => ({
-        record: ADR_FILE,
-        id,
-        kind: kind ?? kindTest(head) ?? 'rationale',
-        verdict: 'holds',
-        evidence: 'src/feature.mjs',
-      }),
-    ),
-    summary: 'the record stands',
-  },
-});
+/** A record review seat that raises nothing. */
+const reviewClean = () => ({ report: { findings: [], summary: 'the record stands' } });
+
+/** The units a record brief names, as addresses: the id, the kind, the head. */
+function briefUnits(prompt) {
+  return [...prompt.matchAll(/^- (U\d+) \(line \d+(?:, (\w+))?\): (.+)$/gm)].map(
+    ([, id, kind, head]) => ({ id, kind, head }),
+  );
+}
 
 /**
- * A record review seat that raises two remarks on the one unit it fails, and
+ * A record review seat that raises two remarks on one unit of the record, and
  * nothing on any later read.
- *
- * Both name the same unit, which the report answers `fails`: a unit that fails
- * carries a finding and a unit that holds carries none (rules 7 and 8,
- * ADR-0073).
  */
 function reviewRemarks() {
   let read = 0;
   return ({ prompt }) => {
-    const units = [...prompt.matchAll(/^- (U\d+) \(line \d+(?:, (\w+))?\): (.+)$/gm)].map(
-      ([, id, kind, head]) => ({
-        record: ADR_FILE,
-        id,
-        kind: kind ?? kindTest(head) ?? 'rationale',
-        verdict: 'holds',
-        evidence: 'src/feature.mjs',
-      }),
-    );
     read += 1;
-    const target = units.find((u) => u.kind === 'claim');
+    const target = briefUnits(prompt).find((u) => u.kind === undefined);
     if (read > 1 || !target) {
-      return { report: { findings: [], units, summary: 'the record stands' } };
+      return { report: { findings: [], summary: 'the record stands' } };
     }
-    target.verdict = 'fails';
     const remark = (id, severity, summary) => ({
       id,
-      criterion: 'fact',
+      criterion: 'truth',
       severity,
       file: ADR_FILE,
       unit: target.id,
-      head: /^- U\d+ \(line \d+[^)]*\): (.+)$/m.exec(prompt)?.[1] ?? target.id,
+      head: target.head,
       line: 1,
       summary,
       evidence: 'src/feature.mjs',
@@ -804,7 +796,6 @@ function reviewRemarks() {
           remark('r1', 'MED', 'the record names the module loosely'),
           remark('r2', 'LOW', 'the record spells the helper two ways'),
         ],
-        units,
         summary: 'the record against the tree',
       },
     };
@@ -940,16 +931,14 @@ test('an owed judgment writes the records onto the run branch and one request ca
   assert.equal(fx.calls.filter((c) => c.seat === 'reconcile-write').length, 1);
 });
 
-test('a write that cannot be made ships the certified sha and leaves the ticket', async (t) => {
+test('a write that reaches outside the record tree is reverted, and the run ships', async (t) => {
   const fx = reconcileFixture(t, {
     seats: reconcileSeats(() => ({
       files: { 'src/sneaky.mjs': 'export const x = 1;\n' },
       report: {
         rewritten: [ADR_FILE],
         unchanged: [],
-        units: unitAnswers(ADR_FILE, ADR_TEXT),
-        divergences: NO_DIVERGENCE,
-        summary: 'wrote the wrong thing twice',
+        summary: 'wrote the wrong thing',
       },
     })),
   });
@@ -960,42 +949,30 @@ test('a write that cannot be made ships the certified sha and leaves the ticket'
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
 
-  // The corrective round is spent and no person was asked: the ship goes out.
-  assert.equal(fx.calls.filter((c) => c.seat === 'reconcile-write').length, 2);
-  assert.ok(
-    !events.some((e) => e.event === 'park' && e.detail?.seat?.startsWith('reconcile-write')),
-  );
-  const written = events.find((e) => e.event === 'reconciliation-written');
-  assert.equal(written.ok, false);
-  assert.equal(written.cause, 'work-product-defect');
-  // The boundary the checks hold: the seat wrote code, and the code is named.
-  const failure = events.find(
-    (e) => e.event === 'seat-failure' && e.seat.startsWith('reconcile-write'),
-  );
-  assert.match(
-    failure.defects.join('\n'),
-    /change outside the decision-record tree: src\/sneaky\.mjs/,
-  );
+  // One dispatch, no refusal and no park: a revert costs the seat no attempt
+  // where a refusal costs one (ADR-0080).
+  assert.equal(fx.calls.filter((c) => c.seat === 'reconcile-write').length, 1);
+  assert.ok(!events.some((e) => e.event === 'seat-refused'));
+  assert.deepEqual(events.filter((e) => e.event === 'park').map((e) => e.type), []);
+  const recapture = events.find((e) => e.event === 'diff-policy-recapture');
+  assert.equal(recapture.class, 'record-seat');
+  assert.deepEqual(recapture.recaptured, ['src/sneaky.mjs']);
 
-  // The tree that shipped is the tree the verdict certified.
-  const certified = events.filter((e) => e.event === 'verdict-rendered').pop();
-  assert.equal(events.find((e) => e.event === 'pr-opened').sha, certified.sha);
+  // The code never left the worktree, and the record the seat claimed and never
+  // wrote is dropped from the list with a note.
   assert.ok(!mainHolds(fx.origin, 'src/sneaky.mjs'));
   assert.equal(gitSync(['show', `main:${ADR_FILE}`], fx.origin), ADR_TEXT);
-  assert.equal(events.find((e) => e.event === 'merged').reconciled, undefined);
+  const written = events.find((e) => e.event === 'reconciliation-written');
+  assert.equal(written.ok, true);
+  assert.deepEqual(written.rewritten, []);
+  assert.deepEqual(written.dropped, [ADR_FILE]);
 
-  // The reconciliation stays owed, and the sweep derives it exactly as before.
+  // The record is still owed, so the close writes the ticket the sweep launches.
   const ticketed = events.filter((e) => e.event === 'reconciliation-judged').pop();
   assert.equal(ticketed.ticket, reconcileTicketPath(fx.paths, runId));
-  assert.equal(ticketed.cause, 'work-product-defect');
   const ticket = readFileSync(ticketed.ticket, 'utf8');
   assert.match(ticket, new RegExp(ADR_FILE.replaceAll('/', '\\/')));
-  assert.match(ticket, /merge commit: [0-9a-f]{7}/);
-  const owed = owedReconciliations(fx.paths, 'proj');
-  assert.equal(owed.length, 1);
-  // The ticket names decision records and nothing else, so the sweep launches
-  // it on the lane that holds no dev seat (ADR-0074).
-  assert.deepEqual(reconciliationLaunch(owed[0]), {
+  assert.deepEqual(reconciliationLaunch(owedReconciliations(fx.paths, 'proj')[0]), {
     project: 'proj',
     lane: 'records',
     ticket: ticketed.ticket,
@@ -1003,46 +980,206 @@ test('a write that cannot be made ships the certified sha and leaves the ticket'
   });
 });
 
-test('a crashed write seat parks, and ship-without-records ships the certified sha', async (t) => {
+test('a crashed write seat leaves its record unwritten, and the run merges', async (t) => {
   const fx = reconcileFixture(t, { seats: reconcileSeats(() => ({ exitCode: 3 })) });
   fx.forge.state.autoChecks = () => [running()];
   const runId = await fx.launch();
-  const park = await waitParked(fx.paths, runId, 'seat-failure');
-  assert.equal(park.detail.seat, 'reconcile-write:1');
-  assert.deepEqual(park.answers.options, ['retry', 'ship-without-records', 'abandon']);
-  assert.deepEqual(park.answers.reasoned, ['ship-without-records']);
-  assert.match(park.question, /the close writes the ticket/);
-  // The park holds no ship token: nothing else of the project waits on it.
-  assert.ok(!readEvents(runLedgerPath(fx.paths, runId)).some((e) => e.event === 'ship-token'));
-  fx.daemon.engine.answer({
-    runId,
-    actor: 'operator',
-    option: 'ship-without-records',
-    answer: 'the record tree moved under the seat; the ticket covers it',
-  });
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+
+  // No park at all: a record never blocks a lane (ADR-0080).
+  assert.deepEqual(events.filter((e) => e.event === 'park').map((e) => e.type), []);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The dispatch is stamped failed, and the ending names the cause.
+  const stamp = events.find((e) => e.event === 'record-written');
+  assert.equal(stamp.record, ADR_FILE);
+  assert.equal(stamp.failed, true);
+  const written = events.filter((e) => e.event === 'reconciliation-written').at(-1);
+  assert.equal(written.ok, false);
+  assert.equal(written.cause, 'seat-failure');
+  // The request body and the close stamp both name the record nobody wrote.
+  assert.match(fx.forge.state.bodies[0], /## Records not written/);
+  assert.match(fx.forge.state.bodies[0], new RegExp(ADR_FILE.replaceAll('/', '\\/')));
+  assert.deepEqual(events.find((e) => e.event === 'run-closed').unwritten, [ADR_FILE]);
+  // And the close writes the ticket the sweep launches for it.
+  assert.equal(owedReconciliations(fx.paths, 'proj').length, 1);
+});
+
+// Two runs that both rewrote one record is the shape a hub supersession makes.
+// The merge takes the default branch's version of the conflicted record, the
+// code ships, and the record rides the close under "Records not written". No
+// seat of this run can settle a document another run already merged, and the
+// dev seat may not touch a record at all (ADR-0074, ADR-0080).
+test('a record conflict at the merge drops the run own change and ships the code', async (t) => {
+  const fx = reconcileFixture(t, { seats: reconcileSeats() });
+  fx.forge.state.autoChecks = () => [running()];
+  fx.forge.state.conflictMode = true;
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  // The default branch gains its own rewrite of the same record.
+  const theirs = ADR_TEXT.replace(
+    'The module src/feature.mjs will double the input.',
+    'The module src/feature.mjs doubles every input it is given.',
+  );
+  commitTree(fx.origin, { [ADR_FILE]: theirs }, 'a competing rewrite of one record');
+  const update = await waitEvent(fx.paths, runId, (e) => e.event === 'branch-update', 'branch-update');
+  fx.forge.setChecks(update.toSha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+
+  // Nothing parked, no fresh pass, and no second stall. The lane is the story
+  // lane: it ships code beside the record it lost.
+  assert.equal(events.find((e) => e.event === 'run-launched').lane, 'story');
+  assert.deepEqual(events.filter((e) => e.event === 'park').map((e) => e.type), []);
+  assert.ok(!events.some((e) => e.event === 'fresh-pass'));
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The merge round resolved, and it names the record it dropped.
+  const round = events.find((e) => e.event === 'merge-round');
+  assert.equal(round.resolved, true);
+  assert.deepEqual(round.recordsDropped, [ADR_FILE]);
+  // No seat was asked to settle the document: the merge arm is gone.
+  const ship = readFileSync(join(import.meta.dirname, '..', 'src/lanes/ship.mjs'), 'utf8');
+  assert.ok(!ship.includes('recordConflictRole'), 'the record conflict seat is still there');
+  // The default branch keeps its own version, and the close names the record.
+  assert.equal(gitSync(['show', `main:${ADR_FILE}`], fx.origin), theirs);
+  assert.deepEqual(events.find((e) => e.event === 'run-closed').unwritten, [ADR_FILE]);
+  // The body a reader opens says what the close stamp says. The body the create
+  // wrote did not: the drop came after it (ADR-0080).
+  assert.equal(events.find((e) => e.event === 'pr-body-rewritten').edited, true);
+  assert.ok(!fx.forge.state.bodies[0].includes('## Records not written'));
+  assert.match(fx.forge.state.edits.at(-1).body, /## Records not written/);
+  assert.match(fx.forge.state.edits.at(-1).body, new RegExp(ADR_FILE.replaceAll('/', '\\/')));
+});
+
+/** A record review seat that raises one HIGH on every read it makes. */
+function reviewStanding() {
+  return ({ prompt }) => {
+    const target = briefUnits(prompt).find((u) => u.kind === undefined);
+    if (!target) return { report: { findings: [], summary: 'the record stands' } };
+    return {
+      report: {
+        findings: [
+          {
+            id: 'r1',
+            criterion: 'truth',
+            severity: 'HIGH',
+            file: ADR_FILE,
+            unit: target.id,
+            head: target.head,
+            line: 1,
+            summary: 'the record claims a doubling the tree does not hold',
+            evidence: 'src/feature.mjs',
+          },
+        ],
+        summary: 'the record against the tree',
+      },
+    };
+  };
+}
+
+// A ticket launches a run to write a record. A record this run wrote takes
+// none, whatever the round behind it ended in: the stall's own stamp says the
+// cap is spent and says nothing about which records a round wrote (ADR-0080).
+test('a record the round wrote takes no ticket at the cap, and its finding rides the close', async (t) => {
+  const fx = reconcileFixture(t, { seats: reconcileSeats(writeClean, reviewStanding()) });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
   const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
   fx.forge.setChecks(opened.sha, [green()]);
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
-  assert.equal(events.find((e) => e.event === 'reconciliation-written').cause, 'operator');
-  assert.equal(events.filter((e) => e.event === 'reconciliation-judged').pop().cause, 'operator');
-  assert.equal(owedReconciliations(fx.paths, 'proj').length, 1);
+
+  // The cap is spent and the newest write stamp is the fallback.
+  assert.ok(events.some((e) => e.event === 'reconcile-stall'));
+  const written = events.filter((e) => e.event === 'reconciliation-written');
+  assert.equal(written.at(-1).ok, false);
+  assert.equal(written.at(-1).cause, 'record-cap');
+  assert.deepEqual(written[0].rewritten, [ADR_FILE]);
+
+  // No ticket, and nothing for the sweep to launch.
+  assert.ok(!existsSync(reconcileTicketPath(fx.paths, runId)));
+  assert.deepEqual(owedReconciliations(fx.paths, 'proj'), []);
+  // The finding that still stands rides the request body and the close stamp.
+  const closed = events.find((e) => e.event === 'run-closed');
+  assert.equal(closed.unwritten, undefined);
+  assert.ok(closed.remarks.length > 0);
+  assert.match(fx.forge.state.bodies[0], /## Findings not answered/);
+});
+
+/** A records-lane run over the one record the fixture repo carries. */
+function recordsLaneFixture(t, { seats } = {}) {
+  return shipFixture(t, {
+    files: {
+      [ADR_FILE]: ADR_TEXT,
+      'tickets/records.md': [
+        '# Reconciliation ticket',
+        '',
+        '## Records to reconcile',
+        '',
+        `- ${ADR_FILE}`,
+        '',
+        '```paths',
+        ADR_FILE,
+        '```',
+        '',
+      ].join('\n'),
+    },
+    config: { repo: { testPaths: ['tests'], recordPaths: ['docs/adr'] } },
+    seats,
+  });
+}
+
+// The records lane's whole diff is its records. A conflict on the one record it
+// wrote leaves the run's own change nowhere, so the merge carries an empty
+// change: the request still opens and merges, the default branch keeps its own
+// version, and the close names the record the run lost (ADR-0080).
+test('a records-lane conflict on its only record merges an empty change and names it', async (t) => {
+  const fx = recordsLaneFixture(t, {
+    seats: {
+      'record-author': () => ({
+        files: { [ADR_FILE]: ADR_REWRITTEN },
+        report: { rewritten: [ADR_FILE], unchanged: [], summary: 'the record states what stands' },
+      }),
+      'record-review': reviewClean,
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  fx.forge.state.conflictMode = true;
+  const runId = await fx.launch({ lane: 'records', ticket: 'tickets/records.md', card: undefined });
+  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  // The default branch gains its own rewrite of the same record.
+  const theirs = ADR_TEXT.replace(
+    'The module src/feature.mjs will double the input.',
+    'The module src/feature.mjs doubles every input it is given.',
+  );
+  commitTree(fx.origin, { [ADR_FILE]: theirs }, 'a competing rewrite of one record');
+  const update = await waitEvent(fx.paths, runId, (e) => e.event === 'branch-update', 'branch-update');
+  fx.forge.setChecks(update.toSha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+
+  // No park, no seat asked to settle the document, and the run merged.
+  assert.deepEqual(events.filter((e) => e.event === 'park').map((e) => e.type), []);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.filter((e) => e.event === 'merged').length, 1);
+  const round = events.find((e) => e.event === 'merge-round');
+  assert.equal(round.resolved, true);
+  assert.deepEqual(round.recordsDropped, [ADR_FILE]);
+  // The default branch keeps its own version, and the close names the record.
+  assert.equal(gitSync(['show', `main:${ADR_FILE}`], fx.origin), theirs);
+  assert.deepEqual(events.find((e) => e.event === 'run-closed').unwritten, [ADR_FILE]);
+  // The body a reader opens says the same thing the close stamp says.
+  const rewritten = events.find((e) => e.event === 'pr-body-rewritten');
+  assert.equal(rewritten.edited, true);
+  assert.match(fx.forge.state.edits.at(-1).body, /## Records not written/);
+  assert.match(fx.forge.state.edits.at(-1).body, new RegExp(ADR_FILE.replaceAll('/', '\\/')));
 });
 
 test('a ticket the close cannot write is loud, and the kind names it', async (t) => {
   const fx = reconcileFixture(t, { seats: reconcileSeats(() => ({ exitCode: 3 })) });
   fx.forge.state.autoChecks = () => [running()];
   const runId = await fx.launch();
-  const park = await waitParked(fx.paths, runId, 'seat-failure');
-  assert.equal(park.detail.seat, 'reconcile-write:1');
   // The ticket path is taken by something the close cannot write over.
   mkdirSync(reconcileTicketPath(fx.paths, runId), { recursive: true });
-  fx.daemon.engine.answer({
-    runId,
-    actor: 'operator',
-    option: 'ship-without-records',
-    answer: 'the records are owed and the ticket is the route',
-  });
   const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
   fx.forge.setChecks(opened.sha, [green()]);
   const events = await waitClosed(fx.paths, runId);
@@ -2117,43 +2254,6 @@ test('textual conflicts take the merge round; test hunks go to the suite seat', 
     conflictCall.denyTools.some((rule) => rule.includes('docs/adr')),
     'the merge-conflict dev seat could reach the record tree',
   );
-});
-
-// A conflict on a record file is the record writer's work. The dev seat may not
-// touch a record in any lane, so a route that sent this one there would leave
-// the markers in the file and stall the merge (ADR-0074).
-test('a record conflict takes the record writer, and no dev seat sees it', async (t) => {
-  const fx = shipFixture(t, {
-    files: { [ADR_FILE]: ADR_TEXT },
-    seats: {
-      ...reconcileSeats(),
-      // The merge-conflict dispatch resolves the markers and reports a summary,
-      // which is the dev seat's shape: this is a merge, not a reconciliation.
-      'reconcile-write': ({ prompt }) =>
-        prompt.includes('conflicts in decision records')
-          ? { files: { [ADR_FILE]: ADR_REWRITTEN }, report: { summary: 'the record is merged' } }
-          : writeClean(),
-    },
-  });
-  fx.forge.state.autoChecks = () => [running()];
-  const runId = await fx.launch();
-  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
-  // Main moves the same record the run rewrote: the merge conflicts on it.
-  commitTree(fx.origin, { [ADR_FILE]: `${ADR_TEXT}\nMain states it its own way.\n` }, 'records: main');
-  const round = await waitEvent(fx.paths, runId, (e) => e.event === 'merge-round', 'merge-round');
-  assert.equal(round.resolved, true);
-  assert.deepEqual(round.conflicts, [ADR_FILE]);
-  fx.forge.setChecks(round.sha, [green()]);
-  const events = await waitClosed(fx.paths, runId);
-  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
-  // The seat that resolved it is the record writer, under its own slot, and no
-  // dev seat was dispatched for the conflict at all.
-  const merge = fx.calls.find((c) => c.prompt.includes('conflicts in decision records'));
-  assert.equal(merge.seat, 'reconcile-write');
-  assert.match(merge.named, /^reconcile-write:\d+$/);
-  assert.ok(!fx.calls.some((c) => c.seat === 'dev' && c.prompt.includes('textual conflicts')));
-  // The brief states the one rule the merge cannot break.
-  assert.match(merge.prompt, /An accepted record is never edited away/);
 });
 
 test('an admin merge over red checks is a breach: ticket, stamp, enqueue', async (t) => {
@@ -4945,193 +5045,3 @@ function runWithLedger(t, lines = []) {
   for (const line of lines) store.append(line.event, { actor: 'daemon', ...line.fields });
   return { paths, runId, store, events: () => readEvents(runLedgerPath(paths, runId)) };
 }
-
-test('a cap ticket the move already carried is stamped, and moved no second time', (t) => {
-  const ctx = runWithLedger(t);
-  const ticket = reconcileTicketPath(ctx.paths, ctx.runId);
-  const absorbed = absorbedTicketPath(ctx.paths, ticket);
-  const ticketed = { seq: 1, event: 'reconciliation-judged', ticket, records: [ADR_FILE] };
-  const bought = { seq: 2, event: 'reconcile-cap-extended', rounds: 1, cap: 2 };
-
-  // The ordinary move: the ticket is where the cap wrote it.
-  mkdirSync(dirname(ticket), { recursive: true });
-  writeFileSync(ticket, '# the cap ticket\n');
-  absorbCapTicket(ctx, [ticketed, bought], ticketed);
-  assert.equal(existsSync(ticket), false);
-  assert.equal(readFileSync(absorbed, 'utf8'), '# the cap ticket\n');
-  const first = ctx.events().at(-1);
-  assert.equal(first.owed, false);
-  assert.equal(first.absorbed, absorbed);
-  assert.equal(first.cause, undefined);
-
-  // The restart shape: a stop between the move and its stamp leaves the ticket
-  // where the move put it. The close-out that comes back stamps the absorption
-  // and moves nothing, rather than recording a failed move that succeeded.
-  absorbCapTicket(ctx, [ticketed, bought], ticketed);
-  const second = ctx.events().at(-1);
-  assert.equal(second.absorbed, absorbed);
-  assert.equal(second.cause, undefined);
-  assert.equal(readFileSync(absorbed, 'utf8'), '# the cap ticket\n');
-
-  // A ticket that is nowhere is a move that failed, and the stamp says so.
-  rmSync(absorbed, { force: true });
-  absorbCapTicket(ctx, [ticketed, bought], ticketed);
-  const third = ctx.events().at(-1);
-  assert.equal(third.absorbed, undefined);
-  assert.match(third.cause, /the cap ticket could not be moved/);
-
-  // A run that bought no round leaves the ticket and stamps nothing.
-  const quiet = runWithLedger(t);
-  absorbCapTicket(quiet, [ticketed], ticketed);
-  assert.deepEqual(quiet.events(), []);
-});
-
-test('a records-lane CI red on a record layer routes to the stage, and a code red parks', () => {
-  const base = { mode: 'records', recordLayers: ['adr-form'] };
-  const opened = { pr: 7 };
-  const sha = 'a'.repeat(40);
-
-  // Every failed check is a record layer: the stage answers its own red, and
-  // the render carries the layer in the open set.
-  const record = stamping();
-  const directive = recordsLaneCiRed(record, base, opened, sha, [{ name: 'adr-form' }]);
-  assert.deepEqual(directive, { next: 'reconcile' });
-  const rendered = record.events.find((e) => e.event === 'reconcile-rendered');
-  assert.equal(rendered.verdict, 'red');
-  assert.equal(rendered.source, 'ci');
-  assert.equal(rendered.sha, sha);
-  assert.deepEqual(rendered.open, ['adr-form']);
-  assert.deepEqual(rendered.layers, [{ layer: 'adr-form', status: 'red' }]);
-  assert.deepEqual(rendered.records, []);
-
-  // One check that is not a record layer is a code defect this lane holds no
-  // seat for, so it parks with the names.
-  const code = stamping();
-  const park = recordsLaneCiRed(code, base, opened, sha, [
-    { name: 'adr-form' },
-    { name: 'unit' },
-  ]);
-  assert.equal(park.park.type, 'ci-red');
-  assert.match(park.park.question, /red on unit/);
-  assert.deepEqual(park.park.detail.checks, ['adr-form', 'unit']);
-  assert.ok(!code.events.some((e) => e.event === 'reconcile-rendered'));
-  // A project that names no record layer has no record red at all.
-  const none = stamping();
-  assert.equal(
-    recordsLaneCiRed(none, { mode: 'records', recordLayers: [] }, opened, sha, [{ name: 'ci' }])
-      .park.type,
-    'ci-red',
-  );
-});
-
-test('a records-lane CI red carries the whole set the last render stood over', (t) => {
-  const kept = 'docs/adr/adr-0002-kept.md';
-  const ctx = runWithLedger(t, [
-    {
-      event: 'reconcile-rendered',
-      fields: {
-        cycle: 1,
-        sha: 'a'.repeat(40),
-        verdict: 'green',
-        open: [],
-        records: [ADR_FILE],
-        kept: [kept],
-      },
-    },
-  ]);
-  const directive = recordsLaneCiRed(
-    ctx,
-    { mode: 'records', recordLayers: ['adr-form'] },
-    { pr: 7 },
-    'b'.repeat(40),
-    [{ name: 'adr-form' }],
-  );
-  assert.deepEqual(directive, { next: 'reconcile' });
-  // The render CI earns is the whole set the last one stood over: what a seat
-  // read, and what its last green review answers for (ADR-0079).
-  const rendered = ctx.events().filter((e) => e.event === 'reconcile-rendered').at(-1);
-  assert.equal(rendered.source, 'ci');
-  assert.deepEqual(rendered.records, [ADR_FILE]);
-  assert.deepEqual(rendered.kept, [kept]);
-});
-
-test('a records-lane update over an uncertified tree goes to the stage that certifies it', () => {
-  // The update stage's own route, on the base that did not move. A tree no
-  // certification covers is certified again before the request opens, and the
-  // stage that certifies it is the lane's. The records lane holds no verdict
-  // stage, so a route that named the verdict would hand the run to a stage its
-  // graph never registered (ADR-0075).
-  assert.equal(certifyingStage({ mode: 'records' }), 'reconcile');
-  assert.equal(certifyingStage({ mode: 'story' }), 'verdict');
-  assert.equal(certifyingStage({ mode: 'repair' }), 'verdict');
-  // A base with no mode at all is a code lane: the field arrives from the lane
-  // base, and a reader that guessed `records` would divert every other lane.
-  assert.equal(certifyingStage({}), 'verdict');
-
-  // The ledger that takes the route: a records-lane run whose record tree is
-  // red at the record commit's own sha certifies nothing, so the update sends
-  // it back to the stage.
-  const event = (seq, name, extra = {}) => ({ seq, event: name, ...extra });
-  const RECORDS = 'r'.repeat(40);
-  const base = { mode: 'records' };
-  const red = [
-    event(1, 'reconcile-rendered', { cycle: 1, sha: RECORDS, verdict: 'red', open: ['F1'] }),
-  ];
-  assert.equal(admitted(red, base), false);
-  assert.deepEqual(certifiedTrees(red, base), {
-    code: null,
-    records: { sha: RECORDS, ok: false },
-  });
-  // The token goes back with the reason that names the stage, and the resume
-  // rule at the top of the handler reads the same stage off it.
-  assert.equal(
-    releasedForVerdict([event(2, 'ship-token', { state: 'released', reason: 're-reconcile' })]),
-    'reconcile',
-  );
-  // A green render at the record commit certifies the tree, and the same run
-  // opens its request instead.
-  const green = [
-    event(1, 'reconcile-rendered', { cycle: 1, sha: RECORDS, verdict: 'green', open: [] }),
-  ];
-  assert.equal(admitted(green, base), true);
-});
-
-test('a records-lane tree with no record certification is refused, and the park names it', () => {
-  // A null record certification says the lane owes no reconciliation. On every
-  // lane that certifies code that is what it says. The records lane certifies
-  // nothing else, so null there is a tree no stage read (ADR-0077).
-  const event = (seq, name, extra = {}) => ({ seq, event: name, ...extra });
-  const RECORDS = 'r'.repeat(40);
-  const base = { mode: 'records' };
-  assert.equal(unjudgedRecords([], base), true);
-  assert.equal(admitted([], base), false);
-  assert.deepEqual(certifiedTrees([], base), { code: null, records: null });
-  // The other lanes read a null the way they always did.
-  assert.equal(unjudgedRecords([], { mode: 'story' }), false);
-  assert.equal(admitted([], { mode: 'story' }), true);
-  assert.equal(unjudgedRecords([], { mode: 'repair' }), false);
-  assert.equal(unjudgedRecords([], {}), false);
-  // A render of either verdict is a certification, and the gate reads the
-  // verdict on it rather than the absence.
-  const green = [
-    event(1, 'reconcile-rendered', { cycle: 1, sha: RECORDS, verdict: 'green', open: [] }),
-  ];
-  assert.equal(unjudgedRecords(green, base), false);
-  assert.equal(admitted(green, base), true);
-  const red = [
-    event(1, 'reconcile-rendered', { cycle: 1, sha: RECORDS, verdict: 'red', open: ['F1'] }),
-  ];
-  assert.equal(unjudgedRecords(red, base), false);
-  assert.equal(admitted(red, base), false);
-  // The refusal is a park a person answers, and it names the render that is
-  // missing. The route back to the stage would meet a stage that already
-  // answered, so this one stops instead.
-  const { park } = blocked(stamping(), 'records-uncertified', UNJUDGED_RECORDS_QUESTION);
-  assert.equal(park.type, 'stage-blocked');
-  assert.equal(park.reason, 'records-uncertified');
-  assert.match(park.question, /reconcile-rendered/);
-  // The site names `retry`; the abandon rides every run park at the engine
-  // (ADR-0029).
-  assert.deepEqual(park.options, ['retry']);
-  assert.deepEqual(runParkForms(park).options, ['retry', 'abandon']);
-});

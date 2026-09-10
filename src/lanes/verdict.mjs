@@ -384,6 +384,9 @@ async function ticketRecords(ctx, base) {
     ctx,
     recordBase({
       ...base,
+      // The lane this birth stands on. A spent ladder here leaves the run its
+      // code and its judge, so the run goes on to its freeze (ADR-0080).
+      mode: 'repair',
       key: ctx.runId,
       spec: {
         key: ctx.runId,

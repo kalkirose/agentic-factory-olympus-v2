@@ -305,11 +305,18 @@ function seatScript({ reportPath, model, report, files = {}, exitCode = 0, envCa
 
 function seatFixture(seats) {
   const calls = [];
+  // The corrective prompt of an invalid report names no seat: it is the same
+  // seat session, told what its report failed.
+  let last = null;
   const commandFor = (opts) => {
-    const seat = /You are the (\S+) seat/.exec(opts.prompt)[1];
+    const seat = /You are the (\S+) seat/.exec(opts.prompt)?.[1] ?? last;
+    last = seat;
     const lines = opts.prompt.split('\n');
     const contract = lines.findIndex((l) => l.includes('write your JSON report to this file'));
-    const reportPath = lines[contract + 1];
+    const reportPath =
+      contract === -1
+        ? /report to the same file, then stop: (.+)$/m.exec(opts.prompt)[1].trim()
+        : lines[contract + 1];
     const label = basename(reportPath, '.json');
     calls.push({ seat, label, attempt: opts.attempt, prompt: opts.prompt, denyTools: opts.denyTools });
     const behavior = seats[seat];
@@ -330,8 +337,6 @@ function seatFixture(seats) {
 const NO_RECORD_DECIDED = {
   rewritten: [],
   unchanged: [],
-  units: [],
-  divergences: [],
   summary: 'the specification decides no record the tree does not hold',
 };
 

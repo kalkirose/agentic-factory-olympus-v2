@@ -1,6 +1,6 @@
 # ADR-0073: Enumerate every unit of a record and answer it by id
 
-Status: accepted (2026-09-07, the reference kind 2026-09-10)
+Status: superseded by ADR-0080 (2026-09-10)
 
 ## Context
 

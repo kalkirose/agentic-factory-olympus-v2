@@ -32,46 +32,37 @@ branch moves once per shipped story.
   the run worktree, in fresh context, once per judged record, in sequence. Its
   brief states the record criteria from the registry, verbatim, because those are
   the criteria the review reads its work against (ADR-0038); beside them it
-  states the unit duty (ADR-0073), the neighbourhood by path, the lifecycle rule,
-  that the divergence goes in the report as well as in the record, and that
-  nothing outside the record tree is edited. The seat reports the records it
-  rewrote, the records it left alone with the reason for each, one divergence
-  entry per judged record, and one entry per unit.
-- **The write is contained by checks.** `writeChecks` in `src/lanes/records.mjs`
-  runs on the lane contract loop, before any commit: every changed file sits
-  under the directory of a judged record, every judged record is accounted for
-  once, every record the seat calls rewritten really changed, every judged record
-  has exactly one divergence entry, and every entry the seat marks `named`
-  carries a statement the record file holds. The unit checks, the supersede
-  checks and the sibling checks run beside them. `reconciliation-written` records
-  the outcome, the declaration and one entry per record with its seat, cost,
-  attempts and units answered.
-- **The divergence declaration is proved against the files.** Each entry names a
-  judged record, the word `none` or `named`, a statement, and the evidence. For
-  `named` the statement is the sentence the seat wrote into the record, and the
-  check finds that sentence in the file. Records wrap at 80 columns, so the
-  comparison normalises whitespace on both sides: every run of whitespace, line
-  breaks included, reads as one space. For `none` the statement is the seat's
-  one-sentence reason it found no divergence. What no check can see is a
-  divergence nobody named, and the review judges that under its `divergence`
-  criterion.
+  states, as prose, the neighbourhood by path, the lifecycle rule, the project's
+  own form gate command, the duty to check every present-tense sentence against
+  the tree and to name every divergence in the record, and that nothing outside
+  the record tree is edited. The seat reports the records it rewrote and the
+  records it left alone with the reason for each, and no reading of its own
+  sentences (ADR-0080).
+- **Two readings of what the write left, and neither refuses.** `writeChecks` in
+  `src/lanes/records.mjs` reverts a changed file outside the record tree and
+  stamps it, because a record run must not ship code and a revert costs no
+  attempt; and it drops a record the report calls rewritten that the tree did not
+  change, with the note on the stamp. `reconciliation-written` records the
+  outcome and one entry per record with its seat, cost and attempts.
 - **The record set is the pass's whole record diff.** `recordScope(worktree,
-  from, to, recordPaths, {lifecycle})` in `src/lanes/records.mjs` reads the
-  record files changed in a range. The range opens at the pass's own opening sha
-  and ends at the sha the stage judges, so every record the pass has touched is
-  read on every cycle until the stage is green. Under the supersede lifecycle a
-  closed record leaves the scope. The code review's file list holds no record
-  path: a record is judged in this stage and nowhere else.
+  recordPaths, {lifecycle, defaultBranch})` in `src/lanes/records.mjs` reads the
+  record files the run changed through the window: the merge base of the run
+  branch and the default branch, computed at the read. Every record the pass has
+  touched is read on every cycle until the stage is green. Under the supersede
+  lifecycle a closed record leaves the scope. The code review's file list holds
+  no record path: a record is judged in this stage and nowhere else.
 - **A record is reviewed by a seat of its own, and no seat is given a diff.**
   `recordReviewRound` in `src/lanes/review.mjs` fans out one `record-review:<n>`
   per record file, in parallel, as the Fury panel fans out per lens. Each brief
-  carries the record path, the harness's unit list, the criteria under
-  `RECORD_RULE`, the spec or ticket, the neighbourhood by path with the count
-  above the cap, and the unit heads this round moved. It carries no diff text.
-  Each seat runs under the unit checks, so a report that leaves a unit unanswered
-  reaches no verifier. A `consistent` finding that names one record is a
-  work-product defect rather than a finding, and so is a finding on a superseded
-  or retired record where the project runs the supersede lifecycle.
+  carries the record path, the harness's unit list as the addresses a finding
+  names, the criteria under `RECORD_RULE`, the spec or ticket, the neighbourhood
+  by path with the count above the cap, and the unit heads this round moved. It
+  carries no diff text. The seat answers with findings and nothing else. Two
+  findings are work-product defects rather than findings, and the seat corrects
+  them in its own attempt: a `consistent` finding that names one record, and a
+  finding on a superseded or retired record where the project runs the supersede
+  lifecycle. A seat that could not deliver leaves its record `unreviewed` for
+  this cycle and parks nothing (ADR-0080).
 - **`repo.recordPaths` names the record tree.** It is an optional list of path
   entries in the project config, in the vocabulary of `repo.testPaths` and
   `repo.uiPaths`, and it defaults to `['docs/adr']`. An entry may carry an `!`
@@ -89,17 +80,19 @@ branch moves once per shipped story.
   call `repair-dev`: that seat implemented the code, and the context that
   implemented the work never reconciles the records against it. The stage
   dispatches `reconcile-write:<n>` again instead, per record, with the open
-  findings and the standing divergence declaration. The corrective report carries
-  `answered`, the finding ids it answered. The round stamps `reconcile-round` and
-  counts against `gates.reconcileRounds`, default 5. The verdict's own repair cap
+  findings and the remarks that record holds. The corrective report carries
+  `answered`, the finding ids it answered, each with the reason where the writer
+  disputes it. The round stamps `reconcile-round` and counts against
+  `gates.reconcileRounds`, default 1 (ADR-0080). The verdict's own repair cap
   never reads these rounds.
 - **A stall at the cap takes the fallback, and asks nobody.**
   `reconciliation-written` carries `ok: false` with a cause from the closed set
-  `record-cap`, `operator` and `work-product-defect`. The cap fallback carries
-  `partial: true` and `residual`, the ids of the confirmed record findings still
-  open, and the record commit ships: the judge found the old records owed, and
-  discarding the rewrite would ship those. `reconcile-stall` is a loud item, and
-  the routes behind the fallback are ADR-0075.
+  `record-cap`, `seat-failure`, `operator` and `work-product-defect`. The cap
+  fallback carries `partial: true` and `residual`, the ids of the confirmed
+  record findings still open, and the record commit ships on every lane: the
+  judge found the old records owed, and discarding the rewrite would ship those.
+  `reconcile-stall` is a loud item, and the routes behind the fallback are
+  ADR-0075 and ADR-0080.
 - **The ship needs a green over the records.** `certifiedTrees` reads two
   certifications, each at its own sha, and the admission gate requires both the
   lane holds. A tree that opens a request is a tree a verdict certified and a
@@ -107,24 +100,21 @@ branch moves once per shipped story.
 - **The stage is in front of the token.** The judgment, the writes and the
   cycles all run before the run queues for the ship token, so none of them holds
   another run of the project out of its merge.
-- **A write nobody can make never costs the run its code.** A work-product defect
-  past its corrective round takes the fallback with no person asked, on both the
-  first write and a corrective one. A seat that never delivered a report parks
-  `seat-failure` offering `retry`, `ship-without-records` and `abandon`;
-  `ship-without-records` takes the same fallback and requires the operator's
-  reason (ADR-0062).
-- **The close writes the ticket for records that did not ride.** The close-out
-  judges nothing. Where the run was judged owed and the records did not ride the
-  merge whole, it writes `tickets/reconcile-<runId>.md` naming the merge commit,
-  the judged records and the rewrite rules, then stamps a second
-  `reconciliation-judged` line carrying the ticket and the cause. Where the
-  records rode the merge with a residual, the ticket carries those findings
-  alone: each id, criterion, text, evidence and verifier confirmation, and the
-  record it is about. The ticket before the stamp: a stamped ticket always exists
-  to launch from (ADR-0024's ordering). The rule reads the ledger and not the
-  route, so it covers every way the records could have been lost. A ticket the
-  close cannot write stamps `gate-integrity` under the `reconciliation-lost`
-  defect kind: loud, and owned by a person.
+- **A write nobody can make never costs the run its code, and never asks
+  anybody.** A dispatch that fails stamps `record-written {failed: true}` and the
+  round goes on to the next record. The render carries `unwritten:<record>` until
+  a round writes it, and the run's own ending names it (ADR-0080).
+- **The close writes the ticket for a record no round wrote.** The close-out
+  judges nothing. Where the judge owed a record and no round wrote it, it writes
+  `tickets/reconcile-<runId>.md` naming the merge commit, that record and the
+  rewrite rules, then stamps a second `reconciliation-judged` line carrying the
+  ticket and the cause. A confirmed finding that stands on a record this run did
+  write buys no ticket: the record shipped, and the finding rides the request
+  body and the close stamp (ADR-0080). The ticket before the stamp: a stamped
+  ticket always exists to launch from (ADR-0024's ordering). The rule reads the
+  ledger and not the route, so it covers every way the records could have been
+  lost. A ticket the close cannot write stamps `gate-integrity` under the
+  `reconciliation-lost` defect kind: loud, and owned by a person.
 - **The sweep launches the ticketed ones on the records lane.** The owed set
   derives at every sweep from the run ledgers alone: shipped story runs whose
   judgment carries a ticket, minus the ships some reconciliation run's launch
@@ -181,22 +171,19 @@ blocks a ship they are a source of wrong blocks.
 
 The answer is not a better instruction to the same lenses. It is to stop asking
 them, and to give the record a seat that reads nothing else. The record criteria
-carry one rule and seven criteria under it, and together they are the whole of
+carry one rule and three criteria under it, and together they are the whole of
 what a record is held to. The rule is that a record never conflicts with the
 code: everything it states is either true of the tree now, or marked as not yet
-built, and a sentence that states why is rationale and is neither. The criteria
-divide that rule into what a seat can judge: the implemented parts read as
-standalone fact, every present-tense claim is true against the tree, a part the
-tree does not implement is stated as not implemented, a divergence is named and
-never absorbed, every name and path and symbol the record cites exists, the
-record reads as one document rather than a trail of amendments, and no open part
-of it contradicts an open part of an active neighbour.
+built, and a sentence that states why is rationale and is neither. `truth`
+divides that rule into what a seat can judge over one record: every
+present-tense claim is true against the tree, a part the tree does not hold is
+stated as not built, a divergence is named and never absorbed, and every name
+the record cites means what the record says it means. `consistent` holds it
+against the neighbours. `form` is what the project's own gate cannot read.
 
-The criterion is load-bearing for the same reason. The verifier is briefed with
-the criterion the finding cites and with the list it comes from, and it refutes a
-finding whose evidence does not reach that criterion. A finding that cites
-`whole` or `fact` and names no sentence of the record is refuted for want of
-evidence. Taste is not a criterion.
+The criterion is load-bearing for the same reason. A finding that names no
+sentence of the record reaches nothing a writer can answer, and the brief says
+so. Taste is not a criterion.
 
 ## Why the review reads the record and not the hunks
 
@@ -219,34 +206,26 @@ Each cycle found the layer the round before it had just moved, because the diff
 it was given was the previous round's change. That is the shape of a review
 whose scope is the last edit rather than the document. Widening the diff does
 not answer it: the whole record was never in any diff. So the file is the scope,
-the harness's own unit list says what to answer, one line names the units this
-round moved, and the seat is given no diff at all.
+the harness's own unit list gives the sentences their addresses, one line names
+the units this round moved, and the seat is given no diff at all.
 
 The code lenses keep the opposite rule, and keep it for the same reason. A code
 diff is the work, and a seat that widens into the repository around it reports
 on decisions nobody made this time. A record is not the work: it is a statement
 about the work, and the statement is judged whole.
 
-The verifier reads the record too. It is the seat that answers whether a record
-and a tree disagree, and a finding it refuted for citing a sentence outside the
-diff would refuse exactly the work this scope exists to buy. Its item line quotes
-the unit head off the finding, so it opens at the sentence under judgment.
-
-## Why half the divergence rule is mechanical and half is not
+## Why the divergence rule is the writer's and the review's
 
 The rule "a divergence is never absorbed silently" was carried in two briefs and
 enforced nowhere. A live reconciliation named three divergences in its report and
 absorbed a fourth; the review caught the one it dropped, and nothing turned that
 catch into work.
 
-The half a check can see is whether the sentence the seat says it wrote is in the
-file. That is now the declaration and the check over it, and a statement that is
-not in the record buys a corrective round.
-
-The half no check can see is whether a divergence exists that nobody wrote a
-sentence about. No check can find a sentence nobody wrote. That is the review
-seat's work under the `divergence` criterion, and the whole of the record rule is
-that its answer now blocks.
+A declaration in the report and a check over it looked mechanical and was not: it
+proved that a sentence the seat named is in the file, which the seat could always
+satisfy, and it never saw a divergence nobody wrote about. The rule is now one
+line of every write brief and one clause of the `truth` criterion, and the review
+seat is what finds a divergence the writer absorbed (ADR-0080).
 
 ## Why the cap fallback keeps the record commit
 

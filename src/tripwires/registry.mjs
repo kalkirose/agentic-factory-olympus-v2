@@ -510,8 +510,8 @@ export function standingTripwires() {
       breach: { op: '>', value: 2 },
       answer:
         'read the findings of the second and third cycles: a reconciliation ' +
-        'that needs more than two is a record brief or a unit check that is ' +
-        'not asking for what the review then finds',
+        'that needs more than two is a record brief that is not asking for ' +
+        'what the review then finds',
     },
     {
       id: 'record-write-time',

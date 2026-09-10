@@ -6,6 +6,13 @@ generically. Work the milestones in order — each one depends on the ones
 above it. Update the status line and the session log in the same commit as
 the work.
 
+This repository is public and every file in it is generic. A rule states what
+it is and why it is that, and never how many times a private run met the
+condition behind it: a count of runs nobody outside can read is evidence a
+reader cannot check, and it dates the sentence that carries it. The measured
+evidence stays in the design outside this repository, and what stands here is
+the rule and its reason.
+
 Status: `open` · `in progress` · `done`
 
 ## M0 — Foundation — done
@@ -791,3 +798,29 @@ never carries a project's specifics.
   beside the dispatched ones. A cap ticket whose work later ships leaves the
   tickets directory for `tickets/absorbed`. ADR-0079 is new and supersedes
   ADR-0078 in part.
+- 2026-09-10: a decision record is judged as a document. The harness held four
+  readers of one record, and every mirror disagreed with the project's form gate
+  somewhere: twenty-eight of thirty-one refusals were on records the gate
+  accepted. The unit contract, the verb list, the tokenizer, the lifecycle
+  mirror and the sibling mechanism are gone. The project gate reads the form,
+  one review seat reads the truth, and the harness reads the ledger.
+  `writeChecks` makes two readings and refuses nothing: a write outside the
+  record tree is reverted and stamped under the `record-seat` class, and a
+  record the report calls rewritten that the tree did not change is dropped with
+  a note. The briefs keep every writing direction as prose and lose the tables,
+  and a record does not cite the standard. `RECORD_CRITERIA` holds three keys.
+  The records lane spawns no judge, and no record round spawns a verifier: a
+  HIGH is confirmed as its reviewer raised it, and a writer that finds the
+  record right disputes the finding in its report. `DEFAULT_RECONCILE_ROUNDS` is
+  one. Nothing blocks a run on a record: a failed write leaves the record
+  unwritten, a failed review leaves it unreviewed, a record conflict at a merge
+  takes the default branch's version, a spent birth ladder lets the story lane
+  go on to its freeze, and every lane ends at the cap in a push and a merge with
+  the standing findings and the unwritten and unreviewed records named in the
+  request body and on `run-closed`. `record-written`, `record-reviewed` and
+  `record-unreviewed` enter the registry; `record-units`,
+  `reconcile-cap-extended` and the `reconcile-cap` park leave it. The readiness
+  stage runs what the record gate needs, so the seat can run the gate it is told
+  to run. ADR-0080 is new and supersedes ADR-0073, ADR-0077, ADR-0078 and
+  ADR-0079; ADR-0005, ADR-0007, ADR-0026, ADR-0038, ADR-0066, ADR-0070 and
+  ADR-0075 are rewritten around it.

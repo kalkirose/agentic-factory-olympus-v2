@@ -691,19 +691,22 @@ function renderRecords(box, r) {
   tiles.appendChild(tile("Record cycles", fmtNum(r.cycles.mean, 1), null,
     sub([r.cycles.reconciliations + " reconciliations · worst " + (r.cycles.worst ?? "—")]),
     "Mean cycles per reconciliation. A re-run and a recheck each count as a stage run of their own."));
-  tiles.appendChild(tile("Writer miss rate", fmtShare(r.writerMiss.rate), null,
-    sub([r.writerMiss.missed + " of " + r.writerMiss.holds + " units answered holds"]),
-    "Units a write seat reported holds that the review then found false."));
-  tiles.appendChild(tile("Reference defects", String(r.referenceDefects.attempts), null,
-    sub([r.referenceDefects.dispatches + " dispatches ended · " + r.referenceDefects.records.length + " records"]),
-    "Attempts a rule-9 defect refused: a reference unit filed as another kind, or a reference the tree does not answer. The target is nought."));
+  tiles.appendChild(tile("Cost per record", fmtNum(r.cost.perRecord, 2), " USD",
+    sub([fmtNum(r.cost.cost, 2) + " USD over " + r.cost.records + " records"]),
+    "What every record seat of a run spent, over the records the run merged. Above 8 USD a record, ask why."));
+  tiles.appendChild(tile("Merged with findings", String(r.standing.merged), null,
+    sub([r.standing.findings + " confirmed findings still standing"]),
+    "Runs that merged with a confirmed HIGH no round answered. A record never blocks a run; this is what that costs."));
+  tiles.appendChild(tile("First read", fmtNum(r.firstRead.perRecord, 2), null,
+    sub([r.firstRead.firstRead + " HIGH on " + r.firstRead.born + " born records · " +
+      r.firstRead.later + " raised later on a record the first read passed"]),
+    "Confirmed HIGH per born record at the first record cycle. A later count that grows against a flat first read says one read of a document is not enough."));
   tiles.appendChild(tile("Remarks answered", fmtShare(r.remarks.share), null,
     sub([r.remarks.answered + " of " + r.remarks.raised + " remarks · " + r.remarks.shipped.length + " shipped"]),
     "Record findings below HIGH a writer answered inside a round opened for a HIGH. A remark opens no round of its own."));
-  tiles.appendChild(tile("Verifier confirms", fmtShare(r.verifier["record-verifier"].rate), null,
-    sub([r.verifier["record-verifier"].confirmed + " of " + r.verifier["record-verifier"].items + " record items · code "
-      + fmtShare(r.verifier["fury-verifier"].rate) + " of " + r.verifier["fury-verifier"].items]),
-    "What each verifier confirmed of what it answered. The two seats run two models, so the rates are read apart."));
+  tiles.appendChild(tile("Verifier confirms", fmtShare(r.verifier["fury-verifier"].rate), null,
+    sub([r.verifier["fury-verifier"].confirmed + " of " + r.verifier["fury-verifier"].items + " items"]),
+    "What the code verifier confirmed of what it answered. A record round spawns none: it confirms a HIGH as its reviewer raised it."));
   tiles.appendChild(tile("Late records", fmtShare(r.late.share), null,
     sub([r.late.born + " born · " + r.late.late + " late"]),
     "Records the judge found owed after the freeze, over those and every record the births wrote."));

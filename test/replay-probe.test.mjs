@@ -145,12 +145,9 @@ test('the request form has no route to an environment value', () => {
 });
 
 test('the probe is open to the judgment seats alone, and none of them holds a credential', () => {
-  // The verifier is here under both its names: one seat function, two models
-  // (plan 41, point 3).
-  assert.deepEqual(
-    [...PROBE_SEATS].sort(),
-    ['fury-verifier', 'record-verifier', 'verdict-triage'],
-  );
+  // No record seat is here: a record round spawns no verifier, and the review
+  // reads the record and the tree (ADR-0080).
+  assert.deepEqual([...PROBE_SEATS].sort(), ['fury-verifier', 'verdict-triage']);
   for (const seat of PROBE_SEATS) {
     assert.equal(seatExecutesSuite(seat), false, `${seat} would keep the host credentials`);
   }

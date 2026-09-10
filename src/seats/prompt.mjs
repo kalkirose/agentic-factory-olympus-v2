@@ -50,7 +50,6 @@ export const CONSTITUTION_SEATS = new Set([
   'fury-operational',
   'fury-interface',
   'fury-verifier',
-  'record-verifier',
   'generalist-review',
   'record-author',
   'record-review',
@@ -72,7 +71,6 @@ export const AUTHORITY_SEATS = new Set([
   'fury-operational',
   'fury-interface',
   'fury-verifier',
-  'record-verifier',
   'generalist-review',
   'verdict-triage',
   'reconcile-judge',
@@ -106,9 +104,7 @@ function constitutionBlock(seat, constitution) {
   if (!CONSTITUTION_SEATS.has(base)) return null;
   const lines = [CONSTITUTION_HEAD, CONSTITUTION_OPEN, constitution.trim(), CONSTITUTION_CLOSE];
   if (AUTHORITY_SEATS.has(base)) lines.push(AUTHORITY_ORDER);
-  // Both verifier names take it: they are one seat function, and the name says
-  // which model reads the items (ADR-0005).
-  if (base === 'fury-verifier' || base === 'record-verifier') lines.push(VERIFIER_AUTHORITY);
+  if (base === 'fury-verifier') lines.push(VERIFIER_AUTHORITY);
   return lines.join('\n');
 }
 

@@ -11,9 +11,10 @@
 // before its dev seat, and the record paths are frozen for that seat.
 //
 // One seat writes the whole set. The count of records is not known before the
-// seat runs, so a per-record dispatch has nothing to dispatch on; the harness
-// enumerates every file the seat wrote and answers the unit check per file
-// instead, and one defect refuses the whole report (ADR-0073).
+// seat runs, so a per-record dispatch has nothing to dispatch on. The harness
+// reads what the seat left in the tree and refuses nothing about it: a file
+// outside the record tree goes back, and a record the report claims and the
+// tree does not hold drops off the list (ADR-0080).
 //
 // The stage derives its step from its own stamps and never from memory. No
 // spawn is a dispatch; a spawn with no report is a seat that died mid-write, so
@@ -27,20 +28,16 @@ import { carryPaths, changedFiles, commitAll, headSha, resetHard } from '../isol
 import { parseTouchedPaths } from '../seats/diffpolicy.mjs';
 import { parseIntentCard } from './card.mjs';
 import { probeCredentials } from './probes.mjs';
-import {
-  AUTHOR_SEAT,
-  birthRole,
-  countedRecords,
-  reconcileWriteSchema,
-  runWindow,
-  writeChecks,
-} from './records.mjs';
+import { AUTHOR_SEAT, birthRole, reconcileWriteSchema, runWindow, writeChecks } from './records.mjs';
 import { reconcileHandler } from './reconcile.mjs';
-import { birthNeighbours, citingRecords, readText, recordFiles, statusOf } from './units.mjs';
+import { recordLayerNeeds, runSpectrum } from './spectrum.mjs';
+import { birthNeighbours, recordFiles } from './units.mjs';
 import {
   ACTOR,
   answeredPath,
   blocked,
+  commandError,
+  gist,
   lastSeatReportEvent,
   loadProjectConfig,
   readConstitution,
@@ -289,6 +286,48 @@ function recordsReadiness(forgeFor) {
 }
 
 /**
+ * What the record form gate needs before a seat can run it.
+ *
+ * Every record brief names the gate command and asks the seat to run it before
+ * it reports. A seat that runs it in a worktree with no dependencies installed
+ * reads "the modules are absent here" and reports without the one mechanical
+ * check the design leaves it (ADR-0080). So the layers the record layers need,
+ * and none of the record layers themselves, run once here.
+ *
+ * It stands in front of the birth seat and not in one lane's readiness, because
+ * every lane that holds a records stage dispatches that seat with the same brief
+ * and the same gate command in it.
+ *
+ * They run under cycle 0, which no render counts, so the green they earn is a
+ * prior the first record cycle carries: the layer reads the dependency manifest,
+ * and the records the birth writes cannot change it. The cycle is also the
+ * resume boundary: a ledger that holds one of these stamps has run them.
+ */
+async function installGateNeeds(ctx, base) {
+  if (runEvents(ctx).some((e) => e.event === 'layer-result' && e.cycle === 0)) return null;
+  const layers = base.layers ?? [];
+  const needs = recordLayerNeeds(layers, new Set(base.recordLayers ?? []));
+  if (needs.size === 0) return null;
+  const spectrum = await runSpectrum(ctx, {
+    layers,
+    commands: base.commands,
+    cwd: base.worktree,
+    env: base.env,
+    cycle: 0,
+    sha: await headSha(base.worktree),
+    run: needs,
+    skip: new Set(layers.map((layer) => layer.name).filter((name) => !needs.has(name))),
+    credentials: base.config?.credentials ?? [],
+  });
+  if (!spectrum.error) return null;
+  return commandError(
+    ctx,
+    'gate-command',
+    `A record gate prerequisite could not run: ${spectrum.error}\nRepair the command, then answer.`,
+  );
+}
+
+/**
  * The forge the credential gate asks about, or null. A resolver that refuses
  * answers null rather than failing the stage, exactly as it does in the story
  * lane: the credential park is what a missing forge costs.
@@ -314,9 +353,21 @@ export function recordsStageHandler(mode) {
     if (base.fail) return base.fail;
     const outcome = await birthRecords(ctx, base);
     if (outcome.fail) return outcome.fail;
+    // The records lane writes decision records and nothing else. A birth that
+    // decided none leaves the lane no work: no record to review, nothing to put
+    // in a request, and nothing to merge. The run says so and ends. A park here
+    // would ask a person a question whose only answer is a different ticket, and
+    // the ticket this run was launched from stands where it was (ADR-0015,
+    // ADR-0080).
+    if (mode === 'records' && outcome.stamp?.decided !== true) {
+      return { close: { state: 'failed', reason: NOTHING_BORN } };
+    }
     return { next };
   };
 }
+
+/** The close a records-lane run takes where its birth decided no record. */
+export const NOTHING_BORN = 'nothing-born';
 
 /**
  * One birth of the records a work item decides: the seat, the checks, the
@@ -337,81 +388,58 @@ export async function birthRecords(ctx, base) {
   if (recordEntries(base.recordPaths).length === 0) {
     return { stamp: await stampNothing(ctx, base) };
   }
-  // The neighbourhood the seat read, which the unit stamps report beside the
-  // answers. It is derived from the work's own touched paths, so a commit that
-  // resumes after a stop reports the same count as the dispatch would have.
+  // The neighbourhood the seat reads, derived from the work's own touched paths.
   const neighbours = birthNeighbours(base.worktree, base.spec.touchedPaths, base.recordPaths);
   if (step === 'commit') {
     const report = readJson(lastSeatReportEvent(runEvents(ctx), AUTHOR_SEAT)?.path);
-    // The report is stamped before its checks run, so a stop between the two
-    // leaves a report nothing judged. The checks run again over the tree the
-    // seat left, and a report they refuse takes the dispatch route.
-    if (report && (await birthChecks(base, report)).length === 0) {
-      return { stamp: await commitRecords(ctx, base, report, null, neighbours) };
+    // The report is stamped before the readings run, so a stop between the two
+    // leaves a report nothing read. They run again over the tree the seat left.
+    if (report) {
+      await writeChecks(ctx, { ...base, seat: AUTHOR_SEAT }, [], report);
+      return { stamp: await commitRecords(ctx, base, report, null) };
     }
   }
+  // The gate the brief is about to name has to be runnable where the seat runs.
+  const installed = await installGateNeeds(ctx, base);
+  if (installed) return { fail: installed };
   // A seat that died mid-edit leaves whatever it had written, and the next
   // dispatch has to be the same dispatch as the first (ADR-0070).
   await resetHard(base.worktree, await headSha(base.worktree));
-  // What the last attempt of this dispatch left, so the retry brief carries the
-  // harness's own enumeration of those files beside the defects.
-  const written = [];
   const outcome = await seatWithChecks(ctx, {
     seat: AUTHOR_SEAT,
-    // The forecast is what the schema asks for. A dispatch whose brief lists no
-    // sibling asks the seat for no sibling entry (ADR-0079).
-    schema: reconcileWriteSchema({
-      units: true,
-      siblings: (base.spec?.siblings ?? []).length > 0,
-    }),
+    schema: reconcileWriteSchema(),
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
     styleFiles: base.styleFiles,
-    buildRole: (brief) => birthRole(base, { ...base.spec, records: [...written] }, neighbours, brief),
-    checks: async (report) => {
-      written.length = 0;
-      written.push(...(report.rewritten ?? []));
-      return birthChecks(base, report);
-    },
+    buildRole: (brief) => birthRole(base, base.spec, neighbours, brief),
+    checks: (report) => writeChecks(ctx, { ...base, seat: AUTHOR_SEAT }, [], report),
     defectReason: 'record-defect',
   });
-  if (outcome.fail) return { fail: outcome.fail };
-  return { stamp: await commitRecords(ctx, base, outcome.report, outcome.cost, neighbours) };
-}
-
-/**
- * The deterministic defects of one birth. The judged record list is empty: a
- * birth judges no record the tree already holds, so the boundary is the
- * project's record tree and the unit check counts the files the seat reported.
- *
- * The siblings are computed from the tree the seat left, because a birth that
- * supersedes an active record does not know which record before it runs.
- */
-async function birthChecks(base, report) {
-  const siblings = base.recordLifecycle === 'supersede' ? await birthSiblings(base, report) : null;
-  return writeChecks(base, [], report, { seat: 'writer', siblings });
-}
-
-/**
- * The active records that cite a record this write closed, minus the records
- * this write itself added. A closed record is one whose status line now reads
- * superseded or retired.
- */
-async function birthSiblings(base, report) {
-  const scope = [...new Set(report.rewritten ?? [])];
-  const siblings = new Set();
-  for (const file of await changedFiles(base.worktree)) {
-    if (!recordPathIncludes(file, base.recordPaths)) continue;
-    const text = readText(join(base.worktree, file));
-    if (text === null) continue;
-    const word = statusOf(text).word;
-    if (word !== 'superseded' && word !== 'retired') continue;
-    for (const other of citingRecords(base.worktree, file, base.recordPaths, { scope })) {
-      siblings.add(other);
-    }
+  // A birth that delivered nothing. The records lane has nothing to hold without
+  // it, so it keeps the park: a run there with no record has no work. The story
+  // and repair lanes go on to their freeze, and the judge names the records late
+  // in the reconcile stage, which is ADR-0074's own fallback path (ADR-0080).
+  if (outcome.fail) {
+    if (base.mode === 'records') return { fail: outcome.fail };
+    return { stamp: await stampBirthFailed(ctx, base) };
   }
-  return [...siblings];
+  return { stamp: await commitRecords(ctx, base, outcome.report, outcome.cost) };
+}
+
+/** The stamp a spent birth ladder leaves on a lane that ships code beside it. */
+async function stampBirthFailed(ctx, base) {
+  const stamp = {
+    actor: ACTOR,
+    sha: await headSha(base.worktree),
+    paths: [],
+    decided: false,
+    birthFailed: true,
+    cause: 'seat-failure',
+    gist: gist('the record birth spent its ladder; the judge owes these records late'),
+  };
+  ctx.store.append('records-committed', stamp);
+  return stamp;
 }
 
 /**
@@ -420,20 +448,17 @@ async function birthSiblings(base, report) {
  * born and late counts read (ADR-0074).
  *
  * `paths` names every record path the commit changed, read from the tree. The
- * seat's `rewritten` list alone is not enough. A superseded record's
- * status-line edit is a legal write that owes no units. The old list left it
- * out, so the reconcile stage read a set without it. `unreported` names the
- * paths the seat did not report, so a reader tells the two kinds apart
- * (ADR-0077).
+ * seat's `rewritten` list alone is not enough: a superseded record's status-line
+ * edit is a legal write the seat does not list, and the reconcile stage would
+ * read a set without it. `unreported` names the paths the seat did not report,
+ * so a reader tells the two kinds apart (ADR-0077).
+ *
+ * `cost` rides the stamp, because the dispatch that wrote every record here is
+ * one dispatch and the number is its own.
  */
-async function commitRecords(ctx, base, report, cost, neighbours = null) {
+async function commitRecords(ctx, base, report, cost) {
   const reported = [...new Set(report.rewritten ?? [])];
   const changed = await changedFiles(base.worktree);
-  // The unit answers are facts about the report and not about the commit, so
-  // they are stamped first: a stop between the two repeats them on the next
-  // dispatch, where a stop after the commit would lose them. The reader joins
-  // by record and unit id, so a repeat is one answer either way.
-  stampUnits(ctx, await countedRecords(base, [], report, changed), report, cost, neighbours);
   const touched = changed.filter((file) => recordPathIncludes(file, base.recordPaths));
   const unreported = touched.filter((file) => !reported.includes(file));
   const paths = [...new Set([...reported, ...touched])];
@@ -448,6 +473,8 @@ async function commitRecords(ctx, base, report, cost, neighbours = null) {
     paths,
     decided,
     ...(unreported.length > 0 && { unreported }),
+    ...((report.dropped ?? []).length > 0 && { dropped: report.dropped }),
+    ...(typeof cost === 'number' && { cost }),
   };
   ctx.store.append('records-committed', stamp);
   return stamp;
@@ -463,48 +490,6 @@ async function stampNothing(ctx, base) {
   };
   ctx.store.append('records-committed', stamp);
   return stamp;
-}
-
-/**
- * One `record-units` stamp per record the check counted: the per-unit answers
- * the writer miss rate joins on (ADR-0073).
- *
- * A record the birth only closed is not one of them. Its status-line edit owes
- * no unit, so nothing counts it and nothing stamps it (ADR-0078). A counted
- * record with no unit still takes its stamp, with an empty list.
- *
- * The cost rides the first record alone. One dispatch wrote every record here,
- * so the number is the dispatch's and not the record's, and a sum over the
- * records of a birth that repeated it would count the seat once per file.
- */
-function stampUnits(ctx, records, report, cost, neighbours) {
-  const entries = Array.isArray(report.units) ? report.units : [];
-  let first = true;
-  for (const record of records) {
-    const units = entries
-      .filter((entry) => entry.record === record)
-      .map(({ record: _record, ...rest }) => rest);
-    ctx.store.append('record-units', {
-      actor: ACTOR,
-      seat: AUTHOR_SEAT,
-      record,
-      units,
-      counts: unitCounts(units),
-      neighbours: neighbours?.neighbours?.length ?? 0,
-      neighboursDropped: neighbours?.dropped ?? 0,
-      ...(first && typeof cost === 'number' && { cost }),
-    });
-    first = false;
-  }
-}
-
-function unitCounts(units) {
-  return {
-    claims: units.filter((u) => u.kind === 'claim').length,
-    holds: units.filter((u) => u.verdict === 'holds').length,
-    fails: units.filter((u) => u.verdict === 'fails').length,
-    notBuilt: units.filter((u) => u.verdict === 'not-built').length,
-  };
 }
 
 /**
@@ -541,42 +526,24 @@ async function recordsBase(ctx, mode) {
     config,
     worktree,
     key,
+    mode,
     env: runEnv(ctx, config, { rangeFrom: window.base }),
     constitution: readConstitution(worktree, config),
     defaultBranch,
     testPaths: config.repo.testPaths ?? [],
-    // The layers that read a record diff. The birth brief names them as what
-    // reads the form of its files, at the render and after the commit.
+    // The layers that read a record diff, and the commands behind them. The
+    // birth brief names the gate command and asks the seat to run it in its own
+    // shell before it reports (ADR-0080).
     recordLayers: config.gates?.recordLayers ?? [],
+    layers: config.gates?.tier1 ?? [],
+    commands: config.commands,
     spec: {
       key,
       path: source.path,
       ...(source.reason && { reason: source.reason }),
       touchedPaths: touched,
-      // The lists the checks refuse on, computed before the seat runs. A brief
-      // that gave neither asked the seat to guess the harness's own reading
-      // (ADR-0079).
-      ...(config.repo?.recordLifecycle === 'supersede' && {
-        siblings: birthSiblingForecast(worktree, touched, recordPaths),
-      }),
     },
   });
-}
-
-/**
- * The active records that cite a record this work touches, minus the records
- * the work itself writes. It is the list the sibling check computes after the
- * seat runs, forecast from the ticket's own paths.
- */
-function birthSiblingForecast(worktree, touched, recordPaths) {
-  const records = touched.filter((path) => recordPathIncludes(path, recordPaths));
-  const out = new Set();
-  for (const record of records) {
-    for (const other of citingRecords(worktree, record, recordPaths, { scope: records })) {
-      out.add(other);
-    }
-  }
-  return [...out];
 }
 
 /**
