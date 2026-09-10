@@ -17,6 +17,7 @@ import {
   correctiveRecords,
   reconcileStep,
   runRemarks,
+  unreviewedOf,
   unwrittenOf,
 } from '../src/lanes/reconcile.mjs';
 import { withReconcileStage } from '../src/lanes/records-stage.mjs';
@@ -589,6 +590,22 @@ function writeRefusing(contents, refuses, { corrective = true } = {}) {
         summary: 'the record states what the tree holds',
       },
     };
+  };
+}
+
+/**
+ * A review that delivers nothing the schema names over one named record, and
+ * raises one finding per record on every other.
+ *
+ * A retry prompt names no record: it is the same seat session, told what its
+ * report failed. Only this record's seat ever writes an invalid report here, so
+ * a prompt with no record on it belongs to that seat.
+ */
+function reviewInvalidFor(record, summary) {
+  return (opts) => {
+    const read = /^Review one decision record: (.+)$/m.exec(opts.prompt)?.[1]?.trim() ?? null;
+    if (read === record || read === null) return { invalid: true };
+    return reviewUnanswered(summary)(opts);
   };
 }
 
@@ -1267,6 +1284,43 @@ test('a corrective dispatch that delivers nothing ends itself, and the round goe
   assert.ok(rendered[1].open.includes(`unwritten:${ADR_TWO}`), rendered[1].open.join(', '));
   assert.ok(events.some((e) => e.event === 'reconcile-stall'));
   assert.equal(written.at(-1).cause, 'record-cap');
+});
+
+// A reviewer's failure is about the reviewer. The record it was given rides the
+// render unreviewed, the next cycle dispatches it, and no run parks on it
+// (ADR-0080).
+test('a review seat that delivers nothing leaves its record for the next cycle', async (t) => {
+  const two = {
+    [ADR]: ADR_REWRITTEN,
+    [ADR_TWO]: ADR_TWO_TEXT + '\nThe module src/base.mjs is read by the feature.\n',
+  };
+  const fx = stageFixture(t, {
+    files: { [ADR_TWO]: ADR_TWO_TEXT },
+    seats: {
+      'reconcile-judge': judgeOwed(Object.keys(two)),
+      'reconcile-write': writeThenCorrect(),
+      'record-review': reviewInvalidFor(ADR_TWO, 'the record claims what the tree does not hold'),
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.deepEqual(events.filter((e) => e.event === 'park').map((e) => e.type), []);
+
+  // The seat that delivered nothing stamped the record unreviewed, and the
+  // cycle rendered over the record its peer read.
+  const missed = events.filter((e) => e.event === 'record-unreviewed');
+  const sets = events.filter((e) => e.event === 'reconcile-review-set');
+  assert.equal(missed[0].record, ADR_TWO);
+  assert.equal(missed[0].cycle, sets[0].cycle);
+  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
+  assert.deepEqual(rendered[0].unreviewed, [ADR_TWO]);
+  // The next cycle dispatches it again: an unreviewed record is no green to
+  // stand on.
+  assert.equal(sets[1].cycle, sets[0].cycle + 1);
+  assert.ok(sets[1].records.includes(ADR_TWO), sets[1].records.join(', '));
+  // The run's ending names it, and no seat of the run was asked about a park.
+  assert.deepEqual(unreviewedOf(events), [ADR_TWO]);
 });
 
 test('a records-lane round that delivers nothing leaves the record unwritten', async (t) => {
