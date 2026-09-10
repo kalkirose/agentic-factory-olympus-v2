@@ -125,7 +125,7 @@ import {
   reconcileCertification,
   reconcileHandler,
   reconcileTicketFromBranch,
-  remarksOf,
+  runRemarks,
 } from './reconcile.mjs';
 import { recordBase, recordsCommitted } from './records-stage.mjs';
 import { activeOf, recordNeighbours } from './units.mjs';
@@ -2042,12 +2042,19 @@ function closeOutHandler({ forgeFor, pollMs, enqueueRepair }) {
     // of one line of `run-closed` sees, and the trade the flag makes is worth
     // seeing there (ADR-0056).
     const fast = fastPathTaken(runEvents(ctx));
+    // The remarks this run shipped with, by id. A remark blocks nothing and
+    // buys no ticket, so a green ship writes none, and the close record is
+    // where the run says which sentences it left standing. The partial ship
+    // says the same thing on its ticket, under "Remarks not answered"
+    // (ADR-0007).
+    const remarks = runRemarks(runEvents(ctx)).map((f) => f.id);
     return {
       close: {
         state: 'shipped',
         pr: merged.pr,
         mergeSha: merged.mergeSha,
         ...(fast && { fastPath: true }),
+        ...(remarks.length > 0 && { remarks }),
       },
     };
   };
@@ -2841,7 +2848,11 @@ function reconcileClose(ctx, base, merged) {
   // own: it holds nothing red, and it rides the ticket a finding earned.
   if (residual.length === 0 && written?.ok === true) return;
   const records = judged.records ?? [];
-  const remarks = remarksOf(events, records, judged.seq);
+  // The remarks over the record set the pass held, and never the judge's list:
+  // under the supersede lifecycle a remark sits on the record a birth or a
+  // round added, and the judge named the record it replaces. It is the
+  // derivation the cap's own ticket reads (ADR-0007).
+  const remarks = runRemarks(events);
   try {
     const ticket = reconcileTicketPath(ctx.paths, ctx.runId);
     writeFileSync(

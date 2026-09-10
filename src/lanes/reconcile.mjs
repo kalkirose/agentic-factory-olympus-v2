@@ -1493,8 +1493,13 @@ async function correctStep(ctx, base, next) {
  * because the round that writes the record for a HIGH is the one seat that is
  * reading that record anyway, and a remark thrown away comes back as the HIGH
  * of a later run (ADR-0007).
+ *
+ * `records` is the set a dispatch may answer for, and a remark on any other
+ * record is left where it stands. `null` is every record: the readers that ask
+ * what the whole run still holds take that, because a set read from any one
+ * stamp leaves out a record another stamp named.
  * @param {object[]} events the run's ledger, in order
- * @param {string[]} records the records a seat may answer for
+ * @param {string[]|null} records the records a seat may answer for, or null
  * @param {number} since the seq the pass's judgment stands at
  * @returns {Array<{record: string, ids: string[]}>}
  */
@@ -1504,11 +1509,12 @@ export function recordRemarks(events, records, since) {
     if (e.event !== 'reconciliation-written') continue;
     for (const id of e.answered ?? []) answered.add(id);
   }
-  const held = new Set(records);
+  const held = records === null ? null : new Set(records);
   const out = new Map();
   for (const e of events) {
     if (e.event !== 'finding' || e.record !== true || e.advisory !== true) continue;
-    if (e.seq <= since || answered.has(e.id) || !held.has(e.file)) continue;
+    if (e.seq <= since || answered.has(e.id)) continue;
+    if (held !== null && !held.has(e.file)) continue;
     if (!out.has(e.file)) out.set(e.file, []);
     out.get(e.file).push(e.id);
   }
@@ -1532,6 +1538,24 @@ export function remarksOf(events, records, since) {
     .flatMap((entry) => entry.ids)
     .map((id) => index.get(id))
     .filter(Boolean);
+}
+
+/**
+ * The remarks of a whole run: every advisory record finding of the pass that no
+ * write says it answered, whatever record it names.
+ *
+ * One derivation, three readers: the cap's ticket, the close's ticket and the
+ * close's own stamp. It takes no record set, because every set a stamp holds
+ * leaves out a record another stamp named. The judge names the records it found
+ * owed, and a birth writes records it never owed; a write stamp names the
+ * records that dispatch wrote, and a corrective round dispatches the records an
+ * open finding names and no others. A remark on any of them is a remark the run
+ * ships with (ADR-0007).
+ * @param {object[]} events the run's ledger, in order
+ * @returns {object[]}
+ */
+export function runRemarks(events) {
+  return remarksOf(events, null, judgment(events)?.seq ?? 0);
 }
 
 /**
@@ -1816,7 +1840,7 @@ async function recordsCap(ctx, base, { cause, residual, open }) {
   const detail = residual.map((id) => index.get(id)).filter(Boolean);
   // The remarks this run ships with. They blocked nothing, and the ticket that
   // states the rest of the work is where the next run reads them (ADR-0007).
-  const remarks = remarksOf(events, records, judged?.seq ?? 0);
+  const remarks = runRemarks(events);
   const failed = (anchor?.records ?? []).filter((entry) => entry.failed === true);
   const reason = judged?.reason ?? '(none recorded)';
   let ticket = null;

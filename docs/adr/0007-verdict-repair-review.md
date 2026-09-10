@@ -60,7 +60,11 @@ review — gets these concrete shapes:
   belongs to when the verifier confirms it, and carries `confirmed: false` beside
   the verifier's evidence when it does not. One below HIGH is a remark: the
   render lists it under `advisory`, the corrective round that writes that record
-  for a HIGH hands it to the writer, and the ticket names it under "Remarks not
+  for a HIGH hands it to the writer, and the run records what it ships with at
+  the close. A run that ships its records whole names the remarks it left
+  standing on `run-closed.remarks`, by id, and writes no ticket: a ticket is a
+  run's spec, and a remark buys no run. A run that leaves a finding open writes
+  the ticket it already owed, and the remarks ride it under "Remarks not
   answered". A record finding is raised by the record review of the reconcile
   stage and by no code lens (ADR-0026, ADR-0075). The verdict's own open set
   travels in `verdict-rendered.open`. The record file

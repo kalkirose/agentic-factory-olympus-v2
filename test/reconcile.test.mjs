@@ -17,6 +17,7 @@ import {
   correctiveRecords,
   reconcileStep,
   reconcileTicketFromBranch,
+  runRemarks,
 } from '../src/lanes/reconcile.mjs';
 import { withReconcileStage } from '../src/lanes/records-stage.mjs';
 import { withAbandonGuard } from '../src/lanes/shared.mjs';
@@ -1807,6 +1808,65 @@ test('the branch ticket names the branch, the records and the open findings', ()
   assert.ok(text.includes('  - the report accounts for it nowhere'));
   // The unwritten mark is not a red layer, and the ticket never lists it as one.
   assert.ok(!text.includes(`- unwritten:${ADR_TWO}`), text);
+});
+
+// A run's remarks are read over every record it holds and no stamp's own list.
+// The judge names the records it found owed; a birth writes records it never
+// owed, and a corrective round's write stamp names the records that round
+// dispatched. Each list leaves out a record another one holds (fix round 1,
+// finding 1).
+test('the remarks of a run are read over every record it holds', () => {
+  const BORN = 'docs/adr/adr-0003-born.md';
+  const remark = (id, file, severity) => ({
+    event: 'finding',
+    id,
+    cycle: 1,
+    record: true,
+    advisory: true,
+    severity,
+    file,
+    unit: 'U2',
+    head: 'The module src/base.mjs holds the base',
+    summary: `${id}: the record names the module loosely`,
+    evidence: 'src/base.mjs',
+  });
+  const base = [
+    { event: 'reconciliation-judged', ok: true, owed: true, records: [ADR] },
+    // The birth wrote a record the judge never owed (W6).
+    { event: 'records-committed', decided: true, paths: [BORN] },
+    { event: 'reconciliation-written', ok: true, rewritten: [ADR], records: [{ record: ADR }] },
+    remark('F1', BORN, 'MED'),
+    remark('F2', ADR, 'LOW'),
+    { event: 'reconcile-rendered', cycle: 1, sha: 'aaa', verdict: 'green', open: [], advisory: ['F1', 'F2'] },
+  ];
+  const carried = runRemarks(ledger(...base));
+  assert.deepEqual(
+    carried.map((f) => f.id),
+    ['F1', 'F2'],
+  );
+  // The finding rides whole: the grade, the criterion place and the sentence a
+  // ticket and a close stamp state.
+  assert.equal(carried[0].severity, 'MED');
+  assert.equal(carried[0].file, BORN);
+  assert.equal(carried[0].summary, 'F1: the record names the module loosely');
+
+  // A corrective round that answered one remark leaves the other standing, and
+  // its own write stamp names one record: a set read from that stamp would drop
+  // the remark on the record the round never dispatched.
+  const answered = ledger(...base, {
+    event: 'reconciliation-written',
+    ok: true,
+    corrective: true,
+    answered: ['F1'],
+    rewritten: [BORN],
+    records: [{ record: BORN }],
+  });
+  assert.deepEqual(
+    runRemarks(answered).map((f) => f.id),
+    ['F2'],
+  );
+  // A run with no record work at all carries none.
+  assert.deepEqual(runRemarks(ledger({ event: 'launched' })), []);
 });
 
 // The remarks a run ships with are on the ticket the next run reads, under one

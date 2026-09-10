@@ -761,9 +761,59 @@ const reviewClean = ({ prompt }) => ({
   },
 });
 
+/**
+ * A record review seat that raises two remarks on the one unit it fails, and
+ * nothing on any later read.
+ *
+ * Both name the same unit, which the report answers `fails`: a unit that fails
+ * carries a finding and a unit that holds carries none (rules 7 and 8,
+ * ADR-0073).
+ */
+function reviewRemarks() {
+  let read = 0;
+  return ({ prompt }) => {
+    const units = [...prompt.matchAll(/^- (U\d+) \(line \d+(?:, (\w+))?\): (.+)$/gm)].map(
+      ([, id, kind, head]) => ({
+        record: ADR_FILE,
+        id,
+        kind: kind ?? kindTest(head) ?? 'rationale',
+        verdict: 'holds',
+        evidence: 'src/feature.mjs',
+      }),
+    );
+    read += 1;
+    const target = units.find((u) => u.kind === 'claim');
+    if (read > 1 || !target) {
+      return { report: { findings: [], units, summary: 'the record stands' } };
+    }
+    target.verdict = 'fails';
+    const remark = (id, severity, summary) => ({
+      id,
+      criterion: 'fact',
+      severity,
+      file: ADR_FILE,
+      unit: target.id,
+      head: /^- U\d+ \(line \d+[^)]*\): (.+)$/m.exec(prompt)?.[1] ?? target.id,
+      line: 1,
+      summary,
+      evidence: 'src/feature.mjs',
+    });
+    return {
+      report: {
+        findings: [
+          remark('r1', 'MED', 'the record names the module loosely'),
+          remark('r2', 'LOW', 'the record spells the helper two ways'),
+        ],
+        units,
+        summary: 'the record against the tree',
+      },
+    };
+  };
+}
+
 /** The seats an owed round spawns: the judge, the writer, and the review. */
-function reconcileSeats(write = writeClean) {
-  return { 'reconcile-judge': judgeOwed, 'reconcile-write': write, 'record-review': reviewClean };
+function reconcileSeats(write = writeClean, review = reviewClean) {
+  return { 'reconcile-judge': judgeOwed, 'reconcile-write': write, 'record-review': review };
 }
 
 function reconcileFixture(t, { seats, config = {} } = {}) {
@@ -800,6 +850,47 @@ test('the close-out ticket names the remarks nobody answered', () => {
   // nothing, so it never appears under that heading.
   assert.ok(!text.includes('## Findings to answer'), text);
   assert.ok(!reconcileTicket(args).includes('## Remarks not answered'));
+});
+
+// A green ship writes no ticket: a remark buys no run. So the close record is
+// where a run says which sentences it shipped standing (fix round 1, finding
+// 2).
+test('a green ship records the remarks it left standing on its close stamp', async (t) => {
+  const fx = reconcileFixture(t, { seats: reconcileSeats(writeClean, reviewRemarks()) });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+
+  // The render is green over the remarks, and no round was opened for them.
+  const rendered = events.filter((e) => e.event === 'reconcile-rendered');
+  assert.equal(rendered.at(-1).verdict, 'green');
+  assert.deepEqual(rendered.at(-1).open, []);
+  assert.ok(!events.some((e) => e.event === 'reconcile-round'));
+  const remarks = events.filter((e) => e.event === 'finding' && e.advisory === true);
+  assert.equal(remarks.length, 2);
+  assert.deepEqual(rendered.at(-1).advisory, remarks.map((e) => e.id));
+
+  // The close names both, and the ship needed no ticket to say it.
+  const closed = events.find((e) => e.event === 'run-closed');
+  assert.equal(closed.state, 'shipped');
+  assert.deepEqual(closed.remarks, remarks.map((e) => e.id));
+  assert.ok(!existsSync(reconcileTicketPath(fx.paths, runId)));
+  // A remark below HIGH is the rule working, so the close stays quiet.
+  assert.ok(!events.some((e) => e.event === 'gate-integrity'));
+});
+
+test('a ship with no remark carries no remark field', async (t) => {
+  const fx = reconcileFixture(t, { seats: reconcileSeats() });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const closed = events.find((e) => e.event === 'run-closed');
+  assert.equal(closed.state, 'shipped');
+  assert.equal(closed.remarks, undefined);
 });
 
 test('an owed judgment writes the records onto the run branch and one request carries both', async (t) => {

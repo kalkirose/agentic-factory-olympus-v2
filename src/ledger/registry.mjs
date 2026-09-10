@@ -152,6 +152,13 @@ export const RUN_EVENTS = new Set([
   // and `activeMs` with the parked and inert spans taken out. Two, because a
   // run that waited nine hours on a human did not take nine hours of harness
   // (ADR-0036).
+  //
+  // A shipped run adds `pr` and `mergeSha`, `fastPath: true` where the ship
+  // carried its certification over a moved base (ADR-0056), and `remarks`, the
+  // ids of the record findings below HIGH that no write answered. A remark
+  // blocks nothing and buys no ticket, so this is where a green ship records
+  // the sentences it left standing; a partial ship names the same set on its
+  // ticket (ADR-0007).
   'run-closed',
   ...SEAT_EVENTS,
   // One read-only probe of one external credential, at the launch gate or at
