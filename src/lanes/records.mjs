@@ -1075,29 +1075,29 @@ export function unitChecks(
 }
 
 /**
- * Rule 9: a reference names something, and what it names is there.
+ * Rule 9: what a reference names, the tree holds.
  *
  * A record id resolves against the whole record tree and not the active half of
  * it, because a record cites the record it supersedes and that one is closed by
- * the same diff. A path resolves against the worktree. A link resolves against
- * nothing: it names a document outside this repository, and the harness says
- * nothing about one.
+ * the same diff. A path resolves against the worktree.
+ *
+ * Those two are the whole list, and there is no third. A bullet that carries
+ * neither an id nor a token with a slash names nothing this check reads, and it
+ * is accepted, because the record form gate accepts it: a link, a root file
+ * cited by its bare name and a line of prose all take that shape, and a refusal
+ * the gate does not make costs the seat an attempt on a true reference.
  *
  * The tokens come from the unit's whole text and not from the eight-word head
  * the unit stands by. A reference states its gloss first as often as last, so a
- * head would refuse a bullet whose id is its ninth word for naming nothing, and
- * would read no id there to check; a record wraps its bullets, so the text is
- * every line the enumeration folded into the unit (ADR-0073). The head still
- * names the unit in the defect text, because that is the text the seat matches
- * to its own list.
+ * head would read no id to check on a bullet whose id is its ninth word; a
+ * record wraps its bullets, so the text is every line the enumeration folded
+ * into the unit (ADR-0073). The head still names the unit in the defect text,
+ * because that is the text the seat matches to its own list.
  */
 function referenceDefects(base, tree, record, unit, line) {
   const defects = [];
-  const ids = [...recordRefs(line)];
-  const tokens = pathTokens(line);
-  const links = tokens.filter(isLink);
-  const paths = tokens.filter((token) => !isLink(token));
-  for (const id of ids) {
+  const paths = pathTokens(line).filter((token) => !isLink(token));
+  for (const id of recordRefs(line)) {
     if (tree.has(id)) continue;
     defects.push(
       `unit check 9: ${record} ${unit.id} ("${unit.head}") cites ADR-${id} and the record tree ` +
@@ -1109,12 +1109,6 @@ function referenceDefects(base, tree, record, unit, line) {
     defects.push(
       `unit check 9: ${record} ${unit.id} ("${unit.head}") cites ${path} and the worktree holds ` +
         'no such path.',
-    );
-  }
-  if (ids.length === 0 && paths.length === 0 && links.length === 0) {
-    defects.push(
-      `unit check 9: ${record} ${unit.id} ("${unit.head}") stands under "## References" and ` +
-        'names no record, no path and no link. A reference names something.',
     );
   }
   return defects;

@@ -45,15 +45,18 @@ the worktree; a rationale entry whose text reads as a claim; a writer's `fails`;
 a review's `fails` with no finding; a finding on a unit the review reported
 `holds`; and, as rule 9, a reference the tree does not answer. Rule 9 refuses any
 kind but `reference` on a unit of the section and `reference` on any unit outside
-one, an `ADR-<n>` token that names no record of the record tree at any status, a
-path token the worktree does not hold, and a reference that names no record, no
-path and no link at all. Rules 4 and 9 read their path tokens from one function,
-which splits on whitespace alone, strips the backticks and the punctuation at a
-token's two ends, and keeps every bracket, parenthesis and plus inside it, as
-the record form gate does. Rule 5 never reads a reference unit. A refusal buys
-the seat its one corrective attempt, and every refused attempt stamps
-`seat-refused` with the seat, the attempt number and the defects, so a reading
-counts the refusals a seat answered as well as the budgets one spent.
+one. On the names a reference carries it refuses two things and no third: an
+`ADR-<n>` token that names no record of the record tree at any status, and a path
+token, slash and all, the worktree does not hold. A bullet that names nothing the
+record form gate checks is accepted, as that gate accepts it, so a link, a root
+file cited by its bare name and a line of prose all pass. Rules 4 and 9 read
+their path tokens from one function, which splits on whitespace alone, strips the
+backticks and the punctuation at a token's two ends, and keeps every bracket,
+parenthesis and plus inside it, as the record form gate does. Rule 5 never reads
+a reference unit. A refusal buys the seat its one corrective attempt, and every
+refused attempt stamps `seat-refused` with the seat, the attempt number and the
+defects, so a reading counts the refusals a seat answered as well as the budgets
+one spent.
 
 `repo.recordLifecycle` is `rewrite` or `supersede`. Under `supersede` no seat
 edits an accepted record. A change is a new record with a `Supersedes` line. The
@@ -74,7 +77,7 @@ to an accepted record costs a new record, so the tree grows.
 
 A record that writes a reference bullet outside its reference section files that
 bullet as a claim, as any other sentence. A record that writes prose inside the
-section takes rule 9 on it and is refused for want of a name.
+section files it as a reference, and rule 9 asks nothing of it.
 
 This record is superseded when the unit check refuses a correct report on more
 than one reconciliation in five. That reading says the enumerator and the seats

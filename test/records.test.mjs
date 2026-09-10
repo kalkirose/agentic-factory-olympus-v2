@@ -394,22 +394,41 @@ test('a reference to a superseded record passes', (t) => {
   assert.deepEqual(unitChecks(CITING_BASE(dir), [CITING], citingReport(dir)), []);
 });
 
-// A link names a document outside the repository. The harness says nothing
-// about one, and a reference that names nothing at all is the defect. The link
-// stands bare or in angle brackets, because a markdown label glues to its
-// target in the form gate and the harness reads the token the gate reads.
-test('unit check 9 takes a link as a name and refuses a reference that names nothing', (t) => {
+// Check 9 refuses a reference for two reasons and no third: an id the record
+// tree does not hold, and a path token, slash and all, the worktree does not
+// hold. A bullet that names neither is accepted, because the record form gate
+// accepts it, and a refusal the gate does not make costs a seat an attempt on a
+// true reference. A root file cited by its bare name, a link and a line of
+// prose are the three shapes that carry no such token.
+test('unit check 9 accepts a reference that names nothing it checks', (t) => {
   for (const bullet of [
+    '- `package.json`, the manifest at the root',
+    '- pnpm-workspace.yaml, the workspace file',
     '- https://example.invalid/notes, the upstream note',
     '- <https://example.invalid/notes>, the upstream note',
+    '- The requirement behind this decision, stated in the product brief',
   ]) {
-    const linked = citingTree(t, [bullet]);
-    assert.deepEqual(unitChecks(CITING_BASE(linked), [CITING], citingReport(linked)), [], bullet);
+    const accepted = citingTree(t, [bullet]);
+    assert.deepEqual(unitChecks(CITING_BASE(accepted), [CITING], citingReport(accepted)), [], bullet);
   }
-  const bare = citingTree(t, ['- PRD NFR24, the requirement behind this decision']);
-  const defects = unitChecks(CITING_BASE(bare), [CITING], citingReport(bare));
-  assert.equal(defects.length, 1);
-  assert.match(defects[0], /^unit check 9: .*names no record, no path and no link/);
+  for (const [bullet, name] of [
+    ['- ADR-999, a record nobody wrote', 'ADR-999'],
+    ['- `scripts/nowhere.ts`, the checker', 'scripts/nowhere.ts'],
+  ]) {
+    const refused = citingTree(t, [bullet]);
+    const defects = unitChecks(CITING_BASE(refused), [CITING], citingReport(refused));
+    assert.equal(defects.length, 1, bullet);
+    assert.ok(defects[0].startsWith('unit check 9: '), defects[0]);
+    assert.ok(defects[0].includes(name), defects[0]);
+  }
+});
+
+// The list of reasons is two long in the source as well as in the answers, so a
+// third reason written back into the check is caught where it is written.
+test('the reference check holds two refusals and no third', () => {
+  const source = readFileSync(join(import.meta.dirname, '..', 'src/lanes/records.mjs'), 'utf8');
+  const body = functionBody(source, 'referenceDefects');
+  assert.equal(body.split('defects.push').length - 1, 2, body);
 });
 
 // The proof it can still fail: one record, two bad references, both named in
