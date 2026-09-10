@@ -1185,15 +1185,39 @@ export function kindTest(head) {
   return null;
 }
 
-/** The tokens of a text that read as repository paths, in the order they stand. */
-function pathTokens(text) {
+/**
+ * The one split every check of a cited path reads, and the record form gate's
+ * own: whitespace alone.
+ *
+ * The rule is the gate's, no wider and no narrower, because a token the two
+ * read differently is a record one of them refuses and the other accepts. A
+ * backtick is the one markup the gate takes off. A leading run of `([{"'<` and
+ * a trailing run of `)]}"'>.,;:!?` belong to the sentence. Everything between
+ * them is the token's, so a route path keeps its `[lang=lang]`, its `(group)`
+ * and its `+page` and names the file the tree holds; a split on those
+ * characters makes one such path five tokens, and the check then refuses a
+ * record the gate accepts. A markdown label glues to its target the same way in
+ * both readers, so `[label](docs/x.md)` names a path the tree does not hold.
+ */
+function bareTokens(text) {
   const found = [];
-  for (const token of String(text).split(/[\s,;()[\]"']+/)) {
-    const bare = token.replaceAll('`', '').replaceAll('*', '').replace(/[.,;:]+$/, '');
-    if (!bare.includes('/')) continue;
-    if (bare.split('/').filter(Boolean).length > 2 || /\.\w{1,6}$/.test(bare)) found.push(bare);
+  for (const raw of String(text ?? '').split(/\s+/)) {
+    const token = raw
+      .replaceAll('`', '')
+      .replace(/^[([{"'<]+/, '')
+      .replace(/[)\]}"'>.,;:!?]+$/, '');
+    if (token.length > 0) found.push(token);
   }
   return found;
+}
+
+/** The tokens of a text that read as repository paths, in the order they stand. */
+export function pathTokens(text) {
+  return bareTokens(text).filter(
+    (token) =>
+      token.includes('/') &&
+      (token.split('/').filter(Boolean).length > 2 || /\.\w{1,6}$/.test(token)),
+  );
 }
 
 /** A token that reads as a repository path: two segments and a suffix, or three. */
@@ -1201,14 +1225,16 @@ function namesPath(text) {
   return pathTokens(text).length > 0;
 }
 
-/** The path a piece of evidence names, without its line suffix, or null. */
-function evidencePath(evidence) {
-  for (const token of String(evidence ?? '').split(/[\s,;()[\]"']+/)) {
-    const bare = token
-      .replaceAll('`', '')
-      .replaceAll('*', '')
-      .replace(/[.,;:]+$/, '')
-      .replace(/:\d+(-\d+)?$/, '');
+/**
+ * The path a piece of evidence names, without its line suffix, or null.
+ *
+ * The tokens are the ones every other check reads. What a claim may cite is
+ * wider than what a reference may: a bare file name answers a claim, so this
+ * takes the first token that holds a separator or a suffix.
+ */
+export function evidencePath(evidence) {
+  for (const token of bareTokens(evidence)) {
+    const bare = token.replace(/:\d+(-\d+)?$/, '');
     if (bare.length === 0) continue;
     if (!bare.includes('/') && !/\.\w{1,6}$/.test(bare)) continue;
     return bare.replaceAll('\\', '/');

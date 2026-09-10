@@ -13,9 +13,11 @@ import {
   WRITE_SEAT,
   birthRole,
   correctiveRole,
+  evidencePath,
   findingLine,
   kindTest,
   parseRecordList,
+  pathTokens,
   reconcileWriteSchema,
   recordScope,
   remarkLine,
@@ -393,10 +395,17 @@ test('a reference to a superseded record passes', (t) => {
 });
 
 // A link names a document outside the repository. The harness says nothing
-// about one, and a reference that names nothing at all is the defect.
+// about one, and a reference that names nothing at all is the defect. The link
+// stands bare or in angle brackets, because a markdown label glues to its
+// target in the form gate and the harness reads the token the gate reads.
 test('unit check 9 takes a link as a name and refuses a reference that names nothing', (t) => {
-  const linked = citingTree(t, ['- [the upstream note](https://example.invalid/notes)']);
-  assert.deepEqual(unitChecks(CITING_BASE(linked), [CITING], citingReport(linked)), []);
+  for (const bullet of [
+    '- https://example.invalid/notes, the upstream note',
+    '- <https://example.invalid/notes>, the upstream note',
+  ]) {
+    const linked = citingTree(t, [bullet]);
+    assert.deepEqual(unitChecks(CITING_BASE(linked), [CITING], citingReport(linked)), [], bullet);
+  }
   const bare = citingTree(t, ['- PRD NFR24, the requirement behind this decision']);
   const defects = unitChecks(CITING_BASE(bare), [CITING], citingReport(bare));
   assert.equal(defects.length, 1);
@@ -427,6 +436,110 @@ test('the kind test reads a path, a symbol and the closed verb list', () => {
   assert.equal(kindTest('Reversal trigger: a second consumer of the same table.'), null);
   // A word with a slash is not a path.
   assert.equal(kindTest('The trade holds either way, and/or costs nothing.'), null);
+});
+
+// -- the one path split (plan 42, point 1) ------------------------------------
+
+/** A route path of the shape a framework writes: a bracket, a group, a plus. */
+const ROUTE = 'web/src/routes/[lang=lang]/(shop)/cart/+page.svelte';
+
+// The harness reads a token exactly as the record form gate reads it, no wider
+// and no narrower: one split on whitespace, the backticks off, a run of the
+// sentence's opening punctuation off the front, a run of its closing punctuation
+// off the back, and everything else the token's own. A token the two read
+// differently is a record one of them refuses and the other accepts, so the
+// table pins the harness's answer to the gate's rule.
+test('the path tokens of a text are the tokens the form gate names', () => {
+  const rows = [
+    // A path in backticks, ending the sentence.
+    { text: `The cart page is \`${ROUTE}\`.`, tokens: [ROUTE] },
+    // The same path bare.
+    { text: `The cart page is ${ROUTE}`, tokens: [ROUTE] },
+    // A path the sentence wraps in parentheses.
+    { text: 'The rule stands in (see `scripts/form.ts`) today.', tokens: ['scripts/form.ts'] },
+    // A path a comma follows.
+    { text: `${ROUTE}, the cart page`, tokens: [ROUTE] },
+    // A path an exclamation mark or a question mark follows.
+    { text: 'Read `scripts/x.ts`!', tokens: ['scripts/x.ts'] },
+    { text: 'Which line of `scripts/x.ts`?', tokens: ['scripts/x.ts'] },
+    // A path with a line suffix, as a piece of evidence writes one. The suffix
+    // is part of the token, so two segments and a suffix read as no path; the
+    // evidence reader is the one that strips it, and it names the file.
+    { text: 'scripts/x.ts:12', tokens: [], evidence: 'scripts/x.ts' },
+    // Two paths in one bullet, in the order they stand.
+    {
+      text: `Both \`${ROUTE}\` and \`web/src/lib/cart.ts\` hold it.`,
+      tokens: [ROUTE, 'web/src/lib/cart.ts'],
+    },
+    // A bare link and an autolink: the angle brackets are the sentence's.
+    { text: '- https://example.invalid/notes, the upstream note', tokens: ['https://example.invalid/notes'] },
+    { text: '- <https://example.invalid/notes>, the upstream note', tokens: ['https://example.invalid/notes'] },
+    // A markdown label glues to its target in the gate, so the harness glues it
+    // too and the token names a path the tree does not hold.
+    { text: '- [the note](docs/x.md)', tokens: ['note](docs/x.md'] },
+    // An asterisk is not markup the gate takes off, so a bolded path is no path.
+    { text: 'The rule stands in **scripts/x.ts** today.', tokens: [] },
+    // A word with a slash is no path.
+    { text: 'The trade holds either way, and/or costs nothing.', tokens: [] },
+  ];
+  for (const row of rows) {
+    assert.deepEqual(pathTokens(row.text), row.tokens, row.text);
+    if (row.evidence !== undefined) assert.equal(evidencePath(row.text), row.evidence, row.text);
+  }
+});
+
+test('the path split is one function: no second tokenizer stands beside it', () => {
+  // Two readers of one rule is the shape that let the gate accept a path the
+  // harness refused. Every check of a cited path reads the one function, so a
+  // second split written inside any of them is the defect this catches.
+  const source = readFileSync(join(import.meta.dirname, '..', 'src/lanes/records.mjs'), 'utf8');
+  assert.ok(!source.includes('split(/[\\s,;()'), 'records.mjs still holds a second path split');
+  for (const name of ['referenceDefects', 'evidencePath', 'namesPath']) {
+    const body = functionBody(source, name);
+    assert.ok(!body.includes('.split('), `${name} splits a text of its own`);
+    assert.ok(/\b(bareTokens|pathTokens)\(/.test(body), `${name} reads no shared tokenizer`);
+  }
+});
+
+/** The source of one top-level function of a module, its head to its close. */
+function functionBody(source, name) {
+  const at = source.indexOf(`function ${name}(`);
+  assert.ok(at !== -1, `${name} is not a function of the module`);
+  const end = source.indexOf('\n}\n', at);
+  assert.ok(end !== -1, `${name} has no close`);
+  return source.slice(at, end);
+}
+
+// Check 9 names the whole path in its defect, so the seat reads what the tree
+// answered and not the directory in front of it.
+test('unit check 9 reads a bracketed route path whole', (t) => {
+  const bullet = `- \`${ROUTE}\`, the cart page`;
+  const held = citingTree(t, [bullet], { [ROUTE]: '<script>\n</script>\n' });
+  assert.deepEqual(unitChecks(CITING_BASE(held), [CITING], citingReport(held)), []);
+  const missing = citingTree(t, [bullet]);
+  const defects = unitChecks(CITING_BASE(missing), [CITING], citingReport(missing));
+  assert.equal(defects.length, 1);
+  assert.ok(
+    defects[0].includes(`cites ${ROUTE} and the worktree holds no such path`),
+    defects[0],
+  );
+});
+
+test('unit check 4 reads a bracketed evidence path whole', (t) => {
+  const evidence = `${ROUTE}:12`;
+  const held = tree(t, { [ROUTE]: '<script>\n</script>\n' });
+  assert.deepEqual(
+    unitChecks({ worktree: held }, [RECORD], reportWith(completeUnits({ U2: { evidence } }))),
+    [],
+  );
+  const missing = tree(t);
+  const defects = unitChecks(
+    { worktree: missing },
+    [RECORD],
+    reportWith(completeUnits({ U2: { evidence } })),
+  );
+  assert.equal(defects.length, 1);
+  assert.ok(defects[0].includes(`cites ${ROUTE} and the worktree holds no such path`), defects[0]);
 });
 
 test('unit check 6 refuses a writer report that leaves a unit failing', (t) => {
