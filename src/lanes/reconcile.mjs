@@ -749,8 +749,12 @@ async function writtenAlready(ctx, events, { seat, record, since, committed }) {
   );
   if (stamp) {
     const { event: _event, seq: _seq, ts: _ts, actor: _actor, gist: _gist, ...entry } = stamp;
-    if (entry.failed === true) return { entry, report: null };
-    return { entry, report: readJson(lastSeatReportEvent(events, seat)?.path) };
+    // A dispatch that failed left no report, and a report file the run can no
+    // longer read is the same fact. Either way the round's readers get a report
+    // that says the dispatch answered nothing, because a resume that hands them
+    // a hole reads it as one (ADR-0080).
+    if (entry.failed === true) return { entry, report: emptyReport() };
+    return { entry, report: readJson(lastSeatReportEvent(events, seat)?.path) ?? emptyReport() };
   }
   if (!committed.has(record)) return null;
   // The commit is there and the stamp is not: the stop fell between the two.
@@ -761,6 +765,15 @@ async function writtenAlready(ctx, events, { seat, record, since, committed }) {
   const entry = { record, seat, attempts: attemptsOf(events, seat, since) };
   stampWrite(ctx, entry);
   return { entry, report };
+}
+
+/**
+ * The report of a dispatch that answered nothing. Every reader of a round's
+ * reports takes an object, so a dispatch with no report of its own is read as
+ * one that rewrote nothing and answered nothing (ADR-0080).
+ */
+function emptyReport() {
+  return { rewritten: [], unchanged: [], answered: [] };
 }
 
 /**
@@ -803,10 +816,9 @@ function lastSeq(events) {
  * attempts, and the shape of the record tree behind it.
  */
 async function stampWritten(ctx, base, { entries, reports, corrective = null }) {
-  const kept = reports.filter(Boolean);
-  const rewritten = [...new Set(kept.flatMap((r) => r.rewritten ?? []))];
-  const unchanged = [...new Set(kept.flatMap((r) => (r.unchanged ?? []).map((u) => u.record)))];
-  const dropped = [...new Set(kept.flatMap((r) => r.dropped ?? []))];
+  const rewritten = [...new Set(reports.flatMap((r) => r.rewritten ?? []))];
+  const unchanged = [...new Set(reports.flatMap((r) => (r.unchanged ?? []).map((u) => u.record)))];
+  const dropped = [...new Set(reports.flatMap((r) => r.dropped ?? []))];
   const tree = await treeShape(base);
   ctx.store.append('reconciliation-written', {
     actor: ACTOR,

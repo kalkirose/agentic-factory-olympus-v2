@@ -17,6 +17,7 @@ import {
   correctiveRecords,
   reconcileStep,
   runRemarks,
+  unwrittenOf,
 } from '../src/lanes/reconcile.mjs';
 import { withReconcileStage } from '../src/lanes/records-stage.mjs';
 import { withAbandonGuard } from '../src/lanes/shared.mjs';
@@ -645,6 +646,23 @@ function hangNth(nth, behaviour) {
   return (opts) => {
     seen += 1;
     return seen === nth ? { hang: true } : behaviour(opts);
+  };
+}
+
+/**
+ * A seat that never answers the corrective dispatch of one named record. Only a
+ * stop ends that one, so a scenario about a restart inside a round holds the run
+ * at the dispatch it names, whatever the attempts before it cost.
+ */
+function hangOnCorrective(record, behaviour) {
+  let held = false;
+  return (opts) => {
+    const mine = briefRecord(opts.prompt) === record && opts.prompt.includes('Findings:');
+    if (mine && !held) {
+      held = true;
+      return { hang: true };
+    }
+    return behaviour(opts);
   };
 }
 
@@ -1664,8 +1682,8 @@ test('the remarks of a run are read over every record it holds', () => {
  * the run on the boundary. Without the hold the stage runs the whole cycle out
  * and the run closes, and the restart lands on a run that is already over.
  */
-async function restartAt(t, { at, hold, nth = 1, seats }) {
-  const fx = stageFixture(t, { seats: { ...seats, [hold]: hangNth(nth, seats[hold]) } });
+async function restartAt(t, { at, hold, nth = 1, seats, files = undefined }) {
+  const fx = stageFixture(t, { files, seats: { ...seats, [hold]: hangNth(nth, seats[hold]) } });
   const runId = await fx.launch();
   await waitEvent(fx.paths, runId, at.predicate, at.label);
   // The held dispatch has to stand before the stop: a stop that starts in front
@@ -1873,6 +1891,61 @@ test('a restart inside a corrective round re-enters that round alone', async (t)
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   assert.equal(events.filter((e) => e.event === 'reconcile-round').length, 1);
   assert.equal(events.filter((e) => e.event === 'reconcile-rendered').at(-1).verdict, 'green');
+});
+
+// A resume inside a round reads the failed dispatch off its own stamp. The
+// dispatch is never made again, and every reader of the round takes a report
+// that says it answered nothing (ADR-0080).
+test('a restart past a failed dispatch re-dispatches nothing and merges', async (t) => {
+  const two = {
+    [ADR]: ADR_REWRITTEN,
+    [ADR_TWO]: ADR_TWO_TEXT + '\nThe module src/base.mjs is read by the feature.\n',
+  };
+  // The first record's corrective dispatch spends its attempts and fails; the
+  // second record's is held, so the stop falls inside the round and behind the
+  // failed stamp.
+  const fx = stageFixture(t, {
+    files: { [ADR_TWO]: ADR_TWO_TEXT },
+    seats: {
+      'reconcile-judge': judgeOwed(Object.keys(two)),
+      'reconcile-write': hangOnCorrective(ADR_TWO, writeRefusing(two, ADR)),
+      'record-review': reviewUnanswered('the record claims what the tree does not hold'),
+    },
+  });
+  const runId = await fx.launch();
+  await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'record-written' && e.failed === true,
+    'a failed write',
+  );
+  // The held dispatch has to stand before the stop: a stop that starts in front
+  // of the spawn ends nothing, and the seat it leaves belongs to no daemon.
+  await waitRunEvents(
+    fx.paths,
+    runId,
+    (events) =>
+      events.filter((e) => e.event === 'seat-spawned' && e.seat === `${'reconcile-write'}:2`)
+        .length >= 2,
+    { label: 'the held dispatch', attempts: 900 },
+  );
+  await fx.restart();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.deepEqual(events.filter((e) => e.event === 'park').map((e) => e.type), []);
+  // One stamp for the record the dispatch spent, and no dispatch after it: one
+  // judged write and one corrective dispatch name the record, and the resume
+  // names it to no seat.
+  const stamps = events.filter((e) => e.event === 'record-written' && e.record === ADR);
+  assert.deepEqual(stamps.map((e) => e.failed ?? false), [false, true]);
+  const spawns = fx.calls.filter((c) => c.seat === 'reconcile-write');
+  assert.equal(spawns.filter((c) => briefRecord(c.prompt) === ADR).length, 2);
+  // The round finished the record behind it, ran once, and the render names the
+  // record the round lost.
+  assert.equal(events.filter((e) => e.event === 'reconcile-round').length, 1);
+  assert.deepEqual(unwrittenOf(events), [ADR]);
+  const rendered = events.filter((e) => e.event === 'reconcile-rendered').at(-1);
+  assert.ok(rendered.open.includes(`unwritten:${ADR}`), rendered.open.join(', '));
 });
 
 // The judged write answers siblings over the same scope the corrective round
