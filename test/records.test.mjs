@@ -596,6 +596,37 @@ test('unit check 4 reads a bracketed evidence path whole', (t) => {
   assert.ok(defects[0].includes(`cites ${ROUTE} and the worktree holds no such path`), defects[0]);
 });
 
+// One claim is answered by four lines of a file as often as by one, and a seat
+// writes them as the list it read them in. The path is what the check stats, so
+// the whole end comes off: a line, a range, or a comma list of the two.
+test('unit check 4 reads an evidence path with a list of lines', (t) => {
+  for (const [evidence, path] of [
+    ['src/feature.mjs:25,33,50,63', 'src/feature.mjs'],
+    ['src/feature.mjs:12-14,20', 'src/feature.mjs'],
+    ['src/feature.mjs:12-14', 'src/feature.mjs'],
+    ['src/feature.mjs:12', 'src/feature.mjs'],
+    ['src/feature.mjs', 'src/feature.mjs'],
+  ]) {
+    assert.equal(evidencePath(evidence), path, evidence);
+    const held = tree(t);
+    assert.deepEqual(
+      unitChecks({ worktree: held }, [RECORD], reportWith(completeUnits({ U2: { evidence } }))),
+      [],
+      evidence,
+    );
+  }
+  // The list is no escape from the check: the file still has to be there.
+  const missing = tree(t);
+  rmSync(join(missing, 'src/feature.mjs'));
+  const defects = unitChecks(
+    { worktree: missing },
+    [RECORD],
+    reportWith(completeUnits({ U2: { evidence: 'src/feature.mjs:25,33' } })),
+  );
+  assert.equal(defects.length, 1);
+  assert.ok(defects[0].includes('cites src/feature.mjs and the worktree holds no such path'), defects[0]);
+});
+
 test('unit check 6 refuses a writer report that leaves a unit failing', (t) => {
   const dir = tree(t);
   const defects = unitChecks(

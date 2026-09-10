@@ -399,8 +399,9 @@ export function unitKindLines() {
     '  the harness answers it.',
     '- "verdict": "holds", "fails" or "not-built". A title, a status, a rationale and a reference',
     '  unit take "holds".',
-    '- "evidence": on a claim, the repo-relative path that answers it, and the line where one',
-    '  exists. The worktree has to hold that path. On any other kind, one short sentence.',
+    '- "evidence": on a claim, the repo-relative path that answers it, and the line or lines',
+    '  where one exists. The worktree has to hold that path. On any other kind, one short',
+    '  sentence.',
   ];
 }
 
@@ -563,8 +564,8 @@ function divergenceDutyLines(records, supersede = false) {
     '  in the file. A statement that is not in the file is a defect and buys you another round.',
     '- "state": "none" when you found no divergence in that record. "statement" is your',
     '  one-sentence reason.',
-    '- "evidence": the repo-relative path, and the line where one exists, that shows the tree',
-    '  side of what you state.',
+    '- "evidence": the repo-relative path, and the line or lines where one exists, that shows',
+    '  the tree side of what you state.',
     ...(supersede
       ? [
           '- A record you add to replace one of these takes an entry of its own. The record it',
@@ -1271,11 +1272,16 @@ function namesPath(text) {
  * them refuses a record the other passes. No gate reads a claim's evidence. A
  * bare file name and a path with the line on its end both answer a claim, so
  * this takes the first token that holds a separator or a suffix, and it takes
- * the line number off.
+ * the lines off it.
+ *
+ * The end a seat writes is a line, a range, or a comma list of the two, because
+ * one claim is answered by four lines of a file as often as by one. A list the
+ * reader left on the name is a path the worktree does not hold, and check 4
+ * then refuses a claim that names the file it says it names.
  */
 export function evidencePath(evidence) {
   for (const token of bareTokens(evidence)) {
-    const bare = token.replace(/:\d+(-\d+)?$/, '');
+    const bare = token.replace(/:\d+(-\d+)?(,\d+(-\d+)?)*$/, '');
     if (bare.length === 0) continue;
     if (!bare.includes('/') && !/\.\w{1,6}$/.test(bare)) continue;
     return bare.replaceAll('\\', '/');
