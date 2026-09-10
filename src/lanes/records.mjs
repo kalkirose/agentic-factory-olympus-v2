@@ -1244,9 +1244,22 @@ export function pathTokens(text) {
   return bareTokens(text).filter((token) => !isLink(token) && /\S\/\S/.test(token));
 }
 
-/** A token that reads as a repository path: a separator inside the name. */
+/** A token of three segments, or of two with a suffix on the second. */
+const SENTENCE_PATH = /[^/\s]+\/+[^/\s]+\/+[^/\s]+|\/[^/\s]*\.\w{1,6}$/;
+
+/**
+ * Whether a sentence names a repository path, for the kind test of rule 5.
+ *
+ * The tokens are the shared ones and the test on a token is not rule 9's,
+ * because the two read two texts. Rule 9 mirrors a gate over a reference list,
+ * where every slashed token is a name the gate stats. Rule 5 reads a sentence
+ * of the body, where a slashed word is a word: `and/or`, `input/output` and
+ * `read/write` name no file, and a rule that took them as paths would refuse a
+ * true rationale sentence and buy the seat an attempt. A path inside a sentence
+ * carries three segments, or two and a suffix.
+ */
 function namesPath(text) {
-  return pathTokens(text).length > 0;
+  return bareTokens(text).some((token) => SENTENCE_PATH.test(token));
 }
 
 /**

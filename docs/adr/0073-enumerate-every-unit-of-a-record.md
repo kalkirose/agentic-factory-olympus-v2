@@ -47,7 +47,7 @@ a review's `fails` with no finding; a finding on a unit the review reported
 kind but `reference` on a unit of the section and `reference` on any unit outside
 one. On the names a reference carries it refuses two things and no third: a
 record id the record tree holds at no status, and a path token the worktree does
-not hold. Rules 4 and 9 read their tokens from one function, which splits on
+not hold. Rules 4, 5 and 9 read their tokens from one function, which splits on
 whitespace alone, strips the backticks and the punctuation at a token's two ends,
 and keeps every bracket, parenthesis and plus inside it, as the record form gate
 does. Rule 9 then weighs each token as that gate weighs it: a token that matches
@@ -57,10 +57,13 @@ over; every other token is a path the worktree has to hold. A bullet whose token
 are all passed over is accepted, as the gate accepts it, so a link, a root file
 cited by its bare name and a line of prose all pass. Rule 4 reads the same split
 and a wider test, because a bare file name answers a claim and no gate reads a
-claim's evidence. Rule 5 never reads a reference unit. A refusal buys the seat
-its one corrective attempt, and every refused attempt stamps `seat-refused` with
-the seat, the attempt number and the defects, so a reading counts the refusals a
-seat answered as well as the budgets one spent.
+claim's evidence; rule 5 reads the same split and a narrower one, three segments
+or two and a suffix, because it weighs a sentence of the body, where a slashed
+word such as `and/or` is a word and not a file. Rule 5 never reads a reference
+unit. A refusal buys the seat its one corrective attempt, and every refused
+attempt stamps `seat-refused` with the seat, the attempt number and the defects,
+so a reading counts the refusals a seat answered as well as the budgets one
+spent.
 
 `repo.recordLifecycle` is `rewrite` or `supersede`. Under `supersede` no seat
 edits an accepted record. A change is a new record with a `Supersedes` line. The

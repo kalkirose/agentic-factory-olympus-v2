@@ -465,12 +465,17 @@ test('the kind test reads a path, a symbol and the closed verb list', () => {
   assert.equal(kindTest('`recordScope` takes a range.'), 'claim');
   assert.equal(kindTest('The check lives in src/lanes/records.mjs today.'), 'claim');
   assert.equal(kindTest('The tree holds docs/style/anti-slop.md.'), 'claim');
+  assert.equal(kindTest('`scripts/x.ts` runs on every push.'), 'claim');
+  assert.equal(kindTest('See docs/adr/x.md for the reason.'), 'claim');
   assert.equal(kindTest('Why: the alternative cost a second module.'), null);
   assert.equal(kindTest('Rejected: a per-combination enumeration, which blows up.'), null);
   assert.equal(kindTest('Reversal trigger: a second consumer of the same table.'), null);
-  // The path test is the record form gate's, and a word with a slash carries
-  // its whole test, so such a word reads as a path here as well.
-  assert.equal(kindTest('The trade holds either way, and/or costs nothing.'), 'claim');
+  // This test reads a sentence of the body, where a slashed word is a word and
+  // no file. Rule 9 reads a reference list and takes every such token as a
+  // name, and the two readers part here.
+  assert.equal(kindTest('The trade holds either way, and/or costs nothing.'), null);
+  assert.equal(kindTest('The seat weighs input/output cost against nothing.'), null);
+  assert.equal(kindTest('Read/write cost was the reason.'), null);
 });
 
 // -- the one path split (plan 42, point 1) ------------------------------------
