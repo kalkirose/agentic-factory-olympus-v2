@@ -1189,22 +1189,23 @@ export function kindTest(head) {
  * The one split every check of a cited path reads, and the record form gate's
  * own: whitespace alone.
  *
- * Backticks and asterisks are markup and go. A run of opening punctuation at
- * the front of a token and a run of closing punctuation at its back belong to
- * the sentence, not to the path. Everything between them is the token's, so a
- * route path keeps its `[lang=lang]`, its `(group)` and its `+page` and names
- * the file the tree holds. A split on those characters makes one such path five
- * tokens, and the check then refuses a record the gate accepts. A markdown
- * label ends at "](", so the target of a link stands as its own token.
+ * The rule is the gate's, no wider and no narrower, because a token the two
+ * read differently is a record one of them refuses and the other accepts. A
+ * backtick is the one markup the gate takes off. A leading run of `([{"'<` and
+ * a trailing run of `)]}"'>.,;:!?` belong to the sentence. Everything between
+ * them is the token's, so a route path keeps its `[lang=lang]`, its `(group)`
+ * and its `+page` and names the file the tree holds; a split on those
+ * characters makes one such path five tokens, and the check then refuses a
+ * record the gate accepts. A markdown label glues to its target the same way in
+ * both readers, so `[label](docs/x.md)` names a path the tree does not hold.
  */
 function bareTokens(text) {
   const found = [];
   for (const raw of String(text ?? '').split(/\s+/)) {
-    const markup = raw.replaceAll('`', '').replaceAll('*', '');
-    const label = markup.lastIndexOf('](');
-    const token = (label === -1 ? markup : markup.slice(label + 2))
-      .replace(/^[([{"']+/, '')
-      .replace(/[.,;:)\]}"']+$/, '');
+    const token = raw
+      .replaceAll('`', '')
+      .replace(/^[([{"'<]+/, '')
+      .replace(/[)\]}"'>.,;:!?]+$/, '');
     if (token.length > 0) found.push(token);
   }
   return found;
@@ -1231,7 +1232,7 @@ function namesPath(text) {
  * wider than what a reference may: a bare file name answers a claim, so this
  * takes the first token that holds a separator or a suffix.
  */
-function evidencePath(evidence) {
+export function evidencePath(evidence) {
   for (const token of bareTokens(evidence)) {
     const bare = token.replace(/:\d+(-\d+)?$/, '');
     if (bare.length === 0) continue;

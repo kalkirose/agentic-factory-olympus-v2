@@ -48,7 +48,7 @@ kind but `reference` on a unit of the section and `reference` on any unit outsid
 one, an `ADR-<n>` token that names no record of the record tree at any status, a
 path token the worktree does not hold, and a reference that names no record, no
 path and no link at all. Rules 4 and 9 read their path tokens from one function,
-which splits on whitespace alone, strips the markup and the punctuation at a
+which splits on whitespace alone, strips the backticks and the punctuation at a
 token's two ends, and keeps every bracket, parenthesis and plus inside it, as
 the record form gate does. Rule 5 never reads a reference unit. A refusal buys
 the seat its one corrective attempt, and every refused attempt stamps
