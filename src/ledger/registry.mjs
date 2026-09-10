@@ -460,6 +460,12 @@ export const RUN_EVENTS = new Set([
   // empty set included: a request whose diff asked for no label and one whose
   // derivation never ran read the same otherwise (ADR-0008).
   'pr-labeled',
+  // The request body, written again over what the run holds now. A merge round
+  // after the request opened drops the run's own change to a record, so the body
+  // and the close stamp would name two different sets. `edited` says whether the
+  // forge took it; a refusal carries its reason and blocks nothing, because the
+  // close stamp names every record either way (ADR-0080).
+  'pr-body-rewritten',
   'check-transition',
   // One CI check attempt's evidence, captured when the attempt was observed
   // rather than when a reader needed it. It names the check run, the attempt,

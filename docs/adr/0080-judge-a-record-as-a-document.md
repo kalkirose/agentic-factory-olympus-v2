@@ -112,7 +112,11 @@ answered", every finding below HIGH under "Remarks not answered", and every
 record no round wrote and no seat read under their own headings. The close
 stamps `run-closed {state: 'shipped', pr, remarks, unwritten?, unreviewed?}`,
 where `remarks` holds the standing confirmed ids beside the advisory ones and
-every finding stamp keeps its own `confirmed` flag.
+every finding stamp keeps its own `confirmed` flag. A merge round that drops a
+record after the request opened writes the body again and stamps
+`pr-body-rewritten`, so the body a reader opens names the same set the close
+stamps. A forge that refuses the edit blocks nothing: the stamp carries the
+reason, and the close names every record either way.
 
 **The resume reads one stamp.** `record-written` lands right after each commit
 and for each failed dispatch, and `writtenAlready` reads it and the round's

@@ -155,8 +155,12 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
     // The labels each create call carried, so a test can say which call
     // labelled the request.
     createLabels: [],
-    // The bodies the run wrote, in the order it opened requests.
+    // The bodies the run wrote, in the order it wrote them: the create's, and
+    // every rewrite a later merge round made.
     bodies: [],
+    // The body rewrites alone, and whether the forge takes one at all.
+    edits: [],
+    editAccepts: true,
     // The CI secret names the parity read asks for; null is a forge that
     // would not answer at all.
     ciSecrets: [],
@@ -259,6 +263,13 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
       }
       return { number: state.pr.number, url: `fake://pr/${state.pr.number}`, labelled: carried };
     },
+    async editBody(number, body) {
+      if (!state.editAccepts) return { edited: false, reason: 'refused (fixture)' };
+      state.bodies.push(body);
+      state.edits.push({ number, body });
+      return { edited: true };
+    },
+
     async ciSecrets() {
       return state.ciSecrets;
     },
@@ -1032,6 +1043,12 @@ test('a record conflict at the merge drops the run own change and ships the code
   // The default branch keeps its own version, and the close names the record.
   assert.equal(gitSync(['show', `main:${ADR_FILE}`], fx.origin), theirs);
   assert.deepEqual(events.find((e) => e.event === 'run-closed').unwritten, [ADR_FILE]);
+  // The body a reader opens says what the close stamp says. The body the create
+  // wrote did not: the drop came after it (ADR-0080).
+  assert.equal(events.find((e) => e.event === 'pr-body-rewritten').edited, true);
+  assert.ok(!fx.forge.state.bodies[0].includes('## Records not written'));
+  assert.match(fx.forge.state.edits.at(-1).body, /## Records not written/);
+  assert.match(fx.forge.state.edits.at(-1).body, new RegExp(ADR_FILE.replaceAll('/', '\\/')));
 });
 
 /** A record review seat that raises one HIGH on every read it makes. */
@@ -1150,6 +1167,11 @@ test('a records-lane conflict on its only record merges an empty change and name
   // The default branch keeps its own version, and the close names the record.
   assert.equal(gitSync(['show', `main:${ADR_FILE}`], fx.origin), theirs);
   assert.deepEqual(events.find((e) => e.event === 'run-closed').unwritten, [ADR_FILE]);
+  // The body a reader opens says the same thing the close stamp says.
+  const rewritten = events.find((e) => e.event === 'pr-body-rewritten');
+  assert.equal(rewritten.edited, true);
+  assert.match(fx.forge.state.edits.at(-1).body, /## Records not written/);
+  assert.match(fx.forge.state.edits.at(-1).body, new RegExp(ADR_FILE.replaceAll('/', '\\/')));
 });
 
 test('a ticket the close cannot write is loud, and the kind names it', async (t) => {

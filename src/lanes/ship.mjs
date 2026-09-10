@@ -1899,6 +1899,7 @@ async function mergeRound(
     ...(recordConflicts.length > 0 && { recordsDropped: recordConflicts }),
   });
   if (stamp) ctx.store.append('branch-update', { actor: ACTOR, fromSha, toSha: sha, mainSha });
+  if (recordConflicts.length > 0) await rewriteRequestBody(ctx, base, sha);
   return { fromSha, toSha: sha, mainSha };
 }
 
@@ -1915,6 +1916,33 @@ async function mergeRound(
  */
 async function dropConflictedRecords(base, conflicts, mainSha) {
   await restorePaths(base.worktree, mainSha, conflicts);
+}
+
+/**
+ * The request body, written again over what the run holds now.
+ *
+ * The body is written when the request opens. A merge round after that drops the
+ * run's own change to a record, so the body's "Records" and "Records not
+ * written" headings would name a set the run no longer holds while the close
+ * stamp names the right one. The reader opens the request, so the two say the
+ * same thing (ADR-0080).
+ *
+ * A forge that refuses the edit is not a defect of the run: the request is open,
+ * the merge is armed, and the close stamp still names every record. The miss is
+ * stamped and the run goes on.
+ */
+async function rewriteRequestBody(ctx, base, sha) {
+  const opened = findLast(runEvents(ctx), 'pr-opened');
+  if (!opened || typeof base.forge?.editBody !== 'function') return;
+  const result = await base.forge.editBody(opened.pr, requestBody(ctx, base, sha));
+  ctx.store.append('pr-body-rewritten', {
+    actor: ACTOR,
+    pr: opened.pr,
+    sha,
+    edited: result?.edited === true,
+    ...(result?.edited !== true && { reason: result?.reason ?? 'refused' }),
+    gist: gist(`request body rewritten on PR #${opened.pr}`),
+  });
 }
 
 // A failed merge round is a stall: the run's one fresh pass is born on

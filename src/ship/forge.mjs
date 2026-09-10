@@ -232,6 +232,24 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
       };
     },
 
+    /**
+     * Rewrites an open request's body. The run says what it holds and what is
+     * still wrong with it, and a merge round after the request opened can change
+     * both: the body a reader opens has to be the body the close stamps
+     * (ADR-0080).
+     *
+     * A refusal is not a defect of the run. The request is open, the merge is
+     * armed, and a body one edit behind costs the reader a heading; the caller
+     * stamps the miss and goes on.
+     */
+    async editBody(number, body) {
+      const result = await gh(['pr', 'edit', String(number), '-R', repo, '--body', body], {
+        allowFail: true,
+      });
+      if (result.code !== 0) return { edited: false, reason: result.output.slice(-300) };
+      return { edited: true };
+    },
+
     async ciSecrets() {
       // The Actions secrets endpoint lists names and never values; there is no
       // route through this API to a secret's content, which is what makes the
