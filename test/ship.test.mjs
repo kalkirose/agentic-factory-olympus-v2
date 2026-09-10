@@ -16,6 +16,7 @@ import {
   runLedgerPath,
 } from '../src/daemon/home.mjs';
 import { postFreeze, repairLane, restoreAnchor } from '../src/lanes/verdict.mjs';
+import { recordsLane } from '../src/lanes/records-stage.mjs';
 import {
   admitted,
   certifiedTrees,
@@ -205,8 +206,22 @@ function fakeForge(origin, { required = ['ci'], mergeCommitChecks = null } = {})
     const pr = state.pr;
     pr.headShaAtMerge = head(pr.head);
     gitSync(['merge', '--squash', pr.head], origin);
+    // `--allow-empty`, because a request whose net diff is empty is a request a
+    // forge merges. A records run whose one record conflicted took the default
+    // branch's version of it, so what is left to squash is nothing (ADR-0080).
     gitSync(
-      ['-c', 'user.email=f@f', '-c', 'user.name=forge', '-c', 'commit.gpgsign=false', 'commit', '-m', `squash ${pr.head}`],
+      [
+        '-c',
+        'user.email=f@f',
+        '-c',
+        'user.name=forge',
+        '-c',
+        'commit.gpgsign=false',
+        'commit',
+        '--allow-empty',
+        '-m',
+        `squash ${pr.head}`,
+      ],
       origin,
     );
     pr.mergeSha = head('main');
@@ -505,6 +520,9 @@ function shipFixture(
     story: { stages: ['seed', ...post.stages], handlers: { seed: seedHandler(seedExtra), ...post.handlers } },
     repair: repairShips ? repairship : repairLane({ afterVerdict: done }),
     repairship,
+    // The whole records lane, with the same ship stages behind it: a records
+    // request opens, merges and closes exactly where a story request does.
+    records: recordsLane({ afterRecords: shipLane, forgeFor: () => forge }),
   };
   // The launch door asks the same forge the ship step asks: a credential with a
   // declared CI surface is proven before a slot is taken (ADR-0068).
@@ -998,7 +1016,9 @@ test('a record conflict at the merge drops the run own change and ships the code
   fx.forge.setChecks(update.toSha, [green()]);
   const events = await waitClosed(fx.paths, runId);
 
-  // Nothing parked, no fresh pass, and no second stall.
+  // Nothing parked, no fresh pass, and no second stall. The lane is the story
+  // lane: it ships code beside the record it lost.
+  assert.equal(events.find((e) => e.event === 'run-launched').lane, 'story');
   assert.deepEqual(events.filter((e) => e.event === 'park').map((e) => e.type), []);
   assert.ok(!events.some((e) => e.event === 'fresh-pass'));
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
@@ -1067,6 +1087,69 @@ test('a record the round wrote takes no ticket at the cap, and its finding rides
   assert.equal(closed.unwritten, undefined);
   assert.ok(closed.remarks.length > 0);
   assert.match(fx.forge.state.bodies[0], /## Findings not answered/);
+});
+
+/** A records-lane run over the one record the fixture repo carries. */
+function recordsLaneFixture(t, { seats } = {}) {
+  return shipFixture(t, {
+    files: {
+      [ADR_FILE]: ADR_TEXT,
+      'tickets/records.md': [
+        '# Reconciliation ticket',
+        '',
+        '## Records to reconcile',
+        '',
+        `- ${ADR_FILE}`,
+        '',
+        '```paths',
+        ADR_FILE,
+        '```',
+        '',
+      ].join('\n'),
+    },
+    config: { repo: { testPaths: ['tests'], recordPaths: ['docs/adr'] } },
+    seats,
+  });
+}
+
+// The records lane's whole diff is its records. A conflict on the one record it
+// wrote leaves the run's own change nowhere, so the merge carries an empty
+// change: the request still opens and merges, the default branch keeps its own
+// version, and the close names the record the run lost (ADR-0080).
+test('a records-lane conflict on its only record merges an empty change and names it', async (t) => {
+  const fx = recordsLaneFixture(t, {
+    seats: {
+      'record-author': () => ({
+        files: { [ADR_FILE]: ADR_REWRITTEN },
+        report: { rewritten: [ADR_FILE], unchanged: [], summary: 'the record states what stands' },
+      }),
+      'record-review': reviewClean,
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  fx.forge.state.conflictMode = true;
+  const runId = await fx.launch({ lane: 'records', ticket: 'tickets/records.md', card: undefined });
+  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  // The default branch gains its own rewrite of the same record.
+  const theirs = ADR_TEXT.replace(
+    'The module src/feature.mjs will double the input.',
+    'The module src/feature.mjs doubles every input it is given.',
+  );
+  commitTree(fx.origin, { [ADR_FILE]: theirs }, 'a competing rewrite of one record');
+  const update = await waitEvent(fx.paths, runId, (e) => e.event === 'branch-update', 'branch-update');
+  fx.forge.setChecks(update.toSha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+
+  // No park, no seat asked to settle the document, and the run merged.
+  assert.deepEqual(events.filter((e) => e.event === 'park').map((e) => e.type), []);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.filter((e) => e.event === 'merged').length, 1);
+  const round = events.find((e) => e.event === 'merge-round');
+  assert.equal(round.resolved, true);
+  assert.deepEqual(round.recordsDropped, [ADR_FILE]);
+  // The default branch keeps its own version, and the close names the record.
+  assert.equal(gitSync(['show', `main:${ADR_FILE}`], fx.origin), theirs);
+  assert.deepEqual(events.find((e) => e.event === 'run-closed').unwritten, [ADR_FILE]);
 });
 
 test('a ticket the close cannot write is loud, and the kind names it', async (t) => {
