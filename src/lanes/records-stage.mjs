@@ -353,9 +353,21 @@ export function recordsStageHandler(mode) {
     if (base.fail) return base.fail;
     const outcome = await birthRecords(ctx, base);
     if (outcome.fail) return outcome.fail;
+    // The records lane writes decision records and nothing else. A birth that
+    // decided none leaves the lane no work: no record to review, nothing to put
+    // in a request, and nothing to merge. The run says so and ends. A park here
+    // would ask a person a question whose only answer is a different ticket, and
+    // the ticket this run was launched from stands where it was (ADR-0015,
+    // ADR-0080).
+    if (mode === 'records' && outcome.stamp?.decided !== true) {
+      return { close: { state: 'failed', reason: NOTHING_BORN } };
+    }
     return { next };
   };
 }
+
+/** The close a records-lane run takes where its birth decided no record. */
+export const NOTHING_BORN = 'nothing-born';
 
 /**
  * One birth of the records a work item decides: the seat, the checks, the

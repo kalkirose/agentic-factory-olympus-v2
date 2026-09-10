@@ -917,9 +917,9 @@ export const PARK_TYPES = new Set([
 ]);
 
 // Terminal run states. Every one of them stamps `run-closed`. A run reaches
-// one of them through the ship path, a human kill, or a human answering a
-// park with its abandon option — never through a condition the run met on
-// its own (ADR-0015).
+// one of them through the ship path, a human kill, a human answering a park
+// with its abandon option, or a records-lane birth that decided no record,
+// which is the one condition a lane meets on its own and ends on (ADR-0015).
 export const CLOSE_STATES = new Set(['shipped', 'failed', 'killed']);
 
 // Closed defect kinds. A defect the harness recognizes in itself used to be

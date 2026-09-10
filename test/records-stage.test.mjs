@@ -1105,6 +1105,34 @@ test('a story birth that spends its ladder stamps birthFailed and the run goes o
   );
 });
 
+// A birth that answered and wrote nothing is not a failure of a seat: the seat
+// read the ticket and found no decision in it. The lane has no work either way,
+// so the run ends loud and asks nobody anything (ADR-0015, ADR-0080).
+test('a records-lane birth that decides nothing closes the run loud', async (t) => {
+  const fx = laneFixture(t, {
+    seats: {
+      'record-author': () => ({
+        report: { rewritten: [], unchanged: [], summary: 'the ticket decides nothing new' },
+      }),
+    },
+    files: { 'tickets/records.md': ticketText([RECORD_PATH]) },
+  });
+  const { runId } = await fx.launch({ lane: 'records', ticket: 'tickets/records.md' });
+  const events = await waitClosed(fx.paths, runId);
+  const closed = events.find((e) => e.event === 'run-closed');
+  assert.equal(closed.state, 'failed');
+  assert.equal(closed.reason, 'nothing-born');
+  // No park, no request, and no stage behind the birth.
+  assert.deepEqual(events.filter((e) => e.event === 'park').map((e) => e.type), []);
+  assert.ok(!events.some((e) => e.event === 'pr-opened'));
+  assert.ok(!events.some((e) => e.event === 'reconcile-rendered'));
+  assert.deepEqual(
+    events.filter((e) => e.event === 'stage-entered').map((e) => e.stage),
+    ['readiness', 'records'],
+  );
+  assert.equal(events.find((e) => e.event === 'records-committed').decided, false);
+});
+
 // The records lane keeps the park: a birth that delivered nothing leaves that
 // lane no record, and a lane with no work has nothing to merge.
 test('a records-lane birth that spends its ladder parks', async (t) => {

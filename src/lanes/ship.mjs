@@ -561,7 +561,12 @@ async function preVerdictUpdate(ctx, base) {
   const certified = admitted(runEvents(ctx), base);
   // The records lane with no render at all. Every other uncertified tree goes
   // back to the stage that certifies it. This one would go back to a stage that
-  // already answered. It is the loud answer instead (ADR-0077).
+  // already answered, so it is the loud answer instead. A run that walked the
+  // stages never reaches it: a birth that decided no record ends the run at the
+  // records stage, and a birth that decided one is rendered over. What is left
+  // is a ledger missing a stamp the stages wrote, and a merge over a record tree
+  // no review read is the one thing this lane must never do in silence
+  // (ADR-0080).
   if (unjudgedRecords(runEvents(ctx), base)) {
     return blocked(ctx, 'records-uncertified', UNJUDGED_RECORDS_QUESTION);
   }
