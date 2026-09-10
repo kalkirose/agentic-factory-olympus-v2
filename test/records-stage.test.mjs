@@ -695,7 +695,7 @@ function citingTree(count = 23, id = '0001') {
   return out;
 }
 
-test('the birth brief names the gate command, and the readiness stage installs what it needs', async (t) => {
+test('the birth brief names the gate command, and the birth installs what it needs', async (t) => {
   const touched = 'docs/adr/adr-0001-keep-one-entry-point.md';
   const probe = join(tempDir(), 'birth-env.json');
   const fx = laneFixture(t, {
@@ -726,7 +726,7 @@ test('the birth brief names the gate command, and the readiness stage installs w
   // The sibling table and the divergence table are gone; the direction stays.
   assert.ok(!brief.includes('"siblings"'), brief);
   assert.match(brief, /Read every active record that cites the one you supersede/);
-  // The layer the gate needs ran once at readiness, before the seat.
+  // The layer the gate needs ran once, before the seat.
   const lockfile = events.filter((e) => e.event === 'layer-result' && e.layer === 'lockfile');
   assert.equal(lockfile.length, 1);
   assert.equal(lockfile[0].cycle, 0);
@@ -736,6 +736,34 @@ test('the birth brief names the gate command, and the readiness stage installs w
   assert.match(JSON.parse(readFileSync(probe, 'utf8')), /^[0-9a-f]{40}$/);
   // One dispatch: the report answered the shape the brief asked for.
   assert.equal(fx.calls.filter((c) => c.seat === 'record-author').length, 1);
+});
+
+// The install stands in front of the birth seat and not in one lane's
+// readiness. Every lane that holds a records stage dispatches that seat with the
+// same gate command in its brief (ADR-0080).
+test('a story birth installs what the gate needs, before the seat', async (t) => {
+  const fx = laneFixture(t, {
+    config: SUPERSEDE_LAYERS,
+    files: citingTree(),
+    seats: {
+      ...storySeats(() => ({ files: { [RECORD_PATH]: RECORD_TEXT }, report: bornReport() })),
+      dev: () => ({
+        files: { 'src/feature.mjs': 'export const f = (x) => 2 * x;\n' },
+        report: { summary: 'implemented' },
+      }),
+    },
+  });
+  const { runId } = await fx.launch({ lane: 'story', card: CARD_PATH });
+  const events = await waitClosed(fx.paths, runId);
+  const lockfile = events.filter(
+    (e) => e.event === 'layer-result' && e.layer === 'lockfile' && e.cycle === 0,
+  );
+  assert.equal(lockfile.length, 1);
+  const spawned = events.find((e) => e.event === 'seat-spawned' && e.seat === 'record-author');
+  assert.ok(lockfile[0].seq < spawned.seq, 'the gate prerequisite ran after the seat');
+  // The gate itself is not run here: the seat runs it, and the render runs it
+  // over the committed bytes.
+  assert.ok(!events.some((e) => e.event === 'layer-result' && e.layer === 'adr-form' && e.cycle === 0));
 });
 
 test('a ticket with no block gives the birth the records it names', async (t) => {

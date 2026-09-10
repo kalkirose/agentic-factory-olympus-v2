@@ -281,8 +281,6 @@ function recordsReadiness(forgeFor) {
       defaultBranch: ctx.payload.defaultBranch ?? 'main',
     });
     if (probed) return probed;
-    const installed = await installGateNeeds(ctx, config, worktree);
-    if (installed) return installed;
     return { next: 'records' };
   };
 }
@@ -296,24 +294,30 @@ function recordsReadiness(forgeFor) {
  * check the design leaves it (ADR-0080). So the layers the record layers need,
  * and none of the record layers themselves, run once here.
  *
+ * It stands in front of the birth seat and not in one lane's readiness, because
+ * every lane that holds a records stage dispatches that seat with the same brief
+ * and the same gate command in it.
+ *
  * They run under cycle 0, which no render counts, so the green they earn is a
  * prior the first record cycle carries: the layer reads the dependency manifest,
- * and the records the birth writes cannot change it.
+ * and the records the birth writes cannot change it. The cycle is also the
+ * resume boundary: a ledger that holds one of these stamps has run them.
  */
-async function installGateNeeds(ctx, config, worktree) {
-  const layers = config.gates?.tier1 ?? [];
-  const needs = recordLayerNeeds(layers, new Set(config.gates?.recordLayers ?? []));
+async function installGateNeeds(ctx, base) {
+  if (runEvents(ctx).some((e) => e.event === 'layer-result' && e.cycle === 0)) return null;
+  const layers = base.layers ?? [];
+  const needs = recordLayerNeeds(layers, new Set(base.recordLayers ?? []));
   if (needs.size === 0) return null;
   const spectrum = await runSpectrum(ctx, {
     layers,
-    commands: config.commands,
-    cwd: worktree,
-    env: runEnv(ctx, config),
+    commands: base.commands,
+    cwd: base.worktree,
+    env: base.env,
     cycle: 0,
-    sha: await headSha(worktree),
+    sha: await headSha(base.worktree),
     run: needs,
     skip: new Set(layers.map((layer) => layer.name).filter((name) => !needs.has(name))),
-    credentials: config.credentials ?? [],
+    credentials: base.config?.credentials ?? [],
   });
   if (!spectrum.error) return null;
   return commandError(
@@ -383,6 +387,9 @@ export async function birthRecords(ctx, base) {
       return { stamp: await commitRecords(ctx, base, report, null) };
     }
   }
+  // The gate the brief is about to name has to be runnable where the seat runs.
+  const installed = await installGateNeeds(ctx, base);
+  if (installed) return { fail: installed };
   // A seat that died mid-edit leaves whatever it had written, and the next
   // dispatch has to be the same dispatch as the first (ADR-0070).
   await resetHard(base.worktree, await headSha(base.worktree));
