@@ -1941,11 +1941,12 @@ test('a restart past a failed dispatch re-dispatches nothing and merges', async 
   const spawns = fx.calls.filter((c) => c.seat === 'reconcile-write');
   assert.equal(spawns.filter((c) => briefRecord(c.prompt) === ADR).length, 2);
   // The round finished the record behind it, ran once, and the render names the
-  // record the round lost.
+  // record whose finding the spent dispatch never answered. The tree still holds
+  // the judged round's own write of it, so the run lost no record.
   assert.equal(events.filter((e) => e.event === 'reconcile-round').length, 1);
-  assert.deepEqual(unwrittenOf(events), [ADR]);
   const rendered = events.filter((e) => e.event === 'reconcile-rendered').at(-1);
   assert.ok(rendered.open.includes(`unwritten:${ADR}`), rendered.open.join(', '));
+  assert.deepEqual(unwrittenOf(events), []);
 });
 
 // The judged write answers siblings over the same scope the corrective round
@@ -2288,6 +2289,47 @@ function closedSeed(text = ADR_RETIRED) {
     ctx.store.append('records-committed', { actor: 'daemon', sha, paths: [ADR], decided: true });
   });
 }
+
+// What the run says it never wrote is read over this pass alone, and per record
+// and never per dispatch (ADR-0080).
+test('the unwritten set opens at the judgment and reads the pass, not the dispatch', () => {
+  const other = 'docs/adr/adr-0009-other.md';
+  const judged = { event: 'reconciliation-judged', ok: true, owed: true, records: [ADR] };
+  // A drop a merge round made before this pass belongs to the pass that made
+  // it. The pass behind it writes its records again.
+  assert.deepEqual(
+    unwrittenOf(ledger({ event: 'merge-round', recordsDropped: [other] }, judged)),
+    [],
+  );
+  // A dispatch that wrote, then a corrective dispatch of the same pass that
+  // changed no line: the tree still holds what the first one wrote.
+  assert.deepEqual(
+    unwrittenOf(
+      ledger(
+        judged,
+        { event: 'record-written', record: ADR },
+        { event: 'record-written', record: ADR, dropped: [ADR] },
+      ),
+    ),
+    [],
+  );
+  // A dispatch that failed before any dispatch wrote the record.
+  assert.deepEqual(
+    unwrittenOf(ledger(judged, { event: 'record-written', record: ADR, failed: true })),
+    [ADR],
+  );
+  // A merge that took the default branch's version undoes every write behind it.
+  assert.deepEqual(
+    unwrittenOf(
+      ledger(
+        judged,
+        { event: 'record-written', record: ADR },
+        { event: 'merge-round', recordsDropped: [ADR] },
+      ),
+    ),
+    [ADR],
+  );
+});
 
 test('the cycle derives its review from the set it was dispatched over', () => {
   const closed = 'docs/adr/adr-0009-closed.md';

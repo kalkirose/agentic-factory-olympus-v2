@@ -2785,6 +2785,32 @@ function residualLine(f) {
  * close cannot write is the one outcome this mechanism must never produce in
  * silence, and it is stamped loud under its own defect kind.
  */
+/**
+ * Every record a write of this pass answered: the ones a seat rewrote, and the
+ * ones a seat read and left alone with the reason.
+ *
+ * It unions every successful write of the pass and never the newest one alone.
+ * A corrective round stamps the records it dispatched, and the stall behind the
+ * cap stamps a fallback with no records at all, so the newest stamp is silent
+ * about a record an earlier round of the same pass wrote (ADR-0080).
+ * @param {object[]} events the run's ledger, in order
+ * @returns {Set<string>}
+ */
+function writtenRecords(events) {
+  const out = new Set();
+  let fresh = -1;
+  for (const e of events) {
+    if (e.event === 'fresh-pass') {
+      fresh = e.seq;
+      out.clear();
+    }
+    if (e.event !== 'reconciliation-written' || e.ok !== true || e.seq < fresh) continue;
+    for (const record of e.rewritten ?? []) out.add(record);
+    for (const record of e.unchanged ?? []) out.add(record);
+  }
+  return out;
+}
+
 function reconcileClose(ctx, base, merged) {
   const events = runEvents(ctx);
   const judged = sinceFreshPass(events, (e) => e.event === 'reconciliation-judged');
@@ -2796,8 +2822,9 @@ function reconcileClose(ctx, base, merged) {
   // to launch a run over it would ask a second run for what one already answered
   // (ADR-0080).
   const unwritten = new Set(unwrittenOf(events));
+  const answered = writtenRecords(events);
   const records = (judged.records ?? []).filter(
-    (record) => unwritten.has(record) || written?.ok !== true,
+    (record) => unwritten.has(record) || !answered.has(record),
   );
   if (records.length === 0) return;
   const residual = residualDetail(events, written);

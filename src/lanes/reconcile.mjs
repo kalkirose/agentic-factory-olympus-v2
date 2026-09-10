@@ -1621,20 +1621,34 @@ async function fallbackStep(ctx, base, { cause, residual = [], next = NEXT_STAGE
  */
 export function unwrittenOf(events) {
   const out = new Set();
+  const wrote = new Set();
   const since = recordPassSeq(events);
   for (const e of events) {
+    // The whole reading opens at the pass the judgment began. A fresh pass
+    // writes its records again, so a drop or a failure a pass before this one
+    // speaks about a record this pass never touched.
+    if (e.seq <= since) continue;
     if (e.event === 'merge-round') {
       // A record the merge round dropped the run's own change to. The default
       // branch's version stands, so this run wrote nothing to it (ADR-0080).
-      for (const record of e.recordsDropped ?? []) out.add(record);
+      for (const record of e.recordsDropped ?? []) {
+        wrote.delete(record);
+        out.add(record);
+      }
       continue;
     }
-    if (e.event !== 'record-written' || e.seq <= since) continue;
+    if (e.event !== 'record-written') continue;
     // A dispatch that delivered nothing, and a dispatch whose report claimed a
-    // rewrite the tree does not hold, are one fact here: this record has no
-    // write of this run (ADR-0080).
-    if (e.failed === true || (e.dropped ?? []).includes(e.record)) out.add(e.record);
-    else out.delete(e.record);
+    // rewrite the tree does not hold, are one fact here: this dispatch wrote
+    // nothing. The record is unwritten only where no dispatch of the pass wrote
+    // it, because a corrective dispatch that changes no line leaves what an
+    // earlier dispatch wrote standing in the tree (ADR-0080).
+    if (e.failed === true || (e.dropped ?? []).includes(e.record)) {
+      if (!wrote.has(e.record)) out.add(e.record);
+      continue;
+    }
+    wrote.add(e.record);
+    out.delete(e.record);
   }
   return [...out];
 }

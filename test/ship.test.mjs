@@ -1014,6 +1014,61 @@ test('a record conflict at the merge drops the run own change and ships the code
   assert.deepEqual(events.find((e) => e.event === 'run-closed').unwritten, [ADR_FILE]);
 });
 
+/** A record review seat that raises one HIGH on every read it makes. */
+function reviewStanding() {
+  return ({ prompt }) => {
+    const target = briefUnits(prompt).find((u) => u.kind === undefined);
+    if (!target) return { report: { findings: [], summary: 'the record stands' } };
+    return {
+      report: {
+        findings: [
+          {
+            id: 'r1',
+            criterion: 'truth',
+            severity: 'HIGH',
+            file: ADR_FILE,
+            unit: target.id,
+            head: target.head,
+            line: 1,
+            summary: 'the record claims a doubling the tree does not hold',
+            evidence: 'src/feature.mjs',
+          },
+        ],
+        summary: 'the record against the tree',
+      },
+    };
+  };
+}
+
+// A ticket launches a run to write a record. A record this run wrote takes
+// none, whatever the round behind it ended in: the stall's own stamp says the
+// cap is spent and says nothing about which records a round wrote (ADR-0080).
+test('a record the round wrote takes no ticket at the cap, and its finding rides the close', async (t) => {
+  const fx = reconcileFixture(t, { seats: reconcileSeats(writeClean, reviewStanding()) });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+
+  // The cap is spent and the newest write stamp is the fallback.
+  assert.ok(events.some((e) => e.event === 'reconcile-stall'));
+  const written = events.filter((e) => e.event === 'reconciliation-written');
+  assert.equal(written.at(-1).ok, false);
+  assert.equal(written.at(-1).cause, 'record-cap');
+  assert.deepEqual(written[0].rewritten, [ADR_FILE]);
+
+  // No ticket, and nothing for the sweep to launch.
+  assert.ok(!existsSync(reconcileTicketPath(fx.paths, runId)));
+  assert.deepEqual(owedReconciliations(fx.paths, 'proj'), []);
+  // The finding that still stands rides the request body and the close stamp.
+  const closed = events.find((e) => e.event === 'run-closed');
+  assert.equal(closed.unwritten, undefined);
+  assert.ok(closed.remarks.length > 0);
+  assert.match(fx.forge.state.bodies[0], /## Findings not answered/);
+});
+
 test('a ticket the close cannot write is loud, and the kind names it', async (t) => {
   const fx = reconcileFixture(t, { seats: reconcileSeats(() => ({ exitCode: 3 })) });
   fx.forge.state.autoChecks = () => [running()];
