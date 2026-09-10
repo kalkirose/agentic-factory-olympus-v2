@@ -45,18 +45,22 @@ the worktree; a rationale entry whose text reads as a claim; a writer's `fails`;
 a review's `fails` with no finding; a finding on a unit the review reported
 `holds`; and, as rule 9, a reference the tree does not answer. Rule 9 refuses any
 kind but `reference` on a unit of the section and `reference` on any unit outside
-one. On the names a reference carries it refuses two things and no third: an
-`ADR-<n>` token that names no record of the record tree at any status, and a path
-token, slash and all, the worktree does not hold. A bullet that names nothing the
-record form gate checks is accepted, as that gate accepts it, so a link, a root
-file cited by its bare name and a line of prose all pass. Rules 4 and 9 read
-their path tokens from one function, which splits on whitespace alone, strips the
-backticks and the punctuation at a token's two ends, and keeps every bracket,
-parenthesis and plus inside it, as the record form gate does. Rule 5 never reads
-a reference unit. A refusal buys the seat its one corrective attempt, and every
-refused attempt stamps `seat-refused` with the seat, the attempt number and the
-defects, so a reading counts the refusals a seat answered as well as the budgets
-one spent.
+one. On the names a reference carries it refuses two things and no third: a
+record id the record tree holds at no status, and a path token the worktree does
+not hold. Rules 4 and 9 read their tokens from one function, which splits on
+whitespace alone, strips the backticks and the punctuation at a token's two ends,
+and keeps every bracket, parenthesis and plus inside it, as the record form gate
+does. Rule 9 then weighs each token as that gate weighs it: a token that matches
+`^ADR-0*(\d+)$` whole is an id; a token that starts with `http` is a link and is
+passed over; a token with no separator between two non-space characters is passed
+over; every other token is a path the worktree has to hold. A bullet whose tokens
+are all passed over is accepted, as the gate accepts it, so a link, a root file
+cited by its bare name and a line of prose all pass. Rule 4 reads the same split
+and a wider test, because a bare file name answers a claim and no gate reads a
+claim's evidence. Rule 5 never reads a reference unit. A refusal buys the seat
+its one corrective attempt, and every refused attempt stamps `seat-refused` with
+the seat, the attempt number and the defects, so a reading counts the refusals a
+seat answered as well as the budgets one spent.
 
 `repo.recordLifecycle` is `rewrite` or `supersede`. Under `supersede` no seat
 edits an accepted record. A change is a new record with a `Supersedes` line. The
