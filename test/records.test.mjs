@@ -394,22 +394,56 @@ test('a reference to a superseded record passes', (t) => {
   assert.deepEqual(unitChecks(CITING_BASE(dir), [CITING], citingReport(dir)), []);
 });
 
-// A link names a document outside the repository. The harness says nothing
-// about one, and a reference that names nothing at all is the defect. The link
-// stands bare or in angle brackets, because a markdown label glues to its
-// target in the form gate and the harness reads the token the gate reads.
-test('unit check 9 takes a link as a name and refuses a reference that names nothing', (t) => {
+// Check 9 refuses a reference for two reasons and no third: an id the record
+// tree does not hold, and a path token the worktree does not hold. A bullet
+// that names neither is accepted, because the record form gate accepts it, and
+// a refusal the gate does not make costs a seat an attempt on a true reference.
+// A root file cited by its bare name, a link and a line of prose are three
+// shapes that carry no such token. The id comes from the whole token, as it
+// does in the gate, so a link that carries a record file name, a lower-case
+// name and a name with a possessive on its end are three more.
+test('unit check 9 accepts a reference that names nothing it checks', (t) => {
   for (const bullet of [
+    '- `package.json`, the manifest at the root',
+    '- pnpm-workspace.yaml, the workspace file',
     '- https://example.invalid/notes, the upstream note',
     '- <https://example.invalid/notes>, the upstream note',
+    '- The requirement behind this decision, stated in the product brief',
+    '- https://example.invalid/other/docs/adr/adr-0999-the-copy.md, the upstream copy',
+    '- adr-999, the name in lower case',
+    "- ADR-0999's successor, named in prose",
+    // The gate reads a separator between two non-space characters, and it
+    // passes over every token that starts with those four letters.
+    '- /name.ext, a name with no folder in front of it',
+    '- httpd/conf/x.conf, the daemon config',
   ]) {
-    const linked = citingTree(t, [bullet]);
-    assert.deepEqual(unitChecks(CITING_BASE(linked), [CITING], citingReport(linked)), [], bullet);
+    const accepted = citingTree(t, [bullet]);
+    assert.deepEqual(unitChecks(CITING_BASE(accepted), [CITING], citingReport(accepted)), [], bullet);
   }
-  const bare = citingTree(t, ['- PRD NFR24, the requirement behind this decision']);
-  const defects = unitChecks(CITING_BASE(bare), [CITING], citingReport(bare));
-  assert.equal(defects.length, 1);
-  assert.match(defects[0], /^unit check 9: .*names no record, no path and no link/);
+  for (const [bullet, name] of [
+    ['- ADR-999, a record nobody wrote', 'ADR-999'],
+    ['- ADR-0999, the same record with its leading zero', 'ADR-999'],
+    ['- `scripts/nowhere.ts`, the checker', 'scripts/nowhere.ts'],
+    // A path with no suffix, a path that ends in its separator, and a scheme
+    // the gate does not pass over: the gate stats all three.
+    ['- src/nowhere, the module', 'src/nowhere'],
+    ['- docs/gone/, the folder', 'docs/gone/'],
+    ['- ftp://host/x.txt, the file on the other host', 'ftp://host/x.txt'],
+  ]) {
+    const refused = citingTree(t, [bullet]);
+    const defects = unitChecks(CITING_BASE(refused), [CITING], citingReport(refused));
+    assert.equal(defects.length, 1, bullet);
+    assert.ok(defects[0].startsWith('unit check 9: '), defects[0]);
+    assert.ok(defects[0].includes(name), defects[0]);
+  }
+});
+
+// The list of reasons is two long in the source as well as in the answers, so a
+// third reason written back into the check is caught where it is written.
+test('the reference check holds two refusals and no third', () => {
+  const source = readFileSync(join(import.meta.dirname, '..', 'src/lanes/records.mjs'), 'utf8');
+  const body = functionBody(source, 'referenceDefects');
+  assert.equal(body.split('defects.push').length - 1, 2, body);
 });
 
 // The proof it can still fail: one record, two bad references, both named in
@@ -431,11 +465,17 @@ test('the kind test reads a path, a symbol and the closed verb list', () => {
   assert.equal(kindTest('`recordScope` takes a range.'), 'claim');
   assert.equal(kindTest('The check lives in src/lanes/records.mjs today.'), 'claim');
   assert.equal(kindTest('The tree holds docs/style/anti-slop.md.'), 'claim');
+  assert.equal(kindTest('`scripts/x.ts` runs on every push.'), 'claim');
+  assert.equal(kindTest('See docs/adr/x.md for the reason.'), 'claim');
   assert.equal(kindTest('Why: the alternative cost a second module.'), null);
   assert.equal(kindTest('Rejected: a per-combination enumeration, which blows up.'), null);
   assert.equal(kindTest('Reversal trigger: a second consumer of the same table.'), null);
-  // A word with a slash is not a path.
+  // This test reads a sentence of the body, where a slashed word is a word and
+  // no file. Rule 9 reads a reference list and takes every such token as a
+  // name, and the two readers part here.
   assert.equal(kindTest('The trade holds either way, and/or costs nothing.'), null);
+  assert.equal(kindTest('The seat weighs input/output cost against nothing.'), null);
+  assert.equal(kindTest('Read/write cost was the reason.'), null);
 });
 
 // -- the one path split (plan 42, point 1) ------------------------------------
@@ -463,24 +503,38 @@ test('the path tokens of a text are the tokens the form gate names', () => {
     { text: 'Read `scripts/x.ts`!', tokens: ['scripts/x.ts'] },
     { text: 'Which line of `scripts/x.ts`?', tokens: ['scripts/x.ts'] },
     // A path with a line suffix, as a piece of evidence writes one. The suffix
-    // is part of the token, so two segments and a suffix read as no path; the
-    // evidence reader is the one that strips it, and it names the file.
-    { text: 'scripts/x.ts:12', tokens: [], evidence: 'scripts/x.ts' },
+    // is part of the token and the gate stats the token whole, so a reference
+    // that writes one names a path the tree does not hold; the evidence reader
+    // is the one that strips it, and it names the file.
+    { text: 'scripts/x.ts:12', tokens: ['scripts/x.ts:12'], evidence: 'scripts/x.ts' },
+    // No count of segments and no ask for a suffix: the separator inside the
+    // name is the whole test, and a name with nothing in front of its
+    // separator is no path.
+    { text: 'The module is src/nowhere today.', tokens: ['src/nowhere'] },
+    { text: 'The folder docs/gone/ is empty.', tokens: ['docs/gone/'] },
+    { text: 'The name /name.ext has no folder.', tokens: [] },
     // Two paths in one bullet, in the order they stand.
     {
       text: `Both \`${ROUTE}\` and \`web/src/lib/cart.ts\` hold it.`,
       tokens: [ROUTE, 'web/src/lib/cart.ts'],
     },
-    // A bare link and an autolink: the angle brackets are the sentence's.
-    { text: '- https://example.invalid/notes, the upstream note', tokens: ['https://example.invalid/notes'] },
-    { text: '- <https://example.invalid/notes>, the upstream note', tokens: ['https://example.invalid/notes'] },
+    // A bare link and an autolink: the angle brackets are the sentence's, and
+    // the gate passes over what is left because it starts with those four
+    // letters. A token that only starts with them is passed over as well.
+    { text: '- https://example.invalid/notes, the upstream note', tokens: [] },
+    { text: '- <https://example.invalid/notes>, the upstream note', tokens: [] },
+    { text: 'The daemon reads httpd/conf/x.conf today.', tokens: [] },
+    // A scheme the gate does not pass over is a path the gate stats.
+    { text: 'The file is ftp://host/x.txt today.', tokens: ['ftp://host/x.txt'] },
     // A markdown label glues to its target in the gate, so the harness glues it
     // too and the token names a path the tree does not hold.
     { text: '- [the note](docs/x.md)', tokens: ['note](docs/x.md'] },
-    // An asterisk is not markup the gate takes off, so a bolded path is no path.
-    { text: 'The rule stands in **scripts/x.ts** today.', tokens: [] },
-    // A word with a slash is no path.
-    { text: 'The trade holds either way, and/or costs nothing.', tokens: [] },
+    // An asterisk is not markup the gate takes off, so a bolded path is a path
+    // token with the asterisks inside it, and the tree holds no such name.
+    { text: 'The rule stands in **scripts/x.ts** today.', tokens: ['**scripts/x.ts**'] },
+    // A word with a slash carries the gate's whole test, so the gate stats it
+    // and so does the harness.
+    { text: 'The trade holds either way, and/or costs nothing.', tokens: ['and/or'] },
   ];
   for (const row of rows) {
     assert.deepEqual(pathTokens(row.text), row.tokens, row.text);
@@ -540,6 +594,37 @@ test('unit check 4 reads a bracketed evidence path whole', (t) => {
   );
   assert.equal(defects.length, 1);
   assert.ok(defects[0].includes(`cites ${ROUTE} and the worktree holds no such path`), defects[0]);
+});
+
+// One claim is answered by four lines of a file as often as by one, and a seat
+// writes them as the list it read them in. The path is what the check stats, so
+// the whole end comes off: a line, a range, or a comma list of the two.
+test('unit check 4 reads an evidence path with a list of lines', (t) => {
+  for (const [evidence, path] of [
+    ['src/feature.mjs:25,33,50,63', 'src/feature.mjs'],
+    ['src/feature.mjs:12-14,20', 'src/feature.mjs'],
+    ['src/feature.mjs:12-14', 'src/feature.mjs'],
+    ['src/feature.mjs:12', 'src/feature.mjs'],
+    ['src/feature.mjs', 'src/feature.mjs'],
+  ]) {
+    assert.equal(evidencePath(evidence), path, evidence);
+    const held = tree(t);
+    assert.deepEqual(
+      unitChecks({ worktree: held }, [RECORD], reportWith(completeUnits({ U2: { evidence } }))),
+      [],
+      evidence,
+    );
+  }
+  // The list is no escape from the check: the file still has to be there.
+  const missing = tree(t);
+  rmSync(join(missing, 'src/feature.mjs'));
+  const defects = unitChecks(
+    { worktree: missing },
+    [RECORD],
+    reportWith(completeUnits({ U2: { evidence: 'src/feature.mjs:25,33' } })),
+  );
+  assert.equal(defects.length, 1);
+  assert.ok(defects[0].includes('cites src/feature.mjs and the worktree holds no such path'), defects[0]);
 });
 
 test('unit check 6 refuses a writer report that leaves a unit failing', (t) => {

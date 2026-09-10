@@ -39,7 +39,6 @@ import {
   readText,
   recordFiles,
   recordId,
-  recordRefs,
   recordUnits,
   statusOf,
   supersedesOf,
@@ -400,8 +399,9 @@ export function unitKindLines() {
     '  the harness answers it.',
     '- "verdict": "holds", "fails" or "not-built". A title, a status, a rationale and a reference',
     '  unit take "holds".',
-    '- "evidence": on a claim, the repo-relative path that answers it, and the line where one',
-    '  exists. The worktree has to hold that path. On any other kind, one short sentence.',
+    '- "evidence": on a claim, the repo-relative path that answers it, and the line or lines',
+    '  where one exists. The worktree has to hold that path. On any other kind, one short',
+    '  sentence.',
   ];
 }
 
@@ -564,8 +564,8 @@ function divergenceDutyLines(records, supersede = false) {
     '  in the file. A statement that is not in the file is a defect and buys you another round.',
     '- "state": "none" when you found no divergence in that record. "statement" is your',
     '  one-sentence reason.',
-    '- "evidence": the repo-relative path, and the line where one exists, that shows the tree',
-    '  side of what you state.',
+    '- "evidence": the repo-relative path, and the line or lines where one exists, that shows',
+    '  the tree side of what you state.',
     ...(supersede
       ? [
           '- A record you add to replace one of these takes an entry of its own. The record it',
@@ -1075,28 +1075,44 @@ export function unitChecks(
 }
 
 /**
- * Rule 9: a reference names something, and what it names is there.
+ * Rule 9: what a reference names, the tree holds.
  *
  * A record id resolves against the whole record tree and not the active half of
  * it, because a record cites the record it supersedes and that one is closed by
- * the same diff. A path resolves against the worktree. A link resolves against
- * nothing: it names a document outside this repository, and the harness says
- * nothing about one.
+ * the same diff. A path resolves against the worktree.
+ *
+ * Those two are the whole list, and there is no third. Each token of the unit
+ * is read as the record form gate reads it: a token that matches `ADR-<n>`
+ * whole is an id, a token that starts with `http` is a link and is passed over,
+ * a token that holds no separator between two non-space characters names
+ * nothing and is passed over, and every other token is a path. A bullet whose
+ * tokens are all passed over is accepted, because the gate accepts it: a link,
+ * a root file cited by its bare name and a line of prose all take that shape,
+ * and a refusal the gate does not make costs the seat an attempt on a true
+ * reference.
+ *
+ * The id is read from the whole token and never from the text, because the gate
+ * reads it that way: a link that carries a record file name in its path, a
+ * lower-case `adr-<n>` and an `ADR-<n>` with a possessive on its end are three
+ * names the gate takes as no id at all.
  *
  * The tokens come from the unit's whole text and not from the eight-word head
  * the unit stands by. A reference states its gloss first as often as last, so a
- * head would refuse a bullet whose id is its ninth word for naming nothing, and
- * would read no id there to check; a record wraps its bullets, so the text is
- * every line the enumeration folded into the unit (ADR-0073). The head still
- * names the unit in the defect text, because that is the text the seat matches
- * to its own list.
+ * head would read no id to check on a bullet whose id is its ninth word; a
+ * record wraps its bullets, so the text is every line the enumeration folded
+ * into the unit (ADR-0073). The head still names the unit in the defect text,
+ * because that is the text the seat matches to its own list.
  */
 function referenceDefects(base, tree, record, unit, line) {
   const defects = [];
-  const ids = [...recordRefs(line)];
-  const tokens = pathTokens(line);
-  const links = tokens.filter(isLink);
-  const paths = tokens.filter((token) => !isLink(token));
+  const ids = new Set();
+  for (const token of bareTokens(line)) {
+    // The gate passes a link over before it reads an id, and so does this: one
+    // token takes one of the three readings, and the link takes the first.
+    if (isLink(token)) continue;
+    const found = RECORD_TOKEN.exec(token);
+    if (found !== null) ids.add(Number(found[1]));
+  }
   for (const id of ids) {
     if (tree.has(id)) continue;
     defects.push(
@@ -1104,17 +1120,11 @@ function referenceDefects(base, tree, record, unit, line) {
         'holds no record of that id. Cite a record this tree holds, or drop the reference.',
     );
   }
-  for (const path of paths) {
+  for (const path of pathTokens(line)) {
     if (existsSync(join(base.worktree, path))) continue;
     defects.push(
       `unit check 9: ${record} ${unit.id} ("${unit.head}") cites ${path} and the worktree holds ` +
         'no such path.',
-    );
-  }
-  if (ids.length === 0 && paths.length === 0 && links.length === 0) {
-    defects.push(
-      `unit check 9: ${record} ${unit.id} ("${unit.head}") stands under "## References" and ` +
-        'names no record, no path and no link. A reference names something.',
     );
   }
   return defects;
@@ -1135,9 +1145,20 @@ function recordTree(base) {
   };
 }
 
-/** Whether a token names a document outside this repository. */
+/** A whole token that names a record id, as the record form gate reads one. */
+const RECORD_TOKEN = /^ADR-0*(\d+)$/;
+
+/**
+ * Whether a token is the link the gate passes over: it starts with `http`.
+ *
+ * The test is the gate's, and it is neither the set of schemes nor the shape of
+ * a URL. A token under another scheme, `ftp://host/x.txt`, is a path the gate
+ * stats, so it is a path here; a token that only starts with those four
+ * letters, `httpd/conf/x.conf`, is a name the gate passes over, so it is passed
+ * over here.
+ */
 function isLink(token) {
-  return /^[a-z][a-z0-9+.-]*:\/\//i.test(token);
+  return /^http/i.test(token);
 }
 
 /** Rule 4: a claim carries the path in the worktree that answers it. */
@@ -1211,30 +1232,56 @@ function bareTokens(text) {
   return found;
 }
 
-/** The tokens of a text that read as repository paths, in the order they stand. */
+/**
+ * The tokens of a text that read as repository paths, in the order they stand.
+ *
+ * The test is the record form gate's, word for word: a token the gate passes
+ * over as a link is no path, and a token with a separator between two non-space
+ * characters is one. Nothing counts the segments and nothing asks for a suffix,
+ * because the gate asks for neither: `src/nowhere` and `docs/gone/` are paths
+ * both readers stat, and `/name.ext` is a name both readers pass over.
+ */
 export function pathTokens(text) {
-  return bareTokens(text).filter(
-    (token) =>
-      token.includes('/') &&
-      (token.split('/').filter(Boolean).length > 2 || /\.\w{1,6}$/.test(token)),
-  );
+  return bareTokens(text).filter((token) => !isLink(token) && /\S\/\S/.test(token));
 }
 
-/** A token that reads as a repository path: two segments and a suffix, or three. */
+/** A token of three segments, or of two with a suffix on the second. */
+const SENTENCE_PATH = /[^/\s]+\/+[^/\s]+\/+[^/\s]+|\/[^/\s]*\.\w{1,6}$/;
+
+/**
+ * Whether a sentence names a repository path, for the kind test of rule 5.
+ *
+ * The tokens are the shared ones and the test on a token is not rule 9's,
+ * because the two read two texts. Rule 9 mirrors a gate over a reference list,
+ * where every slashed token is a name the gate stats. Rule 5 reads a sentence
+ * of the body, where a slashed word is a word: `and/or`, `input/output` and
+ * `read/write` name no file, and a rule that took them as paths would refuse a
+ * true rationale sentence and buy the seat an attempt. A path inside a sentence
+ * carries three segments, or two and a suffix.
+ */
 function namesPath(text) {
-  return pathTokens(text).length > 0;
+  return bareTokens(text).some((token) => SENTENCE_PATH.test(token));
 }
 
 /**
  * The path a piece of evidence names, without its line suffix, or null.
  *
- * The tokens are the ones every other check reads. What a claim may cite is
- * wider than what a reference may: a bare file name answers a claim, so this
- * takes the first token that holds a separator or a suffix.
+ * The tokens are the ones every other check reads. The test on a token is
+ * wider than rule 9's, and it stays wider: rule 9 answers a reference line, and
+ * the record form gate reads that same line, so the two hold one rule or one of
+ * them refuses a record the other passes. No gate reads a claim's evidence. A
+ * bare file name and a path with the line on its end both answer a claim, so
+ * this takes the first token that holds a separator or a suffix, and it takes
+ * the lines off it.
+ *
+ * The end a seat writes is a line, a range, or a comma list of the two, because
+ * one claim is answered by four lines of a file as often as by one. A list the
+ * reader left on the name is a path the worktree does not hold, and check 4
+ * then refuses a claim that names the file it says it names.
  */
 export function evidencePath(evidence) {
   for (const token of bareTokens(evidence)) {
-    const bare = token.replace(/:\d+(-\d+)?$/, '');
+    const bare = token.replace(/:\d+(-\d+)?(,\d+(-\d+)?)*$/, '');
     if (bare.length === 0) continue;
     if (!bare.includes('/') && !/\.\w{1,6}$/.test(bare)) continue;
     return bare.replaceAll('\\', '/');
