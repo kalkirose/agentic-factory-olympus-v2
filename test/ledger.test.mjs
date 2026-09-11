@@ -126,7 +126,7 @@ test('the vocabulary says which record carries each kind, and the two sets are d
   // The frozen surface a take-back names, beside the kind that classifies it.
   // A dev seat that reached a test and one that reached a decision record are
   // two defects with two repairs, and one word for both counts neither.
-  assert.deepEqual([...RECAPTURE_CLASSES].sort(), ['record', 'record-seat', 'test']);
+  assert.deepEqual([...RECAPTURE_CLASSES].sort(), ['record', 'record-seat', 'seat-commit', 'test']);
   for (const cls of RECAPTURE_CLASSES) assert.equal(assertRecaptureClass(cls), cls);
   assert.throws(() => assertRecaptureClass('adr'), /unknown recapture class/);
   assert.throws(() => assertRecaptureClass(undefined), /unknown recapture class/);

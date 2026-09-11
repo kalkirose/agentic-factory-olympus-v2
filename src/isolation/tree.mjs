@@ -12,11 +12,14 @@ import {
 import { MAX_DIFF_BYTES, git, gitCapped } from './git.mjs';
 import { longPath } from './removal.mjs';
 
+/** The author email every commit the daemon signs carries. */
+export const DAEMON_EMAIL = 'daemon@olympus.invalid';
+
 const IDENTITY = [
   '-c',
   'user.name=olympus-daemon',
   '-c',
-  'user.email=daemon@olympus.invalid',
+  `user.email=${DAEMON_EMAIL}`,
   '-c',
   'commit.gpgsign=false',
 ];
@@ -608,6 +611,39 @@ export async function abortMerge(tree) {
 export async function resetHard(tree, sha) {
   await git(['reset', '--hard', sha], { cwd: tree });
   await git(['clean', '-fd'], { cwd: tree });
+}
+
+/**
+ * Unwinds the commits a seat made on top of the daemon's own into the working
+ * tree. The floor is the newest first-parent ancestor of HEAD that the daemon
+ * authored or that is the run's base sha; `reset --mixed` to it leaves every
+ * write the seat made as a dirty file, which is the shape every reader of the
+ * tree expects and the shape the daemon's own commit then holds. Returns the
+ * shas unwound, newest first. Nothing is unwound when HEAD is the floor, when
+ * no base is known, or when no floor sits within `limit` commits: the tree is
+ * then left exactly as the seat left it.
+ */
+export async function unwindSeatCommits(tree, { base = null, limit = 200 } = {}) {
+  if (typeof base !== 'string' || base.length === 0) return [];
+  const out = await git(
+    ['log', '--first-parent', `--max-count=${limit}`, '--format=%H%x09%ae', 'HEAD'],
+    { cwd: tree },
+  );
+  const seat = [];
+  let floor = null;
+  for (const raw of out.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const [sha, email] = line.split('\t');
+    if (sha === base || email === DAEMON_EMAIL) {
+      floor = sha;
+      break;
+    }
+    seat.push(sha);
+  }
+  if (floor === null || seat.length === 0) return [];
+  await git(['reset', '-q', '--mixed', floor], { cwd: tree });
+  return seat;
 }
 
 /** Files under the given path entries at a sha. */

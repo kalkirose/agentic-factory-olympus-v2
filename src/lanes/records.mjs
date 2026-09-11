@@ -28,7 +28,13 @@ import { fileURLToPath } from 'node:url';
 import { recordPathIncludes } from '../config/project.mjs';
 import { assertDefectKind, assertRecaptureClass } from '../ledger/registry.mjs';
 import { git } from '../isolation/git.mjs';
-import { changedFiles, changedInRange, headSha, restorePaths } from '../isolation/tree.mjs';
+import {
+  changedFiles,
+  changedInRange,
+  headSha,
+  restorePaths,
+  unwindSeatCommits,
+} from '../isolation/tree.mjs';
 import { recordCriteriaLines } from './lenses.mjs';
 import { NEIGHBOUR_CAP, isActiveRecord, readText } from './units.mjs';
 import { ACTOR, againstClause, briefLines, gist, underAny } from './shared.mjs';
@@ -296,6 +302,7 @@ const RECORD_RULES = [
   '- A record does not cite the standard. It cites the records it relies on.',
   '- Edit only the decision-record tree. No source, test, or config change',
   '  rides this run: a change outside it is reverted before the commit.',
+  '- Do not commit; the orchestrator commits your work.',
 ];
 
 /** What the report owes about the records the harness judged owed. */
@@ -470,6 +477,24 @@ export async function recordScope(
  * @returns {Promise<string[]>} the defects, which is always empty
  */
 export async function writeChecks(ctx, base, records, report) {
+  // Zeroth: a seat that committed its own writes. Both readings below read the
+  // dirty tree, and a commit empties it: every record the seat wrote would be
+  // dropped as unwritten and an outside write would ride the commit past the
+  // revert. The commits go back into the working tree first, and the stamp
+  // says so; the daemon's own commit then holds what the seat wrote.
+  const unwound = await unwindSeatCommits(base.worktree, { base: ctx.payload?.baseSha ?? null });
+  if (unwound.length > 0) {
+    ctx.store.append('diff-policy-recapture', {
+      actor: ACTOR,
+      seat: base.seat ?? WRITE_SEAT,
+      lane: base.mode ?? 'records',
+      kind: assertDefectKind('capture-takeback'),
+      class: assertRecaptureClass('seat-commit'),
+      commits: unwound,
+      note: SEAT_COMMIT_NOTE,
+      gist: gist(`${unwound.length} seat commit(s) unwound into the working tree: ${unwound[0].slice(0, 7)}`),
+    });
+  }
   const trees = containmentTrees(base, records);
   const outside = (await changedFiles(base.worktree)).filter((file) => !underAny(file, trees));
   if (outside.length > 0) {
@@ -496,6 +521,11 @@ export async function writeChecks(ctx, base, records, report) {
   if (dropped.length > 0) report.dropped = dropped;
   return [];
 }
+
+/** The record's one-sentence statement of what a seat-commit take-back is. */
+export const SEAT_COMMIT_NOTE =
+  'A record seat committed its own writes. The commits were unwound into the working tree ' +
+  'so the readings see every write, and the orchestrator commits the work once.';
 
 /** The record's one-sentence statement of what a record-seat take-back is. */
 export const SEAT_TAKEBACK_NOTE =
