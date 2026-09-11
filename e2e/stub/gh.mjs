@@ -17,7 +17,7 @@ const statePath = process.env.OLYMPUS_E2E_FORGE;
 const state = JSON.parse(readFileSync(statePath, 'utf8'));
 
 const answer = handle();
-log(answer.handled);
+log(answer.handled, answer.body);
 if (answer.out) process.stdout.write(answer.out.endsWith('\n') ? answer.out : answer.out + '\n');
 save();
 process.exit(answer.code ?? 0);
@@ -52,7 +52,11 @@ function api(path) {
 function prCreate() {
   state.head = flag('--head');
   state.base = flag('--base') ?? state.base;
-  return { handled: 'pr-create', out: '' };
+  // The body rides a file the adapter removes after the call, so the log
+  // records its content here, where the file exists.
+  const bodyFile = flag('--body-file');
+  const body = bodyFile ? readFileSync(bodyFile, 'utf8') : null;
+  return { handled: 'pr-create', out: '', body };
 }
 
 function prView() {
@@ -163,10 +167,10 @@ function save() {
   writeFileSync(statePath, JSON.stringify(state, null, 2) + '\n');
 }
 
-function log(handled) {
+function log(handled, body = null) {
   if (!process.env.OLYMPUS_E2E_FORGE_LOG) return;
   appendFileSync(
     process.env.OLYMPUS_E2E_FORGE_LOG,
-    JSON.stringify({ at: Date.now(), handled, argv }) + '\n',
+    JSON.stringify({ at: Date.now(), handled, argv, ...(body !== null && { body }) }) + '\n',
   );
 }

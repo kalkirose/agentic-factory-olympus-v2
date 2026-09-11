@@ -680,7 +680,7 @@ test('a corrective round over a born supersession merges what it could not answe
   assert.ok(standing.length > 0, 'no finding stood on the record no round wrote');
   for (const id of standing) assert.ok(closed.remarks.includes(id), id);
   const create = forgeCalls(fx).find((c) => c.handled === 'pr-create');
-  const body = create.argv[create.argv.indexOf('--body') + 1];
+  const body = create.body;
   assert.match(body, /## Findings not answered/);
   assert.match(body, new RegExp(`\\[${standing[0]}\\]`));
 
@@ -857,7 +857,7 @@ test('a records-lane run at its cap merges with the standing finding named', asy
   assert.equal(finding.confirmed, true);
   assert.equal(finding.advisory, undefined);
   const create = forgeCalls(fx).find((c) => c.handled === 'pr-create');
-  const body = create.argv[create.argv.indexOf('--body') + 1];
+  const body = create.body;
   assert.match(body, /## Findings not answered/);
   assert.match(body, new RegExp(`\\[${finding.id}\\]`));
   // The record rode the merge with the finding standing in it.
