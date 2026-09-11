@@ -409,3 +409,72 @@ test('the record list has one form, and the tree shape reads it', () => {
   assert.equal(parseRecordList('ADR-101 ADR-102'), null);
   assert.equal(parseRecordList('the first one'), null);
 });
+
+// -- the zeroth reading: a seat that committed its own writes -------------------
+
+test('a seat commit is unwound into the working tree, its records are kept, and the take-back is stamped', async (t) => {
+  const dir = repo(t, { [RECORD]: RECORD_TEXT });
+  const base = gitSync(['rev-parse', 'HEAD'], dir).trim();
+  const added = 'docs/adr/adr-902-new.md';
+  const sha = commitTree(dir, { [added]: '# ADR-902: A new decision\n\n**Status:** Accepted\n' }, 'seat: my own commit');
+  const ctx = { ...stubCtx(), payload: { baseSha: base } };
+  const out = report({ rewritten: [added] });
+  assert.deepEqual(await writeChecks(ctx, { ...BASE, worktree: dir }, [], out), []);
+  assert.equal(gitSync(['rev-parse', 'HEAD'], dir).trim(), base, 'HEAD is back at the base');
+  assert.match(gitSync(['status', '--porcelain', '-uall'], dir), /adr-902-new/, 'the write is a dirty file again');
+  assert.deepEqual(out.rewritten, [added], 'the record the seat committed is kept');
+  assert.equal(out.dropped, undefined);
+  const stamp = ctx.events.find((e) => e.event === 'diff-policy-recapture');
+  assert.ok(stamp, 'the unwind left no record');
+  assert.equal(stamp.kind, 'capture-takeback');
+  assert.equal(stamp.class, 'seat-commit');
+  assert.deepEqual(stamp.commits, [sha]);
+  assert.match(stamp.note, /orchestrator commits the work once/);
+});
+
+test('a seat commit that carries a code write is unwound, and the code write is then reverted', async (t) => {
+  const dir = repo(t, { [RECORD]: RECORD_TEXT, 'src/feature.mjs': 'export const f = 1;\n' });
+  const base = gitSync(['rev-parse', 'HEAD'], dir).trim();
+  commitTree(dir, { [RECORD]: `${RECORD_TEXT}\nOne more sentence.\n`, 'src/feature.mjs': 'export const f = 2;\n' }, 'seat: records and code');
+  const ctx = { ...stubCtx(), payload: { baseSha: base } };
+  await writeChecks(ctx, { ...BASE, worktree: dir }, [], report());
+  assert.equal(gitSync(['rev-parse', 'HEAD'], dir).trim(), base);
+  assert.equal(readFileSync(join(dir, 'src/feature.mjs'), 'utf8'), 'export const f = 1;\n', 'the code write did not ride the commit past the revert');
+  assert.match(readFileSync(join(dir, RECORD), 'utf8'), /One more sentence/);
+  const classes = ctx.events.filter((e) => e.event === 'diff-policy-recapture').map((e) => e.class);
+  assert.deepEqual(classes, ['seat-commit', 'record-seat']);
+});
+
+test('the daemon commit is the floor of the unwind, not the run base', async (t) => {
+  const dir = repo(t, { [RECORD]: RECORD_TEXT });
+  const base = gitSync(['rev-parse', 'HEAD'], dir).trim();
+  gitSync(['-c', 'user.name=olympus-daemon', '-c', 'user.email=daemon@olympus.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'records: earlier'], dir);
+  const daemon = gitSync(['rev-parse', 'HEAD'], dir).trim();
+  const added = 'docs/adr/adr-902-new.md';
+  const sha = commitTree(dir, { [added]: '# ADR-902: A new decision\n\n**Status:** Accepted\n' }, 'seat: mine');
+  const ctx = { ...stubCtx(), payload: { baseSha: base } };
+  const out = report({ rewritten: [added] });
+  await writeChecks(ctx, { ...BASE, worktree: dir }, [], out);
+  assert.equal(gitSync(['rev-parse', 'HEAD'], dir).trim(), daemon);
+  assert.deepEqual(out.rewritten, [added]);
+  assert.deepEqual(ctx.events.find((e) => e.event === 'diff-policy-recapture').commits, [sha]);
+});
+
+test('with no base sha known nothing is unwound, and the tree is read as the seat left it', async (t) => {
+  const dir = repo(t, { [RECORD]: RECORD_TEXT });
+  const added = 'docs/adr/adr-902-new.md';
+  const sha = commitTree(dir, { [added]: '# ADR-902: A new decision\n\n**Status:** Accepted\n' }, 'seat: mine');
+  const ctx = stubCtx();
+  const out = report({ rewritten: [added] });
+  await writeChecks(ctx, { ...BASE, worktree: dir }, [], out);
+  assert.equal(gitSync(['rev-parse', 'HEAD'], dir).trim(), sha);
+  assert.deepEqual(out.dropped, [added]);
+  assert.equal(ctx.events.some((e) => e.class === 'seat-commit'), false);
+});
+
+test('every record seat brief forbids the commit', () => {
+  const rule = /Do not commit; the orchestrator commits your work\./;
+  assert.match(birthRole({ ...BASE, worktree: '/tmp/none' }, { key: 'k', touchedPaths: [] }, [], null), rule);
+  assert.match(writeRole({ ...BASE, worktree: '/tmp/none' }, JUDGED, null), rule);
+  assert.match(correctiveRole({ ...BASE, worktree: '/tmp/none' }, JUDGED, { findings: [], brief: null }), rule);
+});

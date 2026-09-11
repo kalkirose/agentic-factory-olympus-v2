@@ -47,13 +47,22 @@ answered. An `answered` entry carries `disputed` with one sentence where the
 writer read the record and found it right; the next cycle's reviewer reads that
 record fresh and either raises the finding again or does not.
 
-**Two readings of what a seat left, and neither refuses.** A changed file
-outside the record tree is reverted to the tree's last commit and stamped
+**Three readings of what a seat left, and none refuses.** First, a commit the
+seat made on top of the daemon's own is unwound into the working tree and
+stamped `diff-policy-recapture` with `class: 'seat-commit'` and the shas. Both
+readings after it read the dirty tree, and a seat commit empties that tree: every
+record the seat wrote would be dropped as unwritten, and a write outside the
+record tree would ride the commit past the revert. The floor of the unwind is
+the newest first-parent ancestor of HEAD that the daemon authored or that is the
+run's base sha, so the daemon's one commit, signed with its own identity, holds
+what the seat wrote. The brief tells the seat not to commit; the unwind is what
+makes the rule cost nothing when a seat does. Second, a changed file outside the
+record tree is reverted to the tree's last commit and stamped
 `diff-policy-recapture` with `class: 'record-seat'`: a record run must not ship
-code, and a revert costs no attempt where a refusal costs one. A record the
-report lists as rewritten that the tree did not change is dropped from the list,
-with the note on the stamp. The one refusal a record write still takes is the
-runner's own: a report that is not the JSON the schema names is no report.
+code, and a revert costs no attempt where a refusal costs one. Third, a record
+the report lists as rewritten that the tree did not change is dropped from the
+list, with the note on the stamp. The one refusal a record write still takes is
+the runner's own: a report that is not the JSON the schema names is no report.
 
 **The lifecycle has one implementation, and it is the project's.** The briefs
 state rule 13 as the rule the seat writes to, and the form gate reads the

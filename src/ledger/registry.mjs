@@ -1029,7 +1029,12 @@ export const DEFECT_KINDS = new Set([...GATE_INTEGRITY_KINDS, ...OBSERVED_DEFECT
 // record tree. The write is reverted and the round goes on, because a record run
 // ships no code and a refusal there costs a dispatch and buys nothing
 // (ADR-0080).
-export const RECAPTURE_CLASSES = new Set(['test', 'record', 'record-seat']);
+//
+// `seat-commit` is a record seat that committed its own writes. The commits are
+// unwound into the working tree before the readings run, so the readings see
+// every write and the daemon's one commit holds them; a seat commit the tree
+// readers cannot see would drop every record it holds as unwritten (ADR-0080).
+export const RECAPTURE_CLASSES = new Set(['test', 'record', 'record-seat', 'seat-commit']);
 
 /** The class, or a throw naming it. The only way one reaches a stamp. */
 export function assertRecaptureClass(cls) {
