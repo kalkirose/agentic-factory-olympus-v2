@@ -615,7 +615,7 @@ test('a story run at its record cap ships the code with the finding named', asyn
   // The finding rode the close stamp and the request body.
   assert.deepEqual(closed.remarks, stall.open);
   const create = forgeCalls(fx).find((c) => c.handled === 'pr-create');
-  assert.match(create.argv[create.argv.indexOf('--body') + 1], /## Findings not answered/);
+  assert.match(create.body, /## Findings not answered/);
   // The code and the record both rode the merge.
   const tree = originTree(fx, 'main');
   assert.ok(tree.includes('src/feature.mjs'), 'the code did not ride the merge');
