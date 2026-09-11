@@ -880,7 +880,7 @@ export function requestBody(ctx, base, sha) {
       ? ['', '## Findings not answered', '', ...standing.map((f) => `- ${findingLine(f)}`)]
       : []),
     ...(remarks.length > 0
-      ? ['', REMARKS_HEADING, '', ...remarks.map((f) => `- ${remarkLine(f)}`)]
+      ? ['', REMARKS_HEADING, '', ...remarkCountLines(remarks)]
       : []),
     ...(unwritten.length > 0
       ? ['', '## Records not written', '', ...unwritten.map((r) => `- ${r}`)]
@@ -889,6 +889,20 @@ export function requestBody(ctx, base, sha) {
       ? ['', '## Records not reviewed', '', ...unreviewed.map((r) => `- ${r}`)]
       : []),
   ].join('\n');
+}
+
+/**
+ * The remarks on a request are a count per severity and nothing more. A remark
+ * is a finding below HIGH: it opened no round and blocks nothing, and every one
+ * of them rides the run ledger in full as a `finding` event, which the close
+ * stamp lists by id. A request that carried each remark's line grew with the
+ * review, past thirty thousand characters on a batch of thirty-eight records,
+ * and nobody read them there. The count says how loud the review was; the
+ * ledger, named on the request's first line, says what it said.
+ */
+export function remarkCountLines(remarks) {
+  const count = (severity) => remarks.filter((f) => f.severity === severity).length;
+  return [`- MED: ${count('MED')}`, `- LOW: ${count('LOW')}`];
 }
 
 async function openPr(ctx, base) {

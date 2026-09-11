@@ -117,8 +117,12 @@ that lane no work.
 **Every lane ends in a merge.** `stallStep` stamps `reconcile-stall` and takes
 `fallbackStep` with cause `record-cap` on every lane. The run pushes, the
 request body names every confirmed finding that still stands under "Findings not
-answered", every finding below HIGH under "Remarks not answered", and every
-record no round wrote and no seat read under their own headings. The close
+answered", the count of findings below HIGH per severity under "Remarks not
+answered", and every record no round wrote and no seat read under their own
+headings. A remark's own line stays on the ledger: it opened no round, it blocks
+nothing, and a body that carried every one of them grew with the review past the
+command line of the process that opens the request, so the request says how many
+and the ledger says what. The close
 stamps `run-closed {state: 'shipped', pr, remarks, unwritten?, unreviewed?}`,
 where `remarks` holds the standing confirmed ids beside the advisory ones and
 every finding stamp keeps its own `confirmed` flag. A merge round that drops a

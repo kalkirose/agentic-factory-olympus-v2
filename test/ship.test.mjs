@@ -30,6 +30,7 @@ import {
   shipStep,
   CHECKLESS_POLLS,
   UPDATE_CAP,
+  remarkCountLines,
 } from '../src/lanes/ship.mjs';
 import { shipTokenState, takeShipToken } from '../src/ship/token.mjs';
 import { FLAKE_LIMIT, RERUN_BUDGET } from '../src/ledger/cycles.mjs';
@@ -1104,6 +1105,19 @@ test('a record the round wrote takes no ticket at the cap, and its finding rides
   assert.equal(closed.unwritten, undefined);
   assert.ok(closed.remarks.length > 0);
   assert.match(fx.forge.state.bodies[0], /## Findings not answered/);
+  // A remark rides the request as a count per severity and nothing more: its
+  // line is on the ledger, and a body that carried every line outgrew the
+  // command line of the process that opens the request.
+  const body = fx.forge.state.bodies[0];
+  // This fixture raises HIGH findings alone, so no remark section is owed here;
+  // the two count lines are pinned by their own test below.
+  assert.ok(!/\[(LOW|MED)\] \[F\d+\]/.test(body), 'no remark line rides the request');
+});
+
+test('the remark count lines are two, one per severity below HIGH', () => {
+  const remarks = [{ severity: 'LOW' }, { severity: 'MED' }, { severity: 'LOW' }];
+  assert.deepEqual(remarkCountLines(remarks), ['- MED: 1', '- LOW: 2']);
+  assert.deepEqual(remarkCountLines([]), ['- MED: 0', '- LOW: 0']);
 });
 
 /** A records-lane run over the one record the fixture repo carries. */
@@ -5045,3 +5059,45 @@ function runWithLedger(t, lines = []) {
   for (const line of lines) store.append(line.event, { actor: 'daemon', ...line.fields });
   return { paths, runId, store, events: () => readEvents(runLedgerPath(paths, runId)) };
 }
+
+// -- the request body rides a file -------------------------------------------
+
+test('the request body rides a file at every size, and a body past the command-line ceiling opens', async () => {
+  const body = 'x'.repeat(40000);
+  const seen = [];
+  const runner = async (argv) => {
+    if (argv[2] === 'create') {
+      const at = argv.indexOf('--body-file');
+      seen.push({ argv, content: at >= 0 ? readFileSync(argv[at + 1], 'utf8') : null });
+      return { code: 0, output: '' };
+    }
+    return { code: 0, output: JSON.stringify({ number: 12, url: 'https://f/12', state: 'OPEN' }) };
+  };
+  const pr = await gitHubForge({ repo: 'acme/widgets', runner }).openPr({
+    head: 'run/x',
+    base: 'main',
+    title: 't',
+    body,
+    labels: ['migration'],
+  });
+  assert.equal(pr.number, 12);
+  assert.equal(seen.length, 1);
+  assert.ok(!seen[0].argv.includes('--body'), 'the body never rides argv');
+  assert.equal(seen[0].content, body, 'the file holds the body byte for byte');
+  assert.deepEqual(seen[0].argv.slice(-2), ['--label', 'migration'], 'the labels still ride the create');
+  assert.equal(existsSync(seen[0].argv[seen[0].argv.indexOf('--body-file') + 1]), false, 'the file is gone after the call');
+});
+
+test('a body edit rides a file too', async () => {
+  const body = 'y'.repeat(40000);
+  let content = null;
+  const runner = async (argv) => {
+    const at = argv.indexOf('--body-file');
+    content = at >= 0 ? readFileSync(argv[at + 1], 'utf8') : null;
+    assert.ok(!argv.includes('--body'));
+    return { code: 0, output: '' };
+  };
+  const out = await gitHubForge({ repo: 'acme/widgets', runner }).editBody(12, body);
+  assert.deepEqual(out, { edited: true });
+  assert.equal(content, body);
+});

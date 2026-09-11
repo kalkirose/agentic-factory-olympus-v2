@@ -55,6 +55,9 @@
 //                          re-found by name. The name route has to choose
 //                          among the attempts on that name; a caller that
 //                          holds one attempt has already chosen (ADR-0041)
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { runCommand } from '../lanes/exec.mjs';
 
 const OUTPUT_LIMIT = 400000;
@@ -124,6 +127,27 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
       throw new Error(`gh ${args[0]} failed (${result.code}): ${result.output.slice(-500)}`);
     }
     return result;
+  }
+
+  /**
+   * The body of a request rides a file, never argv. A body is content with no
+   * bound the harness controls: one line per record a reconcile round wrote,
+   * one line per finding a review raised. Past the command-line ceiling the
+   * spawn dies with `ENAMETOOLONG` (the runner's `COMMAND_LINE_MAX`): no
+   * child, no request, and a stage handler failed for a reason no ledger
+   * reader can see. `gh` reads `--body-file`, so the file is the one shape
+   * that holds at every size, and it is used at every size so the ceiling
+   * is never a case.
+   */
+  async function withBodyFile(body, fn) {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-body-'));
+    const path = join(dir, 'body.md');
+    writeFileSync(path, body, 'utf8');
+    try {
+      return await fn(path);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 
   async function ghJson(args, opts) {
@@ -213,23 +237,26 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
      * reason instead of a run that failed with no request to name.
      */
     async openPr({ head, base, title, body, labels = [] }) {
-      const argv = [
-        'pr', 'create', '-R', repo, '--head', head, '--base', base, '--title', title, '--body', body,
-      ];
-      const created = await gh([...argv, ...labels.flatMap((label) => ['--label', label])], {
-        allowFail: true, // an existing open PR for the branch is not an error
+      return withBodyFile(body, async (bodyFile) => {
+        const argv = [
+          'pr', 'create', '-R', repo, '--head', head, '--base', base, '--title', title,
+          '--body-file', bodyFile,
+        ];
+        const created = await gh([...argv, ...labels.flatMap((label) => ['--label', label])], {
+          allowFail: true, // an existing open PR for the branch is not an error
+        });
+        let view = await openRequest(head);
+        if (!view && labels.length > 0) {
+          await gh(argv, { allowFail: true });
+          view = await openRequest(head);
+        }
+        if (!view) throw new Error(`no open PR for branch ${head} after create`);
+        return {
+          number: view.number,
+          url: view.url,
+          labelled: labels.length > 0 && created.code === 0,
+        };
       });
-      let view = await openRequest(head);
-      if (!view && labels.length > 0) {
-        await gh(argv, { allowFail: true });
-        view = await openRequest(head);
-      }
-      if (!view) throw new Error(`no open PR for branch ${head} after create`);
-      return {
-        number: view.number,
-        url: view.url,
-        labelled: labels.length > 0 && created.code === 0,
-      };
     },
 
     /**
@@ -243,9 +270,11 @@ export function gitHubForge({ repo, ghCommand = ['gh'], runner = runCommand }) {
      * stamps the miss and goes on.
      */
     async editBody(number, body) {
-      const result = await gh(['pr', 'edit', String(number), '-R', repo, '--body', body], {
-        allowFail: true,
-      });
+      const result = await withBodyFile(body, (bodyFile) =>
+        gh(['pr', 'edit', String(number), '-R', repo, '--body-file', bodyFile], {
+          allowFail: true,
+        }),
+      );
       if (result.code !== 0) return { edited: false, reason: result.output.slice(-300) };
       return { edited: true };
     },
