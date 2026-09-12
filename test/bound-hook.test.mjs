@@ -270,6 +270,16 @@ test('an unreadable bound file refuses the call', (t) => {
   assert.match(result.stderr, /^the seat bound cannot be computed: ENOENT/);
 });
 
+test('a bound file that names no worktree refuses the call', (t) => {
+  const { boundPath } = fixture(t, { committed: API_EDIT, bound: { worktree: '' } });
+  const result = runHook(boundPath, { command: 'pnpm run test:backend' });
+  assert.equal(result.status, 2);
+  assert.equal(
+    result.stderr,
+    'the seat bound cannot be computed: the bound file states no worktree\n',
+  );
+});
+
 test('a bound file that is not JSON refuses the call', (t) => {
   const { boundPath } = fixture(t, { committed: API_EDIT });
   writeFileSync(boundPath, 'not json at all\n');

@@ -49,9 +49,8 @@ const DEFAULT_CAP_MS = 300000;
 const MARKER = 'olympus-bound';
 
 const boundPath = process.argv[2];
-let digest = null;
 
-const refusal = await decide();
+const { refusal, digest } = await decide();
 if (refusal === null) {
   process.stdout.write(`${MARKER} ${digest}\n`);
 } else {
@@ -63,15 +62,16 @@ if (refusal === null) {
 }
 
 /**
- * The one decision this process makes: null to let the call through, or the
- * refusal to write. Every failure inside is a refusal, so nothing throws past
- * here and no path leaves the seat unbounded.
- * @returns {Promise<{layer: string|null, command: string, reason: string,
- *   message: string, seat?: string}|null>}
+ * The one decision this process makes: the refusal to write, or null to let the
+ * call through with the bound file's digest. Every failure inside is a refusal,
+ * so nothing throws past here and no path leaves the seat unbounded.
+ * @returns {Promise<{refusal: {layer: string|null, command: string,
+ *   reason: string, message: string, seat?: string}|null, digest: string|null}>}
  */
 async function decide() {
   let command = '';
   let bound = null;
+  let digest = null;
   try {
     command = commandOf(JSON.parse(await readStdin()));
     if (boundPath === undefined) throw new Error('the hook was given no bound file path');
@@ -79,29 +79,34 @@ async function decide() {
     digest = createHash('sha256').update(raw).digest('hex');
     bound = JSON.parse(raw.toString('utf8'));
     const matched = matchedLayers(bound.layers ?? [], command);
-    if (matched.length === 0) return null;
+    if (matched.length === 0) return { refusal: null, digest };
     const inBound = await boundLayers(bound);
     for (const layer of matched) {
       const reason = refusalReason(layer, bound, inBound);
-      if (reason !== null) {
-        return {
+      if (reason === null) continue;
+      return {
+        refusal: {
           ...seatOf(bound),
           layer: layer.name,
           command,
           reason,
           message: `${layer.name} is outside your bound: ${reason}. The verdict runs it.`,
-        };
-      }
+        },
+        digest,
+      };
     }
-    return null;
+    return { refusal: null, digest };
   } catch (error) {
     const reason = String(error?.message ?? error);
     return {
-      ...seatOf(bound),
-      layer: null,
-      command,
-      reason,
-      message: `the seat bound cannot be computed: ${reason}`,
+      refusal: {
+        ...seatOf(bound),
+        layer: null,
+        command,
+        reason,
+        message: `the seat bound cannot be computed: ${reason}`,
+      },
+      digest,
     };
   }
 }
@@ -182,6 +187,16 @@ function refusalReason(layer, bound, inBound) {
  * directory above it, which no ground entry would match.
  */
 async function changedFiles(worktree, baseSha) {
+  // Without these two the diff would answer for whatever tree this process
+  // stands in, which is a bound the seat never had. Doubt refuses instead.
+  for (const [field, value] of [
+    ['worktree', worktree],
+    ['baseSha', baseSha],
+  ]) {
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(`the bound file states no ${field}`);
+    }
+  }
   const diff = await git(['diff', '--name-only', '-z', baseSha], { cwd: worktree });
   const status = await git(['status', '--porcelain', '-z', '-uall'], { cwd: worktree });
   const files = new Set();
