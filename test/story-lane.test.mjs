@@ -3,8 +3,8 @@
 // deterministic defects take the one-corrective contract route.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { COMMAND_LOG_ROOT } from '../src/lanes/exec.mjs';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
@@ -19,10 +19,12 @@ import { fingerprint } from '../src/daemon/credentials.mjs';
 import { openWorkspaceLeftovers } from '../src/telemetry/readers.mjs';
 import { OWNER_PIN_MARKER } from '../src/lanes/supersede.mjs';
 import { FORESEEN_HEADING, FORESEEN_MARKER } from '../src/lanes/card.mjs';
+import { runWorktreePath } from '../src/isolation/worktrees.mjs';
 import {
   tempDir,
   removeDir,
   waitFor,
+  gitSync,
   initOriginRepo,
   projectConfigJson,
   fakeComposeRunner,
@@ -369,6 +371,10 @@ function storyFixture(
     'src/base.mjs': 'export const base = 1;\n',
     ...files,
   });
+  // A card amendment is pushed straight to the default branch; the fixture
+  // origin is a working tree, so it has to accept a push to the branch it has
+  // checked out.
+  gitSync(['config', 'receive.denyCurrentBranch', 'updateInstead'], origin);
   const paths = scaffoldHome(join(root, 'home'));
   writeFileSync(
     paths.instanceConfig,
@@ -412,11 +418,12 @@ function storyFixture(
   return {
     paths,
     daemon,
+    origin,
     calls: fixture.calls,
-    async launch() {
+    async launch(card = 'stories/alpha.md') {
       await daemon.start();
       daemon.engine.seatDefaults = () => ({ commandFor: fixture.commandFor });
-      const { runId } = await daemon.launchRun({ project: 'proj', lane: 'story', card: 'stories/alpha.md' });
+      const { runId } = await daemon.launchRun({ project: 'proj', lane: 'story', card });
       return runId;
     },
     /** A launch the door is expected to refuse: the daemon, started, and the throw. */
@@ -1499,6 +1506,9 @@ test('the stack env reaches the compose up, the lint command, and the seats', as
             '-e',
             `require('fs').writeFileSync(${JSON.stringify(lintCapture)},JSON.stringify(` +
               `Object.fromEntries(${JSON.stringify(ENV_KEYS)}.map((k) => [k, process.env[k]]))))`,
+            // The harness appends one `--card` per card of the closure, and a
+            // bare `node -e` would read those as its own options.
+            '--',
           ],
         },
         lanes: { story: { suiteCommand: 'suite', lintCommand: 'lint' } },
@@ -2504,4 +2514,233 @@ test('the red-state fix carries the map brief and its check, and the freeze reco
   const record = JSON.parse(readFileSync(join(fx.paths.archivedRuns, runId, 'freeze.json'), 'utf8'));
   assert.deepEqual(record.surfaceMap, [fixed]);
   assert.deepEqual(record.dimensionsOutOfScope, restOut());
+});
+
+// -- readiness judges the card and its closure -------------------------------
+
+/** A card lint that records the argv it was given and passes every card. */
+function lintRecording(capture) {
+  return [
+    'node',
+    '-e',
+    `require('fs').writeFileSync(${JSON.stringify(capture)}, JSON.stringify(process.argv.slice(1)))`,
+    '--',
+  ];
+}
+
+/** A story that shipped for one card key, as its archived ledger says it. */
+function seedShipped(paths, runId, storyKey) {
+  const path = archivedRunLedgerPath(paths, runId);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(
+    path,
+    [
+      { seq: 1, event: 'run-launched', project: 'proj', lane: 'story', storyKey },
+      { seq: 2, event: 'run-closed', state: 'shipped' },
+    ]
+      .map((event) => JSON.stringify(event))
+      .join('\n') + '\n',
+  );
+}
+
+const BLOCKED_CARD = `---
+key: alpha-1
+title: Alpha feature
+blocked-by: ["beta-1", "gamma-1"]
+---
+
+## Goal
+
+Provide f(x) that doubles x in src/feature.mjs.
+${FIXTURE_ACCEPTANCE}`;
+
+function otherCard(key) {
+  return `---
+key: ${key}
+title: ${key}
+---
+
+## Goal
+
+Provide something else.
+${FIXTURE_ACCEPTANCE}`;
+}
+
+test('the lint is asked about the card and what it waits on, and never a shipped card', async (t) => {
+  let capture;
+  const seats = {
+    'spec-birth': () => ({
+      report: { outcome: 'grounding-conflict', summary: 'conflict', conflict: 'which way?' },
+    }),
+  };
+  const fx = storyFixture(t, {
+    seats,
+    card: BLOCKED_CARD,
+    files: { 'stories/beta.md': otherCard('beta-1'), 'stories/gamma.md': otherCard('gamma-1') },
+    config: (root) => {
+      capture = join(root, 'lint-argv.json');
+      return {
+        commands: { cardlint: lintRecording(capture) },
+        lanes: { story: { suiteCommand: 'suite', lintCommand: 'cardlint' } },
+      };
+    },
+  });
+  // One of the two cards behind this one has shipped, so it is settled and so
+  // is everything behind it.
+  seedShipped(fx.paths, 'run-gamma', 'gamma-1');
+  const runId = await fx.launch();
+  await waitParked(fx.paths, runId, 'grounding-conflict');
+  assert.deepEqual(JSON.parse(readFileSync(capture, 'utf8')), [
+    '--card',
+    'stories/alpha.md',
+    '--card',
+    'stories/beta.md',
+  ]);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
+});
+
+test('a lint red on a card the harness asked about parks the launch', async (t) => {
+  const seats = {
+    'spec-birth': () => ({
+      report: { outcome: 'grounding-conflict', summary: 'conflict', conflict: 'which way?' },
+    }),
+  };
+  const fx = storyFixture(t, {
+    seats,
+    config: () => ({
+      commands: {
+        cardlint: [
+          'node',
+          '-e',
+          'console.error("card lint: stories/alpha.md: F1: no goal"); process.exit(1)',
+          '--',
+        ],
+      },
+      lanes: { story: { suiteCommand: 'suite', lintCommand: 'cardlint' } },
+    }),
+  });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'stage-blocked');
+  assert.equal(park.reason, 'readiness-lint');
+  assert.ok(park.question.includes('stories/alpha.md: F1: no goal'), park.question);
+  // Nothing is reported beyond the card: the lint refused the card itself.
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  assert.ok(!live.some((e) => e.event === 'readiness-lint-beyond'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
+});
+
+// -- a package the card does not name is one question to the owner ----------
+
+const DEPENDENCY = { importer: '.', name: 'left-pad', reason: 'AC-1 pads the answer' };
+const DEPENDENCY_LINE = `- ${DEPENDENCY.importer}: ${DEPENDENCY.name}`;
+
+/** A birth seat that asks for the package until the card names it. */
+function dependencyBirth() {
+  return ({ prompt }) =>
+    prompt.includes(DEPENDENCY_LINE)
+      ? {
+          files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
+          report: { outcome: 'spec-born', summary: 'born against the named package' },
+        }
+      : {
+          report: {
+            outcome: 'dependency-needed',
+            dependencies: [DEPENDENCY],
+            summary: 'the card names no pad helper',
+          },
+        };
+}
+
+async function parkedOnDependency(t) {
+  const seats = {
+    ...shippingSeats(() => ({ report: { findings: [], summary: 'clean' } })),
+    'spec-birth': dependencyBirth(),
+  };
+  const fx = storyFixture(t, { seats });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'dependency-decision');
+  return { fx, runId, park };
+}
+
+test('a package the card does not name parks the birth before any spec is born', async (t) => {
+  const { fx, runId, park } = await parkedOnDependency(t);
+  assert.deepEqual(park.answers.options, ['approve', 'refuse', 'abandon']);
+  assert.ok(park.question.includes('- .: left-pad (AC-1 pads the answer)'), park.question);
+  assert.deepEqual(park.refs, ['stories/alpha.md']);
+  assert.deepEqual(park.detail.dependencies, [DEPENDENCY]);
+  // The park is raised before the stamp that sends a re-entry past the seat,
+  // so the answer runs the seat again.
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  assert.ok(!live.some((e) => e.event === 'spec-born'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  const closed = (await waitClosed(fx.paths, runId)).find((e) => e.event === 'run-closed');
+  assert.equal(closed.reason, 'dependency-decision');
+});
+
+test('approve names the package on the card, pushes it, and briefs a fresh seat with it', async (t) => {
+  const { fx, runId, park } = await parkedOnDependency(t);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'approve' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The card carries the package, on the default branch, in the plainest line
+  // the section takes.
+  const onMain = gitSync(['show', 'main:stories/alpha.md'], fx.origin);
+  assert.ok(onMain.includes('## Dependencies'), onMain);
+  assert.ok(onMain.includes(DEPENDENCY_LINE), onMain);
+  const amended = events.find((e) => e.event === 'card-amended');
+  assert.equal(amended.card, 'stories/alpha.md');
+  assert.deepEqual(amended.dependencies, [DEPENDENCY]);
+  assert.equal(amended.pushed, true);
+  assert.equal(amended.park, park.seq);
+  assert.ok(amended.sha.length > 0);
+  // The tree the seat runs against is the branch the amendment landed on, and
+  // the refresh says which park bought it.
+  const refresh = events.find((e) => e.event === 'tree-refreshed');
+  assert.ok(refresh.seq > amended.seq);
+  assert.equal(refresh.park, park.seq);
+  assert.equal(refresh.to, gitSync(['rev-parse', 'main'], fx.origin).trim());
+  // A fresh seat, briefed from the card as it now stands and told the answer.
+  const births = fx.calls.filter((c) => c.seat === 'spec-birth');
+  assert.equal(births.length, 2);
+  assert.ok(!births[0].prompt.includes(DEPENDENCY_LINE));
+  assert.ok(births[1].prompt.includes(DEPENDENCY_LINE), births[1].prompt);
+  assert.ok(births[1].prompt.includes('[dependency-decision]'), births[1].prompt);
+});
+
+test('refuse ends the run on the owner word, with no spec and no amendment', async (t) => {
+  const { fx, runId } = await parkedOnDependency(t);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'refuse' });
+  const events = await waitClosed(fx.paths, runId);
+  const closed = events.find((e) => e.event === 'run-closed');
+  assert.equal(closed.state, 'failed');
+  assert.equal(closed.reason, 'dependency-refused');
+  assert.ok(!events.some((e) => e.event === 'card-amended'));
+  assert.ok(!events.some((e) => e.event === 'spec-born'));
+  assert.ok(!gitSync(['show', 'main:stories/alpha.md'], fx.origin).includes('## Dependencies'));
+});
+
+test('a card push that loses twice parks, and the run branch carries none of it', async (t) => {
+  const { fx, runId } = await parkedOnDependency(t);
+  const worktree = runWorktreePath(fx.paths, runId);
+  const baseSha = readEvents(runLedgerPath(fx.paths, runId)).find(
+    (e) => e.event === 'run-launched',
+  ).baseSha;
+  // The branch the amendment is owed goes out of reach, so the push and the
+  // replay behind it both lose.
+  gitSync(['remote', 'set-url', 'origin', `${fx.origin}-gone`], worktree);
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'approve' });
+  const park = await waitParked(fx.paths, runId, 'stage-blocked');
+  assert.equal(park.reason, 'card-push-lost');
+  assert.equal(park.detail.card, 'stories/alpha.md');
+  // The tree is back at the launch base: no card commit rides the run branch
+  // into a pull request the lane denies that path to.
+  assert.equal(gitSync(['rev-parse', 'HEAD'], worktree).trim(), baseSha);
+  assert.equal(gitSync(['status', '--porcelain'], worktree).trim(), '');
+  assert.ok(!readFileSync(join(worktree, 'stories/alpha.md'), 'utf8').includes('## Dependencies'));
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  assert.ok(!live.some((e) => e.event === 'card-amended'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
 });

@@ -959,6 +959,12 @@ export const PARK_TYPES = new Set([
   // decision park: it names its condition in the type, and the run holds
   // every result it earned while it waits (ADR-0022).
   'cycle-repeat',
+  // A package the spec needs that the launched card does not name. The card
+  // is the whole authorization for a dependency, so the answer is written
+  // onto the card and pushed: `approve` amends the card and runs the birth
+  // seat again against it, `refuse` ends the run. A decision park, and an
+  // owner call by the rule the constitution already states.
+  'dependency-decision',
   'card-invalidated', // ship-time card sweep
   // A choice a shipped story left open on a later card, asked at close-out
   // while the context is fresh. Like `card-invalidated` it belongs to the card
