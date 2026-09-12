@@ -5,9 +5,10 @@ Status: accepted (2026-08-30)
 ## Decision
 
 Every worktree a run creates for itself is created over whatever that run left
-at the same path before. The two creation functions in
-`src/isolation/worktrees.mjs` own this, so every stage step that creates a
-worktree gets it, and no step carries a guard of its own.
+at the same path before. `addWorktree` in `src/isolation/worktrees.mjs` is the
+private primitive that owns this, and `addRunWorktree` is the one creation on
+top of it, so a stage step carries no guard of its own and a creation added
+later carries the property by construction.
 
 - **The residue is cleared before the add, and again after a refused one.**
   The state is readable, so the ordinary case never depends on matching the

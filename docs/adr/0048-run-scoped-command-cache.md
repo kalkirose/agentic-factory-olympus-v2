@@ -20,12 +20,11 @@ invisible to git, and it goes away with the workspace at close.
   clone's own `info/exclude`, once, idempotently, inside the clone lock. That
   file is the harness's, in the harness's clone, so nothing in the project
   repository is touched and no commit is needed to hold it.
-- **It is the run's, not the tree's.** A command the run spawns in a
-  disposable worktree (an adversary wave) is given the same directory, because
-  the variable names the run's workspace and not the tree the command happens
-  to sit in. That is right for the caches this is for, which are keyed by file
-  content, and it is the same isolation boundary as everything else here: the
-  run.
+- **It is the run's, not the tree's.** The variable names the run's workspace
+  and not the tree a command happens to sit in, so every command of the run
+  reads one directory wherever it runs. That is right for the caches this is
+  for, which are keyed by file content, and it is the same isolation boundary as
+  everything else here: the run.
 - **`runCache: false` turns it off**, and then no directory is created and no
   variable is set, which is what every command saw before this existed.
 

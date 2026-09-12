@@ -102,7 +102,9 @@ assembly, and the headless runner — gets these concrete shapes:
   list, which consumes every following argument up to the next flag. The
   prompt is a trailing positional (`-p` is a boolean), so a boolean flag has
   to close the list: `--dangerously-skip-permissions` is emitted last, after
-  the tool list and after any `--resume`.
+  the tool list, after any `--resume`, and after the settings file a bounded
+  seat carries (ADR-0084), whose flag takes a value of its own and therefore
+  cannot be the one that closes the list.
 - **A prompt never rides an unbounded command line.** Before each dispatch
   the runner measures the argv it built against `COMMAND_LINE_MAX` (32767,
   the Windows CreateProcess ceiling, applied on every platform). Over the

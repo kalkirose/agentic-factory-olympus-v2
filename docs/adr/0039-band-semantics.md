@@ -126,7 +126,7 @@ healthy. Reversal cost: low — one array in `src/tripwires/duration.mjs`.
 
 If the verdict-cycle threshold of five proves wrong for a project, it is a
 registry entry like any other and moves by PR. If it proves wrong for every
-project, the metric takes the self-baselined route the kill rate takes: a
+project, the metric takes the self-baselined route the lens yield takes: a
 proposal stamped at the fifth judged run, carrying the observed counts, and the
 band committed by a human. Trigger: a project whose honest cycle count sits
 above five for reasons nobody wants changed. Reversal cost: low for the value,

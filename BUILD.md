@@ -824,3 +824,51 @@ never carries a project's specifics.
   to run. ADR-0080 is new and supersedes ADR-0073, ADR-0077, ADR-0078 and
   ADR-0079; ADR-0005, ADR-0007, ADR-0026, ADR-0038, ADR-0066, ADR-0070 and
   ADR-0075 are rewritten around it.
+- 2026-09-12: every stage works the footprint of the change, and one stage
+  judges. Eight seams scoped their work by the container the change sat in, which
+  was the lane, the stage, a file name or a whole directory, rather than by what
+  the change touches, and one stage bought no signal the suite already held.
+  Readiness now lints the launched card and the closure of `blocked-by` behind
+  it, stopping at a shipped key: a red inside that set parks, a red outside it
+  arrives as a block of text the script writes last and stamps one loud
+  `readiness-lint-beyond` per run, and the close-out sweep lints the cards it
+  wrote by name. A package the card does not name is a `dependency-decision`
+  park: `approve` writes a `## Dependencies` section onto the card, pushes it by
+  path through the one card writer, resets the run tree to the pushed head and
+  runs a fresh birth seat against it, and `refuse` closes the run. A lane may
+  declare `dependencyPaths`, the one tier judged by content: the capture reads
+  the lockfile at the freeze against the worktree and admits exactly the packages
+  the card names in the importer it names, holding every other block, and the
+  first block that breaks the grant is the refusal the corrective brief carries.
+  An implementation seat is spawned with a bound file and a settings file that
+  loads a pre-tool hook over it: the hook computes the footprint of the live diff
+  at every call, refuses a command that runs any layer outside it, and appends
+  its refusals to a file the runner stamps from, because the ledger has one
+  writer; the load is proven from the stream, since a settings file the runner
+  CLI refuses is ignored in silence. Every review finding carries the ground it
+  rests on, and the ship path asks a finding the question it asks a layer, so a
+  rebase re-judges a certification only where the incoming diff reached a claim.
+  The update stage's two questions are settled apart: a refusal that belongs to
+  one certification is no longer copied onto the other, and a half-carry is
+  stamped as one. The adversary stage is gone with its waves, its strengthening
+  round, its survivor dispositions, its seat, its throwaway worktree and its two
+  parks; a lane now states the stages it no longer runs, and a run standing in
+  one re-enters at the mapped stage and stamps `stage-retired`. Every ship
+  close-out stamps `base-certified` with the merge sha and each layer's status,
+  duration and mode, and a first cycle whose base that record answers for runs
+  the footprint of the run's own diff, carries the rest with `mode: 'carried'`,
+  and falls back to the whole spectrum with the word that says why. Every seat
+  that reads a decision record is handed the active records that govern its paths
+  and every other active record by path, so no brief names a closed record and no
+  seat is told to list the tree. `readiness-lint-beyond`, `card-amended`,
+  `seat-bound`, `seat-command-refused` and `stage-retired` enter the run
+  registry, `base-certified` the instance registry, and `dependency-decision` the
+  park catalog; the two adversary parks leave it, `adversary-wave` and
+  `survivor-disposition` stay as retired names nothing writes, and the
+  `kill-rate` metric stays in the metric table with no reading behind it so a
+  pinned config blob still parses. ADR-0081 to ADR-0089 are new; ADR-0004,
+  ADR-0005, ADR-0006, ADR-0007, ADR-0010, ADR-0011, ADR-0014, ADR-0015,
+  ADR-0017, ADR-0018, ADR-0019, ADR-0020, ADR-0022, ADR-0023, ADR-0025,
+  ADR-0033, ADR-0038, ADR-0039, ADR-0046, ADR-0048, ADR-0051, ADR-0056,
+  ADR-0058, ADR-0060, ADR-0064, ADR-0066, ADR-0072 and ADR-0074 are rewritten
+  around them.

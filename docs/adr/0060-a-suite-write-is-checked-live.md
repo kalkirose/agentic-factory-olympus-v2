@@ -7,11 +7,10 @@ Status: accepted (2026-09-05)
 Every write of a suite file in a story run runs the project's own checks over
 the tree as the seat left it, before anything is committed.
 
-A story run writes its suite five times: the authoring round, an amendment
-after an adversary survivor, a strengthening round after a zero-kill round, the
-red-state fix, and the re-freeze amendment that answers a suite defect after
-the freeze. Each of the five can add a file or change one, so each of the five
-runs the checks.
+A story run writes its suite three times: the authoring round, the red-state
+fix, and the re-freeze amendment that answers a suite defect after the freeze.
+Each of the three can add a file or change one, so each of the three runs the
+checks.
 
 - **A red is a work-product defect.** It re-briefs the seat with the check's
   own output, on the contract loop the lane already has: one corrective
@@ -49,15 +48,14 @@ are the cheapest class of fault to fix and the most expensive to find late.
 
 ## Why every suite write, and not the authoring round alone
 
-Four of the five writes come after the first. An amendment answers an adversary
-survivor, a strengthening round answers a zero-kill round, the red-state fix
-answers a red the freeze refused, and the re-freeze answers a suite defect the
-verdict found. Every one of them may write a new file or edit an old one.
+Two of the three writes come after the first. The red-state fix answers a red
+the freeze refused, and the re-freeze answers a suite defect the verdict found.
+Either may write a new file or edit an old one.
 
 A check at the authoring round alone covers one writer and leaves the class
-open for four. The cost of asking at all five is one static sweep per suite-seat
+open for two. The cost of asking at all three is one static sweep per suite-seat
 invocation. The cost of asking once is the class staying open for the other
-four, and the re-freeze is the worst of them: it is the amendment that repairs
+two, and the re-freeze is the worse of them: it is the amendment that repairs
 one gate red, and without the checks it can freeze a second one.
 
 ## Why an unrunnable command is not a defect of the seat

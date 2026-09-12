@@ -146,9 +146,9 @@ to catch, and a band that cries is a band an operator learns to ignore.
 The standing entry therefore ships at zero, which no share can fall below, so
 it cannot fire. It is a placeholder with the machinery behind it working, and
 the project raises the one value in its own registry once ten narrowed cycles
-stand on the ledger. That is the same self-baselining path the kill-rate and
-lens-yield bands take (ADR-0010), with the proposal done by hand because the
-reading has no baseline stamp of its own.
+stand on the ledger. That is the same self-baselining path the lens-yield band
+takes (ADR-0010), with the proposal done by hand because the reading has no
+baseline stamp of its own.
 
 ## Replay
 

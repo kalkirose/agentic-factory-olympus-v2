@@ -67,8 +67,8 @@ stops getting closer. It has no round cap.
 `reason` on a park is already load-bearing and already spoken for. A
 recoverable failure carries the close it would have taken in that field, and
 the abandon route reads it back when the human answers (ADR-0015). Decision
-parks — open decisions, grounding conflict, intent conflict, unkilled-gap
-survivor, second zero kill — name their condition in the type instead, and
+parks — open decisions, grounding conflict, intent conflict, a dependency the
+card does not name — name their condition in the type instead, and
 carry no reason at all. Non-convergence is a decision park, so it takes a type.
 The catalog stays closed, and one park type keeps meaning one condition.
 

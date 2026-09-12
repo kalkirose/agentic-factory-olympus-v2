@@ -36,7 +36,7 @@ of the prior run.
   rule and treats an unreadable close as not shipped.
 - **`freeze-inherited`** (new in the run registry): `from`, `sha` (the tree the
   implementation starts on), `frozenSha`, `base`, `priorBase`, the carried spec
-  and record paths, the suite file count, the kill count, and pointers to what
+  and record paths, the suite file count, and pointers to what
   stayed behind. A resumed run never stamps `freeze`. Every reader after the
   freeze takes either anchor (`freezeAnchor`), so the suite sha, the reset sha
   and the verdict loop need no other change.
@@ -59,9 +59,9 @@ of the prior run.
   branch or its frozen commit. Each of those refuses the launch before anything
   is provisioned. The base-divergence refusals close the run with a named
   reason and the diverged file list.
-- **A resumed run counts no freeze.** Tripwire windows measured in freezes, and
-  the kill-rate metric, read `freeze` events only. A resume earned none, so it
-  adds none and re-counts none.
+- **A resumed run counts no freeze.** Tripwire windows measured in freezes read
+  `freeze` events only. A resume earned none, so it adds none and re-counts
+  none.
 
 ## Why a launch option and not a lane
 
@@ -91,9 +91,9 @@ competing merge is not a repair path.
 So the advance is brought in and the claim is re-derived where re-derivation is
 cheap and deterministic, and refused where it is not:
 
-- **Main edited the frozen suite.** Refuse, naming the files. The suite that
-  was proven against the adversary waves is not the suite that would run, and
-  no deterministic check recovers that difference.
+- **Main edited the frozen suite.** Refuse, naming the files. The suite the
+  freeze proved red is not the suite that would run, and no deterministic check
+  recovers that difference.
 - **The merge conflicts.** Refuse, naming the files. Conflict resolution is
   judgment work over two intents, and it belongs to a run that owns its spec,
   not to an admission gate.
@@ -107,13 +107,13 @@ never rewrite the branch — so the frozen commit stays an ancestor of everythin
 after it. A rebase would rewrite it, and the freeze record's suite sha would
 then name a commit outside the branch's history.
 
-What this trades away is named: the adversary waves are not re-run against the
-advanced tree. Their kills measure the suite's discriminating power, which
-follows the suite's content, and the content is unchanged or the run refused.
-The residual risk is that main's advance makes a wrong implementation survive a
-suite that killed it before. The full-spectrum verdict, the Fury round and CI
-all still run on the candidate tree, so that risk lands on the verdict rather
-than on the merge.
+What this trades away is named: the red-state claim is the one claim the advance
+re-derives, and the suite's own discriminating power is not measured again. That
+power follows the suite's content, and the content is unchanged or the run
+refused. The residual risk is that main's advance leaves a wrong implementation
+the unchanged suite no longer catches. The verdict, the Fury round and CI all
+still run on the candidate tree, so that risk lands on the verdict rather than
+on the merge.
 
 ## Why the record is copied verbatim
 
