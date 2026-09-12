@@ -10,6 +10,7 @@ import { basename, dirname, join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
 import {
+  boundLayerNames,
   findingIndex,
   findingLine,
   interruptedStep,
@@ -39,6 +40,7 @@ import {
   FIXTURE_ACCEPTANCE,
   FIXTURE_SPEC,
   NO_SURFACE,
+  answeredReport,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -192,12 +194,32 @@ function seatFixture(seats) {
     const out = behavior({ seat, label, prompt: opts.prompt, attempt: opts.attempt }) ?? {};
     return {
       cmd: process.execPath,
-      args: ['-e', seatScript({ reportPath, model: opts.model, ...out })],
+      args: [
+        '-e',
+        seatScript({
+          reportPath,
+          model: opts.model,
+          ...out,
+          report: answeredReport(out.report, opts.prompt),
+        }),
+      ],
       parseLine: fixtureParse,
     };
   };
   return { commandFor, calls };
 }
+
+/** The layers one brief lists as the seat's bound, in the order it lists them. */
+function boundLayersOf(prompt) {
+  const names = [];
+  for (const line of prompt.split(`${BOUND_HEADING}\n`)[1].split('\n')) {
+    if (!line.startsWith('- ')) break;
+    names.push(line.slice(2).split(':')[0]);
+  }
+  return names;
+}
+
+const BOUND_HEADING = 'The Tier-1 gate commands your work is bounded to:';
 
 /** Seeds the freeze boundary: suite files committed, freeze stamped. */
 function seedHandler(files, extra, specText = FIXTURE_SPEC, exclusions = []) {
@@ -554,9 +576,11 @@ test('a clean implementation ships green in one cycle; advisory findings never b
   // The dev seat carried the test-edit deny rules.
   const dev = fx.calls.find((c) => c.seat === 'dev');
   assert.ok(dev.denyTools.includes('Edit(tests/**)'));
-  // The Tier-1 gates reach the dev seat as commands, not as a self-check.
+  // The Tier-1 gates reach the dev seat as commands, not as a self-check. No
+  // layer of this project declares ground, so the bound is the frozen suite
+  // alone and every other layer is the verdict's.
+  assert.deepEqual(boundLayersOf(dev.prompt), ['unit']);
   assert.ok(dev.prompt.includes('- unit: node --test tests/*.test.mjs'));
-  assert.ok(dev.prompt.includes('- lint: node -e process.exit(0)'));
   assert.ok(!dev.prompt.includes('gate commands from the project config'));
   // No constitution file in this project: no policy block anywhere.
   for (const call of fx.calls) assert.ok(!call.prompt.includes('constitution'), call.seat);
@@ -1060,18 +1084,91 @@ test('gates.flakeRerun "whole" sends the re-run back over the layer', async (t) 
   );
 });
 
-test('the dev and repair briefs name the mapping the cycle uses', async (t) => {
+test('the dev and repair briefs list the bound and name the verdict as the rest', async (t) => {
   const { fx } = partsScenario(t);
   const { runId } = await fx.launch();
   await waitClosed(fx.paths, runId);
   for (const seat of ['dev', 'repair-dev']) {
     const prompt = fx.calls.find((c) => c.seat === seat).prompt;
-    assert.match(prompt, new RegExp(`${PARTS_ENV}=<comma-separated part names>`), seat);
-    assert.match(prompt, /a part is affected unless your diff falls entirely outside its input set/, seat);
-    assert.match(prompt, /its own test sources and the source trees it exercises/, seat);
-    assert.match(prompt, /A path no part claims \(a lockfile, a shared package, a migration, a config file\) reaches every part/, seat);
-    assert.match(prompt, /The verdict proves every part of every layer at the sha it ships\./, seat);
+    // No layer of this project declares ground, so the bound is the frozen
+    // suite alone and the acceptance layer is the verdict's.
+    assert.deepEqual(boundLayersOf(prompt), ['unit'], seat);
+    assert.match(prompt, /A refused layer is not yours to run and not a defect to work around/, seat);
+    assert.match(prompt, /the verdict stage runs every layer of the project at the sha it ships/, seat);
+    assert.match(prompt, /A layer enters your bound when your own work reaches what it reads\./, seat);
   }
+});
+
+// The bound at the spawn is what the declared paths select. The hook recomputes
+// it from the seat's live diff, so these are the layers the brief names and the
+// floor the seat starts from.
+test('the bound at a spawn is the declared footprint, the setup layers and the suite', () => {
+  const layers = [
+    { name: 'unit', ground: ['tests'] },
+    { name: 'lint', ground: ['src'] },
+    { name: 'build', ground: ['src'], needs: ['unit'] },
+    { name: 'install', ground: ['pnpm-lock.yaml'], setup: true },
+    { name: 'e2e', ground: ['e2e'] },
+  ];
+  const of = (declared, suite = 'unit') => [...boundLayerNames({ layers, declared, suite })].sort();
+  // A layer whose ground the declared diff touches, every layer downstream of
+  // one, every setup layer, and the frozen suite.
+  assert.deepEqual(of(['src/feature.mjs']), ['build', 'install', 'lint', 'unit']);
+  // A declared diff inside the test paths reaches the suite's ground and the
+  // layers that need it.
+  assert.deepEqual(of(['tests/feature.test.mjs']), ['build', 'install', 'unit']);
+  // The repair lane declares no path when its ticket carries no block, and has
+  // no frozen suite: what is left is the layers that make a tree runnable.
+  assert.deepEqual(of([], null), ['install']);
+  // A layer that declares no ground is reached by nothing, which is the same
+  // reading the verdict's own footprint takes.
+  assert.deepEqual([...boundLayerNames({ layers: [{ name: 'wide' }], declared: ['src/a'], suite: null })], []);
+});
+
+test('a dev seat that reports the frozen suite red is refused', async (t) => {
+  const fx = verdictFixture(t, {
+    seats: {
+      dev: ({ attempt }) => ({
+        files: { 'src/feature.mjs': GOOD_FEATURE },
+        // The first report hands over a tree the seat itself calls red. The
+        // corrective round finishes the work and reports what the suite says.
+        report: { summary: 'implemented', suiteState: attempt === 1 ? 'red' : 'green' },
+      }),
+      ...furyClean(),
+    },
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const refused = events.filter((e) => e.event === 'seat-refused' && e.seat === 'dev');
+  assert.equal(refused.length, 1);
+  assert.match(refused[0].defects[0], /states the frozen suite is red/);
+  assert.equal(fx.calls.filter((c) => c.seat === 'dev').length, 2);
+});
+
+test('an implementation seat is spawned inside a bound the ledger names', async (t) => {
+  const fx = verdictFixture(t, {
+    seats: { dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE } }), ...furyClean() },
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const stamp = events.find((e) => e.event === 'seat-bound' && e.seat === 'dev');
+  // Every Tier-1 layer of the project is in the file the hook reads; which of
+  // them the seat may run is the hook's answer, not the file's.
+  assert.deepEqual(stamp.layers, ['unit', 'lint', 'build']);
+  const bound = JSON.parse(readFileSync(stamp.path, 'utf8'));
+  assert.equal(bound.seat, 'dev');
+  // The suite layer is named by its command, so a project may call it anything.
+  assert.equal(bound.suite, 'unit');
+  assert.deepEqual(bound.declared, ['src/feature.mjs', 'tests/feature.test.mjs']);
+  assert.equal(bound.capMs, 300000);
+  // No base certification yet, so the seat runs under no time bound at all.
+  assert.equal(bound.elapsedMs, null);
+  assert.deepEqual(
+    bound.layers.find((l) => l.name === 'build'),
+    { name: 'build', argv: BUILD_CMD, ground: [], needs: ['unit'], setup: false },
+  );
 });
 
 test('a red the confirmation sweep turns up enters triage like any other', async (t) => {

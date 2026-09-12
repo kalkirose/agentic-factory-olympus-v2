@@ -458,18 +458,38 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
   // never spawns and the security lens rides the operational seat.
   assert.ok(!seats.includes('fury-code-shape'), 'the cut lenses spawned a seat');
   assert.ok(!seats.includes('fury-security'), 'a standalone security seat ran');
-  // Every seat that writes code is told to check its work with the parts of a
-  // layer its diff can reach, and told the same mapping the cycle uses
-  // (ADR-0046). The seats spend from the same clock the cycles do.
+  // Every seat that writes code is bounded to the layers its own work reaches,
+  // and told whose job the rest is. One stage judges a tree, and it is the
+  // verdict.
   for (const seat of ['dev', 'repair-dev']) {
     const brief = calls.find((c) => c.seat === seat).prompt;
     assert.ok(
-      brief.includes('Check your own work with the parts your diff can reach'),
-      `the ${seat} seat was not told which parts its diff reaches`,
+      brief.includes('The Tier-1 gate commands your work is bounded to:'),
+      `the ${seat} seat was not told its bound`,
     );
     assert.ok(
-      brief.includes('OLYMPUS_PARTS=<comma-separated part names>'),
-      `the ${seat} seat was not told how to run a narrowed layer`,
+      brief.includes('A refused layer is not yours to run and not a defect to work around'),
+      `the ${seat} seat was not told whose job a refused layer is`,
+    );
+  }
+  // The bound the seat actually ran inside, and the hook's own answer beside
+  // its first command: a settings file the CLI refuses is ignored without a
+  // word, so the load is proven from the stream and never from the write.
+  for (const seat of ['dev', 'repair-dev']) {
+    const stamp = events.find((e) => e.event === 'seat-bound' && e.seat === seat);
+    assert.ok(stamp, `the ${seat} seat carried no bound`);
+    assert.deepEqual(
+      stamp.layers,
+      ['lint', 'suite', 'smoke'],
+      `the ${seat} bound named other layers`,
+    );
+    const bound = JSON.parse(readFileSync(stamp.path, 'utf8'));
+    assert.equal(bound.seat, seat);
+    assert.equal(bound.suite, 'suite');
+    assert.ok(bound.declared.includes('src/feature.mjs'));
+    assert.ok(
+      !events.some((e) => e.event === 'seat-failure' && e.reason === 'bound-not-loaded'),
+      'a seat ran a command with no answer from its bound hook',
     );
   }
   const operational = calls.find((c) => c.seat === 'fury-operational').prompt;
@@ -731,5 +751,59 @@ test('a dependency the card does not name is approved onto the card and the stor
   assert.ok(card.includes('- .: left-pad'), 'the card on main does not name the package');
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
 
+  await stopDaemon(fx);
+});
+
+// A settings file the CLI refuses is ignored in print mode with nothing said
+// about it, so a seat can run the whole battery while the harness believes it is
+// bounded. The proof is the hook's own answer in the stream, and a seat that ran
+// a command without one is a seat nobody bounded: the run parks rather than
+// judge a tree on an unbounded pass.
+test('a seat whose bound never loaded parks the run', async (t) => {
+  const fx = buildFixture({
+    prefix: 'olympus-e2e-story-unbound-',
+    scenario: { ...SCENARIO, unboundSeat: 'dev' },
+  });
+  t.after(() => cleanup(fx));
+  await startDaemon(fx);
+  ctl(fx, ['launch', '--project', PROJECT, '--card', CARD_PATH]);
+  const runId = await pollFor(
+    'the launch stamp',
+    () => instanceEvents(fx).find((e) => e.event === 'launch')?.runId,
+    { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
+  );
+  await pollFor(
+    'the open-decisions park',
+    () => runEvents(fx, runId).some((e) => e.event === 'park' && e.type === 'open-decisions'),
+    { abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  ctl(fx, ['answer', '--run', runId, '--text', 'No; f trusts the value it is given.']);
+
+  const park = await pollFor(
+    'the seat-failure park',
+    () =>
+      runEvents(fx, runId).find(
+        (e) => e.event === 'park' && e.type === 'seat-failure' && e.cause === 'bound-not-loaded',
+      ),
+    { attempts: 1800, abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  assert.match(park.question, /The dev seat failed \(bound-not-loaded\)/);
+  const events = runEvents(fx, runId);
+  // The seat was bounded at the spawn: the file was written and stamped, and
+  // what failed is the load the CLI never reported.
+  assert.ok(events.some((e) => e.event === 'seat-bound' && e.seat === 'dev'));
+  assert.equal(
+    events.filter((e) => e.event === 'seat-spawned' && e.seat === 'dev').length,
+    1,
+    'the run bought a second child on a settings file the CLI had already ignored',
+  );
+  // Nothing was judged on the pass: no verdict, and no commit of the seat work.
+  assert.ok(!events.some((e) => e.event === 'implementation-committed'));
+  assert.ok(!events.some((e) => e.event === 'verdict-rendered'));
+
+  ctl(fx, ['kill', '--run', runId]);
+  await pollFor('the run to close', () =>
+    runEvents(fx, runId).find((e) => e.event === 'run-closed'),
+  );
   await stopDaemon(fx);
 });

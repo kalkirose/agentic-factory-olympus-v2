@@ -7,6 +7,7 @@
 //
 // The scenario file (OLYMPUS_E2E_SCENARIO) holds the artifact texts, so one
 // stub drives every lane.
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 
@@ -83,6 +84,7 @@ emit({
   type: 'assistant',
   message: { content: [{ type: 'text', text: `${seat}: fixture work product` }] },
 });
+commandToolUse();
 for (const [path, content] of Object.entries(work.files ?? {})) {
   const full = isAbsolute(path) ? path : join(process.cwd(), path);
   mkdirSync(dirname(full), { recursive: true });
@@ -101,7 +103,10 @@ function behaviour(name) {
   if (name === 'suite') return suiteSeat();
   if (name === 'dev') return devSeat();
   if (name === 'repair-dev') {
-    return { files: scenario.repairFiles, report: { summary: 'the open finding is repaired' } };
+    return {
+      files: scenario.repairFiles,
+      report: { summary: 'the open finding is repaired', ...suiteState() },
+    };
   }
   if (name === 'verdict-triage') return triage();
   if (name === 'fury-verifier') return verifier();
@@ -432,8 +437,21 @@ function devSeat() {
   const repair = prompt.includes('Fix the defect described by the intake ticket');
   return {
     files: repair ? scenario.fixFiles : scenario.devFiles,
-    report: { summary: repair ? 'the ticketed defect is fixed' : 'the spec is implemented' },
+    report: {
+      summary: repair ? 'the ticketed defect is fixed' : 'the spec is implemented',
+      ...suiteState(),
+    },
   };
+}
+
+/**
+ * What the seat says about the frozen suite. The field is in the schema the
+ * prompt carries only where a frozen suite exists, and a report that carries a
+ * field its schema does not name is refused, so the answer follows the schema.
+ */
+function suiteState() {
+  if (!prompt.includes('suiteState')) return {};
+  return { suiteState: scenario.suiteRed === true ? 'red' : 'green' };
 }
 
 function triage() {
@@ -473,6 +491,57 @@ function verifier() {
       summary: `${items.length} item(s) verified`,
     },
   };
+}
+
+/**
+ * One command tool call, as the CLI reports one, for a seat spawned with a
+ * bound: the call, the hook lines the bound hook answers it with, and the tool
+ * result that closes it. The runner proves the bound loaded from the marker
+ * line, so a stub that never ran a command would leave that path unproven.
+ *
+ * The marker carries the digest of the bound file the settings file names,
+ * which is what the real hook prints. A scenario that names this seat in
+ * `unboundSeat` emits the call with no hook lines at all, which is the stream a
+ * settings file the CLI ignored produces.
+ */
+function commandToolUse() {
+  const settings = valueOf('--settings');
+  if (settings === null || settings === undefined) return;
+  const id = `toolu-${process.pid}`;
+  emit({
+    type: 'assistant',
+    message: {
+      content: [{ type: 'tool_use', id, name: 'Bash', input: { command: 'git status --short' } }],
+    },
+  });
+  if (scenario.unboundSeat !== seat) {
+    const boundPath = JSON.parse(readFileSync(settings, 'utf8')).hooks.PreToolUse[0].hooks[0]
+      .args[1];
+    const digest = createHash('sha256').update(readFileSync(boundPath)).digest('hex');
+    emit({
+      type: 'system',
+      subtype: 'hook_started',
+      hook_id: id,
+      hook_name: 'PreToolUse:Bash',
+      hook_event: 'PreToolUse',
+    });
+    emit({
+      type: 'system',
+      subtype: 'hook_response',
+      hook_id: id,
+      hook_name: 'PreToolUse:Bash',
+      hook_event: 'PreToolUse',
+      output: `olympus-bound ${digest}\n`,
+      stdout: `olympus-bound ${digest}\n`,
+      stderr: '',
+      exit_code: 0,
+      outcome: 'success',
+    });
+  }
+  emit({
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: '' }] },
+  });
 }
 
 // -- plumbing ----------------------------------------------------------------

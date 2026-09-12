@@ -175,3 +175,22 @@ test('denyTools ride the claude argv as disallowed tools', () => {
   assert.ok(disallowed.includes('WebSearch'));
   assert.ok(disallowed.includes('Task'));
 });
+
+// The bound and the deny list are two mechanisms over the same seat: the list
+// says which tools it may call, the hook says which layers it may run. The
+// settings file that loads the hook rides between the list and the flag that
+// closes it, so neither swallows the other.
+test('a bound settings file does not open the deny list', () => {
+  const { args } = claudeSeatCommand({
+    prompt: 'P',
+    model: 'claude-opus-5',
+    effort: 'high',
+    def: seatDef('dev'),
+    denyTools: testEditDenyRules(['tests']),
+    settingsPath: '/home/runs/r1/seats/dev-1.settings.json',
+  });
+  const disallowed = args.slice(args.indexOf('--disallowedTools') + 1, args.indexOf('--include-hook-events'));
+  assert.deepEqual(disallowed, ['Edit(tests/**)', 'Write(tests/**)', 'NotebookEdit(tests/**)']);
+  assert.equal(args.at(-1), 'P');
+  assert.equal(args.at(-2), '--dangerously-skip-permissions');
+});

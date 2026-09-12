@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { runSeat, unavailableMemo, RESET_GRACE_MS, CRASH_RETRIES } from '../src/seats/runner.mjs';
 import { parseClaudeLine } from '../src/seats/claude.mjs';
@@ -15,6 +16,8 @@ import {
   runLedgerPath,
   runReportPath,
   archivedRunLedgerPath,
+  seatBoundPath,
+  seatSettingsPath,
 } from '../src/daemon/home.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { tempDir, removeDir, waitFor, NO_WAIT } from './helpers.mjs';
@@ -1332,4 +1335,323 @@ test('a prompt that fits rides the command line unchanged, and writes no file', 
   assert.ok(spawned.includes('ROLE'));
   assert.ok(spawned.includes(ONE_TURN_RULE));
   assert.ok(!readdirSync(dirname(reportPath)).some((f) => f.includes('.prompt-')));
+});
+
+// -- the seat bound ----------------------------------------------------------
+
+// A bound with two layers: one the declared diff reaches and one it does not.
+// The runner writes it and enforces nothing; the hook the settings file loads
+// is what refuses a command, and this file proves the wiring around it.
+const BOUND = {
+  worktree: 'w',
+  baseSha: 'base-sha',
+  layers: [
+    { name: 'lint', argv: ['npm', 'run', 'lint'], ground: ['src'], needs: [], setup: false },
+    { name: 'suite', argv: ['npm', 'test'], ground: ['src', 'tests'], needs: [], setup: false },
+  ],
+  suite: 'suite',
+  declared: ['src/feature.mjs'],
+  elapsedMs: null,
+  capMs: 300000,
+};
+
+function boundFiles(paths, runId = 'r1', seat = 'dev', n = 1) {
+  return {
+    settingsPath: seatSettingsPath(paths, runId, seat, n),
+    boundPath: seatBoundPath(paths, runId, seat, n),
+  };
+}
+
+/**
+ * The stream one command tool call produces. `marked` carries the bound hook's
+ * own answer; without it the stream is what a settings file the CLI ignored
+ * leaves behind, since the host's own hooks answer the same event and are not
+ * this hook.
+ */
+function commandStream(marked) {
+  return [
+    initLine(DEFAULT_MODEL),
+    {
+      type: 'assistant',
+      message: {
+        content: [{ type: 'tool_use', id: 'toolu-1', name: 'Bash', input: { command: 'npm test' } }],
+      },
+    },
+    ...(marked
+      ? [
+          {
+            type: 'system',
+            subtype: 'hook_response',
+            hook_id: 'h1',
+            stdout: 'olympus-bound deadbeef\n',
+            exit_code: 0,
+          },
+        ]
+      : []),
+    {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu-1' }] },
+    },
+    { type: 'result', subtype: 'success', total_cost_usd: 0.02 },
+  ];
+}
+
+// A seat child that appends the refusals its hook would have written, then
+// answers. The hook runs as a process of its own and the runner reads the file
+// it leaves behind, so the fixture leaves the same file.
+function refusingCommand({ report, reportPath, boundPath, refusals }) {
+  const lines = refusals.map((r) => JSON.stringify(r)).join('\n') + '\n';
+  const script = [
+    `const fs = require('fs');`,
+    `fs.appendFileSync(${JSON.stringify(`${boundPath}.refusals.jsonl`)}, ${JSON.stringify(lines)});`,
+    `fs.writeFileSync(${JSON.stringify(reportPath)}, ${JSON.stringify(JSON.stringify(report))});`,
+    ...commandStream(true).map((line) => `console.log(${JSON.stringify(JSON.stringify(line))});`),
+  ].join('\n');
+  return { cmd: process.execPath, args: ['-e', script], parseLine: parseClaudeLine };
+}
+
+test('a bounded seat is spawned on its own settings file, and the bound is stamped', async (t) => {
+  const { paths, store } = setup(t);
+  const reportPath = runReportPath(paths, 'r1', 'dev-1');
+  const { settingsPath, boundPath } = boundFiles(paths);
+  let built = null;
+  const result = await runSeat(store, {
+    sleep: NO_WAIT,
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    settings: { bound: BOUND, settingsPath, boundPath },
+    commandFor: (opts) => {
+      built = opts;
+      return claudeFixtureCommand({
+        report: { verdict: 'pass' },
+        reportPath,
+        lines: commandStream(true),
+      });
+    },
+  });
+  assert.equal(result.ok, true);
+  // The argv builder is told the settings file, and the file names the hook by
+  // absolute path with the bound file as its argument.
+  assert.equal(built.settingsPath, settingsPath);
+  const hook = JSON.parse(readFileSync(settingsPath, 'utf8')).hooks.PreToolUse[0];
+  assert.equal(hook.matcher, 'Bash|PowerShell|REPL');
+  assert.equal(hook.hooks[0].type, 'command');
+  assert.match(hook.hooks[0].args[0], /src\/seats\/bound-hook\.mjs$/);
+  assert.equal(hook.hooks[0].args[1], boundPath.replaceAll('\\', '/'));
+  assert.equal(hook.hooks[0].timeout, 30);
+  // The bound file carries the seat it bounds, so a refusal names it.
+  const bound = JSON.parse(readFileSync(boundPath, 'utf8'));
+  assert.equal(bound.seat, 'dev');
+  assert.equal(bound.suite, 'suite');
+  assert.equal(bound.baseSha, 'base-sha');
+  const stamp = readEvents(runLedgerPath(paths, 'r1')).find((e) => e.event === 'seat-bound');
+  assert.deepEqual(stamp.layers, ['lint', 'suite']);
+  assert.equal(
+    stamp.digest,
+    createHash('sha256').update(readFileSync(boundPath)).digest('hex'),
+    'the stamped digest is the digest of the bytes the hook reads',
+  );
+});
+
+test('a seat whose bound never loaded fails on the stream, not on the write', async (t) => {
+  const { paths, store } = setup(t, 'unbound');
+  const reportPath = runReportPath(paths, 'unbound', 'dev-1');
+  const { settingsPath, boundPath } = boundFiles(paths, 'unbound');
+  const result = await runSeat(store, {
+    sleep: NO_WAIT,
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    settings: { bound: BOUND, settingsPath, boundPath },
+    commandFor: () =>
+      claudeFixtureCommand({
+        // A valid report the runner never reads: a seat that ran a command
+        // outside any bound proved nothing about the tree it leaves.
+        report: { verdict: 'pass' },
+        reportPath,
+        lines: commandStream(false),
+      }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'bound-not-loaded');
+  const events = readEvents(runLedgerPath(paths, 'unbound'));
+  assert.equal(events.find((e) => e.event === 'seat-failure').reason, 'bound-not-loaded');
+  assert.ok(!events.some((e) => e.event === 'seat-report'));
+  // One child. A settings file the CLI ignored is ignored again on a retry.
+  assert.equal(events.filter((e) => e.event === 'seat-spawned').length, 1);
+});
+
+test('the hook answer beside the first command proves the bound loaded', async (t) => {
+  const { paths, store } = setup(t, 'marked');
+  const reportPath = runReportPath(paths, 'marked', 'dev-1');
+  const { settingsPath, boundPath } = boundFiles(paths, 'marked');
+  const result = await runSeat(store, {
+    sleep: NO_WAIT,
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    settings: { bound: BOUND, settingsPath, boundPath },
+    commandFor: () =>
+      claudeFixtureCommand({
+        report: { verdict: 'pass' },
+        reportPath,
+        lines: [
+          ...commandStream(true),
+          // A later call with no answer beside it changes nothing: the first
+          // call settled the question the proof asks.
+          {
+            type: 'assistant',
+            message: {
+              content: [
+                { type: 'tool_use', id: 'toolu-2', name: 'Bash', input: { command: 'ls' } },
+              ],
+            },
+          },
+          {
+            type: 'user',
+            message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu-2' }] },
+          },
+        ],
+      }),
+  });
+  assert.equal(result.ok, true);
+  assert.ok(!readEvents(runLedgerPath(paths, 'marked')).some((e) => e.event === 'seat-failure'));
+});
+
+test('an unbounded seat is ended where that is discovered', async (t) => {
+  const { paths, store } = setup(t, 'killed');
+  const reportPath = runReportPath(paths, 'killed', 'dev-1');
+  const { settingsPath, boundPath } = boundFiles(paths, 'killed');
+  const terminated = [];
+  const result = await runSeat(store, {
+    sleep: NO_WAIT,
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    settings: { bound: BOUND, settingsPath, boundPath },
+    commandFor: () => ({ cmd: process.execPath, args: ['-e', ''], parseLine: parseClaudeLine }),
+    // The supervisor the engine gives the runner answers with the child's own
+    // handle, so a bound that never loaded costs the seat what it has already
+    // spent and no more.
+    supervise: ({ parseLine }) => {
+      const handle = { terminate: (reason) => terminated.push(reason) };
+      handle.done = (async () => {
+        await null;
+        for (const line of commandStream(false)) parseLine(JSON.stringify(line));
+        return { failed: false, code: 0, cost: 0, meta: { model: DEFAULT_MODEL } };
+      })();
+      return handle;
+    },
+  });
+  assert.equal(result.reason, 'bound-not-loaded');
+  assert.deepEqual(terminated, ['bound-not-loaded']);
+});
+
+test('a settings file the runner cannot write refuses the spawn', async (t) => {
+  const { paths, store } = setup(t, 'nowrite');
+  const reportPath = runReportPath(paths, 'nowrite', 'dev-1');
+  mkdirSync(dirname(reportPath), { recursive: true });
+  // A file where the bound's own directory belongs: nothing can be written
+  // under it, and a seat the harness cannot bound does not run at all.
+  const blocked = join(dirname(reportPath), 'blocked');
+  writeFileSync(blocked, 'not a directory\n');
+  let spawns = 0;
+  const result = await runSeat(store, {
+    sleep: NO_WAIT,
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    settings: {
+      bound: BOUND,
+      settingsPath: join(blocked, 'dev-1.settings.json'),
+      boundPath: join(blocked, 'dev-1.bound.json'),
+    },
+    commandFor: () => {
+      spawns++;
+      return claudeFixtureCommand({ report: { verdict: 'pass' }, reportPath });
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'bound-not-loaded');
+  assert.equal(spawns, 0);
+  const events = readEvents(runLedgerPath(paths, 'nowrite'));
+  assert.equal(events.find((e) => e.event === 'seat-failure').reason, 'bound-not-loaded');
+  assert.ok(!events.some((e) => e.event === 'seat-bound'));
+});
+
+test('every command the hook refused is stamped when the seat ends', async (t) => {
+  const { paths, store } = setup(t, 'refused');
+  const reportPath = runReportPath(paths, 'refused', 'dev-1');
+  const { settingsPath, boundPath } = boundFiles(paths, 'refused');
+  const result = await runSeat(store, {
+    sleep: NO_WAIT,
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    settings: { bound: BOUND, settingsPath, boundPath },
+    commandFor: () =>
+      refusingCommand({
+        report: { verdict: 'pass' },
+        reportPath,
+        boundPath,
+        refusals: [
+          {
+            seat: 'dev',
+            layer: 'acceptance',
+            command: 'npm run acceptance',
+            reason: 'the diff does not touch its ground',
+            at: '2020-01-01T00:00:00.000Z',
+          },
+          { seat: 'dev', layer: null, command: 'npm test', reason: 'the bound file is unreadable' },
+        ],
+      }),
+  });
+  assert.equal(result.ok, true);
+  const events = readEvents(runLedgerPath(paths, 'refused'));
+  const refusals = events.filter((e) => e.event === 'seat-command-refused');
+  assert.equal(refusals.length, 2);
+  assert.equal(refusals[0].layer, 'acceptance');
+  assert.equal(refusals[0].command, 'npm run acceptance');
+  assert.equal(refusals[0].reason, 'the diff does not touch its ground');
+  assert.equal(refusals[0].at, '2020-01-01T00:00:00.000Z');
+  // A refusal the hook could not attribute to a layer is a refusal all the same.
+  assert.equal(refusals[1].layer, null);
+  // The count rides the stamp that ends the seat, and the stamps stand before
+  // the report they are counted on.
+  const report = events.find((e) => e.event === 'seat-report');
+  assert.equal(report.refusals, 2);
+  assert.ok(refusals[1].seq < report.seq);
+});
+
+test('a seat with no bound spawns exactly as it did before one existed', async (t) => {
+  const { paths, store } = setup(t, 'nobound');
+  const reportPath = runReportPath(paths, 'nobound', 'dev-1');
+  let built = null;
+  const result = await runSeat(store, {
+    sleep: NO_WAIT,
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    commandFor: (opts) => {
+      built = opts;
+      return claudeFixtureCommand({
+        report: { verdict: 'pass' },
+        reportPath,
+        lines: commandStream(false),
+      });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(built.settingsPath, undefined);
+  const events = readEvents(runLedgerPath(paths, 'nobound'));
+  assert.ok(!events.some((e) => e.event === 'seat-bound'));
+  assert.ok(!events.some((e) => e.event === 'seat-failure'));
 });

@@ -62,6 +62,7 @@ import {
   commitTree,
   projectConfigJson,
   writeTree,
+  answeredReport,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -415,7 +416,15 @@ function seatFixture(seats) {
     const out = behavior({ seat, named, label, prompt: opts.prompt, attempt: opts.attempt }) ?? {};
     return {
       cmd: process.execPath,
-      args: ['-e', seatScript({ reportPath, model: opts.model, ...out })],
+      args: [
+        '-e',
+        seatScript({
+          reportPath,
+          model: opts.model,
+          ...out,
+          report: answeredReport(out.report, opts.prompt),
+        }),
+      ],
       parseLine: fixtureParse,
     };
   };

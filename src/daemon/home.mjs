@@ -120,6 +120,30 @@ export function runReportPath(paths, runId, name) {
 }
 
 /**
+ * The CLI settings file one seat dispatch is spawned with: the hook that holds
+ * the seat inside its bound. One file per dispatch, because the bound it names
+ * is that dispatch's own.
+ *
+ * A run artifact beside the reports, so it archives with the run that spawned
+ * the seat. What the seat was allowed to run is evidence as much as what it
+ * reported.
+ * @param {ReturnType<typeof homePaths>} paths
+ */
+export function seatSettingsPath(paths, runId, seat, n) {
+  return join(paths.runs, runId, 'seats', `${pathPart(seat)}-${n}.settings.json`);
+}
+
+/**
+ * The bound file one seat dispatch is held to. The hook reads it on every
+ * command tool call and appends its refusals beside it, so the refusals of one
+ * dispatch are readable against the bound that produced them.
+ * @param {ReturnType<typeof homePaths>} paths
+ */
+export function seatBoundPath(paths, runId, seat, n) {
+  return join(paths.runs, runId, 'seats', `${pathPart(seat)}-${n}.bound.json`);
+}
+
+/**
  * The directory holding one CI check attempt's captured evidence: the check
  * run's own metadata and, once the workflow run behind it is over, the failure
  * log. It sits inside the run directory, so the evidence archives with the run

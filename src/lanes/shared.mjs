@@ -7,7 +7,12 @@ import { isAbsolute, join } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
 import { ACK_OPTION } from '../ledger/acks.mjs';
 import { isAbandon } from '../ledger/parks.mjs';
-import { runLedgerPath, runReportPath } from '../daemon/home.mjs';
+import {
+  runLedgerPath,
+  runReportPath,
+  seatBoundPath,
+  seatSettingsPath,
+} from '../daemon/home.mjs';
 import { credentialEnv, declaredNames } from '../daemon/credentials.mjs';
 import {
   DEFAULT_CONSTITUTION_PATH,
@@ -714,6 +719,10 @@ export function attemptLimit(events, seat) {
  * stamp, the invocation count and the park detail. The cost comes back beside
  * the report, because a caller that stamps one entry per record needs what the
  * dispatch spent and the ledger's own per-seat total cannot say which slot.
+ *
+ * `settings` is the bound the seat runs inside, as the caller computed it. The
+ * two files it needs are named here, per dispatch, from the invocation count
+ * the ledger already holds.
  */
 export async function seatWithChecks(
   ctx,
@@ -732,6 +741,7 @@ export async function seatWithChecks(
     park = null,
     brief: opening = null,
     resumeByReport = null,
+    settings = null,
   },
 ) {
   // The report the ledger already holds for this seat's label, past the stamp
@@ -771,6 +781,17 @@ export async function seatWithChecks(
       constitution,
       ...(styleFiles && { styleFiles }),
       ...(denyTools && { denyTools }),
+      // The bound this dispatch runs inside, with the two files it needs named
+      // per dispatch: the invocation count is what makes them this dispatch's
+      // own, and the refusals of one seat are then readable against the bound
+      // that produced them.
+      ...(settings && {
+        settings: {
+          bound: settings,
+          settingsPath: seatSettingsPath(ctx.paths, ctx.runId, seat, n),
+          boundPath: seatBoundPath(ctx.paths, ctx.runId, seat, n),
+        },
+      }),
     });
     if (!result.ok) return { fail: seatFail(ctx, seat, result, park) };
     const defects = await checks(result.report);

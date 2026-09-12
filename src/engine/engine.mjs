@@ -488,7 +488,20 @@ export class RunEngine {
           },
           ...(this.waitSleep && { sleep: this.waitSleep }),
           ...opts,
-          supervise,
+          // The runner gets the child's own handle, not only its promise: a
+          // seat whose bound never loaded is ended where that is discovered.
+          // The tracked set is the same one the handlers' wrapper keeps, so
+          // liveness, kill and stop see this child too.
+          supervise: (superviseOpts) => {
+            const child = superviseSeat(run.store, superviseOpts);
+            run.seats.add(child);
+            return {
+              done: child.done.finally(() => {
+                run.seats.delete(child);
+              }),
+              terminate: (reason) => child.terminate(reason),
+            };
+          },
         }),
     };
     Promise.resolve()

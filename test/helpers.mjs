@@ -143,6 +143,21 @@ export const FIXTURE_ACCEPTANCE = `
 export const NO_WAIT = () => Promise.resolve();
 
 /**
+ * The report a fixture seat hands back, filled to the schema its own prompt
+ * carries.
+ *
+ * A lane with a frozen suite asks its implementing seat what the suite said. A
+ * fixture that left the field out would be corrected for the shape of its
+ * report instead of judged on its behaviour, in every scenario that is about
+ * something else. A behaviour that states the field states it, which is how a
+ * scenario says the seat handed over a tree it knows is red.
+ */
+export function answeredReport(report, prompt) {
+  if (!report || !prompt.includes('suiteState') || report.suiteState !== undefined) return report;
+  return { ...report, suiteState: 'green' };
+}
+
+/**
  * A spec that holds the template (ADR-0019) for a fixture card with one
  * acceptance criterion: a header, one criterion section with its mapping,
  * constants and supersedes, one touched-paths block, an environment section.

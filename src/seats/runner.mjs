@@ -45,14 +45,28 @@
 // fails the seat, and the `seat-failure` park behind it is the park it always
 // was. A wait spends nothing and stamps no `seat-failure`, so the corrective
 // and crash-retry budgets read exactly what they read before.
-import { mkdirSync, writeFileSync } from 'node:fs';
+//
+// The bound: a caller that hands over a bound gets a seat that cannot run a
+// layer outside it. The runner writes the bound file and the settings file
+// that loads the hook over it, names the settings file on the command line,
+// and stamps `seat-bound`. A seat the two files cannot be written for does not
+// spawn: the settings file is the whole of the bound, and an unbounded seat is
+// the thing the bound exists to prevent.
+//
+// The hook decides alone and writes its refusals to a file, because the run
+// ledger has one in-process writer holding the sequence in memory. So the
+// runner reads that file when the seat ends and stamps what the hook refused,
+// which is the same fact with one writer.
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { superviseSeat } from '../engine/supervise.mjs';
 import { COMMAND_LINE_MAX, commandLineLength } from '../engine/executable.mjs';
 import { seatDef, FALLBACK_MODEL } from './seatmap.mjs';
 import { checkReportSchema, validateReport, readReport } from './contract.mjs';
 import { assembleSeatPrompt, correctivePrompt, promptFileRef } from './prompt.mjs';
-import { claudeSeatCommand } from './claude.mjs';
+import { claudeSeatCommand, boundLoadProof, COMMAND_TOOLS } from './claude.mjs';
 import {
   SEAT_LADDER,
   ladderStep,
@@ -84,6 +98,17 @@ export const RESET_GRACE_MS = 60_000;
  */
 const RETRYABLE = new Set(['exit', 'silence']);
 
+/** The hook the settings file loads, by absolute path: a seat's own working
+ * directory is the run's worktree and resolves nothing in this tree. */
+const BOUND_HOOK = hostPath(fileURLToPath(new URL('./bound-hook.mjs', import.meta.url)));
+
+/**
+ * How long the CLI gives the bound hook. The hook reads two git commands
+ * against the run's worktree, which is seconds on a large tree and never
+ * minutes; a hook that has not answered by then is a hook that is not going to.
+ */
+const BOUND_HOOK_TIMEOUT_S = 30;
+
 /**
  * Runs one seat session end to end.
  * @param {import('../telemetry/stores.mjs').TelemetryStore} store
@@ -93,6 +118,7 @@ const RETRYABLE = new Set(['exit', 'silence']);
  *   semaphores?: import('./semaphore.mjs').ModelSemaphores,
  *   cwd?: string, env?: object, secretEnv?: string[], costCeiling?: number,
  *   silenceMs?: number, claudeCommand?: string[], denyTools?: string[],
+ *   settings?: {bound: object, settingsPath: string, boundPath: string},
  *   waits?: {register?: Function, holdBarrier?: Function},
  *   sleep?: (ms: number) => Promise<void>, now?: () => number,
  *   commandFor?: (opts: object) => {cmd: string, args: string[], parseLine?: Function},
@@ -119,6 +145,7 @@ export async function runSeat(store, opts) {
     silenceMs,
     claudeCommand,
     denyTools,
+    settings,
     // The engine's wait seam and the clock behind it: the ladder below is the
     // one place a seat session stops and does nothing, and the run has to be
     // readable as waiting while it does (ADR-0069).
@@ -151,6 +178,50 @@ export async function runSeat(store, opts) {
     });
   }
   mkdirSync(dirname(reportPath), { recursive: true });
+  // The bound, before anything spawns. A seat that cannot be held to one does
+  // not run: the harness would be asking a seat to judge a tree it was told
+  // one stage judges, and no later stamp recovers the hour it spends doing it.
+  let held = null;
+  if (settings) {
+    try {
+      held = writeSeatBound(seat, settings);
+    } catch (error) {
+      store.append('seat-failure', {
+        actor: ACTOR,
+        seat,
+        reason: 'bound-not-loaded',
+        cause: error.message,
+      });
+      return { ok: false, failed: true, reason: 'bound-not-loaded', error: error.message };
+    }
+    store.append('seat-bound', {
+      actor: ACTOR,
+      seat,
+      digest: held.digest,
+      layers: held.layers,
+      path: settings.boundPath,
+    });
+  }
+  // Every command the hook refused, stamped once when the seat ends. The count
+  // is taken before the terminal stamp so the summary a reader lands on says
+  // how often this seat fought its bound.
+  let refusals = null;
+  const endBound = () => {
+    if (refusals !== null) return refusals;
+    refusals = 0;
+    for (const line of refusalLines(held)) {
+      store.append('seat-command-refused', {
+        actor: ACTOR,
+        seat,
+        layer: line.layer ?? null,
+        command: line.command ?? '',
+        reason: line.reason ?? '',
+        ...(typeof line.at === 'string' && { at: line.at }),
+      });
+      refusals++;
+    }
+    return refusals;
+  };
   let degraded = false;
   const waitCtx = { store, waits, ...(sleep && { sleep }), now };
   // Where this seat's ladder stands, and whether the vendor's own instant has
@@ -213,6 +284,14 @@ export async function runSeat(store, opts) {
       styleFiles,
     });
     let resume;
+    // Whether the bound hook answered this seat's first command, and the
+    // child's own handle. A settings file the CLI refuses is ignored without a
+    // word in print mode, so the load is proven from the stream; a seat that
+    // ran a command with no answer from the hook is unbounded, and it ends
+    // where that is discovered rather than at its natural end.
+    const proof = held === null ? null : boundLoadProof();
+    let unbounded = false;
+    let running = null;
     // One dispatch: build the argv for the model in force and supervise the
     // child. `seat-spawned` carries the model actually spawned, so a degraded
     // retry reads as its own spawn on the model that judged the work.
@@ -227,6 +306,7 @@ export async function runSeat(store, opts) {
           denyTools,
           attempt,
           resume,
+          ...(settings && { settingsPath: settings.settingsPath }),
         });
       let spec = build(prompt);
       // A prompt is content, and content has no bound the harness controls:
@@ -250,7 +330,19 @@ export async function runSeat(store, opts) {
         });
         spec = build(promptFileRef(path));
       }
-      return supervise({
+      // The proof rides the dialect parser: the supervisor reads every line
+      // through it, and the bound's own answer is one of those lines.
+      const parseLine =
+        proof === null
+          ? spec.parseLine
+          : (line) => {
+              if (proof(line)) {
+                unbounded = true;
+                running?.terminate?.('bound-not-loaded');
+              }
+              return spec.parseLine ? spec.parseLine(line) : null;
+            };
+      const started = supervise({
         seat,
         cmd: spec.cmd,
         args: spec.args,
@@ -259,7 +351,7 @@ export async function runSeat(store, opts) {
         secretEnv,
         costCeiling,
         ...(silenceMs !== undefined && { silenceMs }),
-        ...(spec.parseLine && { parseLine: spec.parseLine }),
+        ...(parseLine && { parseLine }),
         spawnFields: {
           model,
           effort: def.effort,
@@ -279,6 +371,12 @@ export async function runSeat(store, opts) {
           ...(waited > 0 && { afterWait: waited }),
         },
       });
+      // The supervisor answers with the child's own handle or with its promise
+      // alone. Only the handle can end a child early, which is what an
+      // unbounded seat needs; without one the seat runs to its own end and
+      // fails on the same evidence.
+      running = typeof started?.then === 'function' ? null : started;
+      return running === null ? started : running.done;
     };
     // The crash-retry loop reads `model` and `prompt` from the enclosing
     // scope, so a retry after a degrade or a corrective runs on whatever is
@@ -294,7 +392,12 @@ export async function runSeat(store, opts) {
     };
     const dispatchWithRetries = async (attempt) => {
       let result = await dispatch(attempt, 0, ladderPosition() - 1);
-      while (result.failed === true && RETRYABLE.has(result.reason) && crashRetries < CRASH_RETRIES) {
+      while (
+        result.failed === true &&
+        RETRYABLE.has(result.reason) &&
+        crashRetries < CRASH_RETRIES &&
+        !unbounded
+      ) {
         crashRetries++;
         // A session id the dying child named is the work it had already
         // bought: every finding it reached, every file it read. Resuming
@@ -389,6 +492,9 @@ export async function runSeat(store, opts) {
         if (result.failed === true || result.terminated === true) {
           collected.push(result.reason ?? 'unknown');
         }
+        // A seat whose bound never loaded buys nothing from a retry or a wait:
+        // the next child reads the same settings file the CLI already ignored.
+        if (unbounded) return result;
         let next = null;
         if (result.failed === true && RETRYABLE.has(result.reason)) {
           next = await seatLadderStep(result, attempt);
@@ -404,6 +510,16 @@ export async function runSeat(store, opts) {
     };
     for (let attempt = 1; attempt <= 2; attempt++) {
       let result = await dispatchWithWaits(attempt);
+      if (unbounded) {
+        store.append('seat-failure', {
+          actor: ACTOR,
+          seat,
+          reason: 'bound-not-loaded',
+          digest: held.digest,
+          path: settings.settingsPath,
+        });
+        return { ok: false, failed: true, reason: 'bound-not-loaded' };
+      }
       if (result.reason === 'model-unavailable') {
         if (!degraded && model !== FALLBACK_MODEL) {
           store.append('model-degraded', {
@@ -461,6 +577,7 @@ export async function runSeat(store, opts) {
       const read = readReport(reportPath);
       const errors = read.errors ?? validateReport(schema, read.value);
       if (errors.length === 0) {
+        const refused = endBound();
         store.append('seat-report', {
           actor: seat,
           seat,
@@ -468,6 +585,7 @@ export async function runSeat(store, opts) {
           attempt,
           cost: result.cost,
           ...(typeof actual === 'string' && { model: actual }),
+          ...(refused > 0 && { refusals: refused }),
         });
         return { ok: true, report: read.value, model: actual ?? model, cost: result.cost };
       }
@@ -487,7 +605,98 @@ export async function runSeat(store, opts) {
     }
   } finally {
     release();
+    // Every exit of the session, not only the one that reports: a seat that
+    // failed after fighting its bound is the reading that says why.
+    endBound();
   }
+}
+
+/**
+ * Writes the two files one bounded dispatch runs inside, and answers what the
+ * ledger records about them.
+ *
+ * The settings file names this machine's node binary and the hook script by
+ * absolute path, because a hook is spawned as a child of the CLI whose working
+ * directory is the run's worktree. The bound path rides the hook's arguments:
+ * the CLI hands a hook the call on stdin and no run identity at all, so the
+ * only way it learns which bound it enforces is the command line.
+ *
+ * The digest is over the bytes the hook reads, so the marker line the hook
+ * prints identifies exactly this file.
+ * @returns {{digest: string, layers: string[], refusalsPath: string}}
+ */
+function writeSeatBound(seat, { bound, settingsPath, boundPath }) {
+  const text = JSON.stringify({ ...bound, seat }, null, 2) + '\n';
+  mkdirSync(dirname(boundPath), { recursive: true });
+  writeFileSync(boundPath, text, 'utf8');
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  writeFileSync(
+    settingsPath,
+    JSON.stringify(
+      {
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: COMMAND_TOOLS.join('|'),
+              hooks: [
+                {
+                  type: 'command',
+                  command: hostPath(process.execPath),
+                  args: [BOUND_HOOK, hostPath(boundPath)],
+                  timeout: BOUND_HOOK_TIMEOUT_S,
+                },
+              ],
+            },
+          ],
+        },
+      },
+      null,
+      2,
+    ) + '\n',
+    'utf8',
+  );
+  return {
+    digest: createHash('sha256').update(text).digest('hex'),
+    layers: (bound.layers ?? []).map((layer) => layer.name),
+    refusalsPath: `${boundPath}.refusals.jsonl`,
+  };
+}
+
+/**
+ * The refusals the hook left beside the bound file, one object per line.
+ *
+ * A file that is not there is a seat that ran nothing outside its bound, which
+ * is the ordinary case. A line that does not parse is dropped: the hook appends
+ * from a process of its own, and a torn last line says nothing a stamp could
+ * carry.
+ */
+function refusalLines(held) {
+  if (held === null) return [];
+  let text;
+  try {
+    text = readFileSync(held.refusalsPath, 'utf8');
+  } catch {
+    return [];
+  }
+  const lines = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      lines.push(JSON.parse(line));
+    } catch {
+      continue;
+    }
+  }
+  return lines;
+}
+
+/**
+ * A path as a settings file states it. The CLI reads the file as JSON and
+ * spawns what it names; forward slashes are what every host this runs on
+ * accepts, and they survive the JSON round trip without an escape.
+ */
+function hostPath(path) {
+  return path.replaceAll('\\', '/');
 }
 
 /**

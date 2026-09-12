@@ -39,6 +39,7 @@ import {
   FIXTURE_SPEC,
   NO_SURFACE,
   NO_WAIT,
+  answeredReport,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -196,7 +197,15 @@ function seatFixture(seats) {
     const out = behavior({ seat, prompt: opts.prompt, attempt: opts.attempt }) ?? {};
     return {
       cmd: process.execPath,
-      args: ['-e', seatScript({ reportPath, model: opts.model, ...out })],
+      args: [
+        '-e',
+        seatScript({
+          reportPath,
+          model: opts.model,
+          ...out,
+          report: answeredReport(out.report, opts.prompt),
+        }),
+      ],
       parseLine: fixtureParse,
     };
   };

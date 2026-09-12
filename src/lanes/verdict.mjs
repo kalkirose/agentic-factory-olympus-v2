@@ -33,7 +33,7 @@
 // state, so a daemon restart resumes mid-verdict without memory.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join } from 'node:path';
-import { recordPathIncludes } from '../config/project.mjs';
+import { recordPathIncludes, underEntry } from '../config/project.mjs';
 import { reviewDiffPath, runReportPath } from '../daemon/home.mjs';
 import {
   carryPaths,
@@ -86,7 +86,14 @@ import {
   probeOfferLines,
   withReplayRounds,
 } from './replay.mjs';
-import { runSpectrum, rerunLayers, persistentReds, cyclePlan, priorStatus } from './spectrum.mjs';
+import {
+  runSpectrum,
+  rerunLayers,
+  persistentReds,
+  cyclePlan,
+  priorStatus,
+  withDependents,
+} from './spectrum.mjs';
 import { certifiedAt, newestBaseCertification } from '../ledger/readers.mjs';
 import { cloneDir } from '../isolation/clones.mjs';
 import {
@@ -108,7 +115,7 @@ import {
 } from './waiting.mjs';
 import { askProbe } from './probes.mjs';
 import { configuredGroups } from './schedule.mjs';
-import { PARTS_ENV, partPlan, carryTally, confirmationTally, layerGround } from './parts.mjs';
+import { partPlan, carryTally, confirmationTally, layerGround } from './parts.mjs';
 import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview, recordFields } from './review.mjs';
 import { panelLenses } from './lenses.mjs';
@@ -258,9 +265,31 @@ export const DEV_SCHEMA = {
   additionalProperties: false,
   properties: {
     summary: { type: 'string' },
+    // What the frozen suite said when the seat last ran it. The seat's bound
+    // holds the suite whatever its diff, so this is the one layer it always
+    // answers for, and a seat that hands over a tree it knows is red is
+    // handing the verdict a cycle it will spend and then refuse.
+    suiteState: { type: 'string', enum: ['green', 'red'] },
   },
-  required: ['summary'],
+  required: ['summary', 'suiteState'],
 };
+
+/**
+ * The dev report shape for one lane. A seat with a frozen suite states what the
+ * suite said; the repair lane has no frozen suite, so it takes a shape with no
+ * field for one at all, because a mandatory field with nothing behind it is a
+ * field the seat fills by invention.
+ * @param {'story'|'repair'} mode
+ */
+export function devSchema(mode) {
+  if (mode === 'story') return DEV_SCHEMA;
+  const { suiteState, ...properties } = DEV_SCHEMA.properties;
+  return {
+    ...DEV_SCHEMA,
+    properties,
+    required: DEV_SCHEMA.required.filter((key) => key !== 'suiteState'),
+  };
+}
 
 export const TRIAGE_SCHEMA = {
   type: 'object',
@@ -335,7 +364,8 @@ function implementationHandler(mode) {
     // suite is restored from its sha before the tree is committed or judged.
     const { fail, dropped, allowlists } = await devSeatWithCapture(ctx, base, mode, {
       seat: 'dev',
-      buildRole: (brief) => (mode === 'story' ? devRole(base, brief) : fixRole(base, brief)),
+      buildRole: (brief, bound) =>
+        mode === 'story' ? devRole(base, brief, bound) : fixRole(base, brief, bound),
       suiteSha: base.suiteSha,
     });
     if (fail) return fail;
@@ -2445,7 +2475,7 @@ async function repairRound(ctx, base, mode, { pass, round, open, record, cap = R
   const { recaptured } = recordedTakeBacks(runEvents(ctx));
   const result = await runDevSeat(ctx, base, mode, {
     seat: 'repair-dev',
-    buildRole: (brief) => repairRole(base, open, record, brief, recaptured),
+    buildRole: (brief, bound) => repairRole(base, open, record, brief, recaptured, bound),
   });
   if (result.fail) return result;
   ctx.store.append('repair-round', {
@@ -2497,8 +2527,10 @@ export async function freshPass(ctx, base, mode, { newPass, trigger, open, last 
   const withStall = (brief) => (brief ? [stall, ...(Array.isArray(brief) ? brief : [brief])] : stall);
   const result = await runDevSeat(ctx, base, mode, {
     seat: 'dev',
-    buildRole: (brief) =>
-      mode === 'story' ? devRole(base, withStall(brief)) : fixRole(base, withStall(brief)),
+    buildRole: (brief, bound) =>
+      mode === 'story'
+        ? devRole(base, withStall(brief), bound)
+        : fixRole(base, withStall(brief), bound),
     pass: newPass,
     phase: 'fresh',
   });
@@ -2959,6 +2991,10 @@ function declaresPath(base, mode, tier) {
  */
 async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
   const capture = { dropped: [], allowlists: [] };
+  // One derivation for the two facts that must agree: the file the hook
+  // enforces and the list the brief states. A brief that named a layer the hook
+  // refuses would put the seat in a fight it cannot win.
+  const bound = await seatBound(ctx, base, mode);
   // The record tree is denied in both lanes: no seat that writes code writes a
   // decision record, and the repair lane is where most records are owed
   // (ADR-0074). The test paths are the story lane's freeze alone — the repair
@@ -2972,79 +3008,126 @@ async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
   const outcome = await seatWithChecks(ctx, {
     seat,
     label: null,
-    schema: DEV_SCHEMA,
+    schema: devSchema(mode),
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
     ...(denyTools.length > 0 && { denyTools }),
-    buildRole,
-    checks: () => captureDefects(ctx, base, mode, { seat, capture }),
+    ...(bound && { settings: bound }),
+    buildRole: (brief) => buildRole(brief, bound),
+    checks: async (report) => [
+      ...(await captureDefects(ctx, base, mode, { seat, capture })),
+      ...suiteStateDefects(mode, report),
+    ],
   });
   return { ...outcome, dropped: capture.dropped, allowlists: capture.allowlists };
+}
+
+/**
+ * A tree the seat itself calls red against the frozen suite, refused.
+ *
+ * The verdict would find the same red one cycle later and spend the whole
+ * spectrum doing it. A seat that knows the suite is red has not finished the
+ * work it was given, and that is a defect of the work product like any other.
+ */
+function suiteStateDefects(mode, report) {
+  if (mode !== 'story' || report?.suiteState !== 'red') return [];
+  return [
+    'your report states the frozen suite is red; the suite defines done, and a tree ' +
+      'that does not satisfy it is not implemented. Finish the work, run the suite, and ' +
+      'report green.',
+  ];
 }
 
 // -- role blocks -------------------------------------------------------------
 
 /**
- * The Tier-1 gate commands, as facts. A dev seat used to be told to run "the
- * gate commands from the project config" without being told what they are,
- * and the fix seat was told nothing at all. Both seats are judged by these
- * commands, so both are given them. The list is a tool the seat may reach
- * for, not an instruction to double-check its work: this module's header
- * bans verification scaffolding, and that ban settles the wording.
+ * The gate commands this seat may run, as facts. A dev seat used to be told to
+ * run "the gate commands from the project config" without being told what they
+ * are, and the fix seat was told nothing at all.
+ *
+ * The list is the seat's bound and not the whole battery: one stage judges a
+ * tree, and it is the verdict. A seat proves its own work, so it is given the
+ * layers the work it was asked for reaches, and the hook refuses the rest at
+ * the tool call. The list is a tool the seat may reach for, not an instruction
+ * to double-check its work: this module's header bans verification
+ * scaffolding, and that ban settles the wording.
+ *
+ * The bound here is the one the declared paths select, which is all a bound can
+ * be before the seat has written anything. The hook recomputes it from the
+ * seat's live diff on every call, so a seat whose work grows into another
+ * layer's ground may run that layer too.
  */
-function gateCommandLines(base) {
+function gateCommandLines(base, bound) {
+  const inBound = bound ? boundLayerNames(bound) : null;
+  const layers = inBound === null ? base.layers : base.layers.filter((l) => inBound.has(l.name));
   return [
-    'The Tier-1 gate commands this work is judged by:',
-    ...base.layers.map((l) => `- ${l.name}: ${(base.commands[l.command] ?? []).join(' ')}`),
-    ...affectedPartsLines(base),
+    'The Tier-1 gate commands your work is bounded to:',
+    ...layers.map((l) => `- ${l.name}: ${(base.commands[l.command] ?? []).join(' ')}`),
+    ...(inBound === null ? [] : [BOUND_LINE]),
   ];
 }
 
 /**
- * The one line that rides item 1 (ADR-0046). A seat that reaches for a gate
- * command reaches for the whole battery, and on the reference project the
- * acceptance layer alone is forty minutes of it. The cycle that judges the
- * seat already narrows that layer to the parts a diff can reach, so a seat
- * spending the same clock is told the same mapping and left to use it.
- *
- * Told, never required. The verdict runs the full set whatever the seat did,
- * so this is a saving the seat may take and never a check it owes — the ban
- * on verification scaffolding in this module settles the wording.
+ * What the bound is worth to a seat that meets it. A refusal arrives as the
+ * tool's own error, which reads like a defect in the environment unless the
+ * seat was told beforehand whose job the layer is.
  */
-function affectedPartsLines(base) {
-  if (base.config?.gates?.partTargeting === false) return [];
-  return [
-    'A layer command that names its parts takes ' +
-      `${PARTS_ENV}=<comma-separated part names> and runs those parts alone. ` +
-      'Check your own work with the parts your diff can reach: a part is affected ' +
-      'unless your diff falls entirely outside its input set — its own test sources ' +
-      'and the source trees it exercises, as that command declares them. A path no ' +
-      'part claims (a lockfile, a shared package, a migration, a config file) reaches ' +
-      'every part, so narrow nothing when you have touched one. The verdict proves every ' +
-      'part of every layer at the sha it ships.',
-  ];
+const BOUND_LINE =
+  'A command that runs a layer outside this list is refused before it starts, and the ' +
+  'refusal names the layer. A refused layer is not yours to run and not a defect to ' +
+  'work around: the verdict stage runs every layer of the project at the sha it ships. ' +
+  'A layer enters your bound when your own work reaches what it reads.';
+
+/**
+ * The layers a seat may run, given the paths its work reaches: the layers whose
+ * ground holds one of those paths, closed over `needs` because a layer
+ * downstream of a changed one is judged against a prerequisite that moved, plus
+ * every setup layer and the frozen suite, which are in the bound by
+ * declaration.
+ *
+ * The hook enforcing the bound computes the same set from the seat's live diff.
+ * This one answers for the diff the spec declared, which is the bound at the
+ * spawn.
+ * @param {{layers: Array<{name: string, ground?: string[], needs?: string[],
+ *   setup?: boolean}>, declared?: string[], suite?: string|null}} bound
+ * @returns {Set<string>}
+ */
+export function boundLayerNames(bound) {
+  const layers = bound.layers ?? [];
+  const declared = bound.declared ?? [];
+  const touched = new Set();
+  for (const layer of layers) {
+    const ground = layer.ground ?? [];
+    if (declared.some((file) => ground.some((entry) => underEntry(file, entry)))) {
+      touched.add(layer.name);
+    }
+  }
+  const names = withDependents(layers, touched);
+  for (const layer of layers) if (layer.setup === true) names.add(layer.name);
+  if (typeof bound.suite === 'string' && bound.suite.length > 0) names.add(bound.suite);
+  return names;
 }
 
-function devRole(base, brief = null) {
+function devRole(base, brief = null, bound = null) {
   return [
     `Implement the story spec at: ${base.specRef}`,
     'The frozen acceptance suite defines done. Do not edit or delete test files.',
     `Test paths (read-only): ${base.testPaths.join(', ')}`,
     ...recordPathLines(base),
-    ...gateCommandLines(base),
+    ...gateCommandLines(base, bound),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
   ].join('\n');
 }
 
-function fixRole(base, brief = null) {
+function fixRole(base, brief = null, bound = null) {
   return [
     `Fix the defect described by the intake ticket at: ${base.specRef}`,
     'The ticket is the spec. Stay inside its scope.',
     'Add a regression test when the defect class demands one.',
     ...recordPathLines(base),
-    ...gateCommandLines(base),
+    ...gateCommandLines(base, bound),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
   ].join('\n');
@@ -3082,7 +3165,7 @@ const STRUCTURAL_NOTE =
   'Answer it by changing the shape, not by patching around it. Everything else in this brief ' +
   'still holds: the spec, the test files, and every finding it lists.';
 
-function repairRole(base, open, record, brief = null, recaptured = []) {
+function repairRole(base, open, record, brief = null, recaptured = [], bound = null) {
   const structural = open.filter((f) => f.approach === true);
   const rest = open.filter((f) => f.approach !== true);
   return [
@@ -3095,7 +3178,7 @@ function repairRole(base, open, record, brief = null, recaptured = []) {
     ...(rest.length > 0 ? ['Open findings:', ...rest.map((f) => `- ${findingLine(f)}`)] : []),
     'Tier-1 verdict:',
     ...(record?.spectrum ?? []).map((r) => `- ${r.layer}: ${r.status}${layerNote(r)}`),
-    ...gateCommandLines(base),
+    ...gateCommandLines(base, bound),
     ...takenBackLines(record?.dropped, recaptured),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
@@ -3430,6 +3513,72 @@ export function passOpeningSha(events, fallback = null) {
     }
   }
   return fallback;
+}
+
+/**
+ * The cap a bounded seat runs a layer under. It is a constant and not a config
+ * key: a budget with no measurement behind it refuses on a guess, and the
+ * measurement the harness has is the certified base's own per-layer duration.
+ * Five minutes is the reading that separates a layer a seat may sensibly run
+ * from one that is the verdict's whole cycle.
+ */
+const SEAT_LAYER_CAP_MS = 300_000;
+
+/**
+ * The bound one implementation seat runs inside, or null when the run holds no
+ * base commit to compute a footprint against.
+ *
+ * The file carries only what cannot change inside one spawn. The seat's diff
+ * grows while it works, so the hook recomputes the layer set on every call; the
+ * durations come from the newest base certification of this project, because a
+ * layer takes about as long as it took last time and the sha it took that long
+ * at says nothing about the number. No certification yet is no time bound.
+ *
+ * It reads the ledger and the config rather than the base it is handed. A
+ * merge-born fresh pass narrows its own base down to what a dev seat needs, and
+ * a bound that rested on the wider one would be absent on exactly the pass that
+ * spawns a seat over a tree that just moved.
+ */
+async function seatBound(ctx, base, mode) {
+  const baseSha = passOpeningSha(runEvents(ctx), ctx.payload.baseSha ?? null);
+  if (typeof baseSha !== 'string' || baseSha.length === 0) return null;
+  const config = base.config ?? (await loadProjectConfig(ctx));
+  const elapsedMs = {};
+  for (const row of newestBaseCertification(ctx.paths, ctx.project)?.layers ?? []) {
+    if (typeof row.elapsedMs === 'number') elapsedMs[row.name] = row.elapsedMs;
+  }
+  const suite =
+    mode === 'story'
+      ? (base.layers.find((l) => l.command === config.lanes?.story?.suiteCommand)?.name ?? null)
+      : null;
+  return {
+    worktree: base.worktree,
+    baseSha,
+    layers: base.layers.map((layer) => ({
+      name: layer.name,
+      argv: base.commands[layer.command] ?? [],
+      ground: layer.ground ?? [],
+      needs: layer.needs ?? [],
+      setup: layer.setup === true,
+    })),
+    suite,
+    declared: declaredTouchedPaths(base),
+    elapsedMs: Object.keys(elapsedMs).length > 0 ? elapsedMs : null,
+    capMs: SEAT_LAYER_CAP_MS,
+  };
+}
+
+/**
+ * The paths the spec or the ticket declared. A ticket with no fenced block
+ * declares none, and the bound it opens with is then the setup layers alone;
+ * the seat's own first commands widen it.
+ */
+function declaredTouchedPaths(base) {
+  try {
+    return parseTouchedPaths(readFileSync(base.specRef, 'utf8'));
+  } catch {
+    return [];
+  }
 }
 
 async function verdictBase(ctx, mode) {

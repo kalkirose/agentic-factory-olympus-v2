@@ -5,7 +5,7 @@
 // git remote and the same real gate commands as the story scenario.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   DENIED_GATES,
@@ -205,6 +205,23 @@ test('the repair lane ships a ticketed fix through the assembled binaries', asyn
   assert.ok(
     seats[0].prompt.includes('Fix the defect described by the intake ticket'),
     'the fix seat was briefed as a story implementation',
+  );
+  // The repair lane has no frozen suite, so the bound rests on the ticket's own
+  // declared paths and the setup layers alone. The hook widens it from the
+  // seat's live diff on the first command.
+  const bound = events.find((e) => e.event === 'seat-bound' && e.seat === 'dev');
+  assert.ok(bound, 'the fix seat carried no bound');
+  assert.deepEqual(bound.layers, ['lint', 'suite', 'smoke']);
+  const file = JSON.parse(readFileSync(bound.path, 'utf8'));
+  assert.equal(file.suite, null);
+  // This ticket carries no block, so the spawn declares nothing and the brief
+  // opens on the setup layers alone.
+  assert.deepEqual(file.declared, []);
+  assert.ok(seats[0].prompt.includes('- smoke: '));
+  assert.ok(!seats[0].prompt.includes('- lint: '));
+  assert.ok(
+    !events.some((e) => e.event === 'seat-failure' && e.reason === 'bound-not-loaded'),
+    'the fix seat ran a command with no answer from its bound hook',
   );
 
   const merged = events.find((e) => e.event === 'merged');
