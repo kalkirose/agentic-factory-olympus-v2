@@ -1259,6 +1259,37 @@ export function groundedLayers(
 }
 
 /**
+ * Why a first cycle ran the whole spectrum instead of the footprint of its own
+ * diff. A closed vocabulary, because the reading that says whether the footprint
+ * is ever taken on a project is a count of these words, and prose cannot be
+ * counted (ADR-0008).
+ *
+ * The project declares no setup layer, so nothing says which layers make the
+ * others runnable. A Tier-1 layer declares no ground, so it has claimed nothing.
+ * The project holds no certification of its default branch. The diff of the run
+ * against its base will not read. A changed file lies under no layer's ground.
+ */
+/**
+ * The one sweep reason this module decides for itself. The other four are read
+ * off the config and the instance ledger by the caller, which hands them here.
+ */
+export const UNCLAIMED_GROUND = 'unclaimed-ground';
+
+export const SWEEP_REASONS = new Set([
+  'no-setup-layer',
+  'groundless-layer',
+  'no-base-certification',
+  'unreadable-diff',
+  UNCLAIMED_GROUND,
+]);
+
+/** @param {string} reason */
+export function assertSweepReason(reason) {
+  if (!SWEEP_REASONS.has(reason)) throw new Error(`unknown sweep reason: ${reason}`);
+  return reason;
+}
+
+/**
  * The set the first cycle of a pass runs when the default branch is certified:
  * the layers whose ground the run's own diff touches, closed over `needs`, plus
  * every layer no certification answers for, plus every setup layer.
@@ -1485,7 +1516,9 @@ export function cyclePlan(
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   const previous = renders[renders.length - 1];
   if (!previous || previous.pass !== pass || previous.source === 'ci') {
-    if (footprint?.reason !== undefined) return { sweep: 'full', reason: footprint.reason };
+    if (footprint?.reason !== undefined) {
+      return { sweep: 'full', reason: assertSweepReason(footprint.reason) };
+    }
     if (footprint === null) return { sweep: 'full' };
     const scoped = footprintLayers(layers, {
       changed: footprint.changed,
@@ -1497,7 +1530,7 @@ export function cyclePlan(
     });
     // A change no layer's ground reaches is a change nothing here can attribute.
     // Carrying over it would rest a green on a claim the project never made.
-    if (scoped.unclaimed.length > 0) return { sweep: 'full', reason: 'unclaimed-ground' };
+    if (scoped.unclaimed.length > 0) return { sweep: 'full', reason: UNCLAIMED_GROUND };
     return { sweep: 'footprint', run: scoped.run, certified: footprint.certified };
   }
   return { sweep: 'targeted', run: targetedLayers(layers, prior), prior };

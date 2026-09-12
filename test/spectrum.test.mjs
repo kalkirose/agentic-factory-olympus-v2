@@ -17,6 +17,8 @@ import {
   groundedLayers,
   priorStatus,
   targetedLayers,
+  SWEEP_REASONS,
+  assertSweepReason,
 } from '../src/lanes/spectrum.mjs';
 // The four conditions that arm the footprint are read off a project config and
 // the instance ledger, and they decide which plan this module returns, so they
@@ -1729,4 +1731,16 @@ test('a certification of the base answers per layer, and the diff decides the re
   });
   assert.equal(plan.sweep, 'footprint');
   assert.deepEqual([...plan.run].sort(), ['install', 'lint', 'unit']);
+});
+
+test('the sweep reasons are a closed vocabulary', () => {
+  // The reading that says whether the footprint is ever taken on a project is a
+  // count of these words, and a word nobody registered cannot be counted.
+  assert.equal(SWEEP_REASONS.size, 5);
+  for (const reason of SWEEP_REASONS) assert.equal(assertSweepReason(reason), reason);
+  assert.throws(() => assertSweepReason('no-footprint'), /unknown sweep reason/);
+  assert.throws(
+    () => cyclePlan([], { cycle: 1, pass: 1, layers: FOOTPRINT, footprint: { reason: 'because' } }),
+    /unknown sweep reason/,
+  );
 });
