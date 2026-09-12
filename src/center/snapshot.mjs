@@ -298,26 +298,10 @@ function projectHealth(paths, project, ships, escapes, instanceEvents, source) {
       ceiling: window.ceiling,
       breach: window.breach,
     },
-    killRate: lastFreezeKillRate(paths, project),
     fury: { window: BASELINE_WINDOW, ...furyYieldBaseline(paths, project) },
     tripwires: tripwireBoard(instanceEvents, project, registry),
     frontier: frontierView(paths, project, source),
   };
-}
-
-function lastFreezeKillRate(paths, project) {
-  let last = null;
-  for (const { events } of listRunEvents(paths, { project, lane: 'story' })) {
-    for (const f of events.filter((e) => e.event === 'freeze')) {
-      if (last === null || f.ts > last.ts) {
-        const waves = events.filter(
-          (e) => e.event === 'adversary-wave' && e.phase === 'initial',
-        ).length;
-        last = { ts: f.ts, kills: f.killCount, waves, dispositions: f.dispositions };
-      }
-    }
-  }
-  return last;
 }
 
 function tripwireBoard(instanceEvents, project, registry) {

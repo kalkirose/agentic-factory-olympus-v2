@@ -272,11 +272,11 @@ export function validateProjectConfig(config, { launch = false } = {}) {
 /**
  * The frozen suite has to be a Tier-1 layer. A verdict runs `gates.tier1` and
  * nothing else, while the lane's `suiteCommand` runs only before an
- * implementation exists: the freeze red-state check, the inherited-base
- * red-state check, and the adversary waves in their disposable trees. So a
- * suite command no layer carries runs against the pre-implementation tree and
- * never against the candidate, and the green verdict is silent about the one
- * suite the run was created to satisfy. The match is on the command, not the
+ * implementation exists: the freeze red-state check and the inherited-base
+ * red-state check. So a suite command no layer carries runs against the
+ * pre-implementation tree and never against the candidate, and the green
+ * verdict is silent about the one suite the run was created to satisfy. The
+ * match is on the command, not the
  * layer name: a layer may call the suite whatever the project's gate
  * vocabulary calls it. Launch-only: see `validateProjectConfig`.
  */
@@ -694,9 +694,8 @@ function validateStoryLane(lane, commands, err) {
       );
     }
   }
-  // Adversary waves per round. The lane defaults it, so the entry is only
-  // ever a raise; a zero or a fraction would read as a raise and disarm the
-  // stage instead, which is why the figure is validated rather than clamped.
+  // Retired: no stage reads this figure. The key stays accepted, and
+  // validated, so a pinned config blob that still carries it parses.
   if (lane.adversaryWaves !== undefined) {
     if (!Number.isInteger(lane.adversaryWaves) || lane.adversaryWaves < 1) {
       err('lanes.story.adversaryWaves', 'must be a positive integer wave count');

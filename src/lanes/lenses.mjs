@@ -95,18 +95,17 @@ export function recordCriteriaLines() {
 export const DEFAULT_LENSES = Object.freeze(['spec', 'operational', 'security', 'interface']);
 
 /**
- * The dimensions a security probe covers, and one definition of them with six
- * readers (ADR-0038, ADR-0072). The verdict panel reads them as one lens over
- * the candidate diff. The adversary waves read them as directions to be wrong
- * in. Every suite write reads them twice more, once in the brief that asks the
- * seat to map the story's surface along them and once in the deterministic
- * check over the map that comes back, and the story lane and the verdict lane
- * each hold one of those two pairs. One list, so no reader can narrow what
- * another one still probes.
+ * The dimensions a security probe covers, and one definition of them with
+ * several readers (ADR-0038, ADR-0072). The verdict panel reads them as one
+ * lens over the candidate diff. Every suite write reads them twice, once in
+ * the brief that asks the seat to map the story's surface along them and once
+ * in the deterministic check over the map that comes back, and the story lane
+ * and the verdict lane each hold one of those two pairs. One list, so no
+ * reader can narrow what another one still probes.
  *
  * They are not project config. A project that drops the security lens from its
- * verdict panel still gets the dimensions in its waves, because they ride the
- * wave brief and not the panel, and a suite must map what the adversary probes.
+ * verdict panel still gets the dimensions in every suite brief, because they
+ * ride the map rule and not the panel.
  */
 export const SECURITY_DIMENSIONS = Object.freeze([
   'authorization on every entry point',

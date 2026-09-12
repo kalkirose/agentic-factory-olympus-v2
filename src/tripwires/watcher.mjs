@@ -16,16 +16,9 @@
 // record and touches nothing (ADR-0034).
 import { readEvents } from '../ledger/ledger.mjs';
 import { listRunEvents } from '../telemetry/readers.mjs';
-import { withTripwireDefaults } from './registry.mjs';
+import { isRetiredTripwire, withTripwireDefaults } from './registry.mjs';
 import { activeMs, durationBand, durationResetAt, stageDurations } from './duration.mjs';
-import {
-  evaluateMetric,
-  countFreezes,
-  countVerdicts,
-  killRateBaseline,
-  furyYieldBaseline,
-  BASELINE_WINDOW,
-} from './metrics.mjs';
+import { evaluateMetric, countVerdicts, furyYieldBaseline, BASELINE_WINDOW } from './metrics.mjs';
 
 const ACTOR = 'tripwire-watcher';
 const GIST_MAX = 120;
@@ -37,12 +30,9 @@ const GIST_MAX = 120;
 const HEARTBEAT = 'stage-heartbeat';
 const STAGE_EVENTS = new Set([HEARTBEAT, 'stage-entered', 'run-closed']);
 
-// The self-baseline points: the 5th freeze proposes the kill-rate band, the
-// 5th verdict the per-lens yield bands. Stamped once per project and metric.
-const BASELINE_METRICS = new Map([
-  ['freeze', 'kill-rate'],
-  ['verdict-rendered', 'fury-lens-yield'],
-]);
+// The self-baseline points: the 5th verdict proposes the per-lens yield
+// bands. Stamped once per project and metric.
+const BASELINE_METRICS = new Map([['verdict-rendered', 'fury-lens-yield']]);
 
 const COMPARATORS = {
   '>': (a, b) => a > b,
@@ -159,6 +149,9 @@ export class TripwireWatcher {
     const registry = await this.registryFor(project);
     for (const entry of registry) {
       if (!entry.triggerEvents.includes(event)) continue;
+      // A retired metric has no reading, so the entry a pinned blob still
+      // carries is read and never evaluated.
+      if (isRetiredTripwire(entry)) continue;
       // An unreadable metric skips; the next matching append re-evaluates.
       await this.evaluate(project, entry).catch(() => {});
     }
@@ -342,29 +335,15 @@ export class TripwireWatcher {
     ) {
       return;
     }
-    const count =
-      metric === 'kill-rate' ? countFreezes(this.paths, project) : countVerdicts(this.paths, project);
-    if (count < BASELINE_WINDOW) return;
-    const observed =
-      metric === 'kill-rate'
-        ? killRateBaseline(this.paths, project)
-        : furyYieldBaseline(this.paths, project);
+    if (countVerdicts(this.paths, project) < BASELINE_WINDOW) return;
+    const observed = furyYieldBaseline(this.paths, project);
     this.ledger.append('baseline-proposal', {
       actor: ACTOR,
       project,
       metric,
       window: BASELINE_WINDOW,
       observed,
-      // The kill-rate band is a floor; the observed minimum is the honest
-      // opening bid. Lens-yield bands read from the per-lens counts.
-      ...(metric === 'kill-rate' && {
-        suggested: { op: '<', value: round(Math.min(...observed.perFreeze)) },
-      }),
-      gist: gist(
-        metric === 'kill-rate'
-          ? `baseline proposal: kill-rate ${round(observed.rate)} over ${observed.freezes} freezes (${project})`
-          : `baseline proposal: lens yield over ${observed.verdicts} verdicts (${project})`,
-      ),
+      gist: gist(`baseline proposal: lens yield over ${observed.verdicts} verdicts (${project})`),
     });
   }
 }
