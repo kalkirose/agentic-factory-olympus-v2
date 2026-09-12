@@ -657,9 +657,9 @@ export class RunEngine {
 
   /**
    * The backstop under the owning-event sweep: a loud record whose owner never
-   * landed, on a run that is now over. A budget breach and a capture take-back
-   * both ask for no decision, so the run closes them rather than leaving the
-   * owner an alert strip of runs that already ended.
+   * landed, on a run that is now over. Every class in the set reports on the
+   * run itself, so the run closes them rather than leaving the owner an alert
+   * strip of runs that already ended.
    */
   resolveLoudAtClose(run, state) {
     const events = readEvents(runLedgerPath(this.paths, run.runId));
