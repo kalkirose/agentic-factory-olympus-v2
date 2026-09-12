@@ -68,6 +68,26 @@ export async function commitAll(tree, message) {
 }
 
 /**
+ * Commits the named paths and nothing else, under the daemon's own identity.
+ * Returns the new sha, or the head as it stood when the paths stage nothing.
+ * The batches carry literal pathspecs: a bare one is wildmatched, and a
+ * repository path may hold the characters a wildmatch reads. The same
+ * empty-index rule as `commitAll` applies, and the tree holds the committed
+ * bytes afterwards.
+ */
+export async function commitPaths(tree, paths, message) {
+  if (paths.length === 0) return headSha(tree);
+  for (const batch of pathspecBatches(paths)) {
+    await git(['add', '--', ...batch], { cwd: tree });
+  }
+  const staged = await git(['diff', '--cached', '--name-only'], { cwd: tree });
+  if (staged.trim().length === 0) return headSha(tree);
+  await git([...IDENTITY, 'commit', '-m', message], { cwd: tree });
+  await takeIndexBytes(tree, paths);
+  return headSha(tree);
+}
+
+/**
  * The longest pathspec batch one git invocation carries. Windows caps a
  * command line near 32000 characters, and a commit may touch more paths than
  * that fits. The batch keeps every call well under the cap.
@@ -266,20 +286,6 @@ export async function carryPaths(tree, sha, entries, { except = [] } = {}) {
     await git(['checkout', sha, '--', ...take.map((file) => `:(literal)${file}`)], { cwd: tree });
   }
   for (const file of drop) rmSync(longPath(join(tree, file)), { force: true });
-}
-
-/**
- * The working tree's full divergence from HEAD as a patch, new files
- * included, truncated to `limit` characters. Evidence for suite amendment
- * rounds; the tree is disposable, so staging new files is fine.
- *
- * The read carries the diff cap, so a tree holding a lockfile or a build
- * artifact answers short instead of throwing at the caller.
- */
-export async function evidenceDiff(tree, { limit = 8000 } = {}) {
-  await git(['add', '-A'], { cwd: tree });
-  const read = await gitCapped(['diff', '--cached'], { cwd: tree });
-  return read.text.length > limit ? read.text.slice(0, limit) + '\n[truncated]' : read.text;
 }
 
 /**

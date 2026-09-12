@@ -11,19 +11,17 @@
 // The push is worth exactly one retry and no more. A rejection here is almost
 // always the default branch moving under it, and the replay proves the
 // replayed result all over again before the second push (ADR-0063).
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { commandLogPath, runReportPath } from '../daemon/home.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
 import { instanceParkForms } from '../ledger/parks.mjs';
 import { branchSha, cloneDir, fetchClone } from '../isolation/clones.mjs';
-import { git } from '../isolation/git.mjs';
 import {
-  DAEMON_EMAIL,
   changedFiles,
   changedInRange,
   cherryPick,
-  headSha,
+  commitPaths,
   push,
   resetHard,
 } from '../isolation/tree.mjs';
@@ -107,43 +105,6 @@ export const CARD_SWEEP_SCHEMA = {
  * the cards it was not asked about.
  */
 const LINT_OUTPUT_LIMIT = 65536;
-
-/**
- * Commits the named paths and nothing else, under the daemon's own identity.
- * Returns the new sha, or the head as it stood when the paths stage nothing.
- *
- * A path git reports as changed and then stages nothing for is a file whose
- * bytes moved and whose blob did not: a writer that rewrote it with carriage
- * returns. `commit` on an empty index exits non-zero, so the commit is asked
- * for only when the index holds something.
- *
- * The working tree is left as the writer left it. Every reader of the bytes
- * this commit holds reads them off the default branch, and the tree that made
- * it is reset or discarded before anything judges it again.
- */
-async function commitPaths(tree, paths, message) {
-  if (paths.length === 0) return headSha(tree);
-  // Every pathspec is literal: a bare one is wildmatched, and a repository
-  // path may hold the characters a wildmatch reads.
-  await git(['add', '--', ...paths.map((path) => `:(literal)${path}`)], { cwd: tree });
-  const staged = await git(['diff', '--cached', '--name-only'], { cwd: tree });
-  if (staged.trim().length === 0) return headSha(tree);
-  await git(
-    [
-      '-c',
-      'user.name=olympus-daemon',
-      '-c',
-      `user.email=${DAEMON_EMAIL}`,
-      '-c',
-      'commit.gpgsign=false',
-      'commit',
-      '-m',
-      message,
-    ],
-    { cwd: tree },
-  );
-  return headSha(tree);
-}
 
 /**
  * Commits the named paths and pushes them to the default branch.
@@ -531,8 +492,12 @@ async function cardLint({ ctx, config, env, worktree, changed, cards, defects, l
   if (changed.length === 0) return 'unwritten';
   // Plain argv, so the flag the harness asks about is the harness's to append.
   // A script that does not know the flag ignores it and reads the whole
-  // directory, which is a wider answer and never a wrong one.
-  const argv = [...config.commands[name], ...cards.flatMap((card) => ['--card', card])];
+  // directory, which is a wider answer and never a wrong one. A card the
+  // sweep deleted is a changed path with no file behind it; the lint refuses
+  // a name it cannot open, and what a deletion breaks shows on the cards that
+  // still name it, which the whole-corpus parse reads either way.
+  const present = cards.filter((card) => existsSync(join(worktree, card)));
+  const argv = [...config.commands[name], ...present.flatMap((card) => ['--card', card])];
   const run = await runCommand(argv, {
     cwd: worktree,
     env,

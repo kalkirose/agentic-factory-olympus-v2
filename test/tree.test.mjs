@@ -12,7 +12,6 @@ import {
   concludeMerge,
   headSha,
   restorePaths,
-  evidenceDiff,
   filesAt,
 } from '../src/isolation/tree.mjs';
 import { tempDir, removeDir, commitTree, gitSync, initOriginRepo, writeTree } from './helpers.mjs';
@@ -109,14 +108,6 @@ test('restorePaths reverts edits, deletions, and junk under the prefixes only', 
   assert.ok(!existsSync(join(repo, 'tests', 'junk.test.mjs')));
   // Changes outside the prefixes stay.
   assert.equal(readFileSync(join(repo, 'src', 'a.mjs'), 'utf8'), 'impl change\n');
-});
-
-test('evidenceDiff shows the divergence, new files included', async (t) => {
-  const repo = repoFixture(t);
-  writeTree(repo, { 'src/wrong.mjs': 'export const f = () => 0;\n' });
-  const diff = await evidenceDiff(repo);
-  assert.ok(diff.includes('src/wrong.mjs'));
-  assert.ok(diff.includes('() => 0'));
 });
 
 test('filesAt lists the files under the prefixes at a sha', async (t) => {
