@@ -100,10 +100,11 @@ export const CARD_SWEEP_SCHEMA = {
 };
 
 /**
- * The card lint reads a long report when it is refused, and the log of a
- * green is kept: a lint that names errors beyond the cards it was asked about
- * says so at the end of a clean run, and a 4000-character tail drops that
- * block before anything can read it.
+ * What the card lint may say before the harness stops listening. A refusal is
+ * read whole into the correction brief, and the default 4000-character tail
+ * would cut the front off a report that names several cards. The log of a
+ * green is kept beside it, because a clean run still reports what it found on
+ * the cards it was not asked about.
  */
 const LINT_OUTPUT_LIMIT = 65536;
 
