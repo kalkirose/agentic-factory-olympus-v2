@@ -176,6 +176,19 @@ export const RUN_EVENTS = new Set([
   // (ADR-0080).
   'run-closed',
   ...SEAT_EVENTS,
+  // The bound one dev seat was spawned inside: the digest of the bound file
+  // its hook reads, and the layers that file names. The hook decides alone and
+  // appends to a file rather than to a ledger, because one in-process writer
+  // holds the seq and a second corrupts it. So this stamp is the whole record
+  // of what a seat was allowed to run, and a refusal below is readable only
+  // against it.
+  'seat-bound',
+  // One command the bound refused: the `seat`, the `layer` the command named,
+  // the `command` as the tool was given it, and the `reason`. Stamped when the
+  // seat ends, from the file the hook appended to. A count above a few on one
+  // seat says the brief does not state the bound and the seat is fighting the
+  // hook, which is a defect of the brief rather than of the seat.
+  'seat-command-refused',
   // One read-only probe of one external credential, at the launch gate or at
   // the ship gate: `ok` carries the answer, and both answers are stamped, so
   // a run always says which credentials it proved and when. The probe's own
@@ -215,7 +228,24 @@ export const RUN_EVENTS = new Set([
   // nothing and stops nothing, and the route carries on as it did before the
   // probe existed (ADR-0022).
   'substrate-probe',
+  // readiness
+  // Card errors the readiness lint found outside the launched card and the
+  // closure it blocks on: the `cards` that were judged, the `errors` beyond
+  // them, one line each, and the `gist`. Loud, because a person has to repair
+  // a card this run will never touch. The run carries on: a card the launched
+  // one does not depend on cannot make this story wrong, and holding every
+  // launch on the state of a whole directory is what this record replaces.
+  // One per run. Readiness re-runs whole on every park answer and on every
+  // resume, and a record per re-entry would report one directory many times.
+  'readiness-lint-beyond',
   // spec + suite
+  // The launched card, amended with a dependency the owner approved at the
+  // birth park, and pushed to the default branch: the `card`, the
+  // `dependencies` written, the `sha` of the commit, and whether it `pushed`.
+  // The card is the document that authorizes a dependency, so the
+  // authorization is written where the next reader of the card meets it
+  // rather than held in a run the card never names.
+  'card-amended',
   'spec-born',
   'spec-gate-round',
   // The decision records the run was born with, committed on its own branch
@@ -810,6 +840,16 @@ export const INSTANCE_EVENTS = new Set([
   // against the ship that carried it. Stamped here and not in the run,
   // because the run that made the trade closed hours or days before.
   'proof-settled',
+  // What stood green at the sha the default branch became, written by one
+  // ship's close-out: the `project`, the `runId` that shipped, the `sha` of
+  // the merge, and per layer its `name`, `status`, `elapsedMs`, `mode` and the
+  // `verdict` record file it was decided in. Instance-scoped, because it is a
+  // statement about the branch and not about the run that moved it: the run
+  // that writes it archives, and the runs that read it are the ones launched
+  // after it. Two readers: the duration a seat bound is measured against, and
+  // the evidence that a layer whose ground a change does not touch has already
+  // answered for the tree under it.
+  'base-certified',
   // The tripwire registry one project is armed with, stamped whenever the
   // daemon reads a set that differs from the one it last read: the entry ids,
   // their metrics, their windows and their bands. It exists so a console can
@@ -867,14 +907,23 @@ export const LOUD_EVENTS = new Set([
   'workflow-red',
   'external-outage',
   'reconcile-stall',
+  'readiness-lint-beyond',
 ]);
 
 // The close-out backstop. A loud record resolves at the event that owns it
-// (`resolution.mjs`); these two are the classes a run may also close on its
-// own when no owner ever landed. They ask the owner for no decision — the run
-// they reported on is over — so leaving them open would build the owner an
-// alert strip of finished runs (ADR-0021).
-export const CLOSE_RESOLVED_EVENTS = new Set(['budget-breach', 'diff-policy-violation']);
+// (`resolution.mjs`); these are the classes a run may also close on its own
+// when no owner ever landed. Each of them reports on the run itself, and the
+// run is over, so leaving one open would build the owner an alert strip of
+// finished runs (ADR-0021). The card errors a readiness lint found beyond the
+// launched card are such a report: they say what one run read in one
+// directory at one moment, the request that repairs another card stamps
+// nothing in this ledger, and the cards-lane check is what holds the
+// directory clean.
+export const CLOSE_RESOLVED_EVENTS = new Set([
+  'budget-breach',
+  'diff-policy-violation',
+  'readiness-lint-beyond',
+]);
 
 export function streamOf(event) {
   if (QUEUED_EVENTS.has(event)) return 'queued';

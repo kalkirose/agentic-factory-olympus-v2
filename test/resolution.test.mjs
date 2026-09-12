@@ -101,6 +101,46 @@ test('a record finding that shipped as advice is owned by a person', () => {
   assert.deepEqual(ownedResolutions([shipped, line('merged', { pr: 7 })]), []);
 });
 
+test('no run event answers the card errors found beyond the launched card', () => {
+  // A card this story does not depend on is repaired by a cards-lane request,
+  // which stamps nothing in this ledger. So the table names a person and no
+  // event, and every event that answers some other class walks past it.
+  const rule = LOUD_OWNERSHIP['readiness-lint-beyond'][0];
+  assert.equal(rule.owner, undefined);
+  assert.match(rule.by, /run close/);
+  const beyond = line('readiness-lint-beyond', {
+    cards: ['cards/alpha-1.md'],
+    errors: ['cards/beta-2.md: F1: the card states no acceptance criterion'],
+  });
+  const owners = [...OWNER_EVENTS].map((event) => line(event, {}));
+  assert.deepEqual(ownedResolutions([beyond, ...owners]), []);
+});
+
+test('a layer result carried from a base certification answers no exhaustion record', () => {
+  // The record says the layer died of memory on this host. A carried result
+  // says the layer stood green at another sha and that this run never ran it,
+  // so it reports nothing about the host.
+  const died = line('gate-integrity', { kind: 'resource-exhaustion', layer: 'acceptance' });
+  const carried = line('layer-result', {
+    layer: 'acceptance',
+    status: 'green',
+    mode: 'carried',
+    carriedFrom: 'base',
+    baseSha: 'aaa',
+  });
+  assert.deepEqual(ownedResolutions([died, carried]), []);
+  // A green the run bought answers it, whether the result names its mode or,
+  // as every result written before the carry existed does, names none.
+  const ran = line('layer-result', { layer: 'acceptance', status: 'green', mode: 'run' });
+  assert.deepEqual(ownedResolutions([died, carried, ran]), [
+    { resolves: died.seq, owner: 'layer-result', layer: 'acceptance' },
+  ]);
+  const plain = line('layer-result', { layer: 'acceptance', status: 'green' });
+  assert.deepEqual(ownedResolutions([died, plain]), [
+    { resolves: died.seq, owner: 'layer-result', layer: 'acceptance' },
+  ]);
+});
+
 test('a take-back is owned by what the record holds, not by the word for it', () => {
   // The kind rides the loud take-back record. The re-freeze still owns it: a
   // record answers to the event that settles what it reports, and the word is
@@ -346,6 +386,29 @@ test('the close-out sweep is still the backstop when no owner lands', async (t) 
   assert.equal(resolution.note, 'run closed shipped');
   assert.equal(resolution.owner, undefined);
   assert.ok(events.indexOf(resolution) < events.findIndex((e) => e.event === 'run-closed'));
+  assert.equal(openLoud(paths).length, 0);
+});
+
+test('the run close answers the card errors it found beyond the launched card', async (t) => {
+  const { paths, events } = await runScript(t, [
+    [
+      'readiness-lint-beyond',
+      {
+        cards: ['cards/alpha-1.md'],
+        errors: ['cards/beta-2.md: F1: the card states no acceptance criterion'],
+        gist: '1 error beyond the card',
+      },
+    ],
+    // The events that answer other classes land behind it and answer nothing.
+    ['implementation-committed', { pass: 1, phase: 'initial', sha: 'abc' }],
+    ['merged', { pr: 7, sha: 'abc', red: false }],
+  ]);
+  const stamp = events.find((e) => e.event === 'readiness-lint-beyond');
+  const resolutions = events.filter((e) => e.event === 'resolved');
+  assert.equal(resolutions.length, 1);
+  assert.equal(resolutions[0].resolves, stamp.seq);
+  assert.equal(resolutions[0].owner, undefined);
+  assert.equal(resolutions[0].note, 'run closed shipped');
   assert.equal(openLoud(paths).length, 0);
 });
 
