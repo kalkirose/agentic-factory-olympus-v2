@@ -233,7 +233,6 @@ function verifier() {
   };
 }
 
-
 // -- plumbing ----------------------------------------------------------------
 
 /** The scenario block of the story this run belongs to. */

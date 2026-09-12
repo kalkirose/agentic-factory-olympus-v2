@@ -460,7 +460,6 @@ function verifier() {
   };
 }
 
-
 // -- plumbing ----------------------------------------------------------------
 
 function valueOf(flag) {
