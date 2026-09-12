@@ -1470,10 +1470,10 @@ function dependencyLines() {
     'If the spec cannot be written without a package the card does not name, author nothing: ' +
       'set outcome "dependency-needed", list each package under dependencies with its importer ' +
       'key, its name and the reason the spec needs it, and write no spec file.',
-    "A card that names a dependency makes the spec list that importer's package.json under " +
-      'touched-paths, owned by dev.',
-    'A dependency that needs a build permission or a change to the workspace file is not this ' +
-      'story\'s to add: it goes through the repair lane, and the card states the package alone.',
+    'A card with a `## Dependencies` section makes the spec list `<importer>/package.json` ' +
+      'under `touched-paths`, owned by dev; the root importer `.` writes `package.json`.',
+    'A dependency that needs a build script needs `allowBuilds` in the workspace file, which ' +
+      'stays denied on this lane; that change goes through the repair lane.',
     'A criterion that needs a named dependency is tested through the surface it changes, never ' +
       'by importing the package, because the suite is authored and type-checked before the ' +
       'dependency is installed.',
