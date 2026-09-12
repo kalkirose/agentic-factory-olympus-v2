@@ -147,17 +147,6 @@ const IMPLEMENTATIONS = {
     };
   },
 
-  'kill-rate': async ({ paths, project, window }) => {
-    const freezes = collectFreezes(paths, project).slice(-window);
-    const kills = freezes.reduce((n, f) => n + f.kills, 0);
-    const waves = freezes.reduce((n, f) => n + f.waves, 0);
-    return {
-      value: waves > 0 ? kills / waves : null,
-      eligible: waves > 0,
-      detail: { freezes: freezes.length, kills, waves },
-    };
-  },
-
   'fury-lens-yield': async ({ paths, project, window, params }) => {
     const lens = params?.lens;
     const { verdicts, byLens } = collectYield(paths, project, window);
@@ -898,29 +887,10 @@ function waitLadders(events) {
 }
 
 // -- baselines ----------------------------------------------------------------
-// At the 5th freeze and the 5th verdict the watcher stamps a baseline
-// proposal (queued); the human commits the band to the registry by PR.
+// At the 5th verdict the watcher stamps a baseline proposal (queued); the
+// human commits the band to the registry by PR.
 
 export const BASELINE_WINDOW = 5;
-
-export function countFreezes(paths, project) {
-  return collectFreezes(paths, project).length;
-}
-
-/** Observed kill-rate data over the last BASELINE_WINDOW freezes. */
-export function killRateBaseline(paths, project) {
-  const freezes = collectFreezes(paths, project).slice(-BASELINE_WINDOW);
-  const kills = freezes.reduce((n, f) => n + f.kills, 0);
-  const waves = freezes.reduce((n, f) => n + f.waves, 0);
-  const perFreeze = freezes.map((f) => (f.waves > 0 ? f.kills / f.waves : 0));
-  return {
-    freezes: freezes.length,
-    kills,
-    waves,
-    rate: waves > 0 ? kills / waves : 0,
-    perFreeze,
-  };
-}
 
 export function countVerdicts(paths, project) {
   let count = 0;
@@ -1172,20 +1142,6 @@ function carryShares(paths, project) {
     }
   }
   return readings.sort(byTs);
-}
-
-/** Freeze records in ts order: kills and initial-wave count per freeze. */
-function collectFreezes(paths, project) {
-  const freezes = [];
-  for (const { events } of listRunEvents(paths, { project, lane: 'story' })) {
-    const waves = events.filter(
-      (e) => e.event === 'adversary-wave' && e.phase === 'initial',
-    ).length;
-    for (const f of events.filter((e) => e.event === 'freeze')) {
-      freezes.push({ ts: f.ts, kills: f.killCount, waves });
-    }
-  }
-  return freezes.sort(byTs);
 }
 
 /**

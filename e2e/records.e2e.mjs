@@ -177,7 +177,7 @@ test('a record-only ticket ships through the records lane', async (t) => {
   assert.equal(launched.ticket, TICKET, 'the console did not pass the ticket through');
 
   // The stages the lane holds, in order, and none of the ones it does not: no
-  // fix seat, no suite, no adversary, no code verdict.
+  // fix seat, no suite, no code verdict.
   const stages = events.filter((e) => e.event === 'stage-entered').map((e) => e.stage);
   assert.deepEqual(
     [...new Set(stages)],

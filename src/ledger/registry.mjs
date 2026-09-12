@@ -114,6 +114,12 @@ export const RUN_EVENTS = new Set([
   // ledgers before it existed (ADR-0061).
   'run-reconfigured',
   'stage-entered',
+  // A run resumed in a stage this harness no longer runs, sent to the stage
+  // the lane's `retired` map names: `from`, `to`, and the `lane` that holds
+  // the map. A stage removal leaves ledgers standing in the removed name, and
+  // the resume guard refuses a stage its lane does not list, so without the
+  // map and this stamp a removal would strand every run that sat there.
+  'stage-retired',
   // The stage that settled while an operator hold stood, and the stage the run
   // did not enter behind it. A hold interrupts nothing: the running stage keeps
   // its seats and finishes, and the chain stops at the boundary. Quiet — the
@@ -260,6 +266,8 @@ export const RUN_EVENTS = new Set([
   // and late counts read.
   'records-committed',
   'suite-committed',
+  // Retired names, kept so an archived ledger still reads. Nothing writes
+  // them: the stage that did is gone from the lane.
   'adversary-wave',
   'survivor-disposition',
   'red-state-check',
@@ -277,8 +285,8 @@ export const RUN_EVENTS = new Set([
   // rows name. Counts only, so the ledger stays small; the rows stay in the
   // seat report on disk and the freeze record carries the map of the last
   // write. Two readings sit on it: a run that reaches the freeze with no stamp
-  // at all ran no map step, and a row count that grows between the author write
-  // and the freeze is a map the adversary wrote (ADR-0072).
+  // at all ran no map step, and a row count that grows between the author
+  // write and the freeze is a map a corrective round wrote (ADR-0072).
   'surface-map',
   'freeze',
   // A launch that inherited a prior run's freeze instead of deriving one.
@@ -944,8 +952,6 @@ export const PARK_TYPES = new Set([
   // the type, because `reason` on a park already carries the close an
   // answered recovery park takes (ADR-0020).
   'spec-gate-stalled',
-  'unkilled-gap-survivor', // adversary survivor without a killing test
-  'second-zero-kill', // second 0/N adversary round
   'second-stall', // response ladder
   // A verdict cycle that judged what an earlier cycle of the same run already
   // judged — same candidate sha, same suite, same open findings by identity,

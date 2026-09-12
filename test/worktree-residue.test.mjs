@@ -13,7 +13,6 @@ import { fileURLToPath } from 'node:url';
 import { scaffoldHome } from '../src/daemon/home.mjs';
 import { ensureBareClone } from '../src/isolation/clones.mjs';
 import {
-  addDisposableWorktree,
   addRunWorktree,
   assertInRunWorkspace,
   clearWorktreeResidue,
@@ -69,9 +68,9 @@ test('only a path inside the run workspace may be cleared', (t) => {
   const { root, paths } = fixture(t);
   const runId = 'r1';
   const workspace = workspaceRoot(paths, runId);
-  // What a run is allowed to clear: its own worktree and its own disposables.
+  // What a run is allowed to clear: any path inside its own workspace.
   assert.equal(assertInRunWorkspace(paths, runId, runWorktreePath(paths, runId)), runWorktreePath(paths, runId));
-  assert.doesNotThrow(() => assertInRunWorkspace(paths, runId, join(workspace, 'adversary-r1-w1')));
+  assert.doesNotThrow(() => assertInRunWorkspace(paths, runId, join(workspace, 'leftover')));
   // What it is not: the workspace root itself, the root of every workspace,
   // another run's workspace, the clone store, and anywhere else on the disk.
   for (const outside of [
@@ -132,9 +131,9 @@ test('residue is told apart from a request git refused on its merits', () => {
 
 // -- the three shapes a crash leaves ------------------------------------------
 
-/** The tree of a wave the run created and never used. */
-async function stageWave(clone, paths, runId, sha) {
-  const path = await addDisposableWorktree(clone, paths, runId, 'adversary-r1-w1', sha);
+/** The worktree a crashed step created and nothing read. */
+async function stageCrash(clone, paths, runId) {
+  const { path } = await addRunWorktree(clone, paths, runId, 'main');
   // The crash: something was written into the tree and nothing read it.
   writeFileSync(join(path, 'src', 'app.txt'), 'half a run\n');
   return path;
@@ -143,12 +142,11 @@ async function stageWave(clone, paths, runId, sha) {
 test('a worktree is created over the directory and the registration a crash left', async (t) => {
   const { origin, paths } = fixture(t);
   const clone = await ensureBareClone(paths, 'alpha', origin, 'main');
-  const sha = gitSync(['rev-parse', 'main'], origin).trim();
-  const path = await stageWave(clone, paths, 'r1', sha);
+  const path = await stageCrash(clone, paths, 'r1');
   assert.equal(await isRegisteredWorktree(clone, path), true);
 
   // The retry of the crashed step.
-  assert.equal(await addDisposableWorktree(clone, paths, 'r1', 'adversary-r1-w1', sha), path);
+  assert.equal((await addRunWorktree(clone, paths, 'r1', 'main')).path, path);
   assert.equal(readFileSync(join(path, 'src', 'app.txt'), 'utf8').trim(), 'v1');
   // One registration, not two. git reports a worktree path in its own
   // separator form, so the comparison is on the resolved path.
@@ -161,23 +159,21 @@ test('a worktree is created over the directory and the registration a crash left
 test('a worktree is created over a registration whose directory is gone', async (t) => {
   const { origin, paths } = fixture(t);
   const clone = await ensureBareClone(paths, 'alpha', origin, 'main');
-  const sha = gitSync(['rev-parse', 'main'], origin).trim();
-  const path = await stageWave(clone, paths, 'r1', sha);
+  const path = await stageCrash(clone, paths, 'r1');
   // The shape a removal that git refused leaves behind: the harness deleted
   // the tree itself and the registration outlived it (ADR-0004).
   await removeTree(path);
   assert.equal(existsSync(path), false);
   assert.equal(await isRegisteredWorktree(clone, path), true);
 
-  assert.equal(await addDisposableWorktree(clone, paths, 'r1', 'adversary-r1-w1', sha), path);
+  assert.equal((await addRunWorktree(clone, paths, 'r1', 'main')).path, path);
   assert.equal(readFileSync(join(path, 'src', 'app.txt'), 'utf8').trim(), 'v1');
 });
 
 test('a worktree is created over a directory git no longer knows about', async (t) => {
   const { origin, paths } = fixture(t);
   const clone = await ensureBareClone(paths, 'alpha', origin, 'main');
-  const sha = gitSync(['rev-parse', 'main'], origin).trim();
-  const path = await stageWave(clone, paths, 'r1', sha);
+  const path = await stageCrash(clone, paths, 'r1');
   // The other half of the same accident: the registration was pruned and the
   // directory stayed.
   removeTree(join(path, '.git'));
@@ -185,7 +181,7 @@ test('a worktree is created over a directory git no longer knows about', async (
   assert.equal(await isRegisteredWorktree(clone, path), false);
   assert.ok(existsSync(join(path, 'src', 'app.txt')));
 
-  assert.equal(await addDisposableWorktree(clone, paths, 'r1', 'adversary-r1-w1', sha), path);
+  assert.equal((await addRunWorktree(clone, paths, 'r1', 'main')).path, path);
   assert.equal(readFileSync(join(path, 'src', 'app.txt'), 'utf8').trim(), 'v1');
 });
 
@@ -226,11 +222,14 @@ test('the run worktree is created over its own residue, branch included', async 
 test('a residue clearing leaves the rest of the run workspace alone', async (t) => {
   const { origin, paths } = fixture(t);
   const clone = await ensureBareClone(paths, 'alpha', origin, 'main');
-  const sha = gitSync(['rev-parse', 'main'], origin).trim();
   const tree = (await addRunWorktree(clone, paths, 'r1', 'main')).path;
-  const wave = await stageWave(clone, paths, 'r1', sha);
-  await clearWorktreeResidue(clone, paths, 'r1', wave);
-  assert.equal(existsSync(wave), false);
-  assert.ok(existsSync(join(tree, 'src', 'app.txt')), 'the run worktree went with the wave tree');
+  // A directory beside the run worktree, inside the same workspace: the
+  // clearing is bounded by the path it is given and not by the workspace.
+  const leftover = join(workspaceRoot(paths, 'r1'), 'leftover');
+  mkdirSync(leftover, { recursive: true });
+  writeFileSync(join(leftover, 'half.txt'), 'half a step\n');
+  await clearWorktreeResidue(clone, paths, 'r1', leftover);
+  assert.equal(existsSync(leftover), false);
+  assert.ok(existsSync(join(tree, 'src', 'app.txt')), 'the run worktree went with the leftover');
   assert.equal(await isRegisteredWorktree(clone, tree), true);
 });

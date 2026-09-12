@@ -39,14 +39,13 @@ function line(seq, ts, event, extra = {}) {
 /** The rounding every fraction in the metrics takes. */
 const round3 = (value) => Math.round(value * 1000) / 1000;
 
-// A story-lane run ledger with a freeze after `waves` initial waves.
-function freezeRun(paths, runId, project, ts, { kills, waves = 3 }) {
-  const lines = [line(1, ts, 'run-launched', { project, lane: 'story' })];
-  for (let w = 1; w <= waves; w++) {
-    lines.push(line(1 + w, ts, 'adversary-wave', { round: 1, wave: w, phase: 'initial' }));
-  }
-  lines.push(line(2 + waves, ts, 'freeze', { killCount: kills, sha: 'f'.repeat(7) }));
-  writeLedger(runLedgerPath(paths, runId), lines);
+/** A story-lane run ledger holding one rendered verdict. */
+function verdictRun(paths, runId, project, ts) {
+  writeLedger(runLedgerPath(paths, runId), [
+    line(1, ts, 'run-launched', { project, lane: 'story' }),
+    line(2, ts, 'finding', { cycle: 1, id: 'F1', lens: 'operational', severity: 'HIGH', confirmed: true }),
+    line(3, ts, 'verdict-rendered', { cycle: 1, pass: 1, verdict: 'red' }),
+  ]);
 }
 
 // -- registry validation ------------------------------------------------------
@@ -178,7 +177,7 @@ test('the fast path cannot be turned on without the counter that measures it', (
   // Every other entry the project wrote rides through untouched.
   const mixed = {
     gates: { tier1: [], fastPathShip: true },
-    tripwires: [{ id: 'k', metric: 'kill-rate', breach: { op: '<', value: 1 }, answer: 'y' }],
+    tripwires: [{ id: 'k', metric: 'ci-critical-path', breach: { op: '>', value: 30 }, answer: 'y' }],
   };
   assert.deepEqual(
     armedTripwires(mixed).map((e) => e.id),
@@ -518,19 +517,6 @@ test('fast-path-escapes counts only the kind, only inside the window', async (t)
   // A project that never shipped has no window, so it has no reading.
   const quiet = await evaluateMetric('fast-path-escapes', { paths, project: 'r', window: 10 });
   assert.equal(quiet.eligible, false);
-});
-
-test('kill-rate sums kills over waves across the freeze window', async (t) => {
-  const paths = home(t);
-  freezeRun(paths, 'k1', 'p', '2026-08-01T00:00:00Z', { kills: 2 });
-  freezeRun(paths, 'k2', 'p', '2026-08-02T00:00:00Z', { kills: 3 });
-  const both = await evaluateMetric('kill-rate', { paths, project: 'p', window: 5 });
-  assert.equal(both.value, 5 / 6);
-  assert.deepEqual(both.detail, { freezes: 2, kills: 5, waves: 6 });
-  const last = await evaluateMetric('kill-rate', { paths, project: 'p', window: 1 });
-  assert.equal(last.value, 1);
-  const none = await evaluateMetric('kill-rate', { paths, project: 'empty', window: 5 });
-  assert.equal(none.eligible, false);
 });
 
 test('fury-lens-yield counts confirmed findings for one lens over the verdict window', async (t) => {
@@ -1836,6 +1822,22 @@ test('a non-matching event queues no evaluation; ineligible metrics never breach
   assert.equal(readEvents(paths.instanceLedger).filter((e) => e.event === 'tripwire-breach').length, 0);
 });
 
+// A pinned config blob outlives the metric it names. The entry has to parse,
+// and the watcher has to read it and do nothing with it: an evaluation would
+// throw on a metric with no implementation, and a breach would name a wire
+// nothing can ever resolve.
+test('an entry on a retired metric is read and never evaluated', async (t) => {
+  const paths = home(t);
+  const ledger = openInstanceStore(paths);
+  t.after(() => ledger.close());
+  const watcher = new TripwireWatcher({ paths, ledger });
+  watcher.setRegistry('p', [
+    { id: 'kill-rate-floor', metric: 'kill-rate', breach: { op: '<', value: 1 }, answer: 'y' },
+  ]);
+  await watcher.notify('p', { event: 'freeze' });
+  assert.equal(readEvents(paths.instanceLedger).filter((e) => e.event === 'tripwire-breach').length, 0);
+});
+
 test('the registry loads lazily from the reader and a failed read retries', async (t) => {
   const paths = home(t);
   escapesFixture(paths, { counted: 6 });
@@ -1862,39 +1864,13 @@ test('the registry loads lazily from the reader and a failed read retries', asyn
 
 // -- baseline proposals -------------------------------------------------------
 
-test('the 5th freeze stamps one kill-rate baseline proposal, queued', async (t) => {
+test('before the 5th verdict no baseline proposal stamps', async (t) => {
   const paths = home(t);
-  const kills = [3, 2, 3, 1, 2];
-  kills.forEach((k, i) =>
-    freezeRun(paths, `f${i + 1}`, 'p', `2026-08-0${i + 1}T00:00:00Z`, { kills: k }),
-  );
+  verdictRun(paths, 'v1', 'p', '2026-08-01T00:00:00Z');
   const ledger = openInstanceStore(paths);
   t.after(() => ledger.close());
   const watcher = new TripwireWatcher({ paths, ledger });
-  await watcher.notify('p', { event: 'freeze' });
-  const proposals = readEvents(paths.instanceLedger).filter((e) => e.event === 'baseline-proposal');
-  assert.equal(proposals.length, 1);
-  assert.equal(proposals[0].metric, 'kill-rate');
-  assert.equal(proposals[0].observed.kills, 11);
-  assert.equal(proposals[0].observed.waves, 15);
-  // the band is a floor; the observed minimum opens the bid
-  assert.deepEqual(proposals[0].suggested, { op: '<', value: Math.round((1 / 3) * 1000) / 1000 });
-  assert.ok(openStreamItems(paths, 'queued').some((e) => e.event === 'baseline-proposal'));
-  // stamped once per project and metric
-  await watcher.notify('p', { event: 'freeze' });
-  assert.equal(
-    readEvents(paths.instanceLedger).filter((e) => e.event === 'baseline-proposal').length,
-    1,
-  );
-});
-
-test('before the 5th freeze no baseline proposal stamps', async (t) => {
-  const paths = home(t);
-  freezeRun(paths, 'f1', 'p', '2026-08-01T00:00:00Z', { kills: 2 });
-  const ledger = openInstanceStore(paths);
-  t.after(() => ledger.close());
-  const watcher = new TripwireWatcher({ paths, ledger });
-  await watcher.notify('p', { event: 'freeze' });
+  await watcher.notify('p', { event: 'verdict-rendered' });
   assert.equal(
     readEvents(paths.instanceLedger).filter((e) => e.event === 'baseline-proposal').length,
     0,

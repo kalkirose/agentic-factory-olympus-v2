@@ -190,12 +190,8 @@ export const NO_SURFACE = {
   })),
 };
 
-/**
- * The two fields with one enumerated item, closed by a named test. `survivors`
- * are the waves that sit on that item: the amendment write and the
- * strengthening write owe every survivor a tested row.
- */
-export function surfaceMapping(test, { survivors = [] } = {}) {
+/** The two fields with one enumerated item, closed by a named test. */
+export function surfaceMapping(test) {
   const [dimension, ...rest] = SECURITY_DIMENSIONS;
   return {
     surfaceMap: [
@@ -205,7 +201,6 @@ export function surfaceMapping(test, { survivors = [] } = {}) {
         item: 'the module entry point',
         where: 'src/feature.mjs',
         test,
-        ...(survivors.length > 0 && { survivors }),
       },
     ],
     dimensionsOutOfScope: rest.map((other) => ({

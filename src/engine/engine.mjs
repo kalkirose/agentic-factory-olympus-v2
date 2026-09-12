@@ -115,8 +115,13 @@ export class RunEngine {
     this.idCounter = 0;
   }
 
-  /** @param {string} name @param {{stages: string[], handlers: object}} lane */
-  registerLane(name, { stages, handlers }) {
+  /**
+   * @param {string} name
+   * @param {{stages: string[], handlers: object, retired?: Record<string, string>}} lane
+   *   `retired` maps a stage name the lane dropped to the stage a run standing
+   *   in it resumes at.
+   */
+  registerLane(name, { stages, handlers, retired = {} }) {
     if (!Array.isArray(stages) || stages.length === 0) {
       throw new Error(`lane ${name} requires a non-empty stage list`);
     }
@@ -125,7 +130,19 @@ export class RunEngine {
         throw new Error(`lane ${name} stage ${stage} has no handler`);
       }
     }
-    this.lanes.set(name, { stages, handlers });
+    // A retired entry only has meaning for a name the lane dropped, and only
+    // where it sends the run to a stage this build runs. A broken entry is
+    // refused here, because at the resume it would read as an unknown stage
+    // and strand the run it was written to save.
+    for (const [from, to] of Object.entries(retired)) {
+      if (stages.includes(from)) {
+        throw new Error(`lane ${name} retires ${from}, which it still runs`);
+      }
+      if (!stages.includes(to)) {
+        throw new Error(`lane ${name} retires ${from} to unknown stage ${to}`);
+      }
+    }
+    this.lanes.set(name, { stages, handlers, retired });
   }
 
   // -- slot accounting (lane-agnostic) --------------------------------------
@@ -1045,6 +1062,11 @@ export class RunEngine {
     });
   }
 
+  /** The record of a resume sent on by a lane's retired-stage map. */
+  stampRetiredStage(run, from, to) {
+    run.store.append('stage-retired', { actor: ACTOR, lane: run.lane, from, to });
+  }
+
   // -- resume at daemon start ----------------------------------------------
 
   /**
@@ -1102,18 +1124,28 @@ export class RunEngine {
       resumed.push(runId);
       if (run.parked || run.violated) continue;
       const lane = this.lanes.get(run.lane);
-      if (!lane || !run.stage || !lane.stages.includes(run.stage)) {
+      const stage = lane ? resumeStageOf(lane, run.stage) : null;
+      if (stage === null) {
         this.stampViolation(run, `cannot resume: lane ${run.lane}, stage ${run.stage}`);
         continue;
+      }
+      if (stage !== run.stage) {
+        this.stampRetiredStage(run, run.stage, stage);
+        run.stage = stage;
       }
       // A held run resumes as a held run: the stage it completed is not run
       // again, and the stage behind the boundary waits for the release exactly
       // as it did before the restart. The beat picks up where the last instance
       // left it, so the quiet still reads as intentional (ADR-0040).
       if (run.held) {
-        if (!lane.stages.includes(run.deferred)) {
+        const deferred = resumeStageOf(lane, run.deferred);
+        if (deferred === null) {
           this.stampViolation(run, `cannot resume a hold: unknown deferred stage ${run.deferred}`);
           continue;
+        }
+        if (deferred !== run.deferred) {
+          this.stampRetiredStage(run, run.deferred, deferred);
+          run.deferred = deferred;
         }
         this.openPulse(run);
         continue;
@@ -1150,6 +1182,23 @@ export class RunEngine {
     for (const run of this.runs.values()) run.store.close();
     this.runs.clear();
   }
+}
+
+/**
+ * The stage a resume enters for the stage name a ledger holds, or null when
+ * the lane knows the name in neither place.
+ *
+ * A stage a later harness removed keeps a line in the lane's `retired` map,
+ * pointing at the stage that now follows the one before it. Without the map a
+ * removal would strand every run standing in the removed stage, because the
+ * guard refuses a stage its lane does not list and a violated run waits on a
+ * person. The map is a permanent seam: every stage removal adds a line.
+ */
+function resumeStageOf(lane, stage) {
+  if (typeof stage !== 'string' || stage.length === 0) return null;
+  if (lane.stages.includes(stage)) return stage;
+  const to = lane.retired?.[stage];
+  return typeof to === 'string' && lane.stages.includes(to) ? to : null;
 }
 
 function gist(text) {

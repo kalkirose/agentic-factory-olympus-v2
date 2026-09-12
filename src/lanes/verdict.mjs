@@ -214,9 +214,9 @@ export function postFreeze({ afterVerdict }) {
 }
 
 /**
- * The repair lane: fix (seat) → verdict → continuation. No spec birth and no
- * adversary — the intake ticket is the spec; deterministic gates run in
- * full; judgment collapses to the generalist review seat.
+ * The repair lane: fix (seat) → verdict → continuation. No spec birth — the
+ * intake ticket is the spec; deterministic gates run in full; judgment
+ * collapses to the generalist review seat.
  * @param {{afterVerdict: {stages: string[], handlers: object}}} opts
  */
 export function repairLane({ afterVerdict }) {

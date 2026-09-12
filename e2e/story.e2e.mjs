@@ -124,8 +124,6 @@ const SCENARIO = {
     { test: 'f doubles its input', class: 'feature-absence' },
     { test: 'f is a function', class: 'feature-absence' },
   ],
-  // A wrong implementation the frozen suite kills: the wave is a kill.
-  adversaryFiles: { 'src/feature.mjs': 'export const f = (x) => x + x + 1;\n' },
   // The first pass is off by one, so the suite layer is red and the layer that
   // needs it is not runnable. The repair round turns both green.
   devFiles: { 'src/feature.mjs': 'export function f(x) {\n  return x * 2 + 1;\n}\n' },
@@ -204,7 +202,6 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
     'spec-born',
     'spec-gate-round',
     'suite-committed',
-    'adversary-wave',
     'red-state-check',
     'freeze',
     'implementation-committed',
@@ -231,15 +228,8 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
     [[1, 'pass', 0]],
     'the spec gate did not pass in one clean round',
   );
-  const waves = events.filter((e) => e.event === 'adversary-wave');
-  assert.equal(waves.length, 1);
-  assert.ok(
-    waves.every((w) => w.phase === 'initial' && w.result === 'killed'),
-    'the frozen suite did not kill every wave',
-  );
   assert.equal(events.find((e) => e.event === 'red-state-check').result, 'red');
-  const freeze = events.find((e) => e.event === 'freeze');
-  assert.equal(freeze.killCount, 1);
+  assert.ok(events.some((e) => e.event === 'freeze'));
   const record = JSON.parse(readFileSync(join(runDir(fx, runId), 'freeze.json'), 'utf8'));
   assert.equal(record.storyKey, 'alpha-1');
   assert.ok(record.suiteFiles.includes('tests/feature.test.mjs'));
@@ -383,10 +373,10 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
   assert.ok(marks.includes('cardlint'), 'the readiness lint command never ran');
   assert.ok(marks.includes('lint'), 'the lint layer never ran');
   assert.ok(marks.includes('smoke'), 'the smoke layer never ran');
-  // The adversary wave, the red-state check, the first cycle with its flake
-  // re-run, the targeted cycle: the suite command is the busiest of them.
+  // The red-state check, the first cycle with its flake re-run, the targeted
+  // cycle: the suite command is the busiest of them.
   assert.ok(
-    marks.filter((m) => m === 'suite').length >= 4,
+    marks.filter((m) => m === 'suite').length >= 3,
     `the suite command ran ${marks.filter((m) => m === 'suite').length} times`,
   );
   // The run's cache directory reached the gate commands, kept what one of them
@@ -448,7 +438,6 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
     'spec-birth',
     'spec-gate',
     'suite',
-    'adversary',
     'dev',
     'verdict-triage',
     'repair-dev',
@@ -481,10 +470,11 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
   }
   const operational = calls.find((c) => c.seat === 'fury-operational').prompt;
   assert.ok(operational.includes('- security: authorization on every entry point'));
-  // The adversary waves carry the same dimensions into the suite.
-  const adversary = calls.find((c) => c.seat === 'adversary').prompt;
-  assert.ok(adversary.includes('- authorization on every entry point'));
-  assert.ok(adversary.includes('- trust boundaries'));
+  // The suite brief carries the same dimensions, because the map it asks for
+  // is enumerated along them.
+  const suite = calls.find((c) => c.seat === 'suite').prompt;
+  assert.ok(suite.includes('- authorization on every entry point'));
+  assert.ok(suite.includes('- trust boundaries'));
 
   // The machine's credential follows suite execution and nothing else.
   assert.equal(calls.find((c) => c.seat === 'dev').secret, true);

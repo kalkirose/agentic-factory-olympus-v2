@@ -77,7 +77,6 @@ const SCENARIO = {
   spec: SPEC,
   suiteFiles: { 'tests/feature.test.mjs': SUITE },
   suiteReds: [{ test: 'f doubles its input', class: 'feature-absence' }],
-  adversaryFiles: { 'src/feature.mjs': 'export const f = (x) => x + x + 1;\n' },
   devFiles: { 'src/feature.mjs': 'export function f(x) {\n  return x * 2;\n}\n' },
 };
 

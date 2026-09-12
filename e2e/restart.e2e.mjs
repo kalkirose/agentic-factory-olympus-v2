@@ -80,7 +80,6 @@ const SCENARIO = {
   spec: SPEC,
   suiteFiles: { 'tests/feature.test.mjs': SUITE },
   suiteReds: [{ test: 'f doubles its input', class: 'feature-absence' }],
-  adversaryFiles: { 'src/feature.mjs': 'export const f = (x) => x + x + 1;\n' },
   // The first pass is off by one, and the repair round that follows it moves
   // the answer without fixing it: the render behind the round closes nothing,
   // which is what buys the fresh pass.

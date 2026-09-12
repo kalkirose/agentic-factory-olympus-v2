@@ -1,5 +1,5 @@
 // Scenario 2: a ticketed defect is repaired and shipped. The repair lane has
-// no spec birth, no adversary and no card sweep; the intake ticket the console
+// no spec birth and no card sweep; the intake ticket the console
 // hands over is the lane's spec, and the console binary is the only thing that
 // can hand it over. The run walks fix, verdict and ship against the same real
 // git remote and the same real gate commands as the story scenario.

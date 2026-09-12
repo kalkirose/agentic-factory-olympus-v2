@@ -14,6 +14,7 @@ import {
   recordPathIncludes,
   underEntry,
 } from '../src/config/project.mjs';
+import { isRetiredTripwire, withTripwireDefaults } from '../src/tripwires/registry.mjs';
 
 function valid() {
   return {
@@ -447,6 +448,24 @@ test('a tripwire requires an id and a metric', () => {
   assert.deepEqual(errorPaths(config), ['tripwires[0].metric']);
 });
 
+// A run pins the project config at launch. A blob pinned before a metric was
+// retired still names it, and a validator that refused the name would stop
+// that run at its next stage, so a retired metric parses like any other.
+test('an entry on a retired metric parses', () => {
+  const config = valid();
+  config.tripwires.push({
+    id: 'kill-rate-floor',
+    metric: 'kill-rate',
+    window: 5,
+    breach: { op: '<', value: 1 },
+    answer: 'review the suite authoring',
+  });
+  assert.deepEqual(validateProjectConfig(config), []);
+  const filled = withTripwireDefaults(config.tripwires.at(-1));
+  assert.equal(filled.retired, true);
+  assert.equal(isRetiredTripwire(filled), true);
+});
+
 test('stack: composeFile must be repo-relative, env values strings', () => {
   const absolute = valid();
   absolute.stack.composeFile = '/etc/compose.yml';
@@ -813,7 +832,10 @@ test('the one-entry check field is read alone and must agree with the list', () 
   assert.deepEqual(errorPaths(split), ['lanes.story.groundCommand']);
 });
 
-test('a raised adversary wave count is a positive integer or an error', () => {
+// A key no stage reads any more. A run pins its project config at launch, so
+// a blob written before the retirement still carries the key, and a validator
+// that refused it would strand that run at its next stage.
+test('a retired lane key is still accepted, and still validated', () => {
   const raised = valid();
   raised.lanes.story.adversaryWaves = 3;
   assert.deepEqual(validateProjectConfig(raised), []);

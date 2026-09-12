@@ -11,10 +11,9 @@
 //
 // So a project names the checks it wants over its own suite writes, in order,
 // as `lanes.story.suiteChecks`. Every suite write of the story lane runs them:
-// the authoring round, an adversary amendment, a strengthening round, the
-// red-state fix, and the re-freeze amendment after the freeze. Each of those
-// five writes a suite file, and a check that ran at one of them would let the
-// other four past.
+// the authoring round, the red-state fix, and the re-freeze amendment after
+// the freeze. Each of those writes a suite file, and a check that ran at one
+// of them would let the others past.
 //
 // THE ORDER IS THE PROJECT'S. A type check needs its generated packages built;
 // a lint needs its dependencies installed. The list carries that, so this

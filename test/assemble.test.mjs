@@ -71,9 +71,18 @@ test('the records stage stands after the spec gate and the reconcile stage befor
     assert.equal(stages[stages.indexOf('reconcile') + 1], 'update');
   }
   // The records lane holds no fix seat, no suite and no code verdict.
-  for (const stage of ['fix', 'suite', 'verdict', 'adversary']) {
+  for (const stage of ['fix', 'suite', 'verdict']) {
     assert.ok(!lanes.records.stages.includes(stage), stage);
   }
+});
+
+test('a stage the story lane no longer runs maps to the stage that follows it', () => {
+  const lanes = assembleLanes({ instanceConfig: () => twoProjectConfig() });
+  for (const [from, to] of Object.entries(lanes.story.retired ?? {})) {
+    assert.ok(!lanes.story.stages.includes(from), `${from} is still a stage`);
+    assert.ok(lanes.story.stages.includes(to), `${from} maps to unknown stage ${to}`);
+  }
+  assert.equal(lanes.story.retired.adversary, 'freeze');
 });
 
 test('the assembled stages match the pipeline display', () => {

@@ -3,25 +3,21 @@
 //
 // A suite seat is shown defects. It writes a test for each one and stops. It
 // never asks the question the defect list is a sample of: what else on this
-// surface can carry the same fault. The adversary then becomes an enumeration
-// device. It finds one member of a set per round, at a full seat and a full
-// suite run per round, and a person pays for every round past the second. A
-// suite that gained a test for one cookie name gained no test for the second
-// cookie name beside it, and the second cookie name was already in the tree
-// (ADR-0072).
+// surface can carry the same fault. A suite that gained a test for one cookie
+// name gained no test for the second cookie name beside it, and the second
+// cookie name was already in the tree (ADR-0072).
 //
-// So every seat that writes a suite file receives the same dimensions the
-// adversary receives, and owes an enumeration of the story's surface along
-// each of them. The enumeration is a structured field in the seat's report,
-// not prose. Per item it names the test that kills a wrong implementation of
-// that item, or it states why the spec does not constrain it.
+// So every seat that writes a suite file receives the security dimensions and
+// owes an enumeration of the story's surface along each of them. The
+// enumeration is a structured field in the seat's report, not prose. Per item
+// it names the test that kills a wrong implementation of that item, or it
+// states why the spec does not constrain it.
 //
 // THE MAP IS NOT THE MEASURE OF ITSELF. Nothing mechanical knows the surface,
 // so no check here proves the enumeration is complete. The checks below hold
-// the shape and the coverage of the document. The adversary stays the measure
-// of whether the map is the surface, and it is never told what the map holds:
-// an adversary that reads the map is told where the seat already looked, and a
-// kill would then prove the suite covers what the map declared (ADR-0072).
+// the shape and the coverage of the document. What the map missed is read
+// from the defects that reach the default branch, never from the document
+// (ADR-0072).
 //
 // One module, read by the story lane and by the verdict lane, so neither lane
 // owns the rule. It imports the dimension list and nothing else from the lane.
@@ -80,7 +76,6 @@ export const SURFACE_MAP_PROPERTIES = Object.freeze({
         where: { type: 'string' },
         test: { type: 'string' },
         outOfScope: { type: 'string' },
-        survivors: { type: 'array', items: { type: 'integer' } },
       },
       required: ['dimension', 'kind', 'item', 'where'],
     },
@@ -105,15 +100,11 @@ export const SURFACE_MAP_REQUIRED = Object.freeze(['surfaceMap', 'dimensionsOutO
 /**
  * The map rule, stated to every seat that writes a suite file. A seat runs in
  * fresh context, so the whole obligation is on the brief or it does not exist.
- *
- * @param {{survivors?: number[]}} opts the survivor waves this write answers.
- *   The amendment write and the strengthening write carry them; the author
- *   write, the red-state fix and the re-freeze carry none.
  */
-export function surfaceMapLines({ survivors = [] } = {}) {
-  const lines = [
+export function surfaceMapLines() {
+  return [
     'Before you write a test, map the surface of this story along the dimensions below. ' +
-      'They are the dimensions the adversary weighs.',
+      'They are the dimensions the suite asserts on.',
     ...SECURITY_DIMENSIONS.map((dimension) => `- ${dimension}`),
     'For each dimension, enumerate every item of this story that sits on it. Read the spec ' +
       'and read the tree. An item the tree already holds counts, and so does an item the ' +
@@ -135,17 +126,10 @@ export function surfaceMapLines({ survivors = [] } = {}) {
     'The map does not shrink. Every item of your previous map stays in this one. An item the ' +
       'spec no longer constrains stays, with "outOfScope" and the reason.',
   ];
-  if (survivors.length > 0) {
-    lines.push(
-      'Each survivor wave below sits on surface items. Put the wave number in "survivors" on ' +
-        'every item it sits on, and close each of those items with a test, never with "outOfScope".',
-    );
-  }
-  return lines;
 }
 
 /**
- * The deterministic defects of one surface map. Eleven checks, in this order.
+ * The deterministic defects of one surface map. Nine checks, in this order.
  * Every one of them is about the shape and the coverage of the document; none
  * of them judges whether the enumeration is the surface (ADR-0072).
  *
@@ -154,12 +138,11 @@ export function surfaceMapLines({ survivors = [] } = {}) {
  * then the seat-failure park (ADR-0006, ADR-0015).
  *
  * @param {object} report the suite seat's report
- * @param {{worktree: string, previous?: object[]|null, survivors?: number[]}} at
- *   `previous` is the map of the previous suite write, or null where there is
- *   none. `survivors` are the waves this write answers.
+ * @param {{worktree: string, previous?: object[]|null}} at `previous` is the
+ *   map of the previous suite write, or null where there is none.
  * @returns {string[]} defect lines
  */
-export function surfaceMapDefects(report, { worktree, previous = null, survivors = [] }) {
+export function surfaceMapDefects(report, { worktree, previous = null }) {
   const rows = Array.isArray(report?.surfaceMap) ? report.surfaceMap : [];
   const outOfScope = Array.isArray(report?.dimensionsOutOfScope) ? report.dimensionsOutOfScope : [];
   const defects = [];
@@ -237,28 +220,7 @@ export function surfaceMapDefects(report, { worktree, previous = null, survivors
       );
     });
   }
-  // 8. A survivor wave the map does not sit under.
-  const covered = new Set(rows.flatMap((row) => (Array.isArray(row.survivors) ? row.survivors : [])));
-  for (const wave of survivors) {
-    if (covered.has(wave)) continue;
-    defects.push(
-      `survivor wave ${wave} sits on no row of "surfaceMap". Put the wave number in ` +
-        '"survivors" on every item it sits on.',
-    );
-  }
-  // 9. A survivor's own item excused instead of tested.
-  rows.forEach((row, i) => {
-    const waves = (Array.isArray(row.survivors) ? row.survivors : []).filter((w) =>
-      survivors.includes(w),
-    );
-    if (waves.length === 0 || typeof row.outOfScope !== 'string') return;
-    defects.push(
-      `${rowRef(row, i)} names survivor wave ${waves.join(', ')} and carries "outOfScope". A ` +
-        'survivor is a wrong implementation of that item that the suite let past, so the spec ' +
-        'constrains it. Close it with a test.',
-    );
-  });
-  // 10. An item the previous map held and this one drops.
+  // 8. An item the previous map held and this one drops.
   if (Array.isArray(previous)) {
     const here = new Set(rows.map((row) => identity(row)));
     for (const row of previous) {
@@ -270,7 +232,7 @@ export function surfaceMapDefects(report, { worktree, previous = null, survivors
       );
     }
   }
-  // 11. One item, two rows.
+  // 9. One item, two rows.
   const seen = new Set();
   for (const row of rows) {
     const key = identity(row);

@@ -445,7 +445,7 @@ function seatChip(seat) {
   return chip + " · retry " + seat.retry + "/" + seat.retryMax + (seat.resumed ? " resumed" : " fresh");
 }
 
-const STAGE_LABELS = { "readiness": "ready", "spec-birth": "birth", "spec-gate": "gate", "adversary": "advers", "implementation": "dev", "close-out": "close" };
+const STAGE_LABELS = { "readiness": "ready", "spec-birth": "birth", "spec-gate": "gate", "implementation": "dev", "close-out": "close" };
 function stageLabel(stage) { return STAGE_LABELS[stage] ?? stage; }
 
 /* ---------- escalations ---------- */
@@ -542,11 +542,6 @@ function renderHealth(s) {
         "Zero-tolerance incident class. Every incident is loud until resolved."));
     }
 
-    const kr = h.killRate;
-    tiles.appendChild(tile("Kill rate at last freeze",
-      kr ? kr.kills + "/" + kr.waves : "—", null,
-      sub([kr ? kr.dispositions + " dispositions" : "no freeze yet"]),
-      "Adversary kills over initial waves at the most recent freeze. 0-kill blocks the freeze."));
     box.appendChild(tiles);
 
     box.appendChild(el("div", "subhead", "Review yield per lens · confirmed findings, last " + h.fury.window + " verdicts"));

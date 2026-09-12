@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync, renameSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
+import { RunEngine } from '../src/engine/engine.mjs';
 import { scaffoldHome, runLedgerPath, archivedRunLedgerPath } from '../src/daemon/home.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { tempDir, removeDir, waitFor, NO_WAIT } from './helpers.mjs';
@@ -176,4 +177,75 @@ test('a run the engine cannot resume violates loud instead of vanishing', async 
   );
   assert.equal(violation.stream, 'loud');
   assert.match(violation.detail, /cannot resume/);
+});
+
+// A stage removal leaves ledgers standing in the removed name. The lane's
+// retired map is what sends those runs on, and the stamp is the record that
+// the run entered a stage it never reached on its own.
+test('a run standing in a retired stage resumes at the stage the map names', async (t) => {
+  const { home, paths } = setupHome(t);
+  const before = {
+    story: {
+      stages: ['suite', 'adversary', 'freeze'],
+      handlers: {
+        suite: () => ({ next: 'adversary' }),
+        adversary: () => new Promise(() => {}),
+        freeze: () => ({ close: { state: 'shipped' } }),
+      },
+    },
+  };
+  const d1 = new Daemon(home, { waitSleep: NO_WAIT, lanes: before });
+  await d1.start();
+  d1.engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+  await waitFor(
+    () =>
+      readEvents(runLedgerPath(paths, 'r1')).some(
+        (e) => e.event === 'stage-entered' && e.stage === 'adversary',
+      ),
+    { label: 'the run reaches the stage' },
+  );
+  await d1.stop();
+
+  const after = {
+    story: {
+      stages: ['suite', 'freeze'],
+      retired: { adversary: 'freeze' },
+      handlers: {
+        suite: () => ({ next: 'freeze' }),
+        freeze: () => ({ close: { state: 'shipped' } }),
+      },
+    },
+  };
+  const d2 = new Daemon(home, { waitSleep: NO_WAIT, lanes: after });
+  const { runsResumed } = await d2.start();
+  t.after(async () => {
+    await d2.stop();
+  });
+  assert.deepEqual(runsResumed, ['r1']);
+  await waitFor(
+    () => readEvents(archivedRunLedgerPath(paths, 'r1')).some((e) => e.event === 'run-closed'),
+    { label: 'the resumed run closed' },
+  );
+  const events = readEvents(archivedRunLedgerPath(paths, 'r1'));
+  const retired = events.find((e) => e.event === 'stage-retired');
+  assert.deepEqual([retired.lane, retired.from, retired.to], ['story', 'adversary', 'freeze']);
+  assert.equal(events.filter((e) => e.event === 'stage-entered').at(-1).stage, 'freeze');
+  assert.ok(!events.some((e) => e.event === 'liveness-violation'));
+  assert.equal(events.at(-1).state, 'shipped');
+});
+
+// The map is a claim about two stage names, and a wrong claim would only show
+// at a resume, where the run it was written to save is the thing that breaks.
+test('a lane refuses a retired entry that names a stage it still runs or does not run', (t) => {
+  const { paths } = setupHome(t);
+  const engine = new RunEngine(paths, { getSlotCap: () => 1 });
+  const lane = (retired) => ({
+    stages: ['a', 'b'],
+    retired,
+    handlers: { a: () => ({ next: 'b' }), b: () => ({ close: { state: 'shipped' } }) },
+  });
+  assert.throws(() => engine.registerLane('x', lane({ a: 'b' })), /which it still runs/);
+  assert.throws(() => engine.registerLane('x', lane({ c: 'd' })), /unknown stage d/);
+  assert.doesNotThrow(() => engine.registerLane('x', lane({ c: 'b' })));
+  engine.stop();
 });
