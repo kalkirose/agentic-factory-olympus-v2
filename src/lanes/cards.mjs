@@ -531,7 +531,7 @@ async function cardLint({ ctx, config, env, worktree, changed, cards, defects, l
   if (changed.length === 0) return 'unwritten';
   // Plain argv, so the flag the harness asks about is the harness's to append.
   // A script that does not know the flag ignores it and reads the whole
-  // directory, which is the answer this call had before the flag existed.
+  // directory, which is a wider answer and never a wrong one.
   const argv = [...config.commands[name], ...cards.flatMap((card) => ['--card', card])];
   const run = await runCommand(argv, {
     cwd: worktree,
@@ -543,7 +543,7 @@ async function cardLint({ ctx, config, env, worktree, changed, cards, defects, l
   if (run.code === null) {
     defects.push(
       'the card lint of this project could not run, so nothing read the cards you wrote; ' +
-        `the sweep pushes no card the lint did not pass:\n${run.error ?? run.output}`,
+        `no card the lint did not pass is pushed:\n${run.error ?? run.output}`,
     );
     return 'unrun';
   }
