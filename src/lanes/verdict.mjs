@@ -3062,7 +3062,9 @@ function gateCommandLines(base, bound) {
   const inBound = bound ? boundLayerNames(bound) : null;
   const layers = inBound === null ? base.layers : base.layers.filter((l) => inBound.has(l.name));
   return [
-    'The Tier-1 gate commands your work is bounded to:',
+    layers.length > 0
+      ? 'The Tier-1 gate commands your work is bounded to:'
+      : 'No Tier-1 gate command is yours yet: the work as declared reaches the ground of none.',
     ...layers.map((l) => `- ${l.name}: ${(base.commands[l.command] ?? []).join(' ')}`),
     ...(inBound === null ? [] : [BOUND_LINE]),
   ];

@@ -483,7 +483,9 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
       ['lint', 'suite', 'smoke'],
       `the ${seat} bound named other layers`,
     );
-    const bound = JSON.parse(readFileSync(stamp.path, 'utf8'));
+    const bound = JSON.parse(
+      readFileSync(join(runDir(fx, runId), 'seats', `${seat}-1.bound.json`), 'utf8'),
+    );
     assert.equal(bound.seat, seat);
     assert.equal(bound.suite, 'suite');
     assert.ok(bound.declared.includes('src/feature.mjs'));

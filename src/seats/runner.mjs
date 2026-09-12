@@ -194,13 +194,10 @@ export async function runSeat(store, opts) {
       });
       return { ok: false, failed: true, reason: 'bound-not-loaded', error: error.message };
     }
-    store.append('seat-bound', {
-      actor: ACTOR,
-      seat,
-      digest: held.digest,
-      layers: held.layers,
-      path: settings.boundPath,
-    });
+    // The digest and the layers, and no path: the run that wrote the file
+    // archives, and a stamp naming the live directory would point at a
+    // directory that stopped existing. The file travels with the run.
+    store.append('seat-bound', { actor: ACTOR, seat, digest: held.digest, layers: held.layers });
   }
   // Every command the hook refused, stamped once when the seat ends. The count
   // is taken before the terminal stamp so the summary a reader lands on says
@@ -289,7 +286,6 @@ export async function runSeat(store, opts) {
     // word in print mode, so the load is proven from the stream; a seat that
     // ran a command with no answer from the hook is unbounded, and it ends
     // where that is discovered rather than at its natural end.
-    const proof = held === null ? null : boundLoadProof();
     let unbounded = false;
     let running = null;
     // One dispatch: build the argv for the model in force and supervise the
@@ -331,7 +327,10 @@ export async function runSeat(store, opts) {
         spec = build(promptFileRef(path));
       }
       // The proof rides the dialect parser: the supervisor reads every line
-      // through it, and the bound's own answer is one of those lines.
+      // through it, and the bound's own answer is one of those lines. One proof
+      // per child, because a child that died inside a tool call left a question
+      // open that the next child's stream does not answer.
+      const proof = held === null ? null : boundLoadProof();
       const parseLine =
         proof === null
           ? spec.parseLine
@@ -516,7 +515,6 @@ export async function runSeat(store, opts) {
           seat,
           reason: 'bound-not-loaded',
           digest: held.digest,
-          path: settings.settingsPath,
         });
         return { ok: false, failed: true, reason: 'bound-not-loaded' };
       }

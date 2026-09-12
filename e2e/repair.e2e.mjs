@@ -27,6 +27,7 @@ import {
   originSha,
   pollFor,
   rejectedControlFiles,
+  runDir,
   runEvents,
   seatCalls,
   stalled,
@@ -212,7 +213,7 @@ test('the repair lane ships a ticketed fix through the assembled binaries', asyn
   const bound = events.find((e) => e.event === 'seat-bound' && e.seat === 'dev');
   assert.ok(bound, 'the fix seat carried no bound');
   assert.deepEqual(bound.layers, ['lint', 'suite', 'smoke']);
-  const file = JSON.parse(readFileSync(bound.path, 'utf8'));
+  const file = JSON.parse(readFileSync(join(runDir(fx, runId), 'seats', 'dev-1.bound.json'), 'utf8'));
   assert.equal(file.suite, null);
   // This ticket carries no block, so the spawn declares nothing and the brief
   // opens on the setup layers alone.

@@ -1053,12 +1053,13 @@ test('gates.partTargeting false runs every layer whole, whatever its parts say',
       .flatMap((e) => (e.parts ?? []).filter((p) => p.carriedFrom !== undefined)),
     [],
   );
-  // The seat brief drops the line with the mechanism it describes. (The gate
-  // command's own argv is quoted in that brief and mentions the variable, so
-  // the test reads the sentence and not the name.)
+  // The brief offers no narrowing inside a layer, here or anywhere else: the
+  // bound states which layers are the seat's, and which parts of one a diff
+  // reaches is the cycle's own reading. (The gate command's argv is quoted in
+  // that brief and names the variable, so the test reads the sentence.)
   const dev = fx.calls.find((c) => c.seat === 'dev');
   assert.ok(
-    !dev.prompt.includes('Check your own work with the parts your diff can reach'),
+    !dev.prompt.includes('runs those parts alone'),
     'the brief offered a narrowing nothing honours',
   );
 });
@@ -1128,11 +1129,11 @@ test('the bound at a spawn is the declared footprint, the setup layers and the s
 test('a dev seat that reports the frozen suite red is refused', async (t) => {
   const fx = verdictFixture(t, {
     seats: {
-      dev: ({ attempt }) => ({
+      dev: ({ label }) => ({
         files: { 'src/feature.mjs': GOOD_FEATURE },
         // The first report hands over a tree the seat itself calls red. The
         // corrective round finishes the work and reports what the suite says.
-        report: { summary: 'implemented', suiteState: attempt === 1 ? 'red' : 'green' },
+        report: { summary: 'implemented', suiteState: label === 'dev-1' ? 'red' : 'green' },
       }),
       ...furyClean(),
     },
@@ -1157,7 +1158,9 @@ test('an implementation seat is spawned inside a bound the ledger names', async 
   // Every Tier-1 layer of the project is in the file the hook reads; which of
   // them the seat may run is the hook's answer, not the file's.
   assert.deepEqual(stamp.layers, ['unit', 'lint', 'build']);
-  const bound = JSON.parse(readFileSync(stamp.path, 'utf8'));
+  const bound = JSON.parse(
+    readFileSync(join(fx.paths.archivedRuns, runId, 'seats', 'dev-1.bound.json'), 'utf8'),
+  );
   assert.equal(bound.seat, 'dev');
   // The suite layer is named by its command, so a project may call it anything.
   assert.equal(bound.suite, 'unit');
@@ -3427,8 +3430,11 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
   assert.ok(dev.prompt.includes('intake ticket'));
   assert.ok(dev.prompt.includes(join(worktree, 'tickets/t1.md')));
   assert.ok(dev.prompt.includes('regression test'));
-  // The fix seat is judged by the same gates, so it is given them too.
-  assert.ok(dev.prompt.includes('- unit: node --test tests/*.test.mjs'));
+  // This ticket carries no touched-paths block, so the work as declared reaches
+  // no layer's ground and the seat opens on an empty bound. Its own first
+  // command is what widens it.
+  assert.ok(dev.prompt.includes('No Tier-1 gate command is yours yet'));
+  assert.ok(!dev.prompt.includes('- unit: '));
   // The record tree is denied in this lane too; the test paths are not, because
   // this seat writes the regression test (ADR-0074).
   assert.deepEqual(dev.denyTools, [
