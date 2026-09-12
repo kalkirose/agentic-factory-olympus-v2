@@ -31,16 +31,6 @@ const CONFIG_PATH = '.olympus/project.json';
 const CARD_PATH = 'stories/alpha.md';
 const SECOND_CARD = 'stories/beta.md';
 
-const CARD = `---
-key: alpha-1
-title: Alpha feature
----
-
-## Goal
-
-Provide f(x) that doubles x in src/feature.mjs.
-${FIXTURE_ACCEPTANCE}`;
-
 // The launched card, blocked by nothing and leaving one question open, so
 // readiness runs a second time on one launch.
 const CARD_OPEN = `---

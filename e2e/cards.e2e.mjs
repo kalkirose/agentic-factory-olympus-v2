@@ -514,8 +514,11 @@ test('a ship classifies what it collides with, and only a real choice is asked',
   const lintLog = await pollFor(
     'the card lint of the second launch',
     () => {
+      // The file is opened when the command starts and written when it ends,
+      // so its first line is what says the lint has answered.
       const path = join(fx.home, 'runs', beta, 'commands', 'card-lint.log');
-      return existsSync(path) ? readFileSync(path, 'utf8') : undefined;
+      const text = existsSync(path) ? readFileSync(path, 'utf8') : '';
+      return text.includes('card lint: reporting') ? text : undefined;
     },
     { abort: () => stalled(fx, beta), diagnose: () => diagnostics(fx, beta) },
   );
