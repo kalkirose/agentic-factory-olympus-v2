@@ -369,6 +369,9 @@ function storyFixture(
     }),
     'stories/alpha.md': card,
     'src/base.mjs': 'export const base = 1;\n',
+    // The root importer's manifest, which a spec for a story that adds a
+    // dependency has to declare.
+    'package.json': '{}\n',
     ...files,
   });
   // A card amendment is pushed straight to the default branch; the fixture
@@ -2641,7 +2644,12 @@ function dependencyBirth() {
   return ({ prompt }) =>
     prompt.includes(DEPENDENCY_LINE)
       ? {
-          files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
+          files: {
+            [specPathFrom(prompt)]: FIXTURE_SPEC.replace(
+              'tests/feature.test.mjs (new) — suite',
+              'tests/feature.test.mjs (new) — suite\npackage.json — dev',
+            ),
+          },
           report: { outcome: 'spec-born', summary: 'born against the named package' },
         }
       : {
