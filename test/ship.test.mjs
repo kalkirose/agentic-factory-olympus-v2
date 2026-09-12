@@ -4929,6 +4929,80 @@ test('a project that declares no card lint sweeps as it always did', async (t) =
   assert.ok(!fx.calls.find((c) => c.seat === 'card-sweep').prompt.includes('card lint'));
 });
 
+// A card lint that reads the cards it is named, and reports the rest. The
+// project's own script is the one the harness runs, and this is the shape the
+// harness asks a project's script for: a named set judged, everything else
+// reported after a clean exit.
+const CARD_LINT_BY_NAME = `import { readdirSync, readFileSync } from 'node:fs';
+
+const named = [];
+for (let i = 2; i < process.argv.length; i++) {
+  if (process.argv[i] === '--card') named.push(process.argv[i + 1]);
+}
+const all = readdirSync('stories')
+  .filter((name) => name.endsWith('.md'))
+  .map((name) => \`stories/\${name}\`);
+const broken = all.filter((card) => !readFileSync(card, 'utf8').startsWith('---'));
+const set = named.length > 0 ? named : all;
+const red = broken.filter((card) => set.includes(card));
+if (red.length > 0) {
+  console.error(\`card lint: \${red.join(', ')} carries no frontmatter\`);
+  process.exit(1);
+}
+const beyond = broken.filter((card) => !set.includes(card));
+if (beyond.length > 0) {
+  process.stdout.write(
+    'beyond the card:\\n' + beyond.map((card) => \`\${card}: F1: no frontmatter\`).join('\\n') + '\\n',
+  );
+}
+`;
+
+const BY_NAME = {
+  config: {
+    commands: { cardlint: ['node', 'scripts/cardlint.mjs'] },
+    lanes: { story: { suiteCommand: 'suite', lintCommand: 'cardlint' } },
+  },
+  files: { 'scripts/cardlint.mjs': CARD_LINT_BY_NAME },
+};
+
+test('the sweep asks the card lint about the cards it wrote', async (t) => {
+  const fx = shipFixture(t, BY_NAME);
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const sweep = events.find((e) => e.event === 'card-sweep');
+  assert.equal(sweep.lint, 'green');
+  assert.equal(sweep.pushed, true);
+  // The commit carries the cards and nothing else: the writer stages the paths
+  // it wrote, never the tree it stands in.
+  assert.deepEqual(
+    gitSync(['show', '--name-only', '--format=', 'main'], fx.origin).trim().split('\n'),
+    ['stories/alpha.md'],
+  );
+});
+
+test('a card red beyond the ones the sweep wrote does not hold its notes out of the branch', async (t) => {
+  // A person left another card broken. The sweep judges what it wrote; the
+  // project's cards check is what holds the directory clean.
+  const fx = shipFixture(t, {
+    ...BY_NAME,
+    files: { ...BY_NAME.files, 'stories/beta.md': 'A card with no frontmatter.\n' },
+  });
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const sweep = events.find((e) => e.event === 'card-sweep');
+  assert.equal(sweep.lint, 'green');
+  assert.equal(sweep.pushed, true);
+  // One attempt: the red beyond the set is not a defect of this sweep.
+  assert.equal(fx.calls.filter((c) => c.seat === 'card-sweep').length, 1);
+  assert.match(gitSync(['show', 'main:stories/alpha.md'], fx.origin), /<!-- swept -->/);
+  // The other card is untouched: the sweep repaired nobody else's work.
+  assert.equal(gitSync(['show', 'main:stories/beta.md'], fx.origin), 'A card with no frontmatter.\n');
+});
+
 // -- the card sweep absorbs one race (ADR-0063) ------------------------------
 
 const HUMAN_CARD = `---
