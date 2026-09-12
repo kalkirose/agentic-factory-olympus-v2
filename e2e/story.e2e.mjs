@@ -787,7 +787,9 @@ test('a seat whose bound never loaded parks the run', async (t) => {
       runEvents(fx, runId).find(
         (e) => e.event === 'park' && e.type === 'seat-failure' && e.cause === 'bound-not-loaded',
       ),
-    { attempts: 1800, abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+    // The park is what this waits for, so the abort watches the daemon and the
+    // launch alone: a run-scoped abort reads this very park as a stall.
+    { attempts: 600, abort: () => stalled(fx), diagnose: () => diagnostics(fx, runId) },
   );
   assert.match(park.question, /The dev seat failed \(bound-not-loaded\)/);
   const events = runEvents(fx, runId);
