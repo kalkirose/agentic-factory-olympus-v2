@@ -1267,7 +1267,7 @@ function skippedLayers(layers, run, prior) {
  * one that runs either reported not-runnable or was judged against a
  * prerequisite that may change, so neither has a green worth carrying.
  */
-function withDependents(layers, target) {
+export function withDependents(layers, target) {
   const dependents = new Map();
   for (const layer of layers) {
     for (const need of layer.needs ?? []) {
