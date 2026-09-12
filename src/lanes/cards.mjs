@@ -2,12 +2,11 @@
 // project, and the one route by which it pushes text to the default branch
 // outside a pull request.
 //
-// Two stages write cards. The close-out sweep records on the cards what the
-// ship behind it changed about them (ADR-0044). The spec birth writes an
-// owner-approved dependency onto the launched card. Both push through
-// `pushCardPaths`, which stages the paths it is handed and nothing else: a
-// run's worktree holds whatever its seats left in it, and a commit of the
-// whole tree carries those files to a branch no gate reads.
+// A caller names the paths it wrote, and `pushCardPaths` stages those and
+// nothing else: a run's worktree holds whatever its seats left in it, and a
+// commit of the whole tree carries those files to a branch no gate reads. The
+// close-out sweep is one such caller, and it lives here beside the writer
+// because the cards are the whole of its subject (ADR-0044).
 //
 // The push is worth exactly one retry and no more. A rejection here is almost
 // always the default branch moving under it, and the replay proves the
@@ -192,24 +191,13 @@ export async function pushCardPaths({ ctx, paths, message, lintCards = [] }) {
       error: `the push reaches outside ${cardDir}: ${outside.join(', ')}`,
     };
   }
-  const config = await loadProjectConfig(ctx);
-  const env = runEnv(ctx, config);
   const sha = await commitPaths(worktree, paths, message);
   try {
     // Cards are planning artifacts; they land directly on the default branch.
     await push(worktree, 'origin', `HEAD:${defaultBranch}`);
     return { ok: true, pushed: true, attempts: 1, sha };
   } catch (error) {
-    const again = await replayCards({
-      ctx,
-      config,
-      env,
-      worktree,
-      defaultBranch,
-      cardDir,
-      sha,
-      lintCards,
-    });
+    const again = await replayCards({ ctx, worktree, defaultBranch, cardDir, sha, lintCards });
     if (again.ok) return { ok: true, pushed: true, attempts: 2, sha: again.sha, replay: again.replay };
     return {
       ok: false,
@@ -240,9 +228,10 @@ export async function pushCardPaths({ ctx, paths, message, lintCards = [] }) {
  * race, and a loop against it would run for as long as somebody keeps writing.
  * @returns {Promise<{ok: boolean, sha?: string, reason?: string, replay: object}>}
  */
-async function replayCards({ ctx, config, env, worktree, defaultBranch, cardDir, sha, lintCards }) {
+async function replayCards({ ctx, worktree, defaultBranch, cardDir, sha, lintCards }) {
   const replay = { onto: null };
   try {
+    const config = await loadProjectConfig(ctx);
     const clone = cloneDir(ctx.paths, ctx.project);
     await fetchClone(clone);
     const head = await branchSha(clone, defaultBranch);
@@ -269,7 +258,7 @@ async function replayCards({ ctx, config, env, worktree, defaultBranch, cardDir,
     const lint = await cardLint({
       ctx,
       config,
-      env,
+      env: runEnv(ctx, config),
       worktree,
       changed,
       cards: lintCards,
@@ -515,9 +504,9 @@ async function sweepChecks(ctx, base, cardDir, report) {
  *
  * The question put to the lint is about the cards named and no others. A card
  * somebody else left red is not this writer's to repair, and a whole-directory
- * red held the notes of a shipped run out of the default branch for as long as
- * the other card stayed broken. The project's cards-lane check is what holds
- * the directory clean.
+ * answer would hold the notes of a shipped run out of the default branch for
+ * as long as that other card stayed broken. The project's own cards check is
+ * what holds the directory clean.
  *
  * A red is a work-product defect. It fails this attempt and re-briefs the seat
  * on the two-attempt loop the sweep already has, so nothing red is pushed. A
