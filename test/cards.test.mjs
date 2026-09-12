@@ -4,7 +4,7 @@
 // rules, which the spec birth answers to as well.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { scaffoldHome } from '../src/daemon/home.mjs';
 import { ensureBareClone } from '../src/isolation/clones.mjs';
@@ -132,6 +132,18 @@ test('the push carries the named paths and leaves the rest of the tree behind', 
   // written: the writer commits a set, it does not clean a tree.
   assert.throws(() => fx.onMain('src/stray.mjs'));
   assert.ok(existsSync(join(fx.worktree, 'src/stray.mjs')));
+});
+
+test('a card the writer removed is removed on the branch', async (t) => {
+  const fx = await cardsFixture(t, { files: { 'stories/beta.md': '---\nkey: beta-1\ntitle: Beta\n---\n' } });
+  rmSync(join(fx.worktree, 'stories/beta.md'));
+  const landed = await pushCardPaths({
+    ctx: fx.ctx,
+    paths: ['stories/beta.md'],
+    message: 'cards: amend',
+  });
+  assert.equal(landed.ok, true);
+  assert.throws(() => fx.onMain('stories/beta.md'));
 });
 
 test('a path outside the card directory is refused and nothing is pushed', async (t) => {
