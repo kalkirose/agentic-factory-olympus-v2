@@ -115,7 +115,12 @@ export class RunEngine {
     this.idCounter = 0;
   }
 
-  /** @param {string} name @param {{stages: string[], handlers: object}} lane */
+  /**
+   * @param {string} name
+   * @param {{stages: string[], handlers: object, retired?: Record<string, string>}} lane
+   *   `retired` maps a stage name the lane dropped to the stage a run standing
+   *   in it resumes at.
+   */
   registerLane(name, { stages, handlers, retired = {} }) {
     if (!Array.isArray(stages) || stages.length === 0) {
       throw new Error(`lane ${name} requires a non-empty stage list`);
