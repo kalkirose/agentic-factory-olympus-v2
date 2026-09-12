@@ -1,0 +1,82 @@
+{
+	"name": "storefront",
+	"private": true,
+	"version": "0.0.1",
+	"type": "module",
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"preview": "vite preview",
+		"prepare": "svelte-kit sync || echo ''",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+		"typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"lint": "prettier --check . && eslint .",
+		"format": "prettier --write .",
+		"test:e2e": "playwright test",
+		"test:e2e:commerce": "node scripts/e2e-commerce.mjs",
+		"test:acceptance": "node scripts/run-acceptance.mjs",
+		"test:acceptance:e2e": "node scripts/e2e-commerce.mjs --acceptance",
+		"acceptance:plan": "node scripts/e2e-commerce.mjs --acceptance-plan",
+		"test": "node scripts/run-unit.mjs",
+		"test:unit": "vitest",
+		"test:integration": "echo \"no test:integration in storefront\" && exit 0"
+	},
+	"size-limit": [
+		{
+			"name": "home (entry)",
+			"path": ".svelte-kit/output/client/_app/immutable/entry/start.*.js",
+			"limit": "300 KB"
+		},
+		{
+			"name": "configurator route chunk",
+			"path": ".svelte-kit/output/client/_app/immutable/chunks/configurator-*.js",
+			"limit": "500 KB"
+		},
+		{
+			"name": "checkout route chunk",
+			"path": ".svelte-kit/output/client/_app/immutable/chunks/checkout-*.js",
+			"limit": "400 KB"
+		}
+	],
+	"dependencies": {
+		"@example/contracts": "workspace:*",
+		"@example/tokens": "workspace:*",
+		"@sanity/client": "^8.5.0",
+		"@sanity/image-url": "^2.1.1",
+		"@sentry/sveltekit": "10.63.0",
+		"pino": "10.3.1",
+		"zod": "^4.2.0"
+	},
+	"devDependencies": {
+		"@axe-core/playwright": "^4.12.1",
+		"@example/eslint-config": "workspace:*",
+		"@eslint/js": "^10.0.1",
+		"@playwright/test": "^1.60.0",
+		"@sveltejs/adapter-node": "^5.5.4",
+		"@sveltejs/kit": "^2.63.0",
+		"@sveltejs/mcp": "0.1.25",
+		"@sveltejs/vite-plugin-svelte": "^7.1.2",
+		"@tailwindcss/vite": "^4.3.0",
+		"@types/node": "^22",
+		"@vitest/browser-playwright": "^4.1.8",
+		"axe-core": "^4.12.1",
+		"eslint": "^10.4.1",
+		"eslint-config-prettier": "^10.1.8",
+		"eslint-plugin-svelte": "^3.19.0",
+		"globals": "^17.6.0",
+		"playwright": "^1.60.0",
+		"prettier": "^3.8.3",
+		"prettier-plugin-svelte": "^4.1.0",
+		"prettier-plugin-tailwindcss": "^0.8.0",
+		"svelte": "^5.56.1",
+		"svelte-check": "^4.6.0",
+		"tailwindcss": "^4.3.0",
+		"typescript": "^6.0.3",
+		"typescript-eslint": "^8.60.1",
+		"vite": "^8.0.16",
+		"vitest": "^4.1.8",
+		"vitest-axe": "^0.1.0",
+		"vitest-browser-svelte": "^2.1.1"
+	}
+}
