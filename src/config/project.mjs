@@ -276,9 +276,9 @@ export function validateProjectConfig(config, { launch = false } = {}) {
  * red-state check. So a suite command no layer carries runs against the
  * pre-implementation tree and never against the candidate, and the green
  * verdict is silent about the one suite the run was created to satisfy. The
- * match is on the command, not the
- * layer name: a layer may call the suite whatever the project's gate
- * vocabulary calls it. Launch-only: see `validateProjectConfig`.
+ * match is on the command, not the layer name: a layer may call the suite
+ * whatever the project's gate vocabulary calls it. Launch-only: see
+ * `validateProjectConfig`.
  */
 function validateSuiteIsGated(gates, story, err) {
   const suite = story.suiteCommand;
