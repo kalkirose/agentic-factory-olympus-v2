@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -155,18 +155,33 @@ const run = spawnSync(process.execPath, ['--test', ...files], { stdio: 'inherit'
 process.exit(run.status ?? 1);
 `;
 
+// The card lint of the project, asked about the cards of one launch. It
+// refuses a card it was asked about and reports the rest in one block at the
+// end of its output, where the harness reads them off a green exit.
 const CARD_LINT_GATE = `import { readdirSync, readFileSync } from 'node:fs';
 
-let checked = 0;
-for (const name of readdirSync('.olympus/cards')) {
+const named = process.argv.filter((token, i) => process.argv[i - 1] === '--card');
+const errors = [];
+let cards = 0;
+for (const name of readdirSync('.olympus/cards').sort()) {
   if (!name.endsWith('.md')) continue;
-  if (!readFileSync(\`.olympus/cards/\${name}\`, 'utf8').startsWith('---')) {
-    console.error(\`card lint: \${name} carries no frontmatter\`);
-    process.exit(1);
-  }
-  checked++;
+  cards++;
+  const path = \`.olympus/cards/\${name}\`;
+  const text = readFileSync(path, 'utf8');
+  if (!text.startsWith('---')) errors.push({ path, line: \`\${path}: F1: no frontmatter\` });
+  else if (!/^## Goal\\s*$/m.test(text)) errors.push({ path, line: \`\${path}: F2: no goal\` });
 }
-console.log(\`card lint: \${checked} card(s)\`);
+const reported = errors.filter((e) => named.length === 0 || named.includes(e.path));
+if (reported.length > 0) {
+  console.error(reported.map((e) => e.line).join('\\n'));
+  process.exit(1);
+}
+console.log(\`card lint: reporting \${named.length} of \${cards} cards: \${named.join(' ')}\`);
+const beyond = errors.filter((e) => !reported.includes(e));
+if (beyond.length > 0) {
+  process.stdout.write(\`beyond the card:\\n\${beyond.map((e) => e.line).join('\\n')}\\n\`);
+}
+process.exit(0);
 `;
 
 function projectTree() {
@@ -493,6 +508,21 @@ test('a ship classifies what it collides with, and only a real choice is asked',
     () => instanceEvents(fx).filter((e) => e.event === 'launch')[1]?.runId,
     { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
   );
+  // Readiness judged the launched card alone. The card it waits on has
+  // shipped, so it is settled and so is everything behind it, and the errors
+  // of the card the owner still holds reach this launch as a report.
+  const lintLog = await pollFor(
+    'the card lint of the second launch',
+    () => {
+      // The file is opened when the command starts and written when it ends,
+      // so its first line is what says the lint has answered.
+      const path = join(fx.home, 'runs', beta, 'commands', 'card-lint.log');
+      const text = existsSync(path) ? readFileSync(path, 'utf8') : '';
+      return text.includes('card lint: reporting') ? text : undefined;
+    },
+    { abort: () => stalled(fx, beta), diagnose: () => diagnostics(fx, beta) },
+  );
+  assert.ok(lintLog.includes(`reporting 1 of 3 cards: ${BETA_CARD_PATH}`), lintLog);
   const stamp = await pollFor(
     'the supersede the card authorized',
     () => runEvents(fx, beta).find((e) => e.event === 'supersede-authorized'),

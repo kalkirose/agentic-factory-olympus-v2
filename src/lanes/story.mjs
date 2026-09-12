@@ -16,9 +16,10 @@
 // then the seat-failure park — no condition the lane meets on its own closes
 // a run (ADR-0015).
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { commandLogPath, runReportPath } from '../daemon/home.mjs';
 import { textIdentity } from '../ledger/acks.mjs';
+import { storyRunsByKey } from '../telemetry/readers.mjs';
 import {
   abortMerge,
   changedFiles,
@@ -28,11 +29,18 @@ import {
   mergeIntoTree,
   filesAt,
   filesMentioning,
+  resetHard,
   treeFiles,
 } from '../isolation/tree.mjs';
 import { editDenyRules } from '../seats/boundary.mjs';
 import { laneDiffPolicy, parseTouchedBlock } from '../seats/diffpolicy.mjs';
-import { noCriteriaMessage, parseIntentCard } from './card.mjs';
+import {
+  DEPENDENCIES_SECTION,
+  cardClosure,
+  noCriteriaMessage,
+  parseIntentCard,
+} from './card.mjs';
+import { pushCardPaths } from './cards.mjs';
 import { runCommand } from './exec.mjs';
 import { probeCredentials } from './probes.mjs';
 import {
@@ -81,6 +89,7 @@ import {
   lastSeatReportEvent,
   readJson,
   parkDirective,
+  refreshTree,
   withAbandonGuard,
   withTreeRefresh,
   seatWithChecks,
@@ -155,9 +164,26 @@ export const SPEC_BIRTH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    outcome: { type: 'string', enum: ['spec-born', 'grounding-conflict'] },
+    outcome: { type: 'string', enum: ['spec-born', 'grounding-conflict', 'dependency-needed'] },
     summary: { type: 'string' },
     conflict: { type: 'string' },
+    // The packages the spec cannot be written without and the card does not
+    // name. Top-level, because the report contract nests objects one level and
+    // this is already a list of objects. `importer` is the workspace key the
+    // lockfile spells, so the root of a workspace has a spelling too.
+    dependencies: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          importer: { type: 'string' },
+          name: { type: 'string' },
+          reason: { type: 'string' },
+        },
+        required: ['importer', 'name', 'reason'],
+      },
+    },
   },
   required: ['outcome', 'summary'],
 };
@@ -271,6 +297,51 @@ export const SUITE_SCHEMA = {
 // -- readiness (process) -----------------------------------------------------
 
 /**
+ * What the card lint may say before the harness stops listening, and the line
+ * that opens the errors it found outside the cards it was asked about.
+ *
+ * The block rides the end of the output, so a default tail would cut it off
+ * exactly where a long report needs it, and the log behind the record is a
+ * green's, which is deleted unless it is kept.
+ */
+const LINT_OUTPUT_LIMIT = 65536;
+const BEYOND_MARKER = 'beyond the card:';
+
+/**
+ * The cards a launch is judged on, as the lint reads them: the launched card
+ * and every unshipped card it is blocked by, repo-relative, forward-slashed
+ * because they ride a command line.
+ *
+ * A shipped card is settled and so is everything behind it, and which keys
+ * shipped is run history, which the ledgers hold.
+ */
+function closureCards(ctx, worktree, cardPath) {
+  const shipped = new Set(
+    [...storyRunsByKey(ctx.paths, { project: ctx.project }).entries()]
+      .filter(([, runs]) => runs.shipped > 0)
+      .map(([key]) => key),
+  );
+  const closure = cardClosure(join(worktree, dirname(cardPath)), join(worktree, cardPath), {
+    shipped,
+  });
+  return closure.map((path) => relative(worktree, path).replaceAll('\\', '/'));
+}
+
+/**
+ * The errors the lint found beyond the cards it was asked about: the block it
+ * writes last, from its opening line to the end of the output.
+ *
+ * Read from the end, because the marker is a line a card could also carry and
+ * the script writes the block after everything else it has to say.
+ */
+function beyondTheCard(output) {
+  const lines = output.split(/\r?\n/).map((line) => line.trim());
+  const opened = lines.lastIndexOf(BEYOND_MARKER);
+  if (opened === -1) return [];
+  return lines.slice(opened + 1).filter((line) => line.length > 0);
+}
+
+/**
  * Readiness is the lane's admission gate, and it has two routes. A normal
  * launch is admitted on its intent card and derives everything after it. A
  * launch that names a prior run is admitted on that run's freeze instead: it
@@ -310,12 +381,22 @@ function readinessHandler(postFreezeStage, forgeFor) {
     }
     const noCriteria = criteriaBlock(ctx, card, cardPath);
     if (noCriteria) return noCriteria;
+    const events = runEvents(ctx);
     if (story.lintCommand) {
-      const lint = await runCommand(config.commands[story.lintCommand], {
-        cwd: worktree,
-        env: runEnv(ctx, config),
-        log: commandLogPath(ctx.paths, ctx.runId, 'card-lint'),
-      });
+      const cards = closureCards(ctx, worktree, cardPath);
+      const lint = await runCommand(
+        [...config.commands[story.lintCommand], ...cards.flatMap((c) => ['--card', c])],
+        {
+          cwd: worktree,
+          env: runEnv(ctx, config),
+          // The block rides the end of the output and the log is the evidence
+          // behind the record, so neither may be thrown away: the default is a
+          // 4000-character tail, and a green's log is deleted.
+          outputLimit: LINT_OUTPUT_LIMIT,
+          keep: 'always',
+          log: commandLogPath(ctx.paths, ctx.runId, 'card-lint'),
+        },
+      );
       if (lint.code === null) {
         return commandError(
           ctx,
@@ -329,6 +410,17 @@ function readinessHandler(postFreezeStage, forgeFor) {
           output: lint.output,
         });
       }
+      const beyond = beyondTheCard(lint.output);
+      // One record per run. Readiness re-runs whole on every park answer and
+      // on every resume, and one directory read many times is one report.
+      if (beyond.length > 0 && !events.some((e) => e.event === 'readiness-lint-beyond')) {
+        ctx.store.append('readiness-lint-beyond', {
+          actor: ACTOR,
+          cards,
+          errors: beyond,
+          gist: gist(`${beyond.length} errors beyond the card`),
+        });
+      }
     }
     // The questions the card leaves open, and never the foreseen amendments a
     // close-out sweep wrote onto it. A foreseen amendment states a consequence
@@ -336,7 +428,6 @@ function readinessHandler(postFreezeStage, forgeFor) {
     // human to settle: the build-time classifier consumes the note as evidence
     // and the launch proceeds (ADR-0052).
     if (card.openDecisions.length > 0) {
-      const events = runEvents(ctx);
       if (!answeredPark(events, 'open-decisions')?.answer) {
         return parkDirective('open-decisions', {
           question:
@@ -570,11 +661,18 @@ async function advanceBase(ctx, { worktree, config, story, prior, base, from }) 
 // -- spec birth (seat) -------------------------------------------------------
 
 async function specBirth(ctx) {
-  const base = await laneBase(ctx);
+  let base = await laneBase(ctx);
   const noCriteria = criteriaBlock(ctx, base.card, base.cardPath);
   if (noCriteria) return noCriteria;
-  const events = runEvents(ctx);
+  let events = runEvents(ctx);
   if (events.some((e) => e.event === 'spec-born')) return { next: 'spec-gate' };
+  const decided = await dependencyDecision(ctx, base, events);
+  if (decided.directive) return decided.directive;
+  if (decided.amended) {
+    // The card is a different document now, and the seat is briefed from it.
+    base = await laneBase(ctx);
+    events = runEvents(ctx);
+  }
   const { report, fail } = await seatWithChecks(ctx, {
     seat: 'spec-birth',
     schema: SPEC_BIRTH_SCHEMA,
@@ -593,6 +691,9 @@ async function specBirth(ctx) {
       refs: [base.cardPath],
     });
   }
+  // Raised before any `spec-born` stamp, so the answer re-enters a stage that
+  // still has its seat to run.
+  if (report.outcome === 'dependency-needed') return dependencyPark(base, report.dependencies);
   ctx.store.append('spec-born', {
     actor: ACTOR,
     specPath: base.specPath,
@@ -603,14 +704,153 @@ async function specBirth(ctx) {
 
 /**
  * The birth work product: the file exists, and it holds the template. A
- * conflict is a refusal to author, so it is checked against nothing.
+ * conflict is a refusal to author, and so is an unnamed dependency, so
+ * neither is checked against a spec.
+ *
+ * A dependency the report does not name is the one thing the schema cannot
+ * hold: the contract carries no minimum length, and an empty list is a
+ * question nobody can answer.
  */
 async function birthChecks(base, report) {
   if (report.outcome === 'grounding-conflict') return [];
+  if (report.outcome === 'dependency-needed') {
+    if ((report.dependencies ?? []).length > 0) return [];
+    return [
+      'the report asks for a dependency and names none; list each package under dependencies ' +
+        'with its importer, its name and the reason the spec needs it.',
+    ];
+  }
   if (!existsSync(base.specPath) || readFileSync(base.specPath, 'utf8').trim().length === 0) {
     return [`the spec is missing or empty at ${base.specPath}; author it there.`];
   }
   return specLintDefects(base);
+}
+
+// -- a dependency the card does not name (the owner's call) ------------------
+
+/** The heading a card names its dependencies under, as the writer writes it. */
+const DEPENDENCIES_HEADING = '## Dependencies';
+
+const HEADING_LINE = /^(#{1,6})\s+(.*\S)\s*$/;
+
+/**
+ * The park a birth raises over a package the card does not name.
+ *
+ * The card is the whole authorization for a dependency, so the question is the
+ * owner's and the answer is written where the next reader of the card meets
+ * it. The list rides the record because the writer runs on the answer, long
+ * after the report that asked is gone.
+ */
+function dependencyPark(base, dependencies) {
+  const asked = dependencies ?? [];
+  return parkDirective('dependency-decision', {
+    question:
+      `The spec cannot be written without a package ${base.cardPath} does not name:\n` +
+      asked.map((d) => `- ${d.importer}: ${d.name} (${d.reason})`).join('\n') +
+      `\nAnswer "approve" to name it on the card and ship it from this story, or "refuse" to ` +
+      'end the run.',
+    options: ['approve', 'refuse'],
+    refs: [base.cardPath],
+    detail: { dependencies: asked },
+  });
+}
+
+/**
+ * The answer to that park, acted on before the seat runs again.
+ *
+ * `refuse` is the owner's word that this story gets no dependency, and there
+ * is nothing left for it to author. `approve` writes the package onto the card
+ * and pushes it, so the authorization outlives the run and the next reader of
+ * the card sees it; the tree then moves to the pushed head, because the
+ * amendment is a commit on the default branch and never one of this run's own
+ * against a path the lane denies it.
+ *
+ * @returns {Promise<{directive?: object, amended?: boolean}>} a directive that
+ *   ends the stage, or whether the card moved under it
+ */
+async function dependencyDecision(ctx, base, events) {
+  const asked = answeredPark(events, 'dependency-decision');
+  const option = asked?.answer?.option;
+  if (option !== 'approve' && option !== 'refuse') return {};
+  if (option === 'refuse') {
+    return { directive: { close: { state: 'failed', reason: 'dependency-refused' } } };
+  }
+  const parkSeq = asked.park.seq;
+  const written = events.some((e) => e.event === 'card-amended' && e.park === parkSeq);
+  if (!written) {
+    const dependencies = asked.park.detail?.dependencies ?? [];
+    const file = join(base.worktree, base.cardPath);
+    writeFileSync(file, cardWithDependencies(readFileSync(file, 'utf8'), dependencies));
+    const landed = await pushCardPaths({
+      ctx,
+      paths: [base.cardPath],
+      message: `cards: ${base.card?.key ?? ctx.runId} names the dependencies it ships`,
+      lintCards: [base.cardPath],
+    });
+    if (!landed.ok) {
+      // Nothing of the amendment stays on the run branch: the lane denies the
+      // card directory to the candidate diff, so a commit left here would ride
+      // into the pull request unjudged.
+      await resetHard(base.worktree, ctx.payload.baseSha);
+      return {
+        directive: blocked(
+          ctx,
+          landed.reason === 'push-lost' ? 'card-push-lost' : 'card-amend-refused',
+          `The dependency approved for ${base.cardPath} did not reach the default branch: ` +
+            `${landed.error}\nThe run tree is back at its launch base and carries none of it. ` +
+            'Answer "retry" to write and push it again.',
+          { card: base.cardPath, cause: landed.reason },
+        ),
+      };
+    }
+    ctx.store.append('card-amended', {
+      actor: ACTOR,
+      card: base.cardPath,
+      dependencies,
+      sha: landed.sha,
+      pushed: landed.pushed,
+      // The park the amendment answers, so a stage entered twice on one answer
+      // writes the card once.
+      park: parkSeq,
+    });
+  }
+  await refreshTree(ctx, { parkSeq });
+  return { amended: true };
+}
+
+/**
+ * The card with the approved packages named on it: one line each, under the
+ * dependencies heading, appended to the section the card already carries.
+ *
+ * The line is the plainest sentence the section takes, because a project's own
+ * card lint reads every unfenced line of a card and a writer that reaches for
+ * punctuation or for a word of this harness writes a card that lint refuses.
+ * A package the card already names is not written twice.
+ */
+function cardWithDependencies(text, dependencies) {
+  const named = new Set(
+    parseIntentCard(text).card.dependencies.map((d) => `${d.importer}: ${d.name}`),
+  );
+  const add = dependencies
+    .map((d) => `${d.importer}: ${d.name}`)
+    .filter((line) => !named.has(line))
+    .map((line) => `- ${line}`);
+  if (add.length === 0) return text;
+  const lines = text.split('\n');
+  const opened = lines.findIndex((line) => {
+    const heading = HEADING_LINE.exec(line.trimEnd());
+    return heading && DEPENDENCIES_SECTION.test(heading[2]);
+  });
+  if (opened === -1) {
+    return `${text.endsWith('\n') ? text : `${text}\n`}\n${DEPENDENCIES_HEADING}\n\n${add.join('\n')}\n`;
+  }
+  // The section runs to the next heading of any level, which is where the
+  // parser stops reading it; the blank line that closes it stays last.
+  let end = opened + 1;
+  while (end < lines.length && !HEADING_LINE.test(lines[end].trimEnd())) end++;
+  while (end > opened + 1 && lines[end - 1].trim().length === 0) end--;
+  lines.splice(end, 0, ...add);
+  return lines.join('\n');
 }
 
 /**
@@ -1187,6 +1427,7 @@ function birthRole(base, resolved, brief = null) {
     // name a runner the suite seat is not allowed to reach.
     ...suiteFacts(base),
     'If the repository state conflicts with the card\'s intent, do not author around the conflict: set outcome "grounding-conflict" and describe the conflict.',
+    ...dependencyLines(),
     'Otherwise set outcome "spec-born".',
   ];
   if (resolved.length > 0) {
@@ -1216,6 +1457,29 @@ function birthRole(base, resolved, brief = null) {
  * reads there: a run compressed a spec that way, and every mapping after the
  * first line of each list stopped being a mapping.
  */
+/**
+ * What the seat is told about the packages a story may add.
+ *
+ * The card is the whole authorization: a package it names ships from this
+ * story, and a package it does not name is one question to the owner, asked
+ * here and never worked around. The three rules beside it are the ones a spec
+ * gets wrong when it is written against a package that is not installed yet.
+ */
+function dependencyLines() {
+  return [
+    'If the spec cannot be written without a package the card does not name, author nothing: ' +
+      'set outcome "dependency-needed", list each package under dependencies with its importer ' +
+      'key, its name and the reason the spec needs it, and write no spec file.',
+    'A card with a `## Dependencies` section makes the spec list `<importer>/package.json` ' +
+      'under `touched-paths`, owned by dev; the root importer `.` writes `package.json`.',
+    'A dependency that needs a build script needs `allowBuilds` in the workspace file, which ' +
+      'stays denied on this lane; that change goes through the repair lane.',
+    'A criterion that needs a named dependency is tested through the surface it changes, never ' +
+      'by importing the package, because the suite is authored and type-checked before the ' +
+      'dependency is installed.',
+  ];
+}
+
 function templateLines() {
   return [
     'The spec has a fixed template. Write these parts, in this order, and nothing else:',
