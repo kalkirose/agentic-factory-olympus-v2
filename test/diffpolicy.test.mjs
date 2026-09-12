@@ -1,5 +1,5 @@
 // The diff-policy gate's judgment, apart from the lane that runs it: the
-// touched-paths contract, the three tiers, and the config that declares them.
+// touched-paths contract, the four tiers, and the config that declares them.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -7,6 +7,7 @@ import {
   RECAPTURE_NOTE,
   captureGist,
   classifyTakeBacks,
+  dependencyWrites,
   diffPolicyViolations,
   dropLine,
   laneDiffPolicy,
@@ -265,6 +266,102 @@ test('the take-back line states the freeze, the revert, and the re-freeze route'
   assert.doesNotMatch(line, /meant to fix/);
   assert.match(DROP_NOTE, /never\s+through an implementation seat/);
   assert.doesNotMatch(DROP_NOTE, /unfixed/);
+});
+
+// -- the dependency tier -----------------------------------------------------
+
+// The tier as a monorepo declares it: the lockfile is named here and nowhere
+// else, and the manifests stay declarable because a spec does declare those.
+const DEP_TIER = {
+  deniedPaths: ['pnpm-workspace.yaml', '**/.npmrc'],
+  declaredPaths: ['**/package.json'],
+  dependencyPaths: ['pnpm-lock.yaml'],
+  forbiddenPatterns: ['\\.env'],
+};
+
+test('the dependency tier names the changed paths whose content answers for them', () => {
+  assert.deepEqual(
+    dependencyWrites(['apps/web/src/a.ts', 'pnpm-lock.yaml', 'package.json'], DEP_TIER),
+    [{ path: 'pnpm-lock.yaml', pattern: 'pnpm-lock.yaml' }],
+  );
+  assert.deepEqual(dependencyWrites(['pnpm-lock.yaml'], TIER), []);
+  assert.deepEqual(dependencyWrites(['pnpm-lock.yaml'], null), []);
+  // A backslash path answers its own tier entry, like every other reading.
+  assert.deepEqual(dependencyWrites(['sub\\pnpm-lock.yaml'], { dependencyPaths: ['sub'] }), [
+    { path: 'sub/pnpm-lock.yaml', pattern: 'sub' },
+  ]);
+});
+
+test('a dependency path raises no path violation, declared or not', () => {
+  // The card carries the permission and the spec lint refuses a spec that
+  // lists the file, so the path gate has no declaration to find and must not
+  // ask for one.
+  assert.deepEqual(diffPolicyViolations(['pnpm-lock.yaml'], DEP_TIER, () => false), []);
+  const both = { ...DEP_TIER, declaredPaths: ['**'] };
+  assert.deepEqual(diffPolicyViolations(['pnpm-lock.yaml'], both, () => false), []);
+});
+
+test('a denied or forbidden path outranks the dependency tier', () => {
+  const tier = {
+    deniedPaths: ['pnpm-lock.yaml'],
+    dependencyPaths: ['pnpm-lock.yaml', 'apps/web/.env.lock'],
+    forbiddenPatterns: ['\\.env'],
+  };
+  assert.deepEqual(
+    diffPolicyViolations(['pnpm-lock.yaml', 'apps/web/.env.lock'], tier).map((v) => v.rule),
+    ['denied', 'forbidden'],
+  );
+});
+
+test('a dependency take-back stays loud, and the sweep never reaches one', () => {
+  // The judgment is about the file's bytes. A quiet class or a sweep that
+  // carried the write away would leave that judgment nothing to read.
+  const tier = {
+    dependencyPaths: ['pnpm-lock.yaml'],
+    recapturablePaths: ['**'],
+    sweptPaths: ['**'],
+  };
+  const split = classifyTakeBacks(['pnpm-lock.yaml', 'tests/a.png'], tier);
+  assert.deepEqual(split.held, ['pnpm-lock.yaml']);
+  assert.deepEqual(split.recaptured.map((r) => r.path), ['tests/a.png']);
+  assert.deepEqual(sweepCandidates(['pnpm-lock.yaml', 'tests/a.png'], tier), ['tests/a.png']);
+});
+
+test('the grant refusal names the tier, the block that broke, and what to put back', () => {
+  const line = violationLine({
+    path: 'pnpm-lock.yaml',
+    rule: 'dependency-grant',
+    pattern: 'pnpm-lock.yaml',
+    reason: 'importers: apps/web gained left-pad, which the card does not name.',
+  });
+  assert.match(line, /^pnpm-lock\.yaml: the diff policy admits this path only for the dependency/);
+  assert.match(line, /dependencyPaths: pnpm-lock\.yaml/);
+  assert.match(line, /importers: apps\/web gained left-pad, which the card does not name\./);
+  assert.match(line, /Hold the file to the dependency the card names and put the rest of it back\./);
+  // Never "restore it to its committed state": the story is allowed to hold
+  // the dependency its card names, and that wording drops the one change the
+  // seat was sent to make.
+  assert.doesNotMatch(line, /Restore it to its committed state/);
+});
+
+test('the dependency tier is a string list, and the story lane alone takes it', () => {
+  const story = baseConfig({ diffPolicy: { story: { dependencyPaths: ['pnpm-lock.yaml'] } } });
+  assert.deepEqual(validateProjectConfig(story), []);
+  assert.deepEqual(withProjectDefaults(story).diffPolicy.story.dependencyPaths, ['pnpm-lock.yaml']);
+  assert.deepEqual(errorPaths(baseConfig({ diffPolicy: { story: { dependencyPaths: 'x' } } })), [
+    'diffPolicy.story.dependencyPaths',
+  ]);
+  assert.deepEqual(errorPaths(baseConfig({ diffPolicy: { story: { dependencyPath: ['a'] } } })), [
+    'diffPolicy.story.dependencyPath',
+  ]);
+  // The repair lane runs off a ticket and carries no card, so it has nothing
+  // to hold the file's content to. Declaring the tier there would admit every
+  // write to the file or refuse every one.
+  const repair = validateProjectConfig(
+    baseConfig({ diffPolicy: { repair: { dependencyPaths: ['pnpm-lock.yaml'] } } }),
+  );
+  assert.deepEqual(repair.map((e) => e.path), ['diffPolicy.repair.dependencyPaths']);
+  assert.match(repair[0].message, /only the story lane takes this tier/);
 });
 
 // -- the re-capturable class -------------------------------------------------

@@ -4274,6 +4274,173 @@ test('the repair lane keeps its regression test and answers its own tiers', asyn
   );
 });
 
+// -- the dependency tier the capture judges by content -----------------------
+
+// A lockfile small enough to read whole, in the one format the grant reads.
+// The rules it proves are rules about bytes, so the fixture is bytes.
+const LOCK_BEFORE = `lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+
+importers:
+
+  .:
+    dependencies:
+      left-pad:
+        specifier: ^1.3.0
+        version: 1.3.0
+
+packages:
+
+  left-pad@1.3.0:
+    resolution: {integrity: sha512-aaa}
+`;
+
+/** The file one `pnpm add tiny-invariant` on the root importer leaves. */
+const LOCK_ADDED = `lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+
+importers:
+
+  .:
+    dependencies:
+      left-pad:
+        specifier: ^1.3.0
+        version: 1.3.0
+      tiny-invariant:
+        specifier: ^1.3.3
+        version: 1.3.3
+
+packages:
+
+  left-pad@1.3.0:
+    resolution: {integrity: sha512-aaa}
+
+  tiny-invariant@1.3.3:
+    resolution: {integrity: sha512-bbb}
+`;
+
+/** The same install with the resolution of a package already there moved. */
+const LOCK_MOVED = LOCK_ADDED.replace('sha512-aaa', 'sha512-zzz');
+
+const DEP_POLICY = { story: { dependencyPaths: ['pnpm-lock.yaml'] } };
+
+const DEP_CARD = FIXTURE_CARD.replace(
+  '## Goal',
+  ['## Dependencies', '', '- .: tiny-invariant', '', '## Goal'].join('\n'),
+);
+
+function depFixture(t, seats, { cardText = DEP_CARD } = {}) {
+  return verdictFixture(t, {
+    seats,
+    diffPolicy: DEP_POLICY,
+    originFiles: { 'pnpm-lock.yaml': LOCK_BEFORE, [FIXTURE_CARD_PATH]: cardText },
+  });
+}
+
+test('the capture admits a lockfile that holds exactly the dependency the card names', async (t) => {
+  const seats = {
+    dev: () => ({
+      files: { 'src/feature.mjs': GOOD_FEATURE, 'pnpm-lock.yaml': LOCK_ADDED },
+      report: { summary: 'implemented' },
+    }),
+    ...furyClean(),
+  };
+  const fx = depFixture(t, seats);
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // No violation, one pass, and the file rode the implementation commit.
+  assert.ok(!events.some((e) => e.event === 'diff-policy-violation'));
+  assert.equal(fx.calls.filter((c) => c.seat === 'dev').length, 1);
+});
+
+test('the capture refuses a lockfile that moved more than the card names', async (t) => {
+  const seats = {
+    dev: ({ label }) => ({
+      files: {
+        'src/feature.mjs': GOOD_FEATURE,
+        'pnpm-lock.yaml': label === 'dev-1' ? LOCK_MOVED : LOCK_ADDED,
+      },
+      report: { summary: 'implemented' },
+    }),
+    ...furyClean(),
+  };
+  const fx = depFixture(t, seats);
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const stamp = events.find((e) => e.event === 'diff-policy-violation');
+  assert.deepEqual(
+    stamp.violations.map((v) => [v.path, v.rule, v.pattern]),
+    [['pnpm-lock.yaml', 'dependency-grant', 'pnpm-lock.yaml']],
+  );
+  // The refusal names the block that broke, so the seat knows what to put back.
+  assert.match(stamp.violations[0].reason, /^packages: left-pad@1\.3\.0 moved its resolution/);
+  const corrective = fx.calls.find((c) => c.label === 'dev-2');
+  assert.match(corrective.prompt, /pnpm-lock\.yaml: the diff policy admits this path only for/);
+  assert.match(corrective.prompt, /packages: left-pad@1\.3\.0 moved its resolution/);
+  assert.match(corrective.prompt, /Hold the file to the dependency the card names/);
+});
+
+test('a card that names no dependency shuts the lockfile', async (t) => {
+  const seats = {
+    dev: ({ label }) =>
+      label === 'dev-1'
+        ? {
+            files: { 'src/feature.mjs': GOOD_FEATURE, 'pnpm-lock.yaml': LOCK_ADDED },
+            report: { summary: 'implemented' },
+          }
+        : {
+            files: { 'src/feature.mjs': GOOD_FEATURE, 'pnpm-lock.yaml': LOCK_BEFORE },
+            report: { summary: 'implemented without the package' },
+          },
+    ...furyClean(),
+  };
+  const fx = depFixture(t, seats, { cardText: FIXTURE_CARD });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const stamp = events.find((e) => e.event === 'diff-policy-violation');
+  assert.deepEqual(stamp.violations.map((v) => v.rule), ['dependency-grant']);
+  assert.match(stamp.violations[0].reason, /^The card names no dependency/);
+  // The second pass put the file back, so nothing stood in the way of it.
+  assert.equal(fx.calls.filter((c) => c.seat === 'dev').length, 2);
+});
+
+test('an unchanged lockfile is no question, and a lane without the tier reads none', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    ...furyClean(),
+  };
+  // The card names a dependency the seat never installed. The file did not
+  // move, so there is nothing for the grant to answer for.
+  const held = depFixture(t, seats);
+  const first = await held.launch();
+  const one = await waitClosed(held.paths, first.runId);
+  assert.ok(!one.some((e) => e.event === 'diff-policy-violation'));
+  // The same install with no tier declared: the config merge has not landed,
+  // and the capture reads the file by its path tiers alone.
+  const inert = verdictFixture(t, {
+    seats: {
+      dev: () => ({
+        files: { 'src/feature.mjs': GOOD_FEATURE, 'pnpm-lock.yaml': LOCK_MOVED },
+        report: { summary: 'implemented' },
+      }),
+      ...furyClean(),
+    },
+    diffPolicy: { story: { deniedPaths: ['scripts/**'] } },
+    originFiles: { 'pnpm-lock.yaml': LOCK_BEFORE, [FIXTURE_CARD_PATH]: DEP_CARD },
+  });
+  const second = await inert.launch();
+  const two = await waitClosed(inert.paths, second.runId);
+  assert.equal(two.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!two.some((e) => e.event === 'diff-policy-violation'));
+});
+
 // -- the card authorizes a supersede (ADR-0044) -------------------------------
 
 // The collision of the run that paid for this decision: the story's criterion

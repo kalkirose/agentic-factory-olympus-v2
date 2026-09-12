@@ -46,6 +46,7 @@ import {
   changedInRange,
   resetHard,
 } from '../isolation/tree.mjs';
+import { MAX_DIFF_BYTES, git } from '../isolation/git.mjs';
 import { editDenyRules } from '../seats/boundary.mjs';
 import {
   DROP_NOTE,
@@ -53,6 +54,7 @@ import {
   SWEEP_NOTE,
   captureGist,
   classifyTakeBacks,
+  dependencyWrites,
   diffPolicyViolations,
   dropLine,
   laneDiffPolicy,
@@ -122,6 +124,7 @@ import {
 } from './records-stage.mjs';
 import { freezeAnchor } from './resume.mjs';
 import { parseIntentCard } from './card.mjs';
+import { lockfileGrant } from './lockfile.mjs';
 import {
   SUPERSEDE_BRIEF_LINES,
   SUPERSEDE_CLAIM_PROPERTIES,
@@ -2585,9 +2588,11 @@ function ruledSuiteFiles(answer, frozen) {
  * commit. Two things can stand in the way, and they are not the same thing.
  *
  * - A **violation** is a change the lane's diff policy refuses (ADR-0017):
- *   a denied path, an undeclared declarable path, a forbidden path shape. It
+ *   a denied path, an undeclared declarable path, a forbidden path shape, or
+ *   a dependency path holding more than the dependency the card names. It
  *   is a work-product defect the seat answers in one corrective invocation,
- *   and the capture stops until it does.
+ *   and the capture stops until it does. The first three are answered from
+ *   the path; the fourth is answered from the file, against the card.
  * - A **take-back** is a write to a path the lane froze — today, a story-lane
  *   seat that reached a test path past its tool deny. The revert stays
  *   unconditional, because the frozen suite is the thing being judged
@@ -2691,7 +2696,10 @@ async function captureDefects(ctx, base, mode, { seat, capture }) {
   // produces, and the commit record has to say so.
   for (const path of dropped) if (!capture.dropped.includes(path)) capture.dropped.push(path);
   const kept = changed.filter((f) => !frozenWrites.includes(f) && !recordWrites.includes(f));
-  const violations = diffPolicyViolations(kept, tier, declaresPath(base, mode, tier));
+  const violations = [
+    ...diffPolicyViolations(kept, tier, declaresPath(base, mode, tier)),
+    ...(await grantViolations(base, tier, kept)),
+  ];
   // The two classes of take-back part here, and only in the record: the quiet
   // class is reverted, committed around and stated downstream exactly like the
   // loud one. Both carry the closed word for the defect, so a surface that
@@ -2733,6 +2741,76 @@ async function captureDefects(ctx, base, mode, { seat, capture }) {
     ...dropped.map(dropLine),
     ...recordWrites.map(recordDropLine),
   ];
+}
+
+/**
+ * The refusals the content tier raises: one per changed dependency path the
+ * card's grants do not cover.
+ *
+ * The grant runs on every pass and not on the first alone. A dependency path
+ * is one file, every pass rewrites it whole, and a pass that quietly widened
+ * what the last one installed would ship on a judgment made about different
+ * bytes.
+ *
+ * `before` is the file at the run's freeze sha, never the pass's own head:
+ * from pass two onward the head holds the previous pass's install, and a grant
+ * read against that would admit whatever the run had already accumulated. The
+ * freeze is the last tree no dev seat wrote.
+ *
+ * A card that names no dependency is refused before the file is read. The
+ * permission is the card's to give, so the absence of one is the answer, and
+ * the answer costs no read of a file that can be a megabyte.
+ */
+async function grantViolations(base, tier, kept) {
+  const writes = dependencyWrites(kept, tier);
+  if (writes.length === 0) return [];
+  const grants = base.card?.dependencies ?? [];
+  const violations = [];
+  for (const { path, pattern } of writes) {
+    if (grants.length === 0) {
+      violations.push({
+        path,
+        rule: 'dependency-grant',
+        pattern,
+        reason: 'The card names no dependency, and this path changes for a named one alone.',
+      });
+      continue;
+    }
+    const grant = lockfileGrant(
+      await fileAtSha(base.worktree, base.resetSha, path),
+      readWorktreeFile(base.worktree, path),
+      grants,
+    );
+    if (grant.ok) continue;
+    violations.push({ path, rule: 'dependency-grant', pattern, reason: grant.reason });
+  }
+  return violations;
+}
+
+/**
+ * One file as a sha held it, or the empty string where the sha held none. A
+ * dependency lockfile can reach a megabyte, so the read states its own
+ * ceiling rather than taking the child-process default of one.
+ */
+async function fileAtSha(worktree, sha, path) {
+  if (typeof sha !== 'string' || sha.length === 0) return '';
+  try {
+    return await git(['show', `${sha}:${path.replaceAll('\\', '/')}`], {
+      cwd: worktree,
+      maxBuffer: MAX_DIFF_BYTES,
+    });
+  } catch {
+    return '';
+  }
+}
+
+/** One worktree file, or the empty string where the seat removed it. */
+function readWorktreeFile(worktree, path) {
+  try {
+    return readFileSync(join(worktree, path), 'utf8');
+  } catch {
+    return '';
+  }
 }
 
 /**
