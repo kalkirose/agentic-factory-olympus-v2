@@ -283,6 +283,14 @@ async function replayCards({ ctx, worktree, defaultBranch, cardDir, sha, lintCar
 
 // -- the close-out card sweep ------------------------------------------------
 
+/**
+ * One seat brings the cards in line with the repository as shipped, and what
+ * it wrote is pushed by path.
+ *
+ * Nothing here fails the run. The story shipped before this ran, so a seat
+ * that fails, a work product the checks refuse and a push that loses twice are
+ * all recorded on the ledger and raise nothing.
+ */
 export async function cardSweep(ctx, base, merged) {
   const clone = cloneDir(ctx.paths, ctx.project);
   await fetchClone(clone);
