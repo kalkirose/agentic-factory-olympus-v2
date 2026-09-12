@@ -1149,7 +1149,10 @@ test('a dev seat that reports the frozen suite red is refused', async (t) => {
 
 test('an implementation seat is spawned inside a bound the ledger names', async (t) => {
   const fx = verdictFixture(t, {
-    seats: { dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE } }), ...furyClean() },
+    seats: {
+      dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+      ...furyClean(),
+    },
   });
   const { runId } = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
