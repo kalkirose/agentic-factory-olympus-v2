@@ -156,7 +156,7 @@ test('the old positional call is the test half of the same boundary', () => {
 });
 
 test('denyTools ride the claude argv as disallowed tools', () => {
-  const def = seatDef('adversary');
+  const def = seatDef('spec-gate');
   const { args } = claudeSeatCommand({
     prompt: 'P',
     model: 'claude-opus-5',
@@ -171,7 +171,7 @@ test('denyTools ride the claude argv as disallowed tools', () => {
   assert.ok(disallowed.includes('Edit(tests/**)'));
   assert.ok(disallowed.includes('Write(tests/**)'));
   assert.ok(disallowed.includes('NotebookEdit(tests/**)'));
-  // The adversary seat has no web tools and no subagents.
+  // The seat has no web tools and no subagents.
   assert.ok(disallowed.includes('WebSearch'));
   assert.ok(disallowed.includes('Task'));
 });

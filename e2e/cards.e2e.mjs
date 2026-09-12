@@ -294,7 +294,6 @@ function scenarioFor(callDir, memoDir) {
         spec: ALPHA_SPEC,
         suiteFiles: { 'tests/exports.test.mjs': ALPHA_SUITE },
         suiteReds: [{ test: 'the module publishes f alone', class: 'feature-absence' }],
-        adversaryFiles: { 'src/feature.mjs': 'export const f = (x) => x + 1;\n' },
         devFiles: { 'src/feature.mjs': 'export function f(x) {\n  return x * 2;\n}\n' },
         // The close-out classification: one note, one question.
         sweep: {
@@ -327,7 +326,6 @@ function scenarioFor(callDir, memoDir) {
         },
         suiteFiles: { 'tests/exports.test.mjs': BETA_SUITE },
         suiteReds: [{ test: 'the module publishes f and g', class: 'feature-absence' }],
-        adversaryFiles: { 'src/feature.mjs': 'export const f = (x) => 2 * x;\n' },
         devFiles: {
           'src/feature.mjs': 'export function f(x) {\n  return x * 2;\n}\n\nexport function g(x) {\n  return x / 2;\n}\n',
         },

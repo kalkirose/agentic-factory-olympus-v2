@@ -81,7 +81,6 @@ const SCENARIO = {
   spec: SPEC,
   suiteFiles: { 'tests/feature.test.mjs': SUITE },
   suiteReds: [{ test: 'f doubles its input', class: 'feature-absence' }],
-  adversaryFiles: { 'src/feature.mjs': 'export const f = (x) => x + x + 1;\n' },
   // Right first time: the certification this run carries is earned in one
   // cycle, so a second render in the ledger can only be the re-verdict this
   // scenario says nothing takes.

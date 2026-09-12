@@ -439,7 +439,7 @@ function seedHandler(seedExtra = null) {
     writeFileSync(full, STRONG_TEST);
     const sha = await commitAll(worktree, 'suite: seed');
     writeFileSync(join(ctx.paths.runs, ctx.runId, 'spec.md'), '# Spec\n\nf(x) returns 2*x.\n');
-    ctx.store.append('freeze', { actor: 'daemon', sha, killCount: 3, amendmentKills: 0 });
+    ctx.store.append('freeze', { actor: 'daemon', sha });
     if (seedExtra) await seedExtra(ctx);
     return { next: 'implementation' };
   };

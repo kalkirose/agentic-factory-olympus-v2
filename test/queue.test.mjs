@@ -45,8 +45,8 @@ test('parks and breaches join the queue and leave on answer / resolve', (t) => {
   });
   const breach = instance.append('tripwire-breach', {
     actor: 'daemon',
-    tripwire: 'kill-rate',
-    gist: 'tripwire-breach: kill-rate',
+    tripwire: 'ci-critical-path',
+    gist: 'tripwire-breach: ci-critical-path',
   });
 
   let queue = escalationQueue(paths);

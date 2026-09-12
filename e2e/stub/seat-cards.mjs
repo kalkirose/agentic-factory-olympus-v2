@@ -56,15 +56,6 @@ function behavior(name) {
   if (name === 'spec-birth') return specBirth();
   if (name === 'spec-gate') return specGate();
   if (name === 'suite') return suiteSeat();
-  if (name === 'adversary') {
-    return {
-      files: plan().adversaryFiles,
-      report: {
-        approach: 'an implementation that answers the shape and not the value',
-        wrongness: 'the module answers the wrong number',
-      },
-    };
-  }
   if (name === 'dev' || name === 'repair-dev') {
     return { files: plan().devFiles, report: { summary: 'the spec is implemented' } };
   }
@@ -155,7 +146,7 @@ function specGate() {
  * prompt, so the fixture never restates the harness's list.
  */
 function dimensions() {
-  const block = /the dimensions the adversary weighs\.\n([\s\S]*?)\nFor each dimension,/.exec(prompt);
+  const block = /the dimensions the suite asserts on\.\n([\s\S]*?)\nFor each dimension,/.exec(prompt);
   if (!block) return [];
   return block[1]
     .split('\n')
@@ -166,8 +157,7 @@ function dimensions() {
 /**
  * The surface map of one suite write: one enumerated item, closed by a test the
  * declared suite files hold, and every other dimension declared out of scope.
- * The item is the same at every write, so the map never shrinks, and every
- * survivor wave of this write sits on it.
+ * The item is the same at every write, so the map never shrinks.
  */
 function surfaceMap(reds) {
   const dims = dimensions();
@@ -181,7 +171,6 @@ function surfaceMap(reds) {
   const named = reds[0]?.test;
   if (!named) return { surfaceMap: [], dimensionsOutOfScope: out(dims) };
   const [first, ...rest] = dims;
-  const survivors = waves();
   return {
     surfaceMap: [
       {
@@ -190,7 +179,6 @@ function surfaceMap(reds) {
         item: 'the module entry point',
         where: 'src/feature.mjs',
         test: named,
-        ...(survivors.length > 0 && { survivors }),
       },
     ],
     dimensionsOutOfScope: out(rest),
@@ -206,14 +194,6 @@ function suiteSeat() {
     ...surfaceMap(reds),
     summary: 'the suite asserts the criterion',
   };
-  if (prompt.includes('list it under killingTests')) {
-    report.killingTests = [];
-    report.dispositions = waves().map((wave) => ({
-      wave,
-      disposition: 'unkilled-gap',
-      reason: 'the fixture suite encodes no killing test',
-    }));
-  }
   return { files, report };
 }
 
@@ -253,9 +233,6 @@ function verifier() {
   };
 }
 
-function waves() {
-  return [...prompt.matchAll(/^Survivor wave (\d+):$/gm)].map((m) => Number(m[1]));
-}
 
 // -- plumbing ----------------------------------------------------------------
 

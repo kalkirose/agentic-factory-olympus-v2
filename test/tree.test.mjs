@@ -225,8 +225,8 @@ test('restorePaths leaves the freeze exclusions alone, and covers them without t
   assert.ok(!existsSync(join(repo, 'tests', 'support', 'junk.mjs')));
   assert.equal(content('tests/harness.mjs'), 'dev edit\n');
   assert.equal(content('tests/support/fixtures.mjs'), 'a file the dev pass created\n');
-  // The same restore without the exemption — the adversary's restore — covers
-  // the whole set: the edit reverts and the new file goes.
+  // The same restore without the exemption covers the whole set: the edit
+  // reverts and the new file goes.
   await restorePaths(repo, sha, ['tests']);
   assert.equal(content('tests/harness.mjs'), 'base harness\n');
   assert.ok(!existsSync(join(repo, 'tests', 'support', 'fixtures.mjs')));

@@ -116,7 +116,7 @@ export class RunEngine {
   }
 
   /** @param {string} name @param {{stages: string[], handlers: object}} lane */
-  registerLane(name, { stages, handlers }) {
+  registerLane(name, { stages, handlers, retired = {} }) {
     if (!Array.isArray(stages) || stages.length === 0) {
       throw new Error(`lane ${name} requires a non-empty stage list`);
     }
@@ -125,7 +125,19 @@ export class RunEngine {
         throw new Error(`lane ${name} stage ${stage} has no handler`);
       }
     }
-    this.lanes.set(name, { stages, handlers });
+    // A retired entry only has meaning for a name the lane dropped, and only
+    // where it sends the run to a stage this build runs. A broken entry is
+    // refused here, because at the resume it would read as an unknown stage
+    // and strand the run it was written to save.
+    for (const [from, to] of Object.entries(retired)) {
+      if (stages.includes(from)) {
+        throw new Error(`lane ${name} retires ${from}, which it still runs`);
+      }
+      if (!stages.includes(to)) {
+        throw new Error(`lane ${name} retires ${from} to unknown stage ${to}`);
+      }
+    }
+    this.lanes.set(name, { stages, handlers, retired });
   }
 
   // -- slot accounting (lane-agnostic) --------------------------------------

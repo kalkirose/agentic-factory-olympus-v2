@@ -75,7 +75,6 @@ test('the seat list is exactly these names', () => {
     'spec-gate',
     'record-author',
     'suite',
-    'adversary',
     'dev',
     'repair-dev',
     'verdict-triage',

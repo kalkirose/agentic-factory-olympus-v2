@@ -552,7 +552,7 @@ test('status prints the four stop readings under each project', (t) => {
   run.append('run-launched', { actor: 'daemon', project: 'alpha', lane: 'story', storyKey: 's2' });
   run.append('spec-gate-round', { actor: 'daemon', round: 1, verdict: 'findings' });
   run.append('spec-gate-round', { actor: 'daemon', round: 2, verdict: 'pass' });
-  run.append('freeze', { actor: 'daemon', sha: 'aaaaaaa', killCount: 1 });
+  run.append('freeze', { actor: 'daemon', sha: 'aaaaaaa' });
   run.append('waiting', {
     actor: 'daemon',
     kind: 'seat',

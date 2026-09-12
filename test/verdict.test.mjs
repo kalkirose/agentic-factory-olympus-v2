@@ -223,7 +223,7 @@ function seedHandler(files, extra, specText = FIXTURE_SPEC, exclusions = []) {
         2,
       ) + '\n',
     );
-    ctx.store.append('freeze', { actor: 'daemon', sha, killCount: 3, amendmentKills: 0 });
+    ctx.store.append('freeze', { actor: 'daemon', sha });
     if (extra) await extra(ctx, worktree);
     return { next: 'implementation' };
   };
@@ -4802,8 +4802,6 @@ test('the re-freeze carries the map brief and its check, and stamps its own map'
   assert.equal(calls.length, 2);
   assert.ok(calls[0].prompt.includes('map the surface of this story'));
   for (const d of SECURITY_DIMENSIONS) assert.ok(calls[0].prompt.includes(d), d);
-  // A re-freeze answers no survivor wave, so the survivor line stays off it.
-  assert.ok(!calls[0].prompt.includes('Put the wave number in "survivors"'));
   assert.match(calls[1].prompt, /Correction brief/);
   assert.ok(
     calls[1].prompt.includes(

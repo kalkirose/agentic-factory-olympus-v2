@@ -366,10 +366,6 @@ function storySeats(recordAuthor) {
         summary: 'authored',
       },
     }),
-    adversary: () => ({
-      files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
-      report: { approach: 'stub', wrongness: 'f returns 0' },
-    }),
   };
 }
 
@@ -487,7 +483,6 @@ test('a story commits the records it decides before the freeze, and stamps them'
       'spec-gate',
       'records',
       'suite',
-      'adversary',
       'freeze',
       'implementation',
       'verdict',
@@ -1096,7 +1091,6 @@ test('a story birth that spends its ladder stamps birthFailed and the run goes o
       'spec-gate',
       'records',
       'suite',
-      'adversary',
       'freeze',
       'implementation',
       'verdict',

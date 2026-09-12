@@ -42,10 +42,10 @@ test('a declared panel replaces the default, in vocabulary order', () => {
   ]);
 });
 
-// The panel judges the candidate diff and the adversary probes the suite, so
-// the two surfaces state the same dimensions or one of them stops covering
-// what the other assumes it does.
-test('the security criteria and the adversary dimensions come from one list', () => {
+// The panel judges the candidate diff and every suite write maps the story's
+// surface, so the two surfaces state the same dimensions or one of them stops
+// covering what the other assumes it does.
+test('the security criteria and the surface-map dimensions come from one list', () => {
   for (const dimension of SECURITY_DIMENSIONS) {
     assert.ok(LENS_CRITERIA.security.includes(dimension), dimension);
   }
