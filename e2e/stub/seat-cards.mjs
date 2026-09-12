@@ -57,7 +57,10 @@ function behavior(name) {
   if (name === 'spec-gate') return specGate();
   if (name === 'suite') return suiteSeat();
   if (name === 'dev' || name === 'repair-dev') {
-    return { files: plan().devFiles, report: { summary: 'the spec is implemented' } };
+    return {
+      files: plan().devFiles,
+      report: { summary: 'the spec is implemented', ...suiteState() },
+    };
   }
   if (name === 'verdict-triage') return triage();
   if (name === 'fury-verifier') return verifier();
@@ -261,6 +264,15 @@ function rememberStory() {
 function valueOf(flag) {
   const at = argv.indexOf(flag);
   return at === -1 ? null : argv[at + 1];
+}
+
+/**
+ * What the seat says about the frozen suite. The field is in the schema the
+ * prompt carries only where a frozen suite exists, and a report that carries a
+ * field its schema does not name is refused, so the answer follows the schema.
+ */
+function suiteState() {
+  return prompt.includes('suiteState') ? { suiteState: 'green' } : {};
 }
 
 function match(pattern) {

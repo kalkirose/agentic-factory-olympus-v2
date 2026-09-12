@@ -785,7 +785,10 @@ test('a seat whose bound never loaded parks the run', async (t) => {
     'the seat-failure park',
     () =>
       runEvents(fx, runId).find(
-        (e) => e.event === 'park' && e.type === 'seat-failure' && e.cause === 'bound-not-loaded',
+        (e) =>
+          e.event === 'park' &&
+          e.type === 'seat-failure' &&
+          e.detail?.cause === 'bound-not-loaded',
       ),
     // The park is what this waits for, so the abort watches the daemon and the
     // launch alone: a run-scoped abort reads this very park as a stall.
