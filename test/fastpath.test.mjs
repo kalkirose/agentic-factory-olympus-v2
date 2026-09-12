@@ -1354,3 +1354,63 @@ test('the digest moves when a declaration moves and at no other time', () => {
   // is another claim.
   assert.notEqual(declarationDigest({ ...base, ground: ['lint src/api'] }), declarationDigest(base));
 });
+
+// -- a layer that carried the branch's own certification ---------------------
+
+/** The standing result of a layer that carried a base certification. */
+const carriedResult = (baseSha = 'b'.repeat(40)) => ({
+  event: 'layer-result',
+  status: 'green',
+  mode: 'carried',
+  carriedFrom: 'base',
+  baseSha,
+  certifiedSeq: 12,
+});
+
+test('a carried layer is a standing green, and the config ground is what it rests on', () => {
+  const out = fastPathVerdict(
+    inputs({
+      layers: [{ name: 'unit', command: 'unit', ground: ['src/api'] }],
+      prior: new Map([['unit', carriedResult()]]),
+    }),
+  );
+  assert.equal(out.taken, true, `the fast path refused: ${out.refusal} (${out.detail})`);
+  // The layer ran nothing here, so it names no suite of its own, and the claim
+  // it rests on is the project's config ground for it.
+  assert.deepEqual(out.declaration.suites, []);
+  assert.deepEqual(out.declaration.ground, { declared: 0, config: 1 });
+  // And the tree the green was earned at is named per layer, because one
+  // certification now rests on more than one sha.
+  assert.deepEqual(out.declaration.carried, [{ layer: 'unit', sha: 'b'.repeat(40) }]);
+  assert.equal(out.declaration.sha, CERTIFICATION.sha);
+});
+
+test('a carried layer with no config ground refuses, because nothing declares it', () => {
+  // Its own command declared nothing here and the project declares nothing for
+  // it, so no claim in this project says the branch left its ground alone.
+  const out = fastPathVerdict(
+    inputs({
+      layers: [layer('unit')],
+      prior: new Map([['unit', carriedResult()]]),
+    }),
+  );
+  assert.equal(out.taken, false);
+  assert.equal(out.refusal, 'undeclared-suite');
+});
+
+test('a carried layer whose ground the branch moved refuses on that ground', () => {
+  const out = fastPathVerdict(
+    inputs({
+      layers: [{ name: 'unit', command: 'unit', ground: ['src/api'] }],
+      prior: new Map([['unit', carriedResult()]]),
+      mainChanged: { files: ['src/api/other.mjs'], unclassifiable: [] },
+    }),
+  );
+  assert.equal(out.taken, false);
+  assert.equal(out.refusal, 'ground-intersects');
+});
+
+test('a layer the run itself ran names no carried tree', () => {
+  const out = fastPathVerdict(inputs());
+  assert.equal(out.declaration.carried, undefined);
+});

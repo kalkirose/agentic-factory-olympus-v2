@@ -86,7 +86,9 @@ import {
   probeOfferLines,
   withReplayRounds,
 } from './replay.mjs';
-import { runSpectrum, rerunLayers, persistentReds, cyclePlan } from './spectrum.mjs';
+import { runSpectrum, rerunLayers, persistentReds, cyclePlan, priorStatus } from './spectrum.mjs';
+import { certifiedAt, newestBaseCertification } from '../ledger/readers.mjs';
+import { cloneDir } from '../isolation/clones.mjs';
 import {
   credentialHostIn,
   readTransient,
@@ -106,7 +108,7 @@ import {
 } from './waiting.mjs';
 import { askProbe } from './probes.mjs';
 import { configuredGroups } from './schedule.mjs';
-import { PARTS_ENV, partPlan, carryTally, confirmationTally } from './parts.mjs';
+import { PARTS_ENV, partPlan, carryTally, confirmationTally, layerGround } from './parts.mjs';
 import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview, recordFields } from './review.mjs';
 import { panelLenses } from './lenses.mjs';
@@ -633,20 +635,35 @@ async function runCycle(ctx, base, mode, { cycle }) {
     impl?.baseSha && impl?.sha
       ? await changedInRange(base.worktree, impl.baseSha, impl.sha).catch(() => null)
       : null;
-  const plan = cyclePlan(startEvents, {
+  const planArgs = {
     cycle,
     pass,
     layers: base.layers,
     ...(changed && { changed }),
+    breadth: base.config?.gates?.breadthGround ?? [],
+    // Ground the project states no suite of it reads. It leaves the footprint
+    // before anything is attributed, exactly as it leaves a part plan
+    // (ADR-0059).
+    groundless: base.config?.gates?.groundlessPaths ?? [],
     recordPaths: base.recordPaths,
     recordLayers: base.recordLayers,
-  });
+  };
+  let plan = cyclePlan(startEvents, planArgs);
+  // The footprint replaces one branch of the plan and no other, so it is derived
+  // where that branch is taken and nowhere else: the ledger read and the diffs
+  // behind it buy nothing on a cycle that is already narrowed, and the condition
+  // stays in the planner rather than being restated here.
+  if (plan.sweep === 'full') {
+    const footprint = await certifiedFootprint(ctx, base, sha);
+    plan = cyclePlan(startEvents, { ...planArgs, footprint });
+  }
   const parts = await partTargets(base, startEvents, { plan, sha });
   let spectrum = await runSpectrum(ctx, {
     ...gates,
     run: plan.run,
     skip: plan.skip,
     prior: plan.prior,
+    certified: plan.certified,
     parts,
   });
   if (spectrum.error) return { directive: gateCommandError(ctx, spectrum.error) };
@@ -829,6 +846,10 @@ async function runCycle(ctx, base, mode, { cycle }) {
     sha,
     ...(suiteSha && { suiteSha }),
     sweep: plan.sweep,
+    // Why the sweep is the whole spectrum, where it is. A first cycle scopes
+    // itself to the footprint of its own diff whenever it can, so a full one is
+    // a condition that was not met, and the record names which.
+    ...(plan.reason && { reason: plan.reason }),
     ...(tally ?? {}),
     ...(confirmation && { confirmation: true }),
     ...(swept && { confirmationParts: swept }),
@@ -867,7 +888,7 @@ async function runCycle(ctx, base, mode, { cycle }) {
     ...(deferred.length > 0 && { deferred }),
     verdict,
   };
-  const recordPath = join(ctx.paths.runs, ctx.runId, `verdict-${cycle}.json`);
+  const recordPath = join(ctx.paths.runs, ctx.runId, verdictRecordFile(cycle));
   writeFileSync(recordPath, JSON.stringify(record, null, 2) + '\n');
   ctx.store.append('verdict-rendered', {
     actor: ACTOR,
@@ -876,6 +897,7 @@ async function runCycle(ctx, base, mode, { cycle }) {
     sha,
     ...(suiteSha && { suiteSha }),
     sweep: plan.sweep,
+    ...(plan.reason && { reason: plan.reason }),
     // The share rides the event as well as the record, because the reading is
     // taken from the ledgers and a metric that had to open a record file per
     // cycle would be reading somebody else's lifecycle (ADR-0058).
@@ -958,6 +980,77 @@ export async function partTargets(base, events, { plan, sha }) {
     );
   }
   return targets.size > 0 ? targets : null;
+}
+
+/**
+ * What the default branch has already answered for the tree this run started
+ * from, for the first cycle of a pass: the run's own diff against that base, and
+ * the layers a certification of it holds green. Or the one word that says why
+ * there is no such answer, and the cycle runs every layer.
+ *
+ * Four conditions, and each one that fails buys the whole spectrum.
+ *
+ * A project that declares no setup layer has not told the harness which layers
+ * produce the tree the others read. Carrying under that silence leaves a run
+ * with no installed modules and a green it did not earn, so the silence is the
+ * refusal.
+ *
+ * A Tier-1 layer with no ground in the config has claimed nothing, and a carry
+ * is a claim about ground. One such layer refuses for the whole spectrum rather
+ * than for itself: the sweep is one decision about one cycle.
+ *
+ * A project with no certification at all is the ordinary state of one that has
+ * never shipped under this, and of the first run after the harness gains it. The
+ * base itself needs no certification of its own: the close-out stamps the merge
+ * commit, and the default branch moves past it for a card sweep or a config
+ * merge, so the per-layer question is asked of the ancestry and answered by a
+ * diff that touches the layer's ground or does not.
+ *
+ * A diff git cannot answer says nothing about what the run changed.
+ *
+ * The diff is read in the run's own worktree, which holds the base commit it
+ * branched from. The ancestry question behind a certification at an older sha is
+ * read in the project's bare clone, where the default branch lives.
+ */
+export async function certifiedFootprint(ctx, base, sha) {
+  const layers = base.layers ?? [];
+  if (!layers.some((layer) => layer.setup === true)) return { reason: 'no-setup-layer' };
+  const breadth = base.config?.gates?.breadthGround ?? [];
+  const ground = new Map();
+  for (const layer of layers) {
+    const declared = layerGround(layer, null, breadth, base.recordPaths);
+    if (!declared.sources.config) return { reason: 'groundless-layer' };
+    ground.set(layer.name, declared.entries);
+  }
+  const baseSha = typeof ctx.payload?.baseSha === 'string' ? ctx.payload.baseSha : null;
+  if (!baseSha || !newestBaseCertification(ctx.paths, ctx.project)) {
+    return { reason: 'no-base-certification' };
+  }
+  const changed = await changedInRange(base.worktree, baseSha, sha).catch(() => null);
+  if (changed === null) return { reason: 'unreadable-diff' };
+  const clone = cloneDir(ctx.paths, ctx.project);
+  const certified = new Map();
+  for (const layer of layers) {
+    const held = await certifiedAt(
+      ctx.paths,
+      ctx.project,
+      baseSha,
+      layer.name,
+      ground.get(layer.name),
+      clone,
+    );
+    if (held) certified.set(layer.name, held);
+  }
+  return { changed, certified };
+}
+
+/**
+ * The file one cycle's verdict record is written under, inside the run
+ * directory. A name and never a path: the run archives, and a reader outside it
+ * resolves the name through the home's own layout.
+ */
+export function verdictRecordFile(cycle) {
+  return `verdict-${cycle}.json`;
 }
 
 /**

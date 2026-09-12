@@ -175,7 +175,12 @@ test('the repair lane ships a ticketed fix through the assembled binaries', asyn
   );
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   assert.equal(renders.length, 1);
-  assert.deepEqual([renders[0].verdict, renders[0].sweep], ['green', 'full']);
+  // Nothing has certified the tree this run branched from, so the first cycle
+  // runs every layer and names the condition that was not met.
+  assert.deepEqual(
+    [renders[0].verdict, renders[0].sweep, renders[0].reason],
+    ['green', 'full', 'no-base-certification'],
+  );
   assert.deepEqual(
     events.filter((e) => e.event === 'finding'),
     [],

@@ -261,9 +261,12 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
   );
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   assert.equal(renders.length, 2);
+  // The first cycle would scope itself to the footprint of the run's own diff,
+  // and on a fresh origin nothing has certified the tree it branched from. So it
+  // runs every layer and the record says which condition was not met.
   assert.deepEqual(
-    [renders[0].verdict, renders[0].sweep],
-    ['red', 'full'],
+    [renders[0].verdict, renders[0].sweep, renders[0].reason],
+    ['red', 'full', 'no-base-certification'],
   );
   assert.deepEqual(
     [renders[1].verdict, renders[1].sweep, renders[1].confirmation],

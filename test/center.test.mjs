@@ -322,6 +322,17 @@ function seedRecordRun(paths) {
       cost: 1.2,
     }),
     line(80, 'layer-result', { cycle: 4, layer: 'adr-form', status: 'green', elapsedMs: 120_000 }),
+    // A layer of the same cycle that carried the default branch's own
+    // certification. It ran nothing, so it spent no minutes and measures none.
+    line(81, 'layer-result', {
+      cycle: 4,
+      layer: 'unit',
+      status: 'green',
+      mode: 'carried',
+      carriedFrom: 'base',
+      baseSha: 'b'.repeat(40),
+      certifiedSeq: 3,
+    }),
     // The review's own answer over the same record.
     line(84, 'record-reviewed', {
       seat: 'record-review:1',
@@ -431,7 +442,9 @@ test('the records section derives its measures from the ledger', async (t) => {
   assert.deepEqual(r.movedTree, { updates: 1, rejudged: 0, rerun: 1, both: 0, neither: 0 });
   assert.deepEqual(r.recheck, { rechecks: 1, answered: 0, yield: 0 });
   // Two minutes of layers on the first render, one on the second; the third
-  // ran no layer and is no reading.
+  // ran no layer and is no reading. The carried layer of the first render adds
+  // nothing: a carry spends no time, and a reading that counted it as nought
+  // would report a gate that got faster.
   assert.deepEqual(r.gateMinutes, { renders: 2, mean: 1.5 });
   // The first write seat to the last write stamp of that stage run.
   assert.deepEqual(r.writeMinutes, { mean: 45, writes: 1, longest: 45 });

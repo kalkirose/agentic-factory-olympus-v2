@@ -1078,3 +1078,46 @@ test('a same-cycle result that carried nothing is kept untouched by the confirma
   assert.equal(events(ctx).filter((e) => e.event === 'layer-result').length, 1);
   assert.deepEqual(ranParts(ctx), [['alpha', 'beta']]);
 });
+
+test('a layer that carried a base certification reports no part share of its own', () => {
+  // The certification says the layer was green at another tree; it says nothing
+  // about the parts inside it, and this run opened none. A share taken off that
+  // would read as a narrowing that decayed rather than as a layer nobody ran.
+  assert.equal(
+    carryTally([
+      { layer: 'lint', mode: 'carried', carriedFrom: 'base', baseSha: 'base1' },
+      { layer: 'unit', mode: 'run' },
+    ]),
+    null,
+  );
+  // Beside a layer that DID run in parts, the carried layer adds nothing to
+  // either count.
+  assert.deepEqual(
+    carryTally([
+      { layer: 'lint', mode: 'carried', carriedFrom: 'base' },
+      { layer: 'unit', mode: 'run', parts: [{ name: 'a' }, { name: 'b' }] },
+    ]),
+    { partsRun: 2, partsCarried: 0, carryShare: 0 },
+  );
+});
+
+test('a base carry holds no part table, so the cycle behind it plans no narrowing', () => {
+  // The standing result of a carried layer: green, no parts, and the tree the
+  // green was earned at beside the tree the cycle judged. A cycle that does put
+  // such a layer in its run set narrows nothing and carries nothing, which is
+  // the only honest reading of a part table nobody holds.
+  const prior = {
+    layer: 'unit',
+    status: 'green',
+    mode: 'carried',
+    carriedFrom: 'base',
+    baseSha: 'base1',
+    sha: 'candidate',
+  };
+  const plan = partPlan(prior, ['src/f.mjs'], {
+    layer: { name: 'unit', ground: ['src'] },
+  });
+  assert.equal(plan.narrow, null);
+  assert.deepEqual([...plan.reasons], []);
+  assert.deepEqual(plan.blindPaths, []);
+});

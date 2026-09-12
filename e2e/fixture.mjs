@@ -79,12 +79,25 @@ export const PROJECT_CONFIG = {
     cardlint: ['node', '.olympus/gates/cardlint.mjs'],
   },
   gates: {
+    // Every layer states what its command reads, so the first cycle of a run
+    // can be the footprint of that run's own diff. `lint` reads the sources,
+    // `suite` reads the sources and the tests, and `smoke` boots what the
+    // sources build. The one setup layer is what arms the footprint at all: a
+    // project that declares none has not said which layers make the others
+    // runnable, and the cycle runs everything.
     tier1: [
-      { name: 'lint', command: 'lint' },
-      { name: 'suite', command: 'suite' },
+      { name: 'lint', command: 'lint', ground: ['src'] },
+      { name: 'suite', command: 'suite', ground: ['src', 'tests'] },
       // The one layer that declares what it may hold, so the e2e proves the
       // declaration reaches the reading in the ledger (ADR-0045).
-      { name: 'smoke', command: 'smoke', needs: ['suite'], memoryCeilingMb: SMOKE_CEILING_MB },
+      {
+        name: 'smoke',
+        command: 'smoke',
+        needs: ['suite'],
+        memoryCeilingMb: SMOKE_CEILING_MB,
+        ground: ['src'],
+        setup: true,
+      },
     ],
     // The layers a changed record path is attributed to, and no other. A
     // record-only diff runs this one and skips the code suite, which is what

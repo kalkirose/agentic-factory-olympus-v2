@@ -5066,3 +5066,89 @@ test('a record finding prints its unit and the second place; a code finding is u
       'the record states a rule the tree does not hold (evidence: src/feature.mjs:1)',
   );
 });
+
+// -- the first cycle over a certified base -----------------------------------
+//
+// The first cycle of a pass has proven nothing of its own. Where the default
+// branch holds a certification, it runs the footprint of the run's own diff
+// against that base and carries the rest.
+
+const FOOTPRINT_GATES = [
+  { name: 'install', command: 'lint', ground: ['manifest.json'], setup: true },
+  { name: 'unit', command: 'suite', ground: ['src', 'tests'] },
+  { name: 'suite-form', command: 'lint', ground: ['tests'] },
+  { name: 'docs-lint', command: 'lint', ground: ['docs'] },
+];
+
+/** Certifies the tree the run branched from, for every layer of the project. */
+function certifyLaunchBase(ctx) {
+  ctx.instanceStore.append('base-certified', {
+    actor: 'daemon',
+    project: 'proj',
+    runId: 'seed',
+    sha: ctx.payload.baseSha,
+    layers: FOOTPRINT_GATES.map((layer) => ({
+      name: layer.name,
+      status: 'green',
+      elapsedMs: 1000,
+      mode: 'run',
+      verdict: 'verdict-1.json',
+    })),
+  });
+}
+
+test('the first cycle runs the footprint of the run own diff and carries the rest', async (t) => {
+  const fx = verdictFixture(t, {
+    gates: FOOTPRINT_GATES,
+    seats: { dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }), ...furyClean() },
+    seedExtra: (ctx) => certifyLaunchBase(ctx),
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.equal(renders.length, 1);
+  assert.equal(renders[0].verdict, 'green');
+  assert.equal(renders[0].sweep, 'footprint');
+  // A footprint is not a condition that failed, so it names none.
+  assert.equal(renders[0].reason, undefined);
+  const record = readRecord(fx.paths, runId, 1);
+  assert.deepEqual(
+    record.spectrum.map(({ resources, exhaustion, ...decision }) => decision.layer + ':' + decision.mode),
+    ['install:run', 'unit:run', 'suite-form:run', 'docs-lint:carried'],
+  );
+  // The suite commit is inside the footprint: it lands before the dev seat, and
+  // the layer that reads the tests alone ran because of it. A diff taken from
+  // the tree the dev seat started on would have missed it.
+  const suiteForm = events.find((e) => e.event === 'layer-result' && e.layer === 'suite-form');
+  assert.equal(suiteForm.status, 'green');
+  assert.equal(suiteForm.mode, undefined);
+  // And the carried layer names the tree its green was earned at.
+  const carried = record.spectrum.find((r) => r.layer === 'docs-lint');
+  assert.equal(carried.carriedFrom, 'base');
+  assert.equal(carried.status, 'green');
+  const launched = events.find((e) => e.event === 'run-launched');
+  assert.equal(carried.baseSha, launched.baseSha ?? carried.baseSha);
+  const stamp = events.find((e) => e.event === 'layer-result' && e.layer === 'docs-lint');
+  assert.equal(stamp.mode, 'carried');
+  assert.equal(stamp.elapsedMs, undefined);
+  assert.ok(!events.some((e) => e.event === 'layer-started' && e.layer === 'docs-lint'));
+});
+
+test('a project with no setup layer keeps the full sweep, and the record says why', async (t) => {
+  const fx = verdictFixture(t, {
+    gates: FOOTPRINT_GATES.map(({ setup, ...layer }) => layer),
+    seats: { dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }), ...furyClean() },
+    seedExtra: (ctx) => certifyLaunchBase(ctx),
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  const render = events.filter((e) => e.event === 'verdict-rendered').at(-1);
+  assert.equal(render.sweep, 'full');
+  assert.equal(render.reason, 'no-setup-layer');
+  assert.equal(readRecord(fx.paths, runId, 1).reason, 'no-setup-layer');
+  // Every layer ran, and nothing carried.
+  assert.deepEqual(
+    readRecord(fx.paths, runId, 1).spectrum.map((r) => r.mode),
+    ['run', 'run', 'run', 'run'],
+  );
+});

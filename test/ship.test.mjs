@@ -5215,3 +5215,54 @@ test('a body edit rides a file too', async () => {
   assert.deepEqual(out, { edited: true });
   assert.equal(content, body);
 });
+
+// -- what the branch is certified for ----------------------------------------
+
+test('a ship certifies the branch it moved, layer by layer, on the instance ledger', async (t) => {
+  const fx = shipFixture(t);
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const merged = events.find((e) => e.event === 'merged');
+  const stamps = readEvents(fx.paths.instanceLedger).filter((e) => e.event === 'base-certified');
+  // One per ship, whatever brings the close-out back.
+  assert.equal(stamps.length, 1);
+  const [stamp] = stamps;
+  assert.equal(stamp.project, 'proj');
+  assert.equal(stamp.runId, runId);
+  // The sha the default branch became, and never the run's own head.
+  assert.equal(stamp.sha, merged.mergeSha);
+  assert.deepEqual(
+    stamp.layers.map((row) => [row.name, row.status, row.mode, row.verdict]),
+    [['unit', 'green', 'run', 'verdict-1.json']],
+  );
+  // What the layer cost, so a seat bound has a duration to measure against.
+  assert.ok(stamp.layers[0].elapsedMs > 0, 'the certification carries no duration');
+});
+
+test('a lane that renders no code verdict certifies nothing', async (t) => {
+  // The records lane holds no code certification, and a stamp from it would
+  // claim one for every layer of the project.
+  const fx = recordsLaneFixture(t, {
+    seats: {
+      'record-author': () => ({
+        files: { [ADR_FILE]: ADR_REWRITTEN },
+        report: { rewritten: [ADR_FILE], unchanged: [], summary: 'the record states what stands' },
+      }),
+      'record-review': reviewClean,
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch({ lane: 'records', ticket: 'tickets/records.md', card: undefined });
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!events.some((e) => e.event === 'verdict-rendered'));
+  assert.deepEqual(
+    readEvents(fx.paths.instanceLedger).filter((e) => e.event === 'base-certified'),
+    [],
+  );
+});

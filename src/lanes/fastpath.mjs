@@ -244,6 +244,13 @@ function readableModes(srcMode, dstMode) {
  * plan named and carries or skips the rest, so a layer a record-only cycle
  * left out keeps the green it earned, and the record it earned it on is the
  * one holding its declaration (`priorStatus` in spectrum.mjs).
+ *
+ * A layer that carried the default branch's own certification is such a green,
+ * and it stands here on the project's config ground alone. Its part table is
+ * another run's, and a part's declared inputs do not survive into a verdict
+ * record, so no part-level ground can be read across the two runs. The config
+ * ground is the claim the carry itself was taken on, so this asks the same
+ * question of it and names the tree each carried green was earned at.
  * @param {Array<{name: string, ground?: string[]}>} layers the project's
  *   Tier-1 layers
  * @param {Map<string, object>} prior each layer's standing `layer-result`
@@ -275,11 +282,18 @@ export function declaredGround(
   // `declarationSources`: their markers come out of the run's own tree, and a
   // config ground is produced in no tree at all (item 6a of ADR-0056).
   const selfDeclaring = [];
+  // The layers whose green was earned at another tree, with that tree. One
+  // certification can then rest on several shas, and the record says which layer
+  // rests on which.
+  const carried = [];
   const counts = { declared: 0, config: 0 };
   for (const layer of layers) {
     const record = prior.get(layer.name);
     if (!record || record.status !== 'green') {
       return refusal('no-standing-green', `no green result stands for layer ${layer.name}`);
+    }
+    if (record.mode === 'carried' && typeof record.baseSha === 'string') {
+      carried.push({ layer: layer.name, sha: record.baseSha });
     }
     const ground = layerGround(layer, record, breadth, recordPaths);
     // The part refusal comes first, because it is the narrower diagnosis: a
@@ -320,6 +334,7 @@ export function declaredGround(
     entries: [...entries].sort(),
     ground: groundLines.sort(),
     selfDeclaring,
+    carried: carried.sort((a, b) => a.layer.localeCompare(b.layer)),
     counts,
   };
 }
@@ -1010,6 +1025,10 @@ export function fastPathVerdict({
         // verdict's own sha, because that is the execution the declarations
         // came out of.
         sha: certification.sha,
+        // Except for a layer that carried the default branch's certification.
+        // Its green was earned at that tree, this run executed none of it, and a
+        // single sha over the whole declaration would say otherwise.
+        ...(declared.carried.length > 0 && { carried: declared.carried }),
         digest: declarationDigest({
           suites: declared.suites,
           entries: declared.entries,

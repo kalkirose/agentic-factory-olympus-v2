@@ -124,7 +124,9 @@ import {
   answerCount,
   passOpeningSha,
   sweepSkippedAfter,
+  verdictRecordFile,
 } from './verdict.mjs';
+import { priorStatus } from './spectrum.mjs';
 import {
   ACTOR,
   loadProjectConfig,
@@ -2008,6 +2010,9 @@ function closeOutHandler({ forgeFor, pollMs, enqueueRepair }) {
     if (base.storyLane && !runEvents(ctx).some((e) => e.event === 'card-sweep')) {
       await cardSweep(ctx, base, merged);
     }
+    // What the branch is certified for now that this run has moved it. Every
+    // lane, because every lane that ships moves the branch.
+    baseCertified(ctx, merged);
     // The close judges no reconciliation: the judgment ran before the ship, and
     // the records it owed rode this merge or they did not. What is left here is
     // the ticket for the ones that did not, which names the merge commit and so
@@ -2051,6 +2056,57 @@ function closeOutHandler({ forgeFor, pollMs, enqueueRepair }) {
       },
     };
   };
+}
+
+/**
+ * What stood green at the sha the default branch became, written once per ship
+ * on the instance ledger.
+ *
+ * Instance-scoped because it is a statement about the branch and not about the
+ * run: the run that writes it archives, and the runs that read it are the ones
+ * launched after it. Two readers. A seat bound asks what one layer costs on the
+ * clock. A first verdict cycle asks whether a layer has already answered for the
+ * tree under it, and carries it where the run's own diff leaves its ground alone.
+ *
+ * The layers are every layer's standing result at the certified cycle, and not
+ * that cycle's own stamps alone: a cycle runs the layers its plan named and
+ * carries or skips the rest, so a layer an earlier cycle earned is certified on
+ * the record that earned it. `mode` says which of the two it was, and a carry
+ * carries no duration, because it spent none. The record travels as a file name:
+ * the run directory is renamed at the archive, and a stamped path is dead at the
+ * first read.
+ *
+ * A lane that rendered no green verdict certifies nothing. The records lane is
+ * that lane: it holds no code certification, and a stamp from it would claim one.
+ */
+function baseCertified(ctx, merged) {
+  if (typeof merged.mergeSha !== 'string') return;
+  const events = runEvents(ctx);
+  const render = [...events]
+    .reverse()
+    .find((e) => e.event === 'verdict-rendered' && e.verdict === 'green');
+  if (!render) return;
+  // Re-entrant close-out: the stamp is the marker. One per run, whatever brings
+  // the stage back.
+  const written = readEvents(ctx.paths.instanceLedger).some(
+    (e) => e.event === 'base-certified' && e.runId === ctx.runId,
+  );
+  if (written) return;
+  const layers = [...priorStatus(events, render.cycle + 1).values()].map((result) => ({
+    name: result.layer,
+    status: result.status,
+    elapsedMs: result.elapsedMs ?? null,
+    mode: result.mode === 'carried' ? 'carried' : 'run',
+    verdict: verdictRecordFile(result.cycle),
+  }));
+  if (layers.length === 0) return;
+  ctx.instanceStore?.append('base-certified', {
+    actor: ACTOR,
+    project: ctx.project,
+    runId: ctx.runId,
+    sha: merged.mergeSha,
+    layers,
+  });
 }
 
 // -- red-merge breach --------------------------------------------------------
