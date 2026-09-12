@@ -12,8 +12,8 @@ Status: under construction. [BUILD.md](BUILD.md) is the build tracker.
 ## What it does
 
 - Runs a story as one **continuous run**: spec birth → records → suite →
-  adversary → freeze → implementation → verdict → reconcile → ship. Stages are
-  internal states of the run, never separately invoked phases.
+  freeze → implementation → verdict → reconcile → ship. Stages are internal
+  states of the run, never separately invoked phases.
 - Runs a defect or chore through the **repair lane**: fix, regression test,
   deterministic gates, one review, ship. There is no ungated path to main.
 - Runs a decision-record change through the **records lane**: the ticket is the
