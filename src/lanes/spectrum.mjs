@@ -20,7 +20,7 @@
 // default branch has already proven: a layer the branch holds a certification
 // for, whose ground the run's own diff leaves alone, carries that certification
 // instead of running. Everything else runs, and so does every layer the project
-// declares a setup layer, whatever the diff says of its ground — a setup layer
+// declares a setup layer, whatever the diff says of its ground. A setup layer
 // builds the tree the layers after it read, and a certification of another tree
 // does not stand in for that. Doubt buys the whole spectrum: no setup layer
 // declared, a layer with no ground, no certification of the base, a diff git
@@ -1276,9 +1276,9 @@ export function groundedLayers(
  *
  * A setup layer runs whatever the diff and the certification say, and its
  * dependents are NOT pulled in with it. A setup layer produces the tree the
- * layers after it read — installed modules, a build output — and that tree is
- * not in the repository, so no certification of another run's host stands in for
- * it. That is a statement about this host and not about the diff, so it widens
+ * layers after it read: installed modules, a build output. That tree is not in
+ * the repository, so no certification of another run's host stands in for it.
+ * The rule is a statement about this host and not about the diff, so it widens
  * nothing beyond the layer itself.
  *
  * A record path is attributed by the project, exactly as it is in

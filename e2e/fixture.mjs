@@ -82,9 +82,10 @@ export const PROJECT_CONFIG = {
     // Every layer states what its command reads, so the first cycle of a run
     // can be the footprint of that run's own diff. `lint` reads the sources,
     // `suite` reads the sources and the tests, and `smoke` boots what the
-    // sources build. The one setup layer is what arms the footprint at all: a
-    // project that declares none has not said which layers make the others
-    // runnable, and the cycle runs everything.
+    // sources build. The smoke layer is also this project's setup layer, which
+    // is what arms the footprint at all: a project that names none has not said
+    // which layers make the others runnable, and every cycle of it runs
+    // everything.
     tier1: [
       { name: 'lint', command: 'lint', ground: ['src'] },
       { name: 'suite', command: 'suite', ground: ['src', 'tests'] },
