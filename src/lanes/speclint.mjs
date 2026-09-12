@@ -350,7 +350,66 @@ export function lintSpec(
       }
     }
   }
+
+  // (n) a card that names a dependency makes the spec declare that importer's
+  // manifest.
+  //
+  // The card grants the package; the manifest is where the grant is spent. A
+  // story that adds a dependency and declares no manifest reaches the capture
+  // with a file the diff policy admits only when the spec declares it, spends
+  // a corrective round on it, and parks. The card already said what the answer
+  // is, so the lint says it here instead.
+  for (const manifest of unique(
+    (card?.dependencies ?? []).map((d) => importerManifest(d.importer)),
+  )) {
+    if (declared.has(manifest)) continue;
+    defects.push(
+      `the card names a dependency the story adds, and the touched-paths block does not list ` +
+        `${manifest}; a story that adds a dependency writes that importer's manifest, so the ` +
+        'spec declares it.',
+    );
+  }
+
+  // (o) no structured entry names a path the lane may never ship, or one it
+  // ships only for the dependency the card names.
+  //
+  // Rule (h) asks this of the forbidden patterns; these are the other two
+  // classes no spec may plan. The denied tier is the plain case: no run ships
+  // the path, so planning it plans a refusal. The dependency tier takes more
+  // saying. The file does change on a dependency story, and the card is the
+  // whole of the permission, so a spec that lists it claims a permission the
+  // spec cannot hold and the capture judges the file's bytes either way.
+  const shut = [
+    ...(tier?.deniedPaths ?? []).map((entry) => ({ entry, tierName: 'deniedPaths' })),
+    ...(tier?.dependencyPaths ?? []).map((entry) => ({ entry, tierName: 'dependencyPaths' })),
+  ];
+  for (const path of unique([
+    ...block.entries.map((e) => e.path),
+    ...mappings.map((m) => m.path),
+    ...supersedes.filter((s) => s.disposition === 'supersede').map((s) => s.path),
+  ])) {
+    const hit = shut.find((s) => underEntry(path, s.entry));
+    if (!hit) continue;
+    defects.push(
+      hit.tierName === 'deniedPaths'
+        ? `the spec plans to touch ${path}, which the diff policy denies to this lane ` +
+          `(deniedPaths: ${hit.entry}); no run ships it, so no spec may plan it.`
+        : `the spec plans to touch ${path}, which the diff policy admits only for the ` +
+          `dependency the card names (dependencyPaths: ${hit.entry}); the card's Dependencies ` +
+          'section is the whole of that permission, so no spec lists the path.',
+    );
+  }
   return defects;
+}
+
+/**
+ * The manifest of one workspace importer. The importer is the key the
+ * lockfile spells, so the root is `.` and its manifest sits at the repo root
+ * with no directory in front of it.
+ */
+function importerManifest(importer) {
+  const key = String(importer ?? '').replace(/\/+$/, '');
+  return key === '.' || key.length === 0 ? 'package.json' : `${key}/package.json`;
 }
 
 /**

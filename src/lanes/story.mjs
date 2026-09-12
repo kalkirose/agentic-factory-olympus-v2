@@ -1467,7 +1467,10 @@ async function laneBase(ctx) {
     componentsRoot: config.repo.componentsRoot ?? null,
     // The lane's diff policy. The spec lint judges the paths the spec plans
     // against the same tiers the candidate capture judges the diff against, so
-    // a spec cannot plan a path the capture would refuse.
+    // a spec cannot plan a path the capture would refuse. The dependency tier
+    // is the one the capture judges by content: the card carries the
+    // permission, so the lint refuses a spec that plans the file and requires
+    // the manifest of every importer the card names.
     tier: laneDiffPolicy(config, 'story'),
     // The card decides a frozen-surface collision unless the project says
     // otherwise. `false` restores the old default, where every collision is an

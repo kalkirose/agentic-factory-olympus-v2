@@ -277,6 +277,55 @@ test('a gate layer may declare what its process tree is allowed to hold', () => 
   assert.equal(withProjectDefaults(valid()).gates.tier1[0].memoryCeilingMb, undefined);
 });
 
+test('a gate layer may declare that it is what makes the others runnable', () => {
+  // An install, a generated client, a built image. A reader that scopes work
+  // by the footprint of a diff takes such a layer whatever the diff touches,
+  // and it takes it by this declaration: the layer's ground says which files
+  // it reads and says nothing about which layers cannot run without it.
+  const config = valid();
+  config.gates.tier1[0].setup = true;
+  assert.deepEqual(validateProjectConfig(config), []);
+  for (const bad of ['yes', 1, null]) {
+    const wrong = valid();
+    wrong.gates.tier1[1].setup = bad;
+    assert.deepEqual(errorPaths(wrong), ['gates.tier1[1].setup'], String(bad));
+  }
+  // Absent is false, and no default is filled in: a layer that only proves
+  // something declares nothing.
+  assert.equal(withProjectDefaults(valid()).gates.tier1[0].setup, undefined);
+});
+
+// A run pins its project config at launch, so a config merge leaves two
+// shapes in flight at once: the blob a run pinned before it and the file
+// every launch after it reads. One validator parses both, or the merge
+// strands the runs on one side of it.
+test('both sides of a config merge parse under one validator', () => {
+  const pinned = valid();
+  pinned.tripwires.push({
+    id: 'kill-rate-floor',
+    metric: 'kill-rate',
+    window: 5,
+    breach: { op: '<', value: 1 },
+    answer: 'review the suite authoring',
+  });
+  pinned.diffPolicy = { story: { deniedPaths: ['pnpm-lock.yaml', 'pnpm-workspace.yaml'] } };
+  assert.deepEqual(validateProjectConfig(pinned), []);
+
+  const merged = valid();
+  merged.tripwires = [];
+  merged.gates.tier1 = [
+    { name: 'install', command: 'lint', ground: ['pnpm-lock.yaml'], setup: true },
+    { name: 'test', command: 'test', needs: ['install'], ground: ['src'] },
+  ];
+  merged.diffPolicy = {
+    story: {
+      deniedPaths: ['pnpm-workspace.yaml', '**/.npmrc'],
+      dependencyPaths: ['pnpm-lock.yaml'],
+    },
+  };
+  assert.deepEqual(validateProjectConfig(merged), []);
+});
+
 test('a project may turn part-level carrying off, and only with a boolean', () => {
   // The fallback path of ADR-0046. Absent is the decision — the harness
   // carries a part a diff cannot reach — and `false` returns every layer to a
