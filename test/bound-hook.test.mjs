@@ -215,6 +215,29 @@ test('a command that names no layer passes', (t) => {
   assert.match(result.stdout, /^olympus-bound [0-9a-f]{64}\n$/);
 });
 
+test('a bound that names no layer passes every command, and reads no tree', (t) => {
+  const { boundPath } = fixture(t, {
+    committed: API_EDIT,
+    // A base no repository holds: nothing matches, so nothing is diffed.
+    bound: { layers: [], suite: null, baseSha: 'not-a-commit' },
+  });
+  const result = runHook(boundPath, { command: 'pnpm run test:storefront' });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^olympus-bound [0-9a-f]{64}\n$/);
+});
+
+test('a tool input that carries no command names no layer', (t) => {
+  const { boundPath } = fixture(t, { committed: API_EDIT });
+  const call = { hook_event_name: 'PreToolUse', tool_name: 'REPL', tool_input: { code: '1 + 1' } };
+  const result = spawnSync(process.execPath, [HOOK, boundPath], {
+    input: JSON.stringify(call),
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^olympus-bound [0-9a-f]{64}\n$/);
+});
+
 test('every refusal appends one line beside the bound file', (t) => {
   const { boundPath } = fixture(t, { committed: API_EDIT, bound: { seat: 'dev-1' } });
   runHook(boundPath, { command: 'pnpm run test:storefront' });
