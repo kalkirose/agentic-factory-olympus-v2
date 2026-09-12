@@ -152,16 +152,23 @@ export function parseClaudeLine(line) {
  * pass. A `hook_started` line is not evidence — the host's own settings raise
  * one for the same event.
  *
- * The first command tool call of the stream settles it. Its `tool_result`
- * closes the window: a marker inside the window is the proof, and no marker is
- * the miss. A seat that runs no command has no bound to prove and answers
- * neither way.
+ * A command that ran settles it. The proof is the marker beside that command;
+ * no marker beside a command that ran is the miss, because a loaded hook
+ * answers every command tool call.
+ *
+ * A command a hook denied settles nothing, and the next one is read instead. A
+ * hook refusing is how the bound works, and a refusal carries the reason on
+ * stderr rather than the marker on stdout; a call some other hook of the host
+ * denied never reached this one. Either way nothing unbounded ran, which is the
+ * whole of what this answers. A denial is read from the hook's own exit code,
+ * so no reading here rests on a message anybody writes.
  *
  * @returns {(line: string) => boolean} true on the one line that proves the miss
  */
 export function boundLoadProof() {
   let awaiting = null;
   let marked = false;
+  let denied = false;
   let settled = false;
   return function read(line) {
     if (settled || !line.trim()) return false;
@@ -182,6 +189,7 @@ export function boundLoadProof() {
     if (awaiting === null) return false;
     if (parsed.type === 'system' && parsed.subtype === 'hook_response') {
       if (firstWord(parsed.stdout) === BOUND_MARKER) marked = true;
+      if (parsed.exit_code !== 0) denied = true;
       return false;
     }
     if (parsed.type === 'user') {
@@ -189,6 +197,12 @@ export function boundLoadProof() {
         (b) => b?.type === 'tool_result' && (awaiting === '' || b.tool_use_id === awaiting),
       );
       if (!closes) return false;
+      if (denied) {
+        awaiting = null;
+        marked = false;
+        denied = false;
+        return false;
+      }
       settled = true;
       return !marked;
     }

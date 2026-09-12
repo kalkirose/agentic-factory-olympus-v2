@@ -1655,3 +1655,62 @@ test('a seat with no bound spawns exactly as it did before one existed', async (
   assert.ok(!events.some((e) => e.event === 'seat-bound'));
   assert.ok(!events.some((e) => e.event === 'seat-failure'));
 });
+
+test('a command a hook denied says nothing about the load, and the next one answers', async (t) => {
+  const { paths, store } = setup(t, 'blocked');
+  const reportPath = runReportPath(paths, 'blocked', 'dev-1');
+  const { settingsPath, boundPath } = boundFiles(paths, 'blocked');
+  const refused = [
+    initLine(DEFAULT_MODEL),
+    {
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'tool_use', id: 'toolu-0', name: 'Bash', input: { command: 'npm run e2e' } },
+        ],
+      },
+    },
+    // The bound refusing is how the bound works: the refusal carries the reason
+    // on stderr rather than the marker on stdout, and the denial is the hook's
+    // own exit code.
+    {
+      type: 'system',
+      subtype: 'hook_response',
+      hook_id: 'h0',
+      stdout: '',
+      stderr: 'e2e is outside your bound: the diff does not touch its ground. The verdict runs it.\n',
+      exit_code: 2,
+      outcome: 'error',
+    },
+    {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu-0',
+            content: 'PreToolUse:Bash hook error',
+            is_error: true,
+          },
+        ],
+      },
+    },
+  ];
+  const result = await runSeat(store, {
+    sleep: NO_WAIT,
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    settings: { bound: BOUND, settingsPath, boundPath },
+    commandFor: () =>
+      claudeFixtureCommand({
+        report: { verdict: 'pass' },
+        reportPath,
+        lines: [...refused, ...commandStream(true)],
+      }),
+  });
+  assert.equal(result.ok, true);
+  assert.ok(!readEvents(runLedgerPath(paths, 'blocked')).some((e) => e.event === 'seat-failure'));
+});
