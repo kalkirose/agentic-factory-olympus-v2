@@ -537,7 +537,15 @@ async function preVerdictUpdate(ctx, base) {
     toSha: out.toSha,
     ...(decision.code && { code: { answer: decision.code.answer, files: decision.code.files ?? [] } }),
     ...(decision.records && {
-      records: { answer: decision.records.answer, files: decision.records.files ?? [] },
+      records: {
+        answer: decision.records.answer,
+        // Why the records answer reads as it does. The two questions are
+        // answered apart, so a records answer can stand where the code answer
+        // fell, and a stamp that says `kept` without a reason cannot tell a
+        // carry the reconciliation earned from one it was handed.
+        ...(decision.records.reason && { reason: decision.records.reason }),
+        files: decision.records.files ?? [],
+      },
     }),
     ...(!certified && uncertified),
   });

@@ -295,6 +295,7 @@ function recordReview() {
               criterion: 'truth',
               severity: 'HIGH',
               file: record,
+              ground: [record],
               unit: target.id,
               head: target.head,
               line: 1,

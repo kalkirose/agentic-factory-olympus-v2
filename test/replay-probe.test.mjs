@@ -388,6 +388,7 @@ test('the Fury verifier spends a round the same way triage does', async (t) => {
       {
         lens: 'security',
         severity: 'HIGH',
+        ground: ['src/pay.mjs'],
         finding: 'the token check is skipped when the provider is absent',
         evidence: 'src/pay.mjs:41',
       },

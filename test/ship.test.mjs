@@ -785,6 +785,7 @@ function reviewRemarks() {
       criterion: 'truth',
       severity,
       file: ADR_FILE,
+      ground: [ADR_FILE, 'src/feature.mjs'],
       unit: target.id,
       head: target.head,
       line: 1,
@@ -1065,6 +1066,7 @@ function reviewStanding() {
             criterion: 'truth',
             severity: 'HIGH',
             file: ADR_FILE,
+            ground: [ADR_FILE, 'src/feature.mjs'],
             unit: target.id,
             head: target.head,
             line: 1,
@@ -3577,6 +3579,44 @@ test('the resume routes on what the ledger proves, never on merge idempotence', 
     code: null,
     records: { sha: RECORDS, ok: true },
   });
+});
+
+/** The fast-path fixture on a lane that also reconciles a record. */
+function carryingReconcileFixture(t) {
+  return shipFixture(t, {
+    files: { [ADR_FILE]: ADR_TEXT, '.olympus/suite.mjs': DECLARING_SUITE },
+    seats: reconcileSeats(),
+    config: {
+      repo: { testPaths: ['tests'], recordPaths: ['docs/adr'] },
+      commands: { suite: ['node', '.olympus/suite.mjs'] },
+      gates: {
+        tier1: [{ name: 'unit', command: 'suite', ground: ['src'] }],
+        fastPathShip: true,
+        breadthGround: ['package-lock.json'],
+        inertGround: ['docs'],
+      },
+    },
+  });
+}
+
+test('a records answer that stands says why it stands', async (t) => {
+  // Two certifications, one moved base, two answers. The merge is a document
+  // outside the record tree, so neither question is touched by it, and the
+  // records answer carries the reason it stands: no record this run rests on
+  // moved. A stamp that said `kept` and nothing else could not tell that
+  // apart from a reconciliation nobody asked about (ADR-0075).
+  const fx = carryingReconcileFixture(t);
+  const { events } = await shipOverMerge(
+    fx,
+    { 'docs/note.md': 'unrelated main work\n' },
+    'docs: a note',
+  );
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const fast = events.find((e) => e.event === 'fast-path-ship');
+  assert.equal(fast.taken, true, `the fast path refused: ${fast.refusal} (${fast.detail})`);
+  const update = events.find((e) => e.event === 'pre-verdict-update' && e.ran);
+  assert.deepEqual(update.code, { answer: 'kept', files: [] });
+  assert.deepEqual(update.records, { answer: 'kept', reason: 'no-record-moved', files: [] });
 });
 
 test('a project that declares no breadth ground never fast-paths', async (t) => {

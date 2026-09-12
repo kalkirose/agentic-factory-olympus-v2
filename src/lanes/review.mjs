@@ -44,8 +44,9 @@
 // lane seats never reach it — they judge a diff (ADR-0042).
 import { join } from 'node:path';
 import { runReportPath } from '../daemon/home.mjs';
-import { recordPathIncludes } from '../config/project.mjs';
+import { groundEntry, recordPathIncludes } from '../config/project.mjs';
 import {
+  FINDING_GROUND_DUTY,
   LENS_CRITERIA,
   RECORD_CRITERION_KEYS,
   RECORD_LENS,
@@ -92,6 +93,11 @@ const SEVERITIES = Object.freeze(['HIGH', 'MED', 'LOW']);
  * No record enters it. A record is judged by the record round, which has its
  * own seat, its own brief and its own schema, so a code lens carries the
  * panel's lenses and nothing else (ADR-0073).
+ *
+ * `ground` is the paths the finding rests on, and the shape can say no more
+ * than that it is a list of strings: the flat subset carries no `minItems`
+ * (`src/seats/contract.mjs`), so the seat's check loop is what holds the list
+ * non-empty and holds every entry to a path this repository can compare.
  */
 export function reviewSchema(lenses) {
   return {
@@ -107,11 +113,12 @@ export function reviewSchema(lenses) {
             lens: { type: 'string', enum: [...lenses] },
             severity: { type: 'string', enum: [...SEVERITIES] },
             file: { type: 'string' },
+            ground: { type: 'array', items: { type: 'string' } },
             finding: { type: 'string' },
             evidence: { type: 'string' },
             approach: { type: 'boolean' },
           },
-          required: ['lens', 'severity', 'finding', 'evidence'],
+          required: ['lens', 'severity', 'ground', 'finding', 'evidence'],
         },
       },
       summary: { type: 'string' },
@@ -156,6 +163,7 @@ export function recordReviewSchema() {
             criterion: { type: 'string', enum: [...RECORD_CRITERION_KEYS] },
             severity: { type: 'string', enum: [...SEVERITIES] },
             file: { type: 'string' },
+            ground: { type: 'array', items: { type: 'string' } },
             unit: { type: 'string' },
             head: { type: 'string' },
             line: { type: 'integer' },
@@ -172,6 +180,7 @@ export function recordReviewSchema() {
             'criterion',
             'severity',
             'file',
+            'ground',
             'unit',
             'head',
             'line',
@@ -199,6 +208,12 @@ export const VERIFIER_SCHEMA = {
           id: { type: 'string' },
           verdict: { type: 'string', enum: ['confirmed', 'refuted', 'resolved', 'unresolved'] },
           evidence: { type: 'string' },
+          // The files this seat's own evidence reads. It replaces the review
+          // seat's ground on a confirmed finding, because the verifier read the
+          // code and the review seat read a diff: advisory ground is the lens's
+          // word, and a confirmed finding's ground is the word of the seat that
+          // proved it.
+          ground: { type: 'array', items: { type: 'string' } },
           approach: { type: 'boolean' },
         },
         required: ['id', 'verdict', 'evidence'],
@@ -237,14 +252,11 @@ export async function furyRound(ctx, base, { cycle, diff, diffFiles }) {
   );
   const outcomes = await Promise.all(
     seats.map((seat) =>
-      reviewSeat(ctx, {
+      codeReviewSeat(ctx, base, {
         seat,
         label: `${seat}-c${cycle}`,
         schema: reviewSchema(panel[seat]),
-        roleBlock: furyRole(panel[seat], base, diff, supersedes),
-        cwd: base.worktree,
-        env: base.env,
-        constitution: base.constitution,
+        buildRole: (brief) => furyRole(panel[seat], base, diff, supersedes, brief),
       }),
     ),
   );
@@ -277,14 +289,12 @@ function codeOnly(base, diffFiles) {
  * small fix costs one review agent.
  */
 export async function generalistReview(ctx, base, { cycle, diff, priorConfirmed }) {
-  const outcome = await reviewSeat(ctx, {
+  const supersedes = authorizedSupersedes(runEvents(ctx));
+  const outcome = await codeReviewSeat(ctx, base, {
     seat: 'generalist-review',
     label: `generalist-review-c${cycle}`,
     schema: reviewSchema(base.lenses),
-    roleBlock: generalistRole(base, diff, authorizedSupersedes(runEvents(ctx))),
-    cwd: base.worktree,
-    env: base.env,
-    constitution: base.constitution,
+    buildRole: (brief) => generalistRole(base, diff, supersedes, brief),
   });
   if (outcome.fail) return { fail: outcome.fail };
   const collected = outcome.report.findings.map((f) => ({ ...f, source: 'generalist-review' }));
@@ -452,7 +462,70 @@ function recordSeatDefects(base, record, report) {
     file: repoRelative(f.file, base.worktree) ?? record,
     ...(f.file2 && { file2: repoRelative(f.file2, base.worktree) ?? f.file2 }),
   }));
-  return findingRefusals(base, findings).map((r) => r.defect);
+  return [
+    ...groundDefects(base, findings),
+    ...findingRefusals(base, findings).map((r) => r.defect),
+  ];
+}
+
+/**
+ * The ground every finding owes, and the refusal for one that owes it still.
+ *
+ * The list is held non-empty here rather than in the schema, because the flat
+ * subset carries no `minItems` (`src/seats/contract.mjs`). Each entry is held
+ * to a path this repository can compare: a seat writes the path it was
+ * reading, so the worktree prefix comes off first, and a name that will not
+ * canonicalise is a declaration that matches nothing wearing a declaration's
+ * clothes.
+ *
+ * On the records lane nothing reads the result: a record finding reaches no
+ * verdict record, and the lane holds no code certification. The duty is the
+ * same anyway, because the ledger and the eval count these fields across
+ * lanes, and a field carried by one seat and not another counts as nothing.
+ */
+function groundDefects(base, findings) {
+  const defects = [];
+  for (const [index, finding] of findings.entries()) {
+    const label = findingLabel(finding, index);
+    const raw = Array.isArray(finding.ground) ? finding.ground : [];
+    if (raw.length === 0) {
+      defects.push(
+        `finding ${label} names no ground. Put the repo-relative paths or directories the ` +
+          'finding is about in "ground". A finding about a package names the manifest that ' +
+          'declares it or the file that imports it.',
+      );
+      continue;
+    }
+    const bad = raw.filter((entry) => groundOf(entry, base.worktree) === null);
+    if (bad.length > 0) {
+      defects.push(
+        `finding ${label} states ground this repository cannot read: ${bad.join(', ')}. Every ` +
+          'entry is a path inside the repository, written as the repository names it.',
+      );
+    }
+  }
+  return defects;
+}
+
+/** One ground entry as a path entry is written, or null for one that will not compare. */
+function groundOf(entry, worktree) {
+  const relative = repoRelative(entry, worktree);
+  return relative === null ? null : groundEntry(relative);
+}
+
+/** Every readable ground entry of a finding, deduped, in the form a path entry is written. */
+function findingGround(finding, worktree) {
+  const raw = Array.isArray(finding?.ground) ? finding.ground : [];
+  return [...new Set(raw.map((entry) => groundOf(entry, worktree)).filter((e) => e !== null))];
+}
+
+/**
+ * How a refusal names one finding back to the seat that raised it. A record
+ * seat labels its own findings and a code lens does not, so the position in
+ * the report is the last address left: it is what the seat can find again.
+ */
+function findingLabel(finding, index) {
+  return finding.id ?? finding.unit ?? recordPathOf(finding) ?? `#${index + 1}`;
 }
 
 /**
@@ -472,8 +545,8 @@ function recordSeatDefects(base, record, report) {
  */
 function findingRefusals(base, findings) {
   const refusals = [];
-  for (const finding of findings) {
-    const id = finding.id ?? finding.unit ?? recordPathOf(finding) ?? 'a finding';
+  for (const [index, finding] of findings.entries()) {
+    const id = findingLabel(finding, index);
     if (finding.criterion === 'consistent' && !secondRecordOf(finding)) {
       refusals.push({
         finding,
@@ -665,6 +738,10 @@ async function settleFindings(
         evidence: e.evidence,
         confirmed: true,
         ...(e.file && { file: e.file }),
+        // The ground the finding rests on. The fast path reads it off the
+        // verdict record at the next moved base, and a finding rebuilt without
+        // it is a finding the ladder can only answer by re-judging everything.
+        ...(e.ground?.length > 0 && { ground: e.ground }),
         ...(e.record && { record: true }),
         ...(e.criterion && { criterion: e.criterion }),
         // The place a record finding names, both sides of it. A corrective
@@ -689,6 +766,11 @@ async function settleFindings(
     const f = verifiable[i];
     const result = results.get(`new-${i + 1}`);
     const isConfirmed = result?.verdict === 'confirmed';
+    // The verifier's own ground on a confirmed finding. It read the code and
+    // the review seat read a diff, so the seat that proved the finding is the
+    // one whose word the ladder carries. A verifier that states none leaves
+    // the seat's, and a refuted finding is nobody's claim about the tree.
+    const verified = isConfirmed ? findingGround(result, base.worktree) : [];
     const finding = {
       id: `F${nextId++}`,
       source: f.source,
@@ -697,6 +779,7 @@ async function settleFindings(
       summary: sentenceOf(f),
       evidence: f.evidence,
       ...f.place,
+      ...(verified.length > 0 && { ground: verified }),
       ...(f.record && { record: true, ...(f.criterion && { criterion: f.criterion }) }),
       approach: isConfirmed && (result.approach ?? f.approach ?? false),
       confirmed: isConfirmed,
@@ -831,11 +914,17 @@ export function recordFields(f) {
 function findingPlace(finding, allowlist, worktree) {
   const path = repoRelative(finding.file, worktree);
   const second = repoRelative(finding.file2, worktree);
+  const ground = findingGround(finding, worktree);
   return {
     ...(path !== null && {
       file: path,
       ...(underAny(path, allowlist) && { allowlist: true }),
     }),
+    // The ground rides the place for the same reason the file does, and it is
+    // brought to the same form: the fast path compares it against the files a
+    // merge brought in, and a comparison of two spellings is not a comparison
+    // of two paths.
+    ...(ground.length > 0 && { ground }),
     ...recordFields({ ...finding, file2: second }),
   };
 }
@@ -866,6 +955,11 @@ function stampReviewFinding(ctx, cycle, finding, { advisory, diffTruncated = fal
     evidence: gist(finding.evidence),
     ...(finding.file && { file: finding.file }),
     ...(finding.allowlist && { allowlist: true }),
+    // The paths the finding rests on. The fast path asks one question of a
+    // moved base per finding, whether the branch touched this ground, and a
+    // finding stamped without it can only be answered by re-judging the whole
+    // tree, which is the cost this field exists to remove (ADR-0056).
+    ...(finding.ground?.length > 0 && { ground: finding.ground }),
     // The record word and the criterion it fails, assigned here against the
     // project's declared record paths and the seat that raised it, and never
     // read back out of the sentence the seat wrote. Every reader of the ledger
@@ -904,6 +998,34 @@ async function reviewSeat(ctx, { seat, label, schema, roleBlock, cwd, env, const
   const result = await ctx.runSeat({ seat, roleBlock, reportPath, schema, cwd, env, constitution });
   if (!result.ok) return { fail: seatFail(ctx, seat, result) };
   return { report: result.report };
+}
+
+/**
+ * One code review seat: a lens seat of the panel, or the generalist.
+ *
+ * It runs the lane's contract loop, so a report whose findings state no ground
+ * is returned to the seat once and parks the second time. The ground is what
+ * decides whether a finding survives a moved base, and a groundless one costs
+ * every run behind it a whole re-certification, so it is a defect in the work
+ * product and not a claim about the tree.
+ *
+ * `resumeByReport: 0` is the resume this round always had: a report the ledger
+ * holds for this label is this round's answer. The checks judge it again before
+ * it stands, so a stamped report that names no ground is not carried by a
+ * restart.
+ */
+function codeReviewSeat(ctx, base, { seat, label, schema, buildRole }) {
+  return seatWithChecks(ctx, {
+    seat,
+    label,
+    resumeByReport: 0,
+    schema,
+    cwd: base.worktree,
+    env: base.env,
+    constitution: base.constitution,
+    buildRole,
+    checks: (report) => groundDefects(base, report.findings ?? []),
+  });
 }
 
 /**
@@ -998,7 +1120,7 @@ function verifierCoverageDefects(items, results) {
 
 // -- role blocks -------------------------------------------------------------
 
-function furyRole(lenses, base, diff, supersedes = []) {
+function furyRole(lenses, base, diff, supersedes = [], brief = null) {
   return [
     `Review the candidate implementation diff through these lenses, and label every finding with its lens:`,
     ...lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
@@ -1007,12 +1129,14 @@ function furyRole(lenses, base, diff, supersedes = []) {
     'Severity HIGH means the finding must block the ship. Cite evidence (file and line, or spec section) for every finding.',
     'Set "approach": true only when the finding names the implementation structure as wrong against the spec.',
     'Put the repo-relative path of the one file a finding is about in "file"; leave it out for a finding about no single file.',
+    ...FINDING_GROUND_DUTY,
     ...(lenses.includes('spec') ? supersedeDutyLines(base, supersedes) : []),
     ...diffLines(diff),
+    ...briefLines(brief),
   ].join('\n');
 }
 
-function generalistRole(base, diff, supersedes = []) {
+function generalistRole(base, diff, supersedes = [], brief = null) {
   return [
     'Review the diff below through these lenses, and label every finding with its lens:',
     ...base.lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
@@ -1021,8 +1145,10 @@ function generalistRole(base, diff, supersedes = []) {
     'Severity HIGH means the finding must block the ship. Cite evidence (file and line, or spec section) for every finding.',
     'Set "approach": true only when the finding names the implementation structure as wrong against the spec.',
     'Put the repo-relative path of the one file a finding is about in "file"; leave it out for a finding about no single file.',
+    ...FINDING_GROUND_DUTY,
     ...(base.lenses.includes('spec') ? supersedeDutyLines(base, supersedes) : []),
     ...diffLines(diff),
+    ...briefLines(brief),
   ].join('\n');
 }
 
@@ -1144,8 +1270,10 @@ function recordFindingLines(record) {
     `- "file": ${record}. "unit", "head" and "line": the unit it is about, as the list above`,
     '  states them.',
     '- "summary": what is wrong. "evidence": the file and line of the tree that answers it.',
+    `- "ground": ${record}, and every file of the tree your evidence reads.`,
     '- On "consistent" alone: "file2", "unit2" and "head2", the unit of the other record this one',
     '  contradicts. A "consistent" finding that names one record is refused.',
+    ...FINDING_GROUND_DUTY,
     'A finding about a superseded or a retired record is refused: a closed record states what was',
     'known then.',
     'Cite the unit your finding is about. Taste is not a criterion.',
@@ -1226,6 +1354,8 @@ function verifierRole(base, items, brief, probe = null) {
     'For a "confirm" item, the verdict is "confirmed" or "refuted": confirmed only when the code shows the finding.',
     'For a "resolution-check" item, the verdict is "resolved" or "unresolved": resolved only when the code no longer shows the finding.',
     'Set "approach": true on a confirmed finding only when it names the implementation structure as wrong against the spec.',
+    'On a confirmed finding, name the files your own evidence reads in "ground", repo-relative. ' +
+      'It replaces the ground the review seat named: you read the code and that seat read a diff.',
     `The spec: ${base.specRef}`,
     ...recordVerifierLines(items),
     'Items:',

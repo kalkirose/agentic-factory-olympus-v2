@@ -496,7 +496,7 @@ test('a clean implementation ships green in one cycle; advisory findings never b
     'fury-operational': () => ({
       report: {
         findings: [
-          { lens: 'operational', severity: 'MED', finding: 'no retry handling', evidence: 'src/feature.mjs:1' },
+          { lens: 'operational', severity: 'MED', ground: ['src/feature.mjs'], finding: 'no retry handling', evidence: 'src/feature.mjs:1' },
         ],
         summary: 'one advisory',
       },
@@ -570,7 +570,7 @@ test('the constitution reaches the working seats, and the judges get the authori
     'fury-spec': () => ({
       report: {
         findings: [
-          { lens: 'spec', severity: 'HIGH', finding: 'missing platform file', evidence: 'src/feature.mjs:1' },
+          { lens: 'spec', severity: 'HIGH', ground: ['src/feature.mjs'], finding: 'missing platform file', evidence: 'src/feature.mjs:1' },
         ],
         summary: 'one',
       },
@@ -2554,8 +2554,8 @@ test('confirm-to-block: only verifier-confirmed HIGHs enter the verdict, and a c
     'fury-operational': () => ({
       report: {
         findings: [
-          { lens: 'operational', severity: 'HIGH', finding: 'no retry handling', evidence: 'src/feature.mjs:1' },
-          { lens: 'security', severity: 'HIGH', finding: 'injection risk in query', evidence: 'src/feature.mjs:1' },
+          { lens: 'operational', severity: 'HIGH', ground: ['src/feature.mjs'], finding: 'no retry handling', evidence: 'src/feature.mjs:1' },
+          { lens: 'security', severity: 'HIGH', ground: ['src/feature.mjs'], finding: 'injection risk in query', evidence: 'src/feature.mjs:1' },
         ],
         summary: 'two',
       },
@@ -2611,7 +2611,7 @@ test('a project that names the cut lenses gets the code-shape seat back, and it 
     'fury-code-shape': () => ({
       report: {
         findings: [
-          { lens: 'architecture', severity: 'HIGH', finding: 'logic in the wrong layer', evidence: 'src/feature.mjs:1' },
+          { lens: 'architecture', severity: 'HIGH', ground: ['src/feature.mjs'], finding: 'logic in the wrong layer', evidence: 'src/feature.mjs:1' },
         ],
         summary: 'one',
       },
@@ -2656,7 +2656,7 @@ test('stall → fresh pass → second stall parks; abandon closes the run', asyn
     'fury-spec': () => ({
       report: {
         findings: [
-          { lens: 'spec', severity: 'HIGH', finding: 'the criterion is unimplemented', evidence: 'src/feature.mjs:1' },
+          { lens: 'spec', severity: 'HIGH', ground: ['src/feature.mjs'], finding: 'the criterion is unimplemented', evidence: 'src/feature.mjs:1' },
         ],
         summary: 'one',
       },
@@ -2745,6 +2745,7 @@ test('a confirmed approach finding rides the repair brief, and the stall behind 
                 {
                   lens: 'spec',
                   severity: 'HIGH',
+                  ground: ['src/feature.mjs'],
                   finding: 'the implementation structure contradicts the spec',
                   evidence: 'spec section 1',
                   approach: true,
@@ -2752,6 +2753,7 @@ test('a confirmed approach finding rides the repair brief, and the stall behind 
                 {
                   lens: 'spec',
                   severity: 'HIGH',
+                  ground: ['src/feature.mjs'],
                   finding: 'the criterion is unimplemented',
                   evidence: 'src/feature.mjs:1',
                 },
@@ -3304,7 +3306,7 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
     'generalist-review': () => ({
       report: {
         findings: [
-          { lens: 'operational', severity: 'LOW', finding: 'no failure path', evidence: 'src/g.mjs:1' },
+          { lens: 'operational', severity: 'LOW', ground: ['src/g.mjs'], finding: 'no failure path', evidence: 'src/g.mjs:1' },
         ],
         summary: 'advisory only',
       },
@@ -3401,6 +3403,7 @@ test('a confirmed finding in the repair lane takes an ordinary repair round', as
                   {
                     lens: 'operational',
                     severity: 'HIGH',
+                    ground: ['src/base.mjs'],
                     finding: 'the base value the record states is not the one the module holds',
                     evidence: 'src/base.mjs:1',
                     file: 'src/base.mjs',
@@ -3513,6 +3516,7 @@ function capRepairSeats({ claims, alsoCode = false }) {
                 {
                   lens: 'operational',
                   severity: 'HIGH',
+                  ground: ['src/base.mjs'],
                   finding: `the module holds no ${claim} the ticket asks for`,
                   evidence: `src/base.mjs, on the ${claim} claim`,
                   file: 'src/base.mjs',
@@ -4560,6 +4564,7 @@ test('a stretched authorization surfaces as a confirmed HIGH on the spec lens', 
                 {
                   lens: 'spec',
                   severity: 'HIGH',
+                  ground: ['tests/pinned.test.mjs'],
                   finding: 'the scope line covers a second export, not the closed-set shape the amendment dropped',
                   evidence: 'tests/pinned.test.mjs',
                 },

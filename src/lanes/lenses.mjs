@@ -87,6 +87,25 @@ export function recordCriteriaLines() {
 }
 
 /**
+ * The ground duty, stated once for every brief that asks a seat for a finding.
+ *
+ * The ground is what decides whether a finding survives a moved base. A merge
+ * that touches ground the finding rests on costs the run its code
+ * certification; a merge that touches nothing the finding names leaves the
+ * certification standing. A finding with no ground answers that question for
+ * nothing, so every claim in the project has to re-earn itself.
+ *
+ * Paths, and not package names: a package is not a file of this repository and
+ * no diff can be compared against it, while the manifest that declares it and
+ * the file that imports it both are.
+ */
+export const FINDING_GROUND_DUTY = Object.freeze([
+  'Name the ground of every finding in "ground": the repo-relative paths or directories the',
+  'finding is about, one entry each. A finding about a package names the manifest that declares',
+  'it or the file that imports it. A finding that names no ground is refused.',
+]);
+
+/**
  * The panel a project gets when it declares none. Architecture and minimality
  * are out of it: across ten ships they raised 82 findings and the verifier
  * confirmed none, so the two seats' worth of work bought no block (ADR-0038).

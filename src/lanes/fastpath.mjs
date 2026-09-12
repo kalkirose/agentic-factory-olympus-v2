@@ -736,8 +736,44 @@ function recordsAnswer(incoming, { neighbourhood = [], own = [] }) {
     };
   }
   // A record outside the neighbourhood is no answer at all, and it must not
-  // read as one: the reconciliation never rested on it.
-  return { answer: 'kept', files: [] };
+  // read as one: the reconciliation never rested on it. The word is stamped
+  // because a records answer that stands where the code answer fell is a
+  // half-carry, and a reader of the stamp has to see which half and why.
+  return { answer: 'kept', reason: 'no-record-moved', files: [] };
+}
+
+/**
+ * The review finding that stops a carry, or null where none does.
+ *
+ * A finding rests on the files the seat that raised it named, and the question
+ * is the question every other claim is asked: did the default branch move that
+ * ground. A finding that names none is the old refusal, unchanged: nothing in
+ * this project can say the branch left its ground alone, so the certification
+ * it rides is earned again.
+ *
+ * The incoming names this check cannot read as files of this repository are
+ * not asked, because the code answer refuses them by the word that names what
+ * is wrong with them.
+ */
+function lensRefusal(lensFindings, incoming) {
+  const groundless = lensFindings.filter((f) => !(f.ground?.length > 0));
+  if (groundless.length > 0) {
+    return refusal(
+      'lens-ground',
+      'the certification carries review findings that declare no ground: ' +
+        list(groundless.map((f) => f.id)),
+    );
+  }
+  for (const file of incoming.files) {
+    const hit = lensFindings.find((f) => f.ground.some((entry) => underEntry(file, entry)));
+    if (hit) {
+      return refusal(
+        'lens-ground',
+        `the default branch changed ${file}, the ground of review finding ${hit.id}`,
+      );
+    }
+  }
+  return null;
 }
 
 /** One code answer that says the verdict must judge the tree again. */
@@ -792,11 +828,19 @@ export function declarationDigest({
  * Both answers ride every ending, refusals included, so the caller reads two
  * answers whatever happened. A refusal is a certification this check could not
  * carry, and the answer under it says the same thing in the caller's words.
+ * The two refusals that belong to one side alone are the exception: they leave
+ * the other side to its own evidence.
+ *
+ * `recordsSettled` is the records answer the caller already holds, which is the
+ * reconciliation it cannot show. The code question is asked anyway, because a
+ * records fact says nothing about the code.
  * @param {{certification: object|null,
  *   records: {neighbourhood?: string[], recordPaths?: string[]}|null,
+ *   recordsSettled: object|null,
  *   layers: Array<{name: string, ground?: string[]}>,
  *   prior: Map<string, object>, commands: object, testPaths: string[],
- *   breadth: string[], inert: string[], lensFindings: string[],
+ *   breadth: string[], inert: string[],
+ *   lensFindings: Array<{id: string, ground: string[]}>,
  *   configPath: string, readSource: (path: string) => string|null,
  *   storyDiffBefore: string, storyDiffAfter: string,
  *   mainChanged: {files: string[], unclassifiable: string[]},
@@ -808,6 +852,7 @@ export function declarationDigest({
 export function fastPathVerdict({
   certification,
   records = null,
+  recordsSettled = null,
   layers,
   prior,
   commands,
@@ -823,15 +868,35 @@ export function fastPathVerdict({
   mainChanged,
   storyChanged,
 }) {
-  const scope = { code: Boolean(certification), records: records !== null };
+  const scope = {
+    code: Boolean(certification),
+    records: records !== null || recordsSettled !== null,
+  };
   if (!scope.code && !scope.records) {
     return refusal('no-certification', 'no green verdict stands for this tree');
   }
+  // The records answer this call already holds, carried under every refusal
+  // below so a code refusal never overwrites a records fact.
+  const settled = recordsSettled === null ? {} : { records: recordsSettled };
+  // The reconciliation's own answer over the incoming work, for the refusals
+  // that are the code's alone. The run's own records are a re-run and never a
+  // refusal: the stage that wrote them answers a conflict on them.
+  const recordsOwn = () =>
+    records === null
+      ? null
+      : recordsAnswer(mainChanged, {
+          neighbourhood: records.neighbourhood ?? [],
+          own: ownRecords(storyChanged, records.recordPaths ?? []),
+        });
   // Question one. The cheapest of them, and the one that holds whatever any
   // declaration claims: a tree that is not the branch plus the run's own patch
   // was never certified, by anybody, in any shape.
   if (storyDiffBefore !== storyDiffAfter) {
-    return answered(refusal('diff-changed', 'the update changed the story\'s own diff'), scope);
+    return answered(
+      refusal('diff-changed', 'the update changed the story\'s own diff'),
+      scope,
+      settled,
+    );
   }
   let code = null;
   let declared = null;
@@ -844,6 +909,7 @@ export function fastPathVerdict({
       return answered(
         refusal('no-breadth-ground', 'the project declares no shared breadth ground'),
         scope,
+        settled,
       );
     }
     // The suite files are one of the six sets the code question asks. A
@@ -853,34 +919,32 @@ export function fastPathVerdict({
       return answered(
         refusal('no-suite-ground', 'the project names no suite files of its own'),
         scope,
+        settled,
       );
     }
     // The certification is a deterministic gate result AND a review panel's
-    // reading of the tree (ADR-0022). A lens declares no inputs and reads the
-    // whole repository around the diff, so no claim in this project can say
-    // the branch did not move ground a lens finding rests on. Where the panel
-    // raised nothing, the certification rests on declared ground alone and the
-    // questions below cover it.
-    if (lensFindings.length > 0) {
-      return answered(
-        refusal(
-          'lens-ground',
-          `the certification carries review-lens findings whose ground nothing declares: ${list(lensFindings)}`,
-        ),
-        scope,
-      );
-    }
+    // reading of the tree (ADR-0022). A finding names the ground it rests on,
+    // so a branch that moved that ground costs the run its code certification
+    // and a branch that moved none of it leaves the findings standing. Where
+    // the panel raised nothing, the certification rests on declared ground
+    // alone and the questions below cover it.
+    //
+    // This one is the code's alone. A finding is a reading of the code, and
+    // the reconciliation never rested on it, so the records answer is computed
+    // on the records' own evidence rather than copied from this refusal.
+    const lens = lensRefusal(lensFindings, mainChanged);
+    if (lens !== null) return answered(lens, scope, { records: recordsOwn(), ...settled });
     declared = declaredGround(layers, prior, {
       deferred: deferredOf(certification.record),
       breadth,
       recordPaths: records?.recordPaths ?? [],
     });
-    if (declared.ok !== true) return answered(declared, scope);
+    if (declared.ok !== true) return answered(declared, scope, settled);
     // The self-declaring layers alone. A layer whose ground is config-only is
     // produced in no tree, so a story cannot narrow it and there is nothing
     // here to bound (ADR-0056).
     sources = declarationSources(declared.selfDeclaring, commands, readSource, isLinkPath);
-    if (sources.ok !== true) return answered(sources, scope);
+    if (sources.ok !== true) return answered(sources, scope, settled);
     // The declarations decide this skip and they came off the run's own tree.
     // A story that moved the ground they are produced from would be judged
     // against its own narrowing, so it is refused before the ground question
@@ -895,6 +959,7 @@ export function fastPathVerdict({
           `the story's own diff moves the declarations that decide this skip: ${list(moved)}`,
         ),
         scope,
+        settled,
       );
     }
     code = {
@@ -908,7 +973,7 @@ export function fastPathVerdict({
     };
   }
   // Question two, once, for both certifications.
-  const answers = groundVerdict(mainChanged, {
+  const ground = groundVerdict(mainChanged, {
     code,
     records:
       records === null
@@ -922,12 +987,13 @@ export function fastPathVerdict({
             own: ownRecords(storyChanged, records.recordPaths ?? []),
           },
   });
+  const answers = { code: ground.code, records: recordsSettled ?? ground.records };
   const kept = answers.code?.answer !== 'rejudge' && answers.records?.answer !== 'rerun';
   if (!kept) {
     const refused =
       answers.code?.answer === 'rejudge'
         ? { refusal: answers.code.reason, detail: answers.code.detail }
-        : { refusal: 'records-rerun', detail: answers.records.detail };
+        : { refusal: recordsWord(answers.records), detail: answers.records.detail };
     return {
       taken: false,
       refusal: assertFastPathRefusal(refused.refusal),
@@ -974,19 +1040,30 @@ function ownRecords(storyChanged, recordPaths) {
 }
 
 /**
+ * The word a records rerun is refused under: the closed refusal the records
+ * answer already carries, or the word for a record this run rests on moving.
+ * `own-record` and `neighbourhood` say which record moved and are not refusals
+ * of this check.
+ */
+function recordsWord(answer) {
+  return FAST_PATH_REFUSALS.has(answer.reason) ? answer.reason : 'records-rerun';
+}
+
+/**
  * One refusal with the answer it is for each certification in scope. A refusal
  * is a certification this check could not carry over the moved tree, so every
  * answer under it says the caller must earn that certification again.
+ *
+ * `settled` is the answer one side has already reached on its own evidence. A
+ * refusal that belongs to one certification says nothing about the other, and
+ * copying it there costs the run a journey nothing asked for.
  */
-function answered(out, scope) {
+function answered(out, scope, settled = {}) {
+  const copy = (answer) => ({ answer, reason: out.refusal, detail: out.detail, files: [] });
   return {
     ...out,
-    code: scope.code
-      ? { answer: 'rejudge', reason: out.refusal, detail: out.detail, files: [] }
-      : null,
-    records: scope.records
-      ? { answer: 'rerun', reason: out.refusal, detail: out.detail, files: [] }
-      : null,
+    code: settled.code ?? (scope.code ? copy('rejudge') : null),
+    records: settled.records ?? (scope.records ? copy('rerun') : null),
   };
 }
 
@@ -1062,13 +1139,23 @@ function deferredOf(recordPath) {
  * The record is the verdict's own file. A finding a lens raised carries the
  * lens that raised it; a finding triage raised carries its class instead, and
  * that one rests on a gate result whose ground the declarations do name.
+ *
+ * Each one comes back with the ground the seat that raised it named, so the
+ * check can ask the same question of a lens finding it asks of a suite: did
+ * the branch move what this claim rests on.
  * @param {string} path the verdict record
+ * @returns {Array<{id: string, ground: string[]}>}
  */
 export function lensFindingsOf(path) {
   const record = JSON.parse(readFileSync(path, 'utf8'));
   return (record.findings ?? [])
     .filter((finding) => typeof finding.lens === 'string' && finding.lens.length > 0)
-    .map((finding) => `${finding.lens}/${finding.id ?? 'unnamed'}`);
+    .map((finding) => ({
+      id: `${finding.lens}/${finding.id ?? 'unnamed'}`,
+      // A record written before a finding carried its ground answers with
+      // none, which is the refusal this check always gave.
+      ground: Array.isArray(finding.ground) ? finding.ground : [],
+    }));
 }
 
 /**
@@ -1142,12 +1229,27 @@ export async function fastPathDecision(
   if (scope.code && !certification) {
     return answered(refusal('no-certification', 'no green verdict stands for this tree'), scope);
   }
-  if (scope.records && reconciled.ok !== true) {
-    return answered(
-      refusal('no-certification', 'no green reconciliation stands for this tree'),
-      scope,
-    );
+  // The reconciliation this lane holds and cannot show. It is a records fact
+  // and it says nothing about the code, so where the lane also holds a code
+  // certification the code question is asked and this answer rides beside it.
+  // A lane with no code certification has nothing left to ask, and ends here
+  // before the first git read.
+  const recordsSettled =
+    scope.records && reconciled.ok !== true
+      ? {
+          answer: 'rerun',
+          reason: 'no-certification',
+          detail: 'no green reconciliation stands for this tree',
+          files: [],
+        }
+      : null;
+  if (recordsSettled && !scope.code) {
+    return answered(refusal('no-certification', recordsSettled.detail), scope);
   }
+  // The reconciliation's ground rides on even where its answer is settled: the
+  // code question reads the record paths to know which incoming files are not
+  // its own, and a code answer that judged a record would refuse every ship a
+  // record tree touches.
   const records =
     reconciled === null
       ? null
@@ -1159,6 +1261,7 @@ export async function fastPathDecision(
   const verdict = fastPathVerdict({
     certification,
     records,
+    recordsSettled,
     layers: base.config.gates.tier1 ?? [],
     // The certified cycle's own results included, and every earlier cycle's
     // last word on a layer that cycle did not run: a green a later cycle

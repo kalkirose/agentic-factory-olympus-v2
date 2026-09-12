@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   ALL_LENSES,
   DEFAULT_LENSES,
+  FINDING_GROUND_DUTY,
   LENS_CRITERIA,
   RECORD_CRITERIA,
   RECORD_CRITERION_KEYS,
@@ -131,4 +132,19 @@ test('the third criterion is the form the project gate cannot read', () => {
   // It rides every brief and every schema, because the keys are one list.
   const lines = recordCriteriaLines();
   assert.equal(lines[lines.length - 1], `- ${RECORD_CRITERIA.form}`);
+});
+
+// The ground duty is one definition with three readers: the panel's lens
+// seats, the generalist and the record review. A finding whose ground nothing
+// declares costs the next moved base a whole re-certification, so the rule is
+// stated to every seat that raises one, in the same words.
+test('the ground duty names what a ground is and what it is not', () => {
+  const text = FINDING_GROUND_DUTY.join('\n');
+  assert.ok(text.includes('"ground"'), text);
+  assert.ok(text.includes('repo-relative paths or directories'), text);
+  // A package name is not a file of the repository, so the duty names the two
+  // files that are.
+  assert.ok(text.includes('manifest that declares'), text);
+  assert.ok(text.includes('file that imports it'), text);
+  assert.ok(text.includes('names no ground is refused'), text);
 });

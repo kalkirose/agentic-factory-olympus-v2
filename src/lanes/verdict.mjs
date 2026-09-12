@@ -3526,6 +3526,11 @@ function findingFromEvent(e) {
     ...(e.lens && { lens: e.lens }),
     ...(e.severity && { severity: e.severity }),
     ...(e.file && { file: e.file }),
+    // The ground travels with the finding because the fast path asks it of
+    // every moved base, and every reading of a finding after cycle one is
+    // rebuilt here. A finding that lost its ground on the way back out of the
+    // ledger is a finding no merge can be compared against (ADR-0056).
+    ...(e.ground?.length > 0 && { ground: e.ground }),
     // The record word and the criterion travel with the finding, because the
     // ladder reads them: they select the seat that repairs a record, and they
     // are what the corrective brief and the residual ticket state (ADR-0007).

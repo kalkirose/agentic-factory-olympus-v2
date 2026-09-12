@@ -801,13 +801,37 @@ test('a project that names no suite files never fast-paths', () => {
   assert.equal(fastPathVerdict(inputs({ testPaths: [] })).refusal, 'no-suite-ground');
 });
 
-test('a certification carrying a review-lens finding is not carried', () => {
-  // A lens declares no inputs and reads the whole repository around the diff,
-  // so no claim in this project can say the branch left its ground alone.
-  const out = fastPathVerdict(inputs({ lensFindings: ['architecture/F-1'] }));
+test('a certification carrying a groundless review finding is not carried', () => {
+  // A finding that names no ground answers the question for nothing, so no
+  // claim in this project can say the branch left its ground alone. Every
+  // record written before a finding carried its ground reads this way.
+  const out = fastPathVerdict(inputs({ lensFindings: [{ id: 'architecture/F-1', ground: [] }] }));
   assert.equal(out.refusal, 'lens-ground');
   assert.match(out.detail, /architecture\/F-1/);
 });
+
+test('a review finding stands where the branch moved none of its ground', () => {
+  // The incoming change is a document the project declares inert, and the
+  // finding rests on the payment module. The two cannot interact, so the
+  // certification the finding rides is carried.
+  const out = fastPathVerdict(
+    inputs({ lensFindings: [{ id: 'operational/F-1', ground: ['src/api/pay.mjs'] }] }),
+  );
+  assert.equal(out.taken, true, out.detail);
+});
+
+test('a review finding whose ground the branch moved refuses, naming the file and the finding', () => {
+  const out = fastPathVerdict(
+    inputs({
+      lensFindings: [{ id: 'operational/F-1', ground: ['src/api'] }],
+      mainChanged: { files: ['src/api/other.mjs'], unclassifiable: [] },
+    }),
+  );
+  assert.equal(out.refusal, 'lens-ground');
+  assert.match(out.detail, /src\/api\/other\.mjs/);
+  assert.match(out.detail, /operational\/F-1/);
+});
+
 
 test('main-side ground no claim reaches takes the full re-verdict', () => {
   const out = fastPathVerdict(
@@ -881,6 +905,79 @@ test('a moved base outside both grounds carries both certifications', () => {
   assert.equal(out.taken, true, out.detail);
   assert.equal(out.code.answer, 'kept');
   assert.equal(out.records.answer, 'kept');
+  // The records answer says why it stands, so a reader of a half-carry can
+  // tell a reconciliation that was carried from one that was never asked.
+  assert.equal(out.records.reason, 'no-record-moved');
+});
+
+test('a ground hit is the code\'s refusal alone, and the records answer on their own evidence', () => {
+  // A finding is a reading of the code. The reconciliation never rested on
+  // it, so copying this refusal onto the records answer would send the run to
+  // the record round for a fact about the code.
+  const out = fastPathVerdict(
+    inputs({
+      records: NEIGHBOURHOOD,
+      lensFindings: [{ id: 'operational/F-1', ground: ['src/api'] }],
+      mainChanged: { files: ['src/api/other.mjs'], unclassifiable: [] },
+    }),
+  );
+  assert.equal(out.taken, false);
+  assert.equal(out.refusal, 'lens-ground');
+  assert.equal(out.code.answer, 'rejudge');
+  assert.equal(out.records.answer, 'kept');
+  assert.equal(out.records.reason, 'no-record-moved');
+
+  // And the records answer is the records' own: a neighbour of the run moving
+  // beside the ground hit re-runs the reconciliation as well.
+  const both = fastPathVerdict(
+    inputs({
+      records: NEIGHBOURHOOD,
+      lensFindings: [{ id: 'operational/F-1', ground: ['src/api'] }],
+      mainChanged: { files: ['src/api/other.mjs', 'docs/adr/adr-021-y.md'], unclassifiable: [] },
+    }),
+  );
+  assert.equal(both.code.answer, 'rejudge');
+  assert.equal(both.records.answer, 'rerun');
+  assert.equal(both.records.reason, 'neighbourhood');
+});
+
+test('a record the run itself wrote reaches the records answer of a ground hit', () => {
+  // The `own` list rides the answer computed beside a code refusal, exactly as
+  // it rides the answer computed for a clean base. Without it a merge that
+  // moved a record this run wrote would read `kept`.
+  const out = fastPathVerdict(
+    inputs({
+      records: NEIGHBOURHOOD,
+      lensFindings: [{ id: 'operational/F-1', ground: ['src/api'] }],
+      storyChanged: ['src/api/f.mjs', 'docs/adr/adr-030-mine.md'],
+      mainChanged: {
+        files: ['src/api/other.mjs', 'docs/adr/adr-030-mine.md'],
+        unclassifiable: [],
+      },
+    }),
+  );
+  assert.equal(out.records.answer, 'rerun');
+  assert.equal(out.records.reason, 'own-record');
+});
+
+test('every refusal but the two one-sided ones is copied onto both answers', () => {
+  // The rule and its two exceptions in one reading. A refusal is a
+  // certification this check could not carry, and it says the same thing to
+  // every certification in scope unless it belongs to one of them.
+  const both = [
+    ['diff-changed', { storyDiffAfter: 'diff --git a/src/api/f.mjs\n+moved\n' }],
+    ['no-breadth-ground', { breadth: [] }],
+    ['no-suite-ground', { testPaths: [] }],
+    ['undeclared-suite', { prior: new Map([['unit', result([part('api')])]]) }],
+    ['self-declared-ground', { storyChanged: ['.olympus/gates/unit.mjs'] }],
+  ];
+  for (const [refused, over] of both) {
+    const out = fastPathVerdict(inputs({ records: NEIGHBOURHOOD, ...over }));
+    assert.equal(out.refusal, refused);
+    assert.equal(out.code.answer, 'rejudge', refused);
+    assert.equal(out.records.answer, 'rerun', refused);
+    assert.equal(out.records.reason, refused);
+  }
 });
 
 test('a records lane is judged on its records alone', () => {
@@ -909,6 +1006,37 @@ test('a records lane is judged on its records alone', () => {
   assert.equal(conflicted.records.answer, 'rerun');
   assert.equal(conflicted.records.reason, 'own-record');
   assert.equal(conflicted.refusal, 'records-rerun');
+});
+
+test('a reconciliation the lane cannot show leaves the code question to the code', () => {
+  // A records fact says nothing about the code. Copying it onto the code
+  // answer sends the run back to the verdict for something the verdict never
+  // decided, which is the same class as a code refusal copied onto the
+  // records answer.
+  const settled = {
+    answer: 'rerun',
+    reason: 'no-certification',
+    detail: 'no green reconciliation stands for this tree',
+    files: [],
+  };
+  const out = fastPathVerdict(inputs({ records: NEIGHBOURHOOD, recordsSettled: settled }));
+  assert.equal(out.taken, false);
+  assert.equal(out.refusal, 'no-certification');
+  assert.equal(out.code.answer, 'kept');
+  assert.deepEqual(out.records, settled);
+
+  // The settled answer survives a code refusal beside it: each side keeps the
+  // reason that is its own.
+  const refused = fastPathVerdict(
+    inputs({
+      records: NEIGHBOURHOOD,
+      recordsSettled: settled,
+      mainChanged: changed('src/api/other.mjs'),
+    }),
+  );
+  assert.equal(refused.refusal, 'ground-intersects');
+  assert.equal(refused.code.answer, 'rejudge');
+  assert.equal(refused.records.reason, 'no-certification');
 });
 
 test('a lane that certifies nothing carries nothing', () => {
