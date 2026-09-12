@@ -370,6 +370,12 @@ export const RUN_EVENTS = new Set([
   // about two records, so it carries `file2`, `unit2` and `head2` for the
   // second place: without them the reader of the finding has one half of a
   // contradiction.
+  //
+  // A finding names its ground: the repo-relative paths it rests on, brought to
+  // the form a path entry is written in at the stamp. The fast path asks one
+  // question of a moved base per finding, whether the branch touched that
+  // ground, and a finding that names none costs the run its whole code
+  // certification (ADR-0056).
   'finding',
   // The cycle boundary, and what the cycle did not have to buy. `partsRun`,
   // `partsCarried` and `carryShare` are the cycle's carry (ADR-0058);
@@ -480,6 +486,9 @@ export const RUN_EVENTS = new Set([
   // own records and their neighbourhood. One answer never implies the other,
   // and a reader who cannot see which ground the incoming work touched cannot
   // tell a wide ground from a busy branch (ADR-0075).
+  // A records answer carries `reason` as well: `no-record-moved` where it
+  // stands, the record that moved where it does not, and the closed refusal
+  // that settled it where one did.
   'pre-verdict-update',
   // The clean-rebase fast path's answer about one moved base: whether the
   // certification the run already earned stands over the tree the update

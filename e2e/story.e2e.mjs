@@ -28,6 +28,7 @@ import {
   forgeCalls,
   gateMarks,
   instanceEvents,
+  originFile,
   originSha,
   originTree,
   pollFor,
@@ -657,6 +658,75 @@ test('a story birth that spends its ladder ships, and the judge names the record
   assert.ok(tree.includes(RECORD), 'the record did not ride the merge');
   assert.ok(tree.includes('src/feature.mjs'), 'the code did not ride the merge');
   assert.ok(!events.some((e) => e.event === 'reconciliation-judged' && e.ticket));
+
+  await stopDaemon(fx);
+});
+
+// A birth that needs a package the card does not name asks the owner once.
+// The approve answer writes the dependency onto the card on the default
+// branch, refreshes the run tree onto that head, and a fresh birth seat reads
+// the amended card and writes the spec. The run then ships as any other.
+test('a dependency the card does not name is approved onto the card and the story ships', async (t) => {
+  const fx = buildFixture({
+    prefix: 'olympus-e2e-dependency-',
+    scenario: {
+      ...SCENARIO,
+      specDependencies: [{ importer: '.', name: 'left-pad', reason: 'AC-1 pads the answer' }],
+      // A story that adds a dependency writes the importer's manifest, and the
+      // spec lint holds the spec to declaring it.
+      spec: SPEC.replace(
+        'src/feature.mjs (new) — dev\n',
+        'src/feature.mjs (new) — dev\npackage.json (new) — dev\n',
+      ),
+    },
+    tree: { '.olympus/project.json': ONE_ROUND },
+  });
+  t.after(() => cleanup(fx));
+  await startDaemon(fx);
+  ctl(fx, ['launch', '--project', PROJECT, '--card', CARD_PATH]);
+  const runId = await pollFor(
+    'the launch stamp',
+    () => instanceEvents(fx).find((e) => e.event === 'launch')?.runId,
+    { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
+  );
+  await pollFor(
+    'the open-decisions park',
+    () => runEvents(fx, runId).some((e) => e.event === 'park' && e.type === 'open-decisions'),
+    { abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  ctl(fx, ['answer', '--run', runId, '--text', 'No; f trusts the value it is given.']);
+  await pollFor(
+    'the dependency-decision park',
+    () => runEvents(fx, runId).some((e) => e.event === 'park' && e.type === 'dependency-decision'),
+    { abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  ctl(fx, ['answer', '--run', runId, '--option', 'approve']);
+  await pollFor(
+    'the run to close',
+    () => runEvents(fx, runId).some((e) => e.event === 'run-closed'),
+    { attempts: 1800, abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  const events = runEvents(fx, runId);
+
+  // The park was raised before any spec was born, and answered once.
+  const park = events.find((e) => e.event === 'park' && e.type === 'dependency-decision');
+  assert.ok(park.seq < events.find((e) => e.event === 'spec-born').seq);
+  const amended = events.find((e) => e.event === 'card-amended');
+  assert.equal(amended.card, CARD_PATH);
+  assert.equal(amended.pushed, true);
+  assert.deepEqual(
+    amended.dependencies.map((d) => `${d.importer}: ${d.name}`),
+    ['.: left-pad'],
+  );
+  const refreshed = events.find((e) => e.event === 'tree-refreshed' && e.seq > amended.seq);
+  assert.ok(refreshed, 'the run tree was not refreshed onto the amended head');
+
+  // The amendment is a commit on the default branch of the origin, and the
+  // story shipped behind it.
+  const card = originFile(fx, 'main', CARD_PATH);
+  assert.ok(/^## Dependencies\s*$/m.test(card), 'the card on main carries no Dependencies section');
+  assert.ok(card.includes('- .: left-pad'), 'the card on main does not name the package');
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
 
   await stopDaemon(fx);
 });

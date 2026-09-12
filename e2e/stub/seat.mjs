@@ -349,6 +349,20 @@ function specBirth() {
       report: { amendedSections: ['AC-1'], summary: 'amended' },
     };
   }
+  // A scenario may name a package the card does not carry. The stub asks for
+  // it once; the amended card carries it, and the next call writes the spec.
+  // The heading is read at a line start: the brief's own rule names the
+  // heading inside a sentence, and the card text carries it as a line.
+  const needed = scenario.specDependencies;
+  if (needed && !/^## Dependencies\s*$/m.test(prompt)) {
+    return {
+      report: {
+        outcome: 'dependency-needed',
+        dependencies: needed,
+        summary: 'the card names no such package',
+      },
+    };
+  }
   // A scenario may name a first draft the lint refuses; the corrective round
   // carries the lint's defects in its brief, and the stub then writes the spec.
   const draft = scenario.specFirstDraft && !prompt.includes('Correction brief');

@@ -742,6 +742,11 @@ export function originTree(fx, ref) {
     .filter((line) => line.length > 0);
 }
 
+/** One file as a ref of the fixture origin holds it. */
+export function originFile(fx, ref, path) {
+  return git(['show', `${ref}:${path}`], fx.origin);
+}
+
 // -- shared assertions -------------------------------------------------------
 
 /**
