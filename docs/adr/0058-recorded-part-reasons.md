@@ -125,10 +125,12 @@ be sixty-four copies of one fact. Three of them ride the layer.
 
 ## Why the share leaves out the cycles that run whole on purpose
 
-The metric reads targeted cycles alone. A full sweep is the first cycle of a
-pass and has nothing to carry from. A confirming cycle runs every layer at its
-own sha so the green it certifies rests on no carry (ADR-0046). Both are the
-design working, and both record a share of zero.
+The metric reads targeted cycles alone. A first cycle carries no part: it runs
+every part of every layer it runs, whether it runs the whole spectrum or only
+the footprint of its own diff, and a layer it carries whole from a base
+certification reports no part at all (ADR-0088). A confirming cycle runs every
+layer at its own sha so the green it certifies rests on no carry (ADR-0046).
+Both are the design working, and both record a share of zero.
 
 Counting them would read the design as a decay, and it would drag the mean down
 hardest on the runs that reached green fastest, which is exactly backwards. The

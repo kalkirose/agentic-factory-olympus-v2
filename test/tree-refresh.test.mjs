@@ -111,6 +111,16 @@ if (beyond.length > 0) {
 process.exit(0);
 `;
 
+// A lint that has more to say after the block. The harness reads one merged
+// stream of the command's two pipes, so a tool's own summary, a warning or a
+// progress line can land after the marker.
+const CARD_LINT_CHATTY = `process.stdout.write('beyond the card:' + String.fromCharCode(10));
+process.stdout.write('${'stories/beta.md'}: F2: no goal' + String.fromCharCode(10));
+process.stdout.write('the package manager took 1.2s' + String.fromCharCode(10));
+process.stdout.write('## Summary' + String.fromCharCode(10));
+process.exit(0);
+`;
+
 // -- fixture -----------------------------------------------------------------
 
 function fixtureParse(line) {
@@ -162,7 +172,7 @@ function seatFixture() {
   return { commandFor, calls };
 }
 
-function fixture(t, { beta = BETA_BROKEN, card = CARD_BLOCKED } = {}) {
+function fixture(t, { beta = BETA_BROKEN, card = CARD_BLOCKED, lint = CARD_LINT } = {}) {
   const root = tempDir();
   const origin = initOriginRepo(join(root, 'origin'), {
     [CONFIG_PATH]: projectConfigJson({
@@ -171,7 +181,7 @@ function fixture(t, { beta = BETA_BROKEN, card = CARD_BLOCKED } = {}) {
       lanes: { story: { suiteCommand: 'suite', lintCommand: 'cardlint' } },
       stack: null,
     }),
-    'scripts/cardlint.mjs': CARD_LINT,
+    'scripts/cardlint.mjs': lint,
     [CARD_PATH]: card,
     [SECOND_CARD]: beta,
     'src/base.mjs': 'export const base = 1;\n',
@@ -254,8 +264,9 @@ function waitFound(paths, runId, match, label) {
 }
 
 /** What the card lint of the project said, as the run kept it. */
-function lintLog(paths, runId) {
-  return readFileSync(join(paths.runs, runId, 'commands', 'card-lint.log'), 'utf8');
+/** The log of one read of the cards: the evidence a stamped record rests on. */
+function lintLog(paths, runId, entry = 1) {
+  return readFileSync(join(paths.runs, runId, 'commands', `card-lint-${entry}.log`), 'utf8');
 }
 
 // -- the route ---------------------------------------------------------------
@@ -295,11 +306,14 @@ test('a retry meets the repair the branch carries, and the tree says so', async 
     'the stage after readiness',
   );
   // The lint was asked about the launched card and the card it is blocked by,
-  // and about no other card in the directory.
+  // and about no other card in the directory. The read after the retry is the
+  // second read, and the first read's own output is still where it was: the
+  // park behind it names what that read said.
   assert.ok(
-    lintLog(fx.paths, runId).includes(`reporting 2 of 2 cards: ${CARD_PATH} ${SECOND_CARD}`),
-    lintLog(fx.paths, runId),
+    lintLog(fx.paths, runId, 2).includes(`reporting 2 of 2 cards: ${CARD_PATH} ${SECOND_CARD}`),
+    lintLog(fx.paths, runId, 2),
   );
+  assert.ok(lintLog(fx.paths, runId, 1).includes(`${SECOND_CARD}: F2: no goal`));
   // One park, one refresh: the stage did not come back, and the entries behind
   // it read the ledger and stopped.
   await waitFound(
@@ -389,7 +403,7 @@ test('a card red outside the closure is reported once and the launch goes on', a
   );
   assert.deepEqual(reported.cards, [CARD_PATH]);
   assert.deepEqual(reported.errors, [`${SECOND_CARD}: F2: no goal`]);
-  assert.equal(reported.gist, '1 errors beyond the card');
+  assert.equal(reported.gist, '1 error(s) beyond the card');
   assert.ok(lintLog(fx.paths, runId).includes(`reporting 1 of 2 cards: ${CARD_PATH}`));
   // The card's own open decision holds the launch, and answering it runs
   // readiness whole again. The directory is the same directory, so the report
@@ -406,6 +420,26 @@ test('a card red outside the closure is reported once and the launch goes on', a
   const held = events(fx.paths, runId);
   assert.equal(held.filter((e) => e.event === 'readiness-lint-beyond').length, 1);
   assert.ok(!held.some((e) => e.event === 'park' && e.type === 'stage-blocked'));
+  // Two reads of the cards, two logs. The record was stamped off the first
+  // read, and the evidence behind it is still the first read's own output.
+  assert.ok(lintLog(fx.paths, runId, 1).includes(`${SECOND_CARD}: F2: no goal`));
+  assert.ok(lintLog(fx.paths, runId, 2).includes('card lint: reporting 1 of 2 cards'));
+});
+
+test('a line after the block that is not an error is not read as one', async (t) => {
+  // The block runs to the end of the output, so whatever the tool says last
+  // rides it. A record that counted those lines would report errors nobody
+  // wrote and name a count no card answers for.
+  const fx = fixture(t, { card: CARD_OPEN, lint: CARD_LINT_CHATTY });
+  const { runId } = await fx.launch();
+  const reported = await waitFound(
+    fx.paths,
+    runId,
+    (e) => e.event === 'readiness-lint-beyond',
+    'the record of the errors beyond the card',
+  );
+  assert.deepEqual(reported.errors, [`${SECOND_CARD}: F2: no goal`]);
+  assert.equal(reported.gist, '1 error(s) beyond the card');
 });
 
 test('a park of another class buys no refresh', async (t) => {

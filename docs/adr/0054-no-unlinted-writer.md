@@ -9,28 +9,31 @@ that binds a person writing the same file, before the write leaves the
 machine. The rule is general and it is stated in the doctrine; this record
 covers the one writer that has it today.
 
-The close-out card sweep is that writer. It is the single mechanism allowed to
-land text on the default branch without a request behind it (ADR-0044), so it
-is the single writer whose output no gate reads. Its self-check now ends with
-the project's own card lint:
+The card writer is that writer. It is the single mechanism allowed to land text
+on the default branch without a request behind it (ADR-0044), so it is the
+single writer whose output no gate reads. The project's own card lint runs
+inside it, over the commit, before the push leaves the machine, and it runs
+again over a replayed result before a second push:
 
-- **The command is the project's.** `lanes.story.lintCommand` already names the
-  check the launch gate runs over the same cards. The sweep runs that command,
-  in the sweep worktree, over the cards the seat just wrote. The harness holds
-  no rule about card text: it runs what the project named.
-- **Red fails the attempt.** A red lint is a work-product defect. It joins the
-  defect list, so it re-briefs the seat on the two-attempt loop the sweep
-  already had, and the sweep pushes nothing while a defect stands. Nothing red
-  reaches the default branch.
-- **A sweep that wrote nothing runs no lint.** The rule binds writes. The tree
-  as it was merged is not this sweep's answer to give, and a red it inherited
-  is not a defect the seat can repair.
-- **A command that could not run fails the attempt too.** It is not a red, but
-  it is not a green either, and a push behind it is a push of cards no check
-  read. It joins the defect list on the same loop, so nothing unlinted reaches
-  the default branch. The `card-sweep` stamp carries `lint` on every sweep
-  (`green`, `red`, `unrun`, `unwritten`, or `undeclared`), so the reader of a
-  ledger can always tell a refused card from a host that could not answer.
+- **The command is the project's.** `lanes.story.lintCommand` names the check
+  the launch gate runs over the same cards. The writer runs that command, in
+  the worktree it is pushing from, over the cards its caller named. The harness
+  holds no rule about card text: it runs what the project named.
+- **Red pushes nothing.** The writer refuses with the lint's own output, and the
+  commit goes with the refusal, so no card text stays on a branch a gate does
+  not read. A caller with a seat behind it takes the red as a work-product
+  defect as well, which re-briefs the seat on the loop it already has. Nothing
+  red reaches the default branch.
+- **A caller that wrote nothing runs no lint.** The rule binds writes. A write
+  that changed no byte is not a write, the tree as it stood is not this
+  writer's answer to give, and a red it inherited is not a defect its seat can
+  repair.
+- **A command that could not run refuses too.** It is not a red, but it is not
+  a green either, and a push behind it is a push of cards no check read. It
+  refuses the same way, so nothing unlinted reaches the default branch. The
+  `card-sweep` stamp carries `lint` on every sweep (`green`, `red`, `unrun`,
+  `unwritten`, or `undeclared`), so the reader of a ledger can always tell a
+  refused card from a host that could not answer.
 - **The seat is told.** The role block says the lint runs over everything it
   writes, so the check is a condition of the work rather than a surprise at the
   end of it.
@@ -58,13 +61,13 @@ exactly the check a person passes, forever, with no rule to keep in step.
 
 ## Adversarial reading
 
-The lint judges the whole tree, not the diff, so a red that was already on the
-default branch fails a sweep attempt that did not cause it. The sweep then
-spends both attempts and records `ok: false`; the story still ships, and the
-supersedes the run owed the card are lost for that run. That is the accepted
-trade: a project whose default branch fails its own card lint is already
-holding every launch, and the sweep's silence is the smaller loss. The
-`unwritten` case keeps the common shape of this out of the loop entirely.
+The question put to the lint is about the cards the writer wrote and no others,
+so a red somebody else left on the default branch does not fail a write that did
+not cause it. The cost is that this check alone does not hold the directory
+clean: a card the writer never touches stays red until the project's own cards
+check on a pull request catches it, and the launch gate reports it as an error
+beyond the launched card. The `unwritten` case keeps a sweep that wrote nothing
+out of the loop entirely.
 
 An unrunnable command fails an attempt the seat cannot repair, and the re-brief
 tells it something it cannot act on. The sweep then loses that run's card
@@ -78,11 +81,12 @@ that has already merged a pull request.
 
 ## Fallback paths
 
-If the whole-tree reading proves too blunt, the check narrows to the cards the
-sweep wrote: the command runs, and a red is a defect only when its output names
-a file the sweep touched. Trigger: a sweep failing on a red it inherited.
-Reversal cost: low, one filter in `cardLint`, at the price of depending on the
-command's output naming its files.
+If the per-card reading lets a defect through that a whole-tree reading would
+have caught, the writer stops passing the card flags and the command reads the
+whole directory. Trigger: a card the writer landed breaking a launch behind it
+anyway, because the defect it carried is one only the corpus shows. Reversal
+cost: low, one argument in `cardLint`, at the price of a writer that a red on
+somebody else's card can hold.
 
 If failing on an unrunnable command costs more card writes than it saves, the
 `unrun` case stops failing the attempt: the sweep pushes as it would with no
@@ -91,8 +95,8 @@ green to report. Trigger: sweeps lost to a host defect the seat cannot repair,
 on a project whose lint is otherwise green. Reversal cost: trivial, one branch
 in `cardLint`, at the price of a push no check read.
 
-If a project wants the sweep to write without its lint, it removes
-`lanes.story.lintCommand`, and the sweep behaves exactly as it did before this
-record: no lint, `lint: 'undeclared'` on the stamp. Trigger: a lint that cannot
-run in the daemon's environment. Reversal cost: trivial, one config key, at the
-price of the class this record eliminates.
+If a project wants the writer to write without its lint, it removes
+`lanes.story.lintCommand`: no lint runs, and `lint: 'undeclared'` rides the
+sweep stamp. Trigger: a lint that cannot run in the daemon's environment.
+Reversal cost: trivial, one config key, at the price of the class this record
+eliminates.

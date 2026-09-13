@@ -337,6 +337,35 @@ const BASE = {
   lenses: ['spec', 'security'],
 };
 
+/**
+ * A tree the fixture findings rest on. Every ground entry is held to a path the
+ * reviewed tree really has, so the paths these reports name exist here, and a
+ * base over this tree is what a fixture finding is judged against.
+ */
+function groundTree(t, files = {}) {
+  const root = tempDir('olympus-reviewground-');
+  const worktree = join(root, 'tree');
+  const tree = {
+    'src/pay.mjs': 'export const pay = 1;\n',
+    'src/checkout.mjs': 'export const checkout = 1;\n',
+    'src/token.mjs': 'export const token = 1;\n',
+    'src/api/rates.mjs': 'export const rates = 1;\n',
+    'allowlists/price.json': '{}\n',
+    ...files,
+  };
+  for (const [path, text] of Object.entries(tree)) {
+    mkdirSync(dirname(join(worktree, path)), { recursive: true });
+    writeFileSync(join(worktree, path), text);
+  }
+  t.after(() => removeDir(root));
+  return worktree;
+}
+
+/** The lane base of a code review, over a tree the fixture grounds stand in. */
+function groundBase(t, overrides = {}) {
+  return { ...BASE, worktree: groundTree(t), ...overrides };
+}
+
 const REPORT = {
   findings: [
     {
@@ -429,7 +458,7 @@ test('a brief whose excerpt is the whole diff says so and names the same file', 
 test('a finding raised over a cut diff carries the word for it', async (t) => {
   const { ctx, paths } = runFixture(t, REPORT);
 
-  const outcome = await generalistReview(ctx, BASE, {
+  const outcome = await generalistReview(ctx, groundBase(t), {
     cycle: 1,
     diff: excerpted({ truncated: true }),
     priorConfirmed: [],
@@ -447,7 +476,7 @@ test('a finding raised over a cut diff carries the word for it', async (t) => {
 test('a finding raised over an excerpt of a whole diff carries nothing', async (t) => {
   const { ctx, paths } = runFixture(t, REPORT);
 
-  await generalistReview(ctx, BASE, { cycle: 1, diff: excerpted(), priorConfirmed: [] });
+  await generalistReview(ctx, groundBase(t), { cycle: 1, diff: excerpted(), priorConfirmed: [] });
 
   const findings = readEvents(runLedgerPath(paths, 'r1')).filter((e) => e.event === 'finding');
   assert.equal(findings.length, 1);
@@ -469,7 +498,7 @@ test("a cycle's diff file sits in the run directory, beside the record", () => {
 // reading is the run worktree. A match against any other form answers no
 // silently, which is the one thing the field exists to stop (ADR-0010).
 test('a finding carries the file the lens named, in the form a path entry is written', async (t) => {
-  const worktree = process.cwd();
+  const worktree = groundTree(t);
   const ground = ['src/pay.mjs'];
   const report = {
     findings: [
@@ -572,7 +601,7 @@ test('a ground entry this repository cannot read is returned to the seat', async
       : groundFinding(['../elsewhere/pay.mjs']),
   );
 
-  const outcome = await generalistReview(fx.ctx, BASE, {
+  const outcome = await generalistReview(fx.ctx, groundBase(t), {
     cycle: 1,
     diff: excerpted(),
     priorConfirmed: [],
@@ -586,8 +615,36 @@ test('a ground entry this repository cannot read is returned to the seat', async
   assert.match(refused[0].defects[0], /ground this repository cannot read: \.\.\/elsewhere/);
 });
 
+test('ground the tree has nothing at is returned to the seat, and the whole-tree glob is not', async (t) => {
+  // A sentence about the subject and an invented path both canonicalise, and
+  // neither can ever be compared against a merge. The glob is the one ground a
+  // finding about no single file may name, and it is admitted as written.
+  const fx = seatsFixture(t, ({ roleBlock }) =>
+    roleBlock.includes('Correction brief')
+      ? groundFinding(['**'])
+      : groundFinding(['the whole repository', 'nope/missing.mjs']),
+  );
+
+  const outcome = await generalistReview(fx.ctx, groundBase(t), {
+    cycle: 1,
+    diff: excerpted(),
+    priorConfirmed: [],
+  });
+
+  assert.equal(outcome.fail, undefined);
+  const events = readEvents(runLedgerPath(fx.paths, 'r1'));
+  const refused = events.filter((e) => e.event === 'seat-refused');
+  assert.equal(refused.length, 1);
+  assert.match(
+    refused[0].defects[0],
+    /ground this tree has nothing at: the whole repository, nope\/missing\.mjs/,
+  );
+  const [finding] = events.filter((e) => e.event === 'finding');
+  assert.deepEqual(finding.ground, ['**']);
+});
+
 test('a finding carries its ground in the form a path entry is written', async (t) => {
-  const worktree = process.cwd();
+  const worktree = groundTree(t);
   const fx = seatsFixture(t, () =>
     groundFinding([
       './src/pay.mjs',
@@ -628,7 +685,7 @@ test('the verifier ground replaces the seat ground on a confirmed finding', asyn
       : groundFinding(['src/pay.mjs'], 'HIGH'),
   );
 
-  const outcome = await generalistReview(fx.ctx, BASE, {
+  const outcome = await generalistReview(fx.ctx, groundBase(t), {
     cycle: 1,
     diff: excerpted(),
     priorConfirmed: [],
@@ -657,7 +714,7 @@ test('a verifier that states no ground leaves the seat ground standing', async (
       : groundFinding(['src/pay.mjs'], 'HIGH'),
   );
 
-  const outcome = await generalistReview(fx.ctx, BASE, {
+  const outcome = await generalistReview(fx.ctx, groundBase(t), {
     cycle: 1,
     diff: excerpted(),
     priorConfirmed: [],
@@ -1382,7 +1439,7 @@ test('a MED finding on code is advisory, and reaches no verifier', async (t) => 
     summary: 'one on code',
   }));
 
-  const outcome = await generalistReview(fx.ctx, RECORD_BASE, {
+  const outcome = await generalistReview(fx.ctx, recordBase(recordTree(t)), {
     cycle: 1,
     diff: excerpted(),
     priorConfirmed: [],
@@ -1442,7 +1499,7 @@ test('the verifier is told the record, the unit head and the criterion', async (
         },
   );
 
-  await generalistReview(fx.ctx, { ...RECORD_BASE, recordPaths: ['docs/adr'] }, {
+  await generalistReview(fx.ctx, recordBase(recordTree(t)), {
     cycle: 1,
     diff: excerpted(),
     priorConfirmed: [],

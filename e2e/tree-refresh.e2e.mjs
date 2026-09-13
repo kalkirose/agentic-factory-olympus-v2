@@ -277,7 +277,7 @@ test('a card red outside the closure is reported, and the launch goes on', async
   );
   assert.deepEqual(reported.cards, [CARD_PATH]);
   assert.deepEqual(reported.errors, [`${BROKEN_CARD_PATH}: F2: no goal`]);
-  assert.equal(reported.gist, '1 errors beyond the card');
+  assert.equal(reported.gist, '1 error(s) beyond the card');
   // Readiness went past it. The next question is the card's own open decision,
   // and no step of the run is blocked on another card.
   await pollFor(

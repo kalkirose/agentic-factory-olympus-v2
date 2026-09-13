@@ -234,6 +234,71 @@ test('a run standing in a retired stage resumes at the stage the map names', asy
   assert.equal(events.at(-1).state, 'shipped');
 });
 
+// A park is answered at the stage the ledger names, so a parked run needs the
+// map as much as a running one: the answer executes that name, and a retired
+// name has no handler behind it.
+test('a run parked in a retired stage is mapped, and its answer runs the mapped stage', async (t) => {
+  const { home, paths } = setupHome(t);
+  const before = {
+    story: {
+      stages: ['suite', 'adversary', 'freeze'],
+      handlers: {
+        suite: () => ({ next: 'adversary' }),
+        adversary: () => ({
+          park: { type: 'open-decisions', question: 'Which way?', options: ['on'] },
+        }),
+        freeze: () => ({ close: { state: 'shipped' } }),
+      },
+    },
+  };
+  const d1 = new Daemon(home, { waitSleep: NO_WAIT, lanes: before });
+  await d1.start();
+  d1.engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+  await waitFor(() => readEvents(runLedgerPath(paths, 'r1')).some((e) => e.event === 'park'), {
+    label: 'the run parks in the stage',
+  });
+  await d1.stop();
+
+  const after = {
+    story: {
+      stages: ['suite', 'freeze'],
+      retired: { adversary: 'freeze' },
+      handlers: {
+        suite: () => ({ next: 'freeze' }),
+        freeze: () => ({ close: { state: 'shipped' } }),
+      },
+    },
+  };
+  const d2 = new Daemon(home, { waitSleep: NO_WAIT, lanes: after });
+  const { runsResumed } = await d2.start();
+  t.after(async () => {
+    await d2.stop();
+  });
+  assert.deepEqual(runsResumed, ['r1']);
+  const held = readEvents(runLedgerPath(paths, 'r1'));
+  const retired = held.find((e) => e.event === 'stage-retired');
+  assert.deepEqual([retired.from, retired.to], ['adversary', 'freeze']);
+  // The map moved the stage and nothing else: the run still waits on the human,
+  // and the slot it does not hold is still free.
+  assert.ok(!held.some((e) => e.event === 'liveness-violation'));
+  assert.equal(d2.engine.activeCount('proj'), 0);
+
+  writeControl(paths, 'answer', {
+    command: 'answer',
+    actor: 'operator',
+    runId: 'r1',
+    option: 'on',
+  });
+  await waitFor(
+    () => readEvents(archivedRunLedgerPath(paths, 'r1')).some((e) => e.event === 'run-closed'),
+    { label: 'the answered run closed' },
+  );
+  const events = readEvents(archivedRunLedgerPath(paths, 'r1'));
+  assert.equal(events.find((e) => e.event === 'resume').stage, 'freeze');
+  assert.equal(events.filter((e) => e.event === 'stage-retired').length, 1);
+  assert.equal(events.at(-1).state, 'shipped');
+});
+
 // The map is a claim about two stage names, and a wrong claim would only show
 // at a resume, where the run it was written to save is the thing that breaks.
 test('a lane refuses a retired entry that names a stage it still runs or does not run', (t) => {

@@ -44,6 +44,21 @@ process.exit(1);
 `;
 
 /**
+ * A card lint that passes the tree it is first given and refuses every tree
+ * after it, so the replay's own read is the one that says no.
+ */
+const LINT_RED_AFTER_FIRST = `import { existsSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const seen = join(process.cwd(), '..', 'lint-seen.txt');
+if (existsSync(seen)) {
+  console.error('card lint: the card carries no frontmatter');
+  process.exit(1);
+}
+writeFileSync(seen, 'read');
+console.log('card lint: ok');
+`;
+
+/**
  * A card lint that lands a commit on the origin while it runs, so the push
  * that follows it meets a branch that moved a second time.
  */
@@ -185,7 +200,7 @@ test('a push that loses a race is replayed onto the new head and lands', async (
   assert.ok(fx.onMain('stories/beta.md').includes('beta-1'));
 });
 
-test('the replay lint is asked about the cards it is given and no others', async (t) => {
+test('every lint of a push is asked about the cards it is given and no others', async (t) => {
   const fx = await cardsFixture(t, { files: { 'stories/gamma.md': '---\nkey: gamma-1\ntitle: G\n---\n' } });
   fx.race({ 'stories/beta.md': '---\nkey: beta-1\ntitle: Beta\n---\n' });
   writeTree(fx.worktree, { 'stories/alpha.md': SWEPT, 'stories/gamma.md': '---\nkey: gamma-1\ntitle: G2\n---\n' });
@@ -196,11 +211,57 @@ test('the replay lint is asked about the cards it is given and no others', async
     lintCards: ['stories/alpha.md', 'stories/gamma.md'],
   });
   assert.equal(landed.ok, true);
-  assert.deepEqual(fx.lintArgv(), ['--card stories/alpha.md --card stories/gamma.md']);
+  // Two reads, of two trees: the commit, and the result replayed onto the head
+  // that beat it. Both are asked about the two cards the caller named.
+  assert.deepEqual(fx.lintArgv(), [
+    '--card stories/alpha.md --card stories/gamma.md',
+    '--card stories/alpha.md --card stories/gamma.md',
+  ]);
+});
+
+test('a result the project lint refuses before the first push is a lint-red', async (t) => {
+  // The writer is the gate. A card the project's own lint refuses never leaves
+  // the machine, and the commit behind it never stays on the run branch.
+  const fx = await cardsFixture(t, { lint: LINT_RED });
+  writeTree(fx.worktree, { 'stories/alpha.md': SWEPT });
+  const head = gitSync(['rev-parse', 'HEAD'], fx.worktree).trim();
+  const landed = await pushCardPaths({
+    ctx: fx.ctx,
+    paths: ['stories/alpha.md'],
+    message: 'cards: amend',
+    lintCards: ['stories/alpha.md'],
+  });
+  assert.equal(landed.ok, false);
+  assert.equal(landed.pushed, false);
+  assert.equal(landed.reason, 'lint-red');
+  assert.equal(landed.attempts, 0);
+  assert.match(landed.error, /the card lint of this project is red/);
+  assert.equal(gitSync(['rev-parse', 'HEAD'], fx.worktree).trim(), head);
+  assert.equal(gitSync(['status', '--porcelain'], fx.worktree).trim(), '');
+  assert.ok(!fx.onMain('stories/alpha.md').includes('<!-- swept -->'));
+});
+
+test('a write that changes nothing is no commit, no push and no loss', async (t) => {
+  // The card already says what the caller came to say. A push of an empty
+  // commit would spend the retry and could report a loss that cost nothing.
+  const fx = await cardsFixture(t);
+  const head = gitSync(['rev-parse', 'HEAD'], fx.worktree).trim();
+  const landed = await pushCardPaths({
+    ctx: fx.ctx,
+    paths: ['stories/alpha.md'],
+    message: 'cards: amend',
+    lintCards: ['stories/alpha.md'],
+  });
+  assert.equal(landed.ok, true);
+  assert.equal(landed.pushed, false);
+  assert.equal(landed.attempts, 0);
+  assert.equal(landed.sha, head);
+  assert.deepEqual(fx.lintArgv(), []);
+  assert.equal(gitSync(['rev-parse', 'HEAD'], fx.worktree).trim(), head);
 });
 
 test('a replayed result the project lint refuses is a lint-red, and nothing is pushed', async (t) => {
-  const fx = await cardsFixture(t, { lint: LINT_RED });
+  const fx = await cardsFixture(t, { lint: LINT_RED_AFTER_FIRST });
   fx.race({ 'stories/beta.md': '---\nkey: beta-1\ntitle: Beta\n---\n' });
   writeTree(fx.worktree, { 'stories/alpha.md': SWEPT });
   const landed = await pushCardPaths({

@@ -97,12 +97,20 @@ export function recordCriteriaLines() {
  *
  * Paths, and not package names: a package is not a file of this repository and
  * no diff can be compared against it, while the manifest that declares it and
- * the file that imports it both are.
+ * the file that imports it both are. A sentence is not a path either, so the
+ * duty names the one legal form for a finding whose subject is the whole tree:
+ * the glob every file matches. It is a claim that stands only while nothing at
+ * all moves, and stating it that way makes the cost visible to the seat that
+ * makes it, which a phrase like "the whole repository" never could.
  */
 export const FINDING_GROUND_DUTY = Object.freeze([
   'Name the ground of every finding in "ground": the repo-relative paths or directories the',
-  'finding is about, one entry each. A finding about a package names the manifest that declares',
-  'it or the file that imports it. A finding that names no ground is refused.',
+  'finding is about, one entry each. Every entry is a path this tree holds, or a glob over such',
+  'paths; a finding about a file the diff deletes names the directory it stood in. A finding',
+  'about a package names the manifest that declares it or the file that imports it. A finding',
+  'whose subject is the whole tree names "**", the one whole-tree ground, and it stands only',
+  'while nothing at all moves. A finding that names no ground is refused, and so is an entry',
+  'this tree has nothing at.',
 ]);
 
 /**

@@ -328,17 +328,39 @@ function closureCards(ctx, worktree, cardPath) {
 }
 
 /**
+ * The shape one error of the block reads in: a path, a short upper-case code,
+ * and what is wrong, each separated by a colon.
+ */
+const BEYOND_LINE = /^[^\s:]+:\s*[A-Z][A-Z0-9]{0,7}:\s*\S/;
+
+/**
  * The errors the lint found beyond the cards it was asked about: the block it
  * writes last, from its opening line to the end of the output.
  *
  * Read from the end, because the marker is a line a card could also carry and
  * the script writes the block after everything else it has to say.
+ *
+ * Only the lines that read as one error are kept. The harness reads a merged
+ * stream of the command's two pipes, so a warning, a progress line or a tool's
+ * own summary can land after the marker, and a record that counted those would
+ * report errors nobody wrote.
  */
+/**
+ * How many times this run has run readiness, this run included. The stage is
+ * entered once and executed again on every park answer and every resume, so an
+ * entry alone would count one read where a run took several.
+ */
+function readinessReads(events) {
+  return events.filter(
+    (e) => (e.event === 'stage-entered' || e.event === 'resume') && e.stage === 'readiness',
+  ).length;
+}
+
 function beyondTheCard(output) {
   const lines = output.split(/\r?\n/).map((line) => line.trim());
   const opened = lines.lastIndexOf(BEYOND_MARKER);
   if (opened === -1) return [];
-  return lines.slice(opened + 1).filter((line) => line.length > 0);
+  return lines.slice(opened + 1).filter((line) => BEYOND_LINE.test(line));
 }
 
 /**
@@ -394,7 +416,10 @@ function readinessHandler(postFreezeStage, forgeFor) {
           // 4000-character tail, and a green's log is deleted.
           outputLimit: LINT_OUTPUT_LIMIT,
           keep: 'always',
-          log: commandLogPath(ctx.paths, ctx.runId, 'card-lint'),
+          // One log per read of the cards. Readiness runs whole on every park
+          // answer and on every resume, and the record a read stamps is only
+          // as good as the evidence that read left behind (ADR-0043).
+          log: commandLogPath(ctx.paths, ctx.runId, `card-lint-${readinessReads(events)}`),
         },
       );
       if (lint.code === null) {
@@ -418,7 +443,7 @@ function readinessHandler(postFreezeStage, forgeFor) {
           actor: ACTOR,
           cards,
           errors: beyond,
-          gist: gist(`${beyond.length} errors beyond the card`),
+          gist: gist(`${beyond.length} error(s) beyond the card`),
         });
       }
     }
@@ -1445,22 +1470,6 @@ function birthRole(base, resolved, brief = null) {
 }
 
 /**
- * The template. It is stated to the seat that writes the spec and checked
- * mechanically on what comes back (ADR-0019), so the two never drift.
- *
- * Every part of it exists because its absence cost a run. A clause with no
- * criterion behind it binds the suite, the implementer and the review, and
- * nothing ever asks where it came from; a test plan without file paths cannot
- * be checked against the paths the suite may use; a constant restated in three
- * places is three constants; a clause that contradicts a frozen test is a
- * deadlock nobody declared. The cap is what keeps the document readable whole.
- *
- * The one-line mapping rule is stated beside the cap because a seat that meets
- * the cap by reflowing its mapping list destroys the one structure the lint
- * reads there: a run compressed a spec that way, and every mapping after the
- * first line of each list stopped being a mapping.
- */
-/**
  * What the seat is told about the packages a story may add.
  *
  * The card is the whole authorization: a package it names ships from this
@@ -1483,6 +1492,22 @@ function dependencyLines() {
   ];
 }
 
+/**
+ * The template. It is stated to the seat that writes the spec and checked
+ * mechanically on what comes back (ADR-0019), so the two never drift.
+ *
+ * Every part of it exists because its absence cost a run. A clause with no
+ * criterion behind it binds the suite, the implementer and the review, and
+ * nothing ever asks where it came from; a test plan without file paths cannot
+ * be checked against the paths the suite may use; a constant restated in three
+ * places is three constants; a clause that contradicts a frozen test is a
+ * deadlock nobody declared. The cap is what keeps the document readable whole.
+ *
+ * The one-line mapping rule is stated beside the cap because a seat that meets
+ * the cap by reflowing its mapping list destroys the one structure the lint
+ * reads there: a run compressed a spec that way, and every mapping after the
+ * first line of each list stopped being a mapping.
+ */
 function templateLines() {
   return [
     'The spec has a fixed template. Write these parts, in this order, and nothing else:',
@@ -1711,6 +1736,10 @@ function redStateFixRole(base, brief) {
     'The red-state check failed: the suite is green against the pre-implementation tree.',
     `Fix the suite so it asserts the behavior specified at: ${base.specPath}`,
     ...suiteReportLines(base),
+    // The same records the authoring seat was given. This seat rewrites the
+    // assertions that seat wrote, so it decides against the same tree
+    // (ADR-0089).
+    ...governingRecordLines(base.worktree, specTouchedPaths(base), base.recordPaths ?? []),
     ...briefLines(brief),
   ].join('\n');
 }

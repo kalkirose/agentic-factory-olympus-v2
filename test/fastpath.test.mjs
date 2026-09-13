@@ -820,6 +820,16 @@ test('a review finding stands where the branch moved none of its ground', () => 
   assert.equal(out.taken, true, out.detail);
 });
 
+test('the one whole-tree ground refuses whatever the branch moved', () => {
+  // The legal ground for a finding about no single file, and the reading that
+  // makes it legal: every incoming file is under it, so the certification it
+  // rides stands only while nothing at all moves.
+  const out = fastPathVerdict(inputs({ lensFindings: [{ id: 'spec/F-1', ground: ['**'] }] }));
+  assert.equal(out.refusal, 'lens-ground');
+  assert.match(out.detail, /docs\/note\.md/);
+  assert.match(out.detail, /spec\/F-1/);
+});
+
 test('a review finding whose ground the branch moved refuses, naming the file and the finding', () => {
   const out = fastPathVerdict(
     inputs({

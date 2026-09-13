@@ -2551,6 +2551,12 @@ test('the red-state fix carries the map brief and its check, and the freeze reco
   const calls = fx.calls.filter((c) => c.seat === 'suite');
   assert.equal(calls.length, 3);
   assert.ok(calls[1].prompt.includes('map the surface of this story'));
+  // The fix seat rewrites the assertions the author seat wrote, so it is given
+  // the same record scope: the block is on both briefs, or the second seat
+  // decides against a tree the first one never saw.
+  const scope = 'named in neither list is closed';
+  assert.ok(calls[0].prompt.includes(scope), calls[0].prompt);
+  assert.ok(calls[1].prompt.includes(scope), calls[1].prompt);
   assert.match(calls[2].prompt, /Correction brief/);
   assert.ok(calls[2].prompt.includes('the previous map holds the item "the module entry point"'));
   // One stamp per suite write, with its counts.
@@ -2713,16 +2719,33 @@ function dependencyBirth() {
         };
 }
 
-async function parkedOnDependency(t) {
+async function parkedOnDependency(t, options = {}) {
   const seats = {
     ...shippingSeats(() => ({ report: { findings: [], summary: 'clean' } })),
     'spec-birth': dependencyBirth(),
   };
-  const fx = storyFixture(t, { seats });
+  const fx = storyFixture(t, { seats, ...options });
   const runId = await fx.launch();
   const park = await waitParked(fx.paths, runId, 'dependency-decision');
   return { fx, runId, park };
 }
+
+/**
+ * A card lint this project holds its cards to: it refuses a card that names a
+ * dependency. Every project writes its own rules and the harness holds none, so
+ * a fixture rule is as good as any real one.
+ */
+const LINT_NO_DEPENDENCIES = `import { readFileSync } from 'node:fs';
+const named = process.argv.filter((token, i) => process.argv[i - 1] === '--card');
+const bad = named.filter((card) => readFileSync(card, 'utf8').includes('## Dependencies'));
+for (const card of bad) console.error(card + ': F9: a card may not name a dependency');
+process.exit(bad.length > 0 ? 1 : 0);
+`;
+
+const CARD_LINT_CONFIG = () => ({
+  commands: { cardlint: ['node', 'scripts/cardlint.mjs'] },
+  lanes: { story: { suiteCommand: 'suite', lintCommand: 'cardlint' } },
+});
 
 test('a package the card does not name parks the birth before any spec is born', async (t) => {
   const { fx, runId, park } = await parkedOnDependency(t);
@@ -2796,6 +2819,35 @@ test('a card push that loses twice parks, and the run branch carries none of it'
   assert.equal(park.detail.card, 'stories/alpha.md');
   // The tree is back at the launch base: no card commit rides the run branch
   // into a pull request the lane denies that path to.
+  assert.equal(gitSync(['rev-parse', 'HEAD'], worktree).trim(), baseSha);
+  assert.equal(gitSync(['status', '--porcelain'], worktree).trim(), '');
+  assert.ok(!readFileSync(join(worktree, 'stories/alpha.md'), 'utf8').includes('## Dependencies'));
+  const live = readEvents(runLedgerPath(fx.paths, runId));
+  assert.ok(!live.some((e) => e.event === 'card-amended'));
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'abandon' });
+  await waitClosed(fx.paths, runId);
+});
+
+test('an amendment the project lint refuses reaches no branch, and the park says so', async (t) => {
+  // The card lint runs over what the writer wrote before the push, so a card
+  // this project refuses never lands on the default branch and never holds a
+  // launch behind it. The launched card passes the lint at readiness: what the
+  // lint refuses is the amendment.
+  const { fx, runId } = await parkedOnDependency(t, {
+    files: { 'scripts/cardlint.mjs': LINT_NO_DEPENDENCIES },
+    config: CARD_LINT_CONFIG,
+  });
+  const worktree = runWorktreePath(fx.paths, runId);
+  const baseSha = readEvents(runLedgerPath(fx.paths, runId)).find(
+    (e) => e.event === 'run-launched',
+  ).baseSha;
+  fx.daemon.engine.answer({ runId, actor: 'operator', option: 'approve' });
+  const park = await waitParked(fx.paths, runId, 'stage-blocked');
+  assert.equal(park.reason, 'card-amend-refused');
+  assert.equal(park.detail.card, 'stories/alpha.md');
+  assert.ok(park.question.includes('F9: a card may not name a dependency'), park.question);
+  // Nothing reached the branch, and nothing stayed on the run's own.
+  assert.ok(!gitSync(['show', 'main:stories/alpha.md'], fx.origin).includes('## Dependencies'));
   assert.equal(gitSync(['rev-parse', 'HEAD'], worktree).trim(), baseSha);
   assert.equal(gitSync(['status', '--porcelain'], worktree).trim(), '');
   assert.ok(!readFileSync(join(worktree, 'stories/alpha.md'), 'utf8').includes('## Dependencies'));

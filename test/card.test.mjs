@@ -216,6 +216,27 @@ test('a dependency line the parser cannot read is an error, never an omission', 
   }
 });
 
+test('only the dependencies heading opens the section', () => {
+  // Every line of the section is read as one dependency and a line that is not
+  // one is an error, so a heading that merely holds the word would take a
+  // card's prose about its dependencies and refuse the card for it.
+  for (const heading of [
+    '## Dependencies and risks',
+    '## Open dependencies',
+    '### Dependency notes',
+  ]) {
+    const { card, errors } = dependencies(
+      [heading, '', '- this story waits on the payment work landing first', ''].join('\n'),
+    );
+    assert.deepEqual(errors, [], heading);
+    assert.deepEqual(card.dependencies, [], heading);
+  }
+  // The heading itself, at any level a card writes it and in any case.
+  assert.deepEqual(dependencies('### dependencies\n\n- .: zod\n').card.dependencies, [
+    { importer: '.', name: 'zod' },
+  ]);
+});
+
 // -- the closure a launch is judged on ---------------------------------------
 
 function cardText(key, blockedBy) {

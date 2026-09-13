@@ -467,8 +467,8 @@ export function activeOf(worktree, records = []) {
 
 /**
  * The record id in a file name, by the leading digits after an `adr-` prefix.
- * ceq writes `adr-020-...md` and the harness writes `0026-...md`; both answer
- * the number the references carry.
+ * A project may write `adr-020-...md` where this repository writes
+ * `0026-...md`; both answer the number the references carry.
  */
 export function recordId(path) {
   const match = /^(?:adr[-_]?)?0*(\d+)/i.exec(basename(String(path).replaceAll('\\', '/')));
@@ -661,7 +661,15 @@ export function governingRecordLines(
       ? [
           GOVERNING_RECORDS_LINE,
           ...governing.map((file) => `- ${file}`),
-          ...(dropped > 0 ? [`and ${dropped} more, by the same rule, under ${dir}`] : []),
+          // The cap decides the order of the reading, never what the brief
+          // names: a record under the cut is an active record, so it stands in
+          // the list below and this line says where it went.
+          ...(dropped > 0
+            ? [
+                `${dropped} further record(s) rank under this list by the same rule; ` +
+                  'this brief names each of them.',
+              ]
+            : []),
         ]
       : []),
     ...(rest.length > 0 ? [OTHER_RECORDS_LINE, ...rest.map((file) => `- ${file}`)] : []),

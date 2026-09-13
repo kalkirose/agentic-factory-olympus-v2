@@ -516,7 +516,9 @@ test('a ship classifies what it collides with, and only a real choice is asked',
     () => {
       // The file is opened when the command starts and written when it ends,
       // so its first line is what says the lint has answered.
-      const path = join(fx.home, 'runs', beta, 'commands', 'card-lint.log');
+      // Each read of the cards writes its own log; this launch's first read is
+      // the one that answers.
+      const path = join(fx.home, 'runs', beta, 'commands', 'card-lint-1.log');
       const text = existsSync(path) ? readFileSync(path, 'utf8') : '';
       return text.includes('card lint: reporting') ? text : undefined;
     },

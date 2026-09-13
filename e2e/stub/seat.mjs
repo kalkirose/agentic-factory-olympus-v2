@@ -111,7 +111,7 @@ function behaviour(name) {
   if (name === 'verdict-triage') return triage();
   if (name === 'fury-verifier') return verifier();
   if (name.startsWith('fury-') || name === 'generalist-review') {
-    return { report: { findings: [], summary: 'the diff answers the spec' } };
+    return { report: { findings: lensFindings(name), summary: 'the diff answers the spec' } };
   }
   if (name === 'card-sweep') {
     return { report: { updatedCards: [], invalidated: [], summary: 'every card still stands' } };
@@ -184,6 +184,37 @@ function priorCalls(match) {
     if (match(call)) out.push(call);
   }
   return out;
+}
+
+/**
+ * The code review finding a scenario asks for, on the seat it names.
+ *
+ * The default is no finding, because every other scenario reads a diff that
+ * answers its spec. A scenario that asks for one gets it on that seat's first
+ * review and on no later one, so the round that answers the finding can close
+ * it and the run still reaches a green verdict.
+ *
+ * The ground is the scenario's to state: the check loop holds every entry to a
+ * path the reviewed tree really has, and the fixture is the only thing that
+ * knows one.
+ */
+function lensFindings(name) {
+  const asked = scenario.lensFinding;
+  if (!asked || asked.seat !== name || lensCalls(name) > 1) return [];
+  return [
+    {
+      lens: asked.lens,
+      severity: asked.severity,
+      ground: asked.ground,
+      finding: asked.finding,
+      evidence: asked.ground.join(', '),
+    },
+  ];
+}
+
+/** How many times this run has reviewed a diff through one lens seat, this read included. */
+function lensCalls(name) {
+  return priorCalls((call) => call.seat === name).length;
 }
 
 /** How many corrective dispatches this run has made over one record, this one included. */
