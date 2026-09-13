@@ -50,7 +50,8 @@ the rest.**
   by a tail is a block that is missing exactly where a long report needs it.
 - **Three outcomes.** A red inside the set parks the stage, as any blocked
   precondition does. A clean set with a block stamps one loud
-  `readiness-lint-beyond` carrying the cards judged, the error lines and a gist,
+  `readiness-lint-beyond` carrying the cards judged, the error lines, the count of
+  block lines the harness could not read as an error, and a gist,
   and the run goes on. A clean set with no block is a clean directory.
 - **One record per run.** Readiness re-runs whole on every park answer and on
   every resume, and one directory read many times is one report. The stamp is
