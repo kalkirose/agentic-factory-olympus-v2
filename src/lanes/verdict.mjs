@@ -94,7 +94,7 @@ import {
   cyclePlan,
   priorStatus,
 } from './spectrum.mjs';
-import { certifiedAt, newestBaseCertification } from '../ledger/readers.mjs';
+import { certifiedAtAll, newestBaseCertification } from '../ledger/readers.mjs';
 import { cloneDir } from '../isolation/clones.mjs';
 import {
   credentialHostIn,
@@ -678,13 +678,22 @@ async function runCycle(ctx, base, mode, { cycle }) {
     groundless: base.config?.gates?.groundlessPaths ?? [],
     recordPaths: base.recordPaths,
     recordLayers: base.recordLayers,
+    // The frozen suite, by layer name. It never carries on the footprint cycle:
+    // this run wrote the suite inside this pass, and the base certification was
+    // stamped before the suite existed, so a green held there answers a
+    // different question than the one this cycle asks.
+    suite: suiteLayer(base.layers, base.config, mode),
   };
   let plan = cyclePlan(startEvents, planArgs);
   // The footprint replaces one branch of the plan and no other, so it is derived
   // where that branch is taken and nowhere else: the ledger read and the diffs
   // behind it buy nothing on a cycle that is already narrowed, and the condition
   // stays in the planner rather than being restated here.
-  if (plan.sweep === 'full') {
+  //
+  // A full sweep that already names its reason is the planner's own decision and
+  // not the absence of one, so the footprint behind it would be derived and
+  // thrown away.
+  if (plan.sweep === 'full' && plan.reason === undefined) {
     const footprint = await certifiedFootprint(ctx, base, sha);
     plan = cyclePlan(startEvents, { ...planArgs, footprint });
   }
@@ -1067,20 +1076,29 @@ export async function certifiedFootprint(ctx, base, sha) {
   }
   const changed = await changedInRange(base.worktree, baseSha, sha).catch(() => null);
   if (changed === null) return { reason: 'unreadable-diff' };
-  const clone = cloneDir(ctx.paths, ctx.project);
-  const certified = new Map();
-  for (const layer of layers) {
-    const held = await certifiedAt(
-      ctx.paths,
-      ctx.project,
-      baseSha,
-      layer.name,
-      ground.get(layer.name),
-      clone,
-    );
-    if (held) certified.set(layer.name, held);
-  }
+  // One call for the whole spectrum. The ancestry question behind a
+  // certification at an older sha is one diff per ancestor, and a reader asked
+  // layer by layer would buy that diff once per layer.
+  const certified = await certifiedAtAll(
+    ctx.paths,
+    ctx.project,
+    baseSha,
+    layers.map((layer) => ({ name: layer.name, ground: ground.get(layer.name) })),
+    cloneDir(ctx.paths, ctx.project),
+  );
   return { changed, certified };
+}
+
+/**
+ * The Tier-1 layer that runs the frozen suite, by name, or null where the lane
+ * has none. The config names the suite by the command behind it, and two
+ * readers need the layer: the cycle plan, which never carries it, and the seat
+ * bound, which always holds it.
+ */
+function suiteLayer(layers, config, mode) {
+  if (mode !== 'story') return null;
+  const command = config?.lanes?.story?.suiteCommand;
+  return (layers ?? []).find((layer) => layer.command === command)?.name ?? null;
 }
 
 /**
@@ -3615,10 +3633,6 @@ async function seatBound(ctx, base, mode) {
   for (const row of newestBaseCertification(ctx.paths, ctx.project)?.layers ?? []) {
     if (typeof row.elapsedMs === 'number') elapsedMs[row.name] = row.elapsedMs;
   }
-  const suite =
-    mode === 'story'
-      ? (base.layers.find((l) => l.command === config.lanes?.story?.suiteCommand)?.name ?? null)
-      : null;
   return {
     worktree: base.worktree,
     baseSha,
@@ -3629,7 +3643,7 @@ async function seatBound(ctx, base, mode) {
       needs: layer.needs ?? [],
       setup: layer.setup === true,
     })),
-    suite,
+    suite: suiteLayer(base.layers, config, mode),
     declared: declaredTouchedPaths(base),
     elapsedMs: Object.keys(elapsedMs).length > 0 ? elapsedMs : null,
     capMs: SEAT_LAYER_CAP_MS,

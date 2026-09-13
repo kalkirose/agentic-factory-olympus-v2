@@ -5376,6 +5376,35 @@ test('the first cycle runs the footprint of the run own diff and carries the res
   assert.ok(!events.some((e) => e.event === 'layer-started' && e.layer === 'docs-lint'));
 });
 
+// The same project with the frozen suite's layer grounded away from the run's
+// own work, and another layer claiming what the run touched. The certification
+// holds the suite layer green at the base, so a footprint that judged it by
+// ground alone would carry it.
+const SUITE_AWAY_GATES = FOOTPRINT_GATES.map((layer) => {
+  if (layer.name === 'unit') return { ...layer, ground: ['vendor'] };
+  if (layer.name === 'suite-form') return { ...layer, ground: ['src', 'tests'] };
+  return layer;
+});
+
+test('the frozen suite runs on the footprint cycle, whatever its ground says', async (t) => {
+  const fx = verdictFixture(t, {
+    gates: SUITE_AWAY_GATES,
+    seats: { dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }), ...furyClean() },
+    seedExtra: (ctx) => certifyLaunchBase(ctx),
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const record = readRecord(fx.paths, runId, 1);
+  assert.equal(record.sweep, 'footprint');
+  // The suite this run froze is the question the cycle exists to answer. The
+  // base certification predates the suite, so its green answers another one.
+  assert.deepEqual(
+    record.spectrum.map((r) => `${r.layer}:${r.mode}`),
+    ['install:run', 'unit:run', 'suite-form:run', 'docs-lint:carried'],
+  );
+});
+
 test('a footprint cycle states no part share, and names the tree its carries came from', async (t) => {
   const fx = verdictFixture(t, {
     gates: FOOTPRINT_GATES,
