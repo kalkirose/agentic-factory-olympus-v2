@@ -290,7 +290,7 @@ export function surfaceMapCounts(report) {
 }
 
 function identity(row) {
-  return `${row?.dimension ?? ''} ${row?.item ?? ''}`;
+  return `${row?.dimension ?? ''}\u0000${row?.item ?? ''}`;
 }
 
 function rowRef(row, i) {

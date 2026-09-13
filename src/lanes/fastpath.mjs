@@ -99,8 +99,9 @@ export const FAST_PATH_REFUSALS = new Set([
   // The declarations that decide this skip come off the run's own tree, and the
   // run's own tree moved the ground they are produced from.
   'self-declared-ground',
-  // The certification carries a review-lens finding, and a lens declares no
-  // ground, so no claim in this project can say the branch did not reach it.
+  // The default branch moved a file under a review finding's own ground, or the
+  // certification carries a finding that declares none, which no claim in this
+  // project can answer for.
   'lens-ground',
   // A change on the default branch this module cannot read as a file of this
   // repository: a submodule, a symlink, a mode flip, or a path it cannot

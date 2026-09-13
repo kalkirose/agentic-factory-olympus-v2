@@ -32,7 +32,6 @@ import {
   resetHard,
   treeFiles,
 } from '../isolation/tree.mjs';
-import { editDenyRules } from '../seats/boundary.mjs';
 import { laneDiffPolicy, parseTouchedBlock, parseTouchedPaths } from '../seats/diffpolicy.mjs';
 import {
   DEPENDENCIES_SECTION,
