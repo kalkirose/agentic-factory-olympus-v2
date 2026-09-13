@@ -30,10 +30,10 @@ again over a replayed result before a second push:
   repair.
 - **A command that could not run refuses too.** It is not a red, but it is not
   a green either, and a push behind it is a push of cards no check read. It
-  refuses on the same road, so nothing unlinted reaches the default branch. The
-  `card-sweep` stamp carries `lint` on every sweep
-  (`green`, `red`, `unrun`, `unwritten`, or `undeclared`), so the reader of a
-  ledger can always tell a refused card from a host that could not answer.
+  refuses the same way, so nothing unlinted reaches the default branch. The
+  `card-sweep` stamp carries `lint` on every sweep (`green`, `red`, `unrun`,
+  `unwritten`, or `undeclared`), so the reader of a ledger can always tell a
+  refused card from a host that could not answer.
 - **The seat is told.** The role block says the lint runs over everything it
   writes, so the check is a condition of the work rather than a surprise at the
   end of it.
