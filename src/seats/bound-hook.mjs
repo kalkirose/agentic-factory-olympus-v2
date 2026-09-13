@@ -22,6 +22,11 @@
 // to fail, because a cap is a claim about time and needs a measurement behind
 // it.
 //
+// The bound itself is computed in `bound.mjs`, which the brief and the stamp
+// read too. Beyond the layers the diff touches, that set holds every layer they
+// need; a prerequisite admitted that way is judged by the cap here like any
+// other bound layer, unless it declares `setup`.
+//
 // A refusal is appended beside the bound file as one JSON line. The run ledger
 // has a single in-process writer holding the sequence in memory, so a second
 // writer here would corrupt it and bypass every reader that listens on the
@@ -38,8 +43,7 @@
 // answer in the stream and proves the bound loaded.
 import { createHash } from 'node:crypto';
 import { appendFileSync, readFileSync } from 'node:fs';
-import { underEntry } from '../config/project.mjs';
-import { withDependents } from '../lanes/spectrum.mjs';
+import { boundLayerNames } from './bound.mjs';
 import { git } from '../isolation/git.mjs';
 
 /** The cap a bound file that states none is read with. */
@@ -112,51 +116,61 @@ async function decide() {
 }
 
 /**
- * The seat's own command, as the CLI states it. A tool input that carries no
- * command string names no layer and is judged as such: this hook reads the
- * command and judges nothing else about a call.
+ * The seat's own command, as the CLI states it. A command tool carries a shell
+ * line in `command`; the REPL carries source in `code`, which runs a layer as
+ * readily as a shell line does and is read the same way. A tool input that
+ * carries neither names no layer: this hook reads what the call would run and
+ * judges nothing else about it.
  */
 function commandOf(call) {
-  const command = call?.tool_input?.command;
-  return typeof command === 'string' ? command : '';
+  const input = call?.tool_input ?? {};
+  for (const field of ['command', 'code']) {
+    if (typeof input[field] === 'string') return input[field];
+  }
+  return '';
 }
 
 /**
  * Every layer the command runs. A layer is named by its command argv joined by
  * spaces and found anywhere in the command, because a seat runs a layer inside
  * a shell line that may hold a directory change, a redirection or a second
- * command. Whitespace is collapsed on both sides, so a line broken over
- * several spaces still names what it runs.
+ * command.
  */
 function matchedLayers(layers, command) {
-  const text = collapse(command);
+  const text = spelling(command);
   if (text.length === 0) return [];
   return layers.filter((layer) => {
-    const argv = collapse((layer.argv ?? []).join(' '));
+    const argv = spelling((layer.argv ?? []).join(' '));
     return argv.length > 0 && text.includes(argv);
   });
 }
 
 /**
- * The layers the seat may run: the layers whose ground its diff touches, closed
- * over `needs` because a layer downstream of a changed one is judged against a
- * prerequisite that moved, plus the setup layers and the frozen suite, which
- * are in the bound by declaration.
+ * One command line as the match reads it. The same invocation has several
+ * ordinary spellings, and a match on the literal argv would let every one of
+ * them but the config's own walk past the bound: a line broken over several
+ * spaces, a Windows path separator, a quoted script path. Whitespace is
+ * collapsed, a backslash reads as a forward slash, and a quote is dropped.
+ *
+ * Both sides are read through this, so the layer's own argv is normalised the
+ * same way and a config that quotes a path still matches.
+ */
+function spelling(text) {
+  return String(text)
+    .replace(/\s+/g, ' ')
+    .replaceAll('\\', '/')
+    .replaceAll('"', '')
+    .replaceAll("'", '')
+    .trim();
+}
+
+/**
+ * The layers the seat may run, against the diff it holds now. The rule is the
+ * one the brief named at the spawn; only the file list differs, and here it is
+ * the live diff rather than the declared paths.
  */
 async function boundLayers(bound) {
-  const layers = bound.layers ?? [];
-  const changed = await changedFiles(bound.worktree, bound.baseSha);
-  const touched = new Set();
-  for (const layer of layers) {
-    const ground = layer.ground ?? [];
-    if (changed.some((file) => ground.some((entry) => underEntry(file, entry)))) {
-      touched.add(layer.name);
-    }
-  }
-  const inBound = withDependents(layers, touched);
-  for (const layer of layers) if (layer.setup === true) inBound.add(layer.name);
-  if (typeof bound.suite === 'string' && bound.suite.length > 0) inBound.add(bound.suite);
-  return inBound;
+  return boundLayerNames(bound, await changedFiles(bound.worktree, bound.baseSha));
 }
 
 /**
@@ -252,10 +266,6 @@ function readStdin() {
     process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     process.stdin.on('error', reject);
   });
-}
-
-function collapse(text) {
-  return String(text).replace(/\s+/g, ' ').trim();
 }
 
 function repoRelative(path) {

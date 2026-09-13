@@ -110,24 +110,45 @@ export function openRuns(paths) {
       runId: entry.name,
       ...state,
       cost: runCost(events),
-      carryShare: lastCarryShare(events),
+      carry: lastCarry(events),
     });
   }
   return runs;
 }
 
 /**
- * The carried share of the run's last rendered verdict, or null before one.
+ * What the run's last rendered verdict did not have to buy, or null before one.
  * It is what the cycles of this run are buying: a run whose share has fallen
  * to nothing is re-running every part of every layer, which costs hours and
  * turns nothing red (ADR-0058).
+ *
+ * The last render answers, and no earlier one is consulted. A cycle that
+ * narrowed by layer rather than by part states no share, and walking back past
+ * it would print the share of a cycle the run has left behind.
+ * @returns {{share: number}|{sweep: string}|null}
  */
-function lastCarryShare(events) {
+function lastCarry(events) {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
-    if (e.event === 'verdict-rendered' && typeof e.carryShare === 'number') return e.carryShare;
+    if (e.event !== 'verdict-rendered') continue;
+    if (typeof e.carryShare === 'number') return { share: e.carryShare };
+    return typeof e.sweep === 'string' ? { sweep: e.sweep } : null;
   }
   return null;
+}
+
+/**
+ * The carry as one phrase on a run line.
+ *
+ * A footprint cycle carries whole layers and holds no part table under them, so
+ * it measures no share at all. The line names the reading it has rather than
+ * printing a percentage the render never stated. A cycle that ran no layer in
+ * parts has nothing to say either way.
+ */
+function carryText(carry) {
+  if (carry === null || carry === undefined) return '';
+  if (typeof carry.share === 'number') return ` · carry ${Math.round(carry.share * 100)}%`;
+  return carry.sweep === 'footprint' ? ' · carry by layer' : '';
 }
 
 /** The status page: chips, loud strip, queue, runs, projects. */
@@ -195,12 +216,9 @@ export function renderStatus(paths) {
     const budget = run.payload?.budget;
     const spend = `$${run.cost.toFixed(2)}${typeof budget === 'number' ? ` of $${budget.toFixed(2)}` : ''}`;
     // The carry, on the one stage that spends it. A run in verdict is a run
-    // paying for gate layers by the hour, and this is the share of that work
-    // its last cycle did not have to do (ADR-0058).
-    const carry =
-      run.stage === 'verdict' && typeof run.carryShare === 'number'
-        ? ` · carry ${Math.round(run.carryShare * 100)}%`
-        : '';
+    // paying for gate layers by the hour, and this is what its last cycle did
+    // not have to do (ADR-0058).
+    const carry = run.stage === 'verdict' ? carryText(run.carry) : '';
     lines.push(
       `  ${run.runId} ${run.lane} @ ${run.stage} · ${spend}${carry}` +
         `${flags.length > 0 ? ` [${flags.join(', ')}]` : ''}`,

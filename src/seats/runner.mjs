@@ -56,10 +56,12 @@
 // The hook decides alone and writes its refusals to a file, because the run
 // ledger has one in-process writer holding the sequence in memory. So the
 // runner reads that file when the seat ends and stamps what the hook refused,
-// which is the same fact with one writer.
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+// which is the same fact with one writer. A dispatch the daemon never saw end
+// leaves its file behind unread, so every start also sweeps the files of this
+// run's earlier dispatches and stamps what no stamp carries yet.
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { superviseSeat } from '../engine/supervise.mjs';
 import { COMMAND_LINE_MAX, commandLineLength } from '../engine/executable.mjs';
@@ -67,6 +69,7 @@ import { seatDef, FALLBACK_MODEL } from './seatmap.mjs';
 import { checkReportSchema, validateReport, readReport } from './contract.mjs';
 import { assembleSeatPrompt, correctivePrompt, promptFileRef } from './prompt.mjs';
 import { claudeSeatCommand, boundLoadProof, COMMAND_TOOLS } from './claude.mjs';
+import { boundLayerNames } from './bound.mjs';
 import {
   SEAT_LADDER,
   ladderStep,
@@ -194,6 +197,10 @@ export async function runSeat(store, opts) {
       });
       return { ok: false, failed: true, reason: 'bound-not-loaded', error: error.message };
     }
+    // What a dispatch the daemon lost refused, before this dispatch's own
+    // stamp: the hook wrote those lines, and a restart between the write and
+    // the read is the one way they reach no ledger at all.
+    stampLostRefusals(store, seat, held);
     // The digest and the layers, and no path: the run that wrote the file
     // archives, and a stamp naming the live directory would point at a
     // directory that stopped existing. The file travels with the run.
@@ -206,15 +213,8 @@ export async function runSeat(store, opts) {
   const endBound = () => {
     if (refusals !== null) return refusals;
     refusals = 0;
-    for (const line of refusalLines(held)) {
-      store.append('seat-command-refused', {
-        actor: ACTOR,
-        seat,
-        layer: line.layer ?? null,
-        command: line.command ?? '',
-        reason: line.reason ?? '',
-        ...(typeof line.at === 'string' && { at: line.at }),
-      });
+    for (const line of refusalsIn(held?.refusalsPath)) {
+      stampRefusal(store, seat, line);
       refusals++;
     }
     return refusals;
@@ -655,24 +655,27 @@ function writeSeatBound(seat, { bound, settingsPath, boundPath }) {
   );
   return {
     digest: createHash('sha256').update(text).digest('hex'),
-    layers: (bound.layers ?? []).map((layer) => layer.name),
+    // The bound, not the battery: the stamp is the whole record of what this
+    // seat was allowed to run, and the file holds every layer because the hook
+    // needs the ground and the `needs` of the ones it refuses too.
+    layers: [...boundLayerNames(bound)],
     refusalsPath: `${boundPath}.refusals.jsonl`,
   };
 }
 
 /**
- * The refusals the hook left beside the bound file, one object per line.
+ * The refusals a hook left in one file, one object per line.
  *
  * A file that is not there is a seat that ran nothing outside its bound, which
  * is the ordinary case. A line that does not parse is dropped: the hook appends
  * from a process of its own, and a torn last line says nothing a stamp could
  * carry.
  */
-function refusalLines(held) {
-  if (held === null) return [];
+function refusalsIn(path) {
+  if (typeof path !== 'string') return [];
   let text;
   try {
-    text = readFileSync(held.refusalsPath, 'utf8');
+    text = readFileSync(path, 'utf8');
   } catch {
     return [];
   }
@@ -686,6 +689,55 @@ function refusalLines(held) {
     }
   }
   return lines;
+}
+
+/** One refusal on the ledger, as the hook wrote it. */
+function stampRefusal(store, seat, line) {
+  store.append('seat-command-refused', {
+    actor: ACTOR,
+    seat,
+    layer: line.layer ?? null,
+    command: line.command ?? '',
+    reason: line.reason ?? '',
+    ...(typeof line.at === 'string' && { at: line.at }),
+  });
+}
+
+/**
+ * What the hook refused in a dispatch of this seat that never reached its own
+ * read: the daemon stopped between the hook's append and the end of the seat,
+ * and the next start is the only reader left for those lines.
+ *
+ * Every refusals file beside this dispatch's own is swept, because a run may
+ * have lost more than one dispatch. A line already stamped is skipped, matched
+ * on the instant and the command the hook wrote: the pair is what the hook
+ * knows about a call, and a seat that ran one command twice refused it twice.
+ */
+function stampLostRefusals(store, seat, held) {
+  const dir = dirname(held.refusalsPath);
+  const own = basename(held.refusalsPath);
+  let entries;
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return;
+  }
+  const stamped = new Set(
+    store
+      .events()
+      .filter((e) => e.event === 'seat-command-refused' && e.seat === seat)
+      .map((e) => `${e.at ?? ''} ${e.command ?? ''}`),
+  );
+  for (const entry of entries.sort()) {
+    if (entry === own || !entry.endsWith('.refusals.jsonl')) continue;
+    for (const line of refusalsIn(join(dir, entry))) {
+      if (typeof line.seat === 'string' && line.seat !== seat) continue;
+      const key = `${line.at ?? ''} ${line.command ?? ''}`;
+      if (stamped.has(key)) continue;
+      stamped.add(key);
+      stampRefusal(store, seat, line);
+    }
+  }
 }
 
 /**

@@ -160,8 +160,13 @@ export function parseClaudeLine(line) {
  * hook refusing is how the bound works, and a refusal carries the reason on
  * stderr rather than the marker on stdout; a call some other hook of the host
  * denied never reached this one. Either way nothing unbounded ran, which is the
- * whole of what this answers. A denial is read from the hook's own exit code,
- * so no reading here rests on a message anybody writes.
+ * whole of what this answers. A denial is read from the hook's own outcome and
+ * its exit code, so no reading here rests on a message anybody writes.
+ *
+ * A field the line does not carry says nothing, and a reading that took an
+ * absent code for a denial would disarm this proof on every stream: the miss it
+ * exists to catch is a command that ran with no marker beside it, and a denial
+ * is exactly what excuses one.
  *
  * @returns {(line: string) => boolean} true on the one line that proves the miss
  */
@@ -189,7 +194,7 @@ export function boundLoadProof() {
     if (awaiting === null) return false;
     if (parsed.type === 'system' && parsed.subtype === 'hook_response') {
       if (firstWord(parsed.stdout) === BOUND_MARKER) marked = true;
-      if (parsed.exit_code !== 0) denied = true;
+      if (parsed.outcome === 'error' || exitCode(parsed) !== 0) denied = true;
       return false;
     }
     if (parsed.type === 'user') {
@@ -208,6 +213,11 @@ export function boundLoadProof() {
     }
     return false;
   };
+}
+
+/** A hook's exit code, or 0 where the line states none: absence is no denial. */
+function exitCode(line) {
+  return typeof line.exit_code === 'number' ? line.exit_code : 0;
 }
 
 function firstWord(text) {

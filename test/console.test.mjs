@@ -145,6 +145,20 @@ test('a run in verdict carries the share of its part work it did not do', (t) =>
   run.close();
   assert.match(renderStatus(paths), /r2 story @ verdict · \$0\.00 · carry 85%/);
 
+  // A footprint cycle carries whole layers and holds no part table under them,
+  // so it states no share. The line names the reading it has; the older render's
+  // number says nothing about where this run stands now.
+  const footprint = openRunStore(paths, 'r2');
+  footprint.append('verdict-rendered', {
+    actor: 'daemon',
+    cycle: 2,
+    sweep: 'footprint',
+    verdict: 'green',
+    open: [],
+  });
+  footprint.close();
+  assert.match(renderStatus(paths), /r2 story @ verdict · \$0\.00 · carry by layer/);
+
   // A run in any other stage says nothing about it, and a run that has
   // rendered no verdict has nothing to say.
   const moved = openRunStore(paths, 'r2');
