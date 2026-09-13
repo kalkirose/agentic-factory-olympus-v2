@@ -4,7 +4,8 @@
 // event-keyed watchers, and every number re-derives from the files on each
 // build. Clone-backed sections (tripwire registry, frontier) read the bare
 // clone without a fetch and degrade to null when no clone exists yet.
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
+import { basename } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
 import { LOUD_EVENTS, SEAT_TERMINAL_EVENTS } from '../ledger/registry.mjs';
 import { runCost } from '../ledger/cost.mjs';
@@ -32,7 +33,7 @@ import { CRASH_RETRIES } from '../seats/runner.mjs';
 import { computeFrontier, roadmapPositions } from '../frontier/graph.mjs';
 import { readGraphSource } from '../frontier/source.mjs';
 import { cloneDir, readBlobFromBranch } from '../isolation/clones.mjs';
-import { parseProjectConfig } from '../config/project.mjs';
+import { driftHeld, parseProjectConfig } from '../config/project.mjs';
 import { PRE_FREEZE_STAGES } from '../lanes/story.mjs';
 import { RECORDS_LANE_STAGES } from '../lanes/records-stage.mjs';
 import { VERIFIER_SEATS } from '../lanes/review.mjs';
@@ -121,7 +122,7 @@ export async function buildSnapshot(paths, { now = new Date() } = {}) {
         projectHealth(paths, name, ships, escapes, instanceEvents, sources.get(name)),
       ),
     },
-    stats: statsView(allRuns, ships, harnessPinTs(instanceEvents)),
+    stats: statsView(paths, allRuns, ships, harnessPinTs(instanceEvents), sources),
     tail: tailView(paths, allRuns),
   };
 }
@@ -402,7 +403,7 @@ function shipList(allRuns) {
   return ships.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
 }
 
-function statsView(allRuns, ships, pinTs) {
+function statsView(paths, allRuns, ships, pinTs, sources) {
   const last = ships.slice(-SHIPS_WINDOW);
   const prior = ships.slice(-2 * SHIPS_WINDOW, -SHIPS_WINDOW);
   const shipMinutes = last.map((s) => s.shipMinutes).filter((m) => m !== undefined);
@@ -416,7 +417,7 @@ function statsView(allRuns, ships, pinTs) {
     greenShipP50Minutes: shipMinutes.length > 0 ? round(median(shipMinutes)) : null,
     ciCriticalPathP50Minutes: ciCriticalPath(allRuns),
     stageMedians: stageMedians(allRuns, last),
-    records: recordsView(allRuns, pinTs),
+    records: recordsView(paths, allRuns, ships, pinTs, sources),
   };
 }
 
@@ -438,6 +439,13 @@ function statsView(allRuns, ships, pinTs) {
 const RECORDS_WINDOW = 10;
 
 // A run is in the record window when it holds one of these.
+//
+// `reconcile-skipped` is not one, and neither is a `reconciliation-judged` that
+// carries `advisory: true`. Both say the stage stood over the records rather
+// than working them, and a window that counted such a run would read every
+// measure below over a run that spent no record seat at all (ADR-0090). The
+// seat mean and the drift count are the readings of that mode, and they stand
+// on the ships and the ticket directory rather than on this window.
 const RECORD_STAMPS = new Set([
   'records-committed',
   'record-written',
@@ -450,9 +458,15 @@ const RECORD_STAMPS = new Set([
   'reconciliation-written',
 ]);
 
-function recordsView(allRuns, pinTs) {
+/** Whether one stamp puts its run in the record window. */
+function recordStamp(e) {
+  if (!RECORD_STAMPS.has(e.event)) return false;
+  return !(e.event === 'reconciliation-judged' && e.advisory === true);
+}
+
+function recordsView(paths, allRuns, ships, pinTs, sources) {
   const runs = allRuns
-    .filter((r) => r.events.some((e) => RECORD_STAMPS.has(e.event)))
+    .filter((r) => r.events.some(recordStamp))
     .map((r) => ({ ...r, ts: r.events[0]?.ts ?? '' }))
     .sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0))
     .slice(-RECORDS_WINDOW);
@@ -477,6 +491,12 @@ function recordsView(allRuns, pinTs) {
       reconciliations: cycles.detail.reconciliations,
       ...(cycles.detail.worst !== undefined && { worst: cycles.detail.worst }),
     },
+    // What the record work costs a ship in seats, and what is waiting for a
+    // person. Both stand outside the window above: the seat mean is over the
+    // ships whatever they spent, so a mode that spends none reads as none, and
+    // the drift count is a directory and not a ledger (ADR-0090).
+    seats: seatShare(allRuns, ships),
+    drift: driftHeldCount(paths, allRuns, sources),
     cost: recordCost(runs),
     standing: standingFindings(runs),
     firstRead: firstReadYield(runs),
@@ -533,7 +553,100 @@ function recordSeat(seat) {
   return typeof seat === 'string' && RECORD_SEATS.has(seat.split(':')[0]);
 }
 
-const RECORD_SEATS = new Set(['record-author', 'record-review', 'reconcile-write']);
+const RECORD_SEATS = new Set([
+  'record-author',
+  'record-review',
+  'reconcile-judge',
+  'reconcile-write',
+]);
+
+/** How many ships the seat mean reads. */
+const SEAT_SHARE_WINDOW = 20;
+
+/**
+ * What the record work costs a ship in seats: the mean record seats spawned per
+ * shipped run over the last twenty ships, beside the records those runs wrote.
+ *
+ * It is the reading the shape of this stage is judged by. One judge, one writer
+ * over the set, one reviewer over the set and one corrective writer is the most
+ * a ship pays where the judge runs in front of the token; a ship whose judge
+ * runs after the merge pays one seat and writes nothing (ADR-0090).
+ *
+ * Every ship counts, whatever it spent. A window of the runs that touched a
+ * record would read a quiet quarter as an expensive one, and the question here
+ * is what a ship costs and not what a record costs.
+ */
+function seatShare(allRuns, ships) {
+  const last = ships.slice(-SEAT_SHARE_WINDOW);
+  const byRun = new Map(allRuns.map((r) => [r.runId, r.events]));
+  let seats = 0;
+  let records = 0;
+  const perRun = [];
+  for (const ship of last) {
+    const events = byRun.get(ship.runId) ?? [];
+    const spawned = events.filter((e) => e.event === 'seat-spawned' && recordSeat(e.seat)).length;
+    const wrote = new Set(
+      events.filter((e) => e.event === 'record-written' && e.failed !== true).map((e) => e.record),
+    ).size;
+    seats += spawned;
+    records += wrote;
+    perRun.push({ runId: ship.runId, seats: spawned, records: wrote });
+  }
+  return {
+    ships: last.length,
+    seats,
+    records,
+    mean: last.length > 0 ? round(seats / last.length) : null,
+    perShip: last.length > 0 ? round(records / last.length) : null,
+    runs: perRun,
+  };
+}
+
+/**
+ * The record drift waiting for a person: the tickets under the drift directory
+ * that no run has launched, and the projects whose own threshold that count has
+ * reached.
+ *
+ * A ticket lands there where the judge read the merge and found drift, and it
+ * stays until the owner launches the records lane on it. Nothing in the harness
+ * launches one, so the count is the one alarm that mode has: at a project's
+ * `gates.driftHeld`, the mode is costing what the stage would have paid
+ * (ADR-0090).
+ *
+ * It reads the directory and not the ledgers, because a ticket the owner moved
+ * there by hand is drift too, and no ledger says so. The project of a ticket is
+ * the project of the run it names, which is the one join the home can make; a
+ * ticket whose run this home does not hold counts in the total and against no
+ * threshold.
+ */
+function driftHeldCount(paths, allRuns, sources) {
+  let names = [];
+  try {
+    names = readdirSync(paths.driftTickets).filter((name) => name.endsWith('.md'));
+  } catch {
+    // No directory means no drift was ever written: a measured zero.
+    return { held: 0, launched: 0, tickets: [], over: [] };
+  }
+  const launched = new Set();
+  const projectOf = new Map();
+  for (const { runId, project, events } of allRuns) {
+    projectOf.set(`drift-${runId}.md`, project);
+    const launch = events.find((e) => e.event === 'run-launched');
+    if (typeof launch?.driftTicket === 'string') launched.add(basename(launch.driftTicket));
+  }
+  const held = names.filter((name) => !launched.has(name));
+  const byProject = new Map();
+  for (const name of held) {
+    const project = projectOf.get(name);
+    if (project) byProject.set(project, (byProject.get(project) ?? 0) + 1);
+  }
+  const over = [];
+  for (const [project, count] of byProject) {
+    const threshold = driftHeld(sources?.get(project)?.config);
+    if (count >= threshold) over.push({ project, held: count, threshold });
+  }
+  return { held: held.length, launched: launched.size, tickets: held, over };
+}
 
 /** How many records one run's last write stamp says the tree holds active. */
 function shippedRecords(events) {
@@ -582,8 +695,8 @@ function standingFindings(runs) {
  * confirmed HIGH a cycle after the first raised on a record the first cycle read
  * and passed.
  *
- * The track spends one review seat per record and no verifier behind it, so the
- * question it turns on is whether the first read is the read. A `later` that
+ * The track spends one review seat over the cycle and no verifier behind it, so
+ * the question it turns on is whether the first read is the read. A `later` that
  * grows against a flat `firstRead` is the reading that answers no (ADR-0080).
  */
 function firstReadYield(runs) {

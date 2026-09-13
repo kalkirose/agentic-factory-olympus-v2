@@ -113,8 +113,8 @@ export function reconcileWriteSchema({ answered = false } = {}) {
  * before the code exists by a seat that will never write that code.
  *
  * It carries no diff, because there is nothing implemented to read. It carries
- * the neighbourhood, because a decision that contradicts an active record's
- * open part is the conflict this brief exists to settle.
+ * the neighbourhood, because a decision that contradicts an active record is
+ * the conflict this brief exists to settle.
  * @param {object} base the lane base
  * @param {{key?: string, path?: string, reason?: string, touchedPaths?: string[]}} spec
  * @param {{neighbours: string[], dropped: number}|string[]} neighbours
@@ -126,16 +126,16 @@ export function birthRole(base, spec, neighbours, brief) {
     'you will not write it. A record states one decision, not a diff.',
     ...specLines(spec),
     '',
-    'Write one file per decision, in the form the project states, with status Accepted. Every',
-    'part the tree does not hold is stated as not yet implemented. Where the specification',
-    'decides nothing the record tree does not already hold, write no file and say so in',
-    '"unchanged" with the reason.',
+    'Write one file per decision, in the form the project states, with status Accepted. Where the',
+    'specification decides nothing the record tree does not already hold, write no file and say',
+    'so in "unchanged" with the reason.',
     ...neighbourhoodLines(neighbours),
     // The neighbourhood above is this seat's first list, so the rest of the tree
     // is what it has not been given: the paths the work touches and the
     // neighbourhood are each named once (ADR-0089).
     ...governingRecordLines(base.worktree, [], base.recordPaths ?? [], {
       exclude: [...neighbourList(neighbours), ...(spec?.touchedPaths ?? [])],
+      reconcile: base.reconcile,
     }),
     ...renderLines(base),
     '',
@@ -299,10 +299,11 @@ const RECORD_RULES = [
   '- Every record you leave meets these criteria, which are the criteria the',
   '  review reads it against:',
   ...recordCriteriaLines().map((line) => `  ${line}`),
-  '- Check every present-tense sentence against the tree before you write it,',
-  '  and cite the path in the record where a claim rests on one.',
-  '- Name every divergence between the tree and the decision in the record,',
-  '  verbatim, with the evidence that shows it. A divergence is never absorbed.',
+  '- Check every present-tense sentence about the code against the tree before',
+  '  you write it, and cite the path in the record where a claim rests on one.',
+  '- State no implementation status and no divergence from the tree. A decision',
+  '  the tree does not hold yet is written as the decision, with no sentence',
+  '  about how much of it is built.',
   '- Read every active record that cites the one you supersede, and leave none',
   '  of them contradicted.',
   '- A record does not cite the standard. It cites the records it relies on.',
@@ -334,8 +335,8 @@ function neighbourhoodLines(neighbours) {
   }
   return [
     '',
-    'The neighbourhood. Read each one whole. An open part of your records may not contradict an',
-    'open part of any of them:',
+    'The neighbourhood. Read each one whole. The decision in your records may not contradict the',
+    'decision in any of them:',
     ...list.map((path) => `- ${path}`),
     ...(dropped > 0
       ? [
@@ -397,7 +398,7 @@ function lifecycleLines(base) {
     '  names is added in this same diff and names the old record back. One record may split into',
     '  several, and several may merge into one.',
     '- The project form gate reads that pairing. Run it before you report.',
-    '- Two active records that decide one unbuilt part differently resolve by recency. The newer',
+    '- Two active records that decide one point differently resolve by recency. The newer',
     '  decision stands, the older record gets its status line, and the newer record names both.',
     ...CLOSED_RECORD_DUTY,
   ];

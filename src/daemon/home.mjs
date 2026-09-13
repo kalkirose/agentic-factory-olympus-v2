@@ -34,6 +34,10 @@ export function homePaths(home, config) {
     // wrote them and the run that reads them, so they live on the home rather
     // than in either run directory.
     tickets: join(home, 'tickets'),
+    // The record drift a merge left behind, under `gates.reconcile: advisory`.
+    // The sweep launches nothing from here: every ticket waits for an owner
+    // launch, and the count of them is the mode's one alarm (ADR-0090).
+    driftTickets: join(home, 'tickets', 'drift'),
     // The one accessor for the run-workspace root. Nothing derives a worktree
     // path a second way — `isolation/worktrees.mjs` joins the run id onto this.
     worktrees: config?.worktreeRoot ?? join(home, 'worktrees'),
@@ -98,6 +102,24 @@ export function repairTicketPath(paths, escapeSeq) {
  */
 export function reconcileTicketPath(paths, runId) {
   return join(paths.tickets, `reconcile-${runId}.md`);
+}
+
+/**
+ * The path of one shipped run's drift ticket: what the judge found after the
+ * merge, under `gates.reconcile: advisory`.
+ *
+ * A directory of its own, beside the tickets the sweep launches from. The owed
+ * set walks the run ledgers and never a directory, so the split is for the
+ * person: a ticket here waits for an owner launch, and one beside it is the
+ * harness's own work. The centre counts what stands here (ADR-0090).
+ *
+ * The directory is made by the first write rather than at scaffold, because a
+ * project that never names the word never writes one, and an empty directory
+ * reads as a mechanism that ran and found nothing.
+ * @param {ReturnType<typeof homePaths>} paths
+ */
+export function driftTicketPath(paths, runId) {
+  return join(paths.driftTickets, `drift-${runId}.md`);
 }
 
 /** @param {ReturnType<typeof homePaths>} paths */

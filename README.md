@@ -17,8 +17,8 @@ Status: under construction. [BUILD.md](BUILD.md) is the build tracker.
 - Runs a defect or chore through the **repair lane**: fix, regression test,
   deterministic gates, one review, ship. There is no ungated path to main.
 - Runs a decision-record change through the **records lane**: the ticket is the
-  spec, one seat writes the records, one seat per record judges them, ship. No
-  seat that writes code writes a decision record, in any lane.
+  spec, one seat writes the records, one seat judges them, ship. No seat that
+  writes code writes a decision record, in any lane.
 - Keeps ≥2 runs in flight with structural isolation: per-run git worktrees off
   a bare clone, and a per-run compose stack for services.
 - Crosses every machine seam unattended, day and night. A run waits only at a

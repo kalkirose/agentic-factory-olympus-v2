@@ -71,7 +71,14 @@ function behavior(name) {
     return plan().sweep ?? { report: emptySweep() };
   }
   if (name === 'reconcile-judge') {
-    return { report: { owed: false, records: [], reason: 'no decision-record tree in this fixture' } };
+    return {
+      report: {
+        owed: false,
+        records: [],
+        causes: [],
+        reason: 'no decision-record tree in this fixture',
+      },
+    };
   }
   // The birth before the freeze. This scenario is about cards and its stories
   // decide no record, so the seat writes nothing and says so (ADR-0074).

@@ -9,6 +9,7 @@
 // what is owed, the reconciliation runs' own launch stamps say what has been
 // answered (the owed-repairs pattern, ADR-0024). A daemon that dies between
 // the ticket and the launch owes the same reconciliation after the restart.
+import { existsSync } from 'node:fs';
 import { listRunEvents } from '../telemetry/readers.mjs';
 import { TICKETED_LANES } from '../lanes/records-stage.mjs';
 
@@ -36,6 +37,19 @@ export function launchedReconciliations(paths) {
  * where the records did not ride its own merge. A run that launched and failed
  * is not owed again: a reconciliation that cannot land is a console decision,
  * like a spent card.
+ *
+ * Two stamps are held out of the set, and both mean the same thing: this ticket
+ * waits for a person (ADR-0090).
+ *
+ * A stamp with `advisory: true` came from the judge that read the merge, under
+ * `gates.reconcile: advisory`. Its ticket is drift the owner applies when the
+ * owner chooses, so the sweep launches none of them, and a project that flips
+ * the word back launches none of the ones it already holds either.
+ *
+ * A stamp whose ticket file is gone at the stamped path is held for the same
+ * reason with no word on it: the owner moved the ticket into the drift set by
+ * hand. Reading the file rather than a second stamp is what makes that move the
+ * whole of the action.
  * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
  */
 export function owedReconciliations(paths, project) {
@@ -44,9 +58,14 @@ export function owedReconciliations(paths, project) {
   for (const { runId, events } of listRunEvents(paths, { project, lane: 'story' })) {
     if (launched.has(runId)) continue;
     const judged = events.find(
-      (e) => e.event === 'reconciliation-judged' && e.owed === true && typeof e.ticket === 'string',
+      (e) =>
+        e.event === 'reconciliation-judged' &&
+        e.owed === true &&
+        e.advisory !== true &&
+        typeof e.ticket === 'string',
     );
     if (!judged) continue;
+    if (!existsSync(judged.ticket)) continue;
     const closed = events.find((e) => e.event === 'run-closed');
     if (closed?.state !== 'shipped') continue;
     owed.push({ runId, project, ticket: judged.ticket, closedTs: closed.ts });

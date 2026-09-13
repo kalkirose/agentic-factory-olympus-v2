@@ -680,9 +680,17 @@ function fmtShare(value) {
 }
 
 function renderRecords(box, r) {
-  if (!r || r.runs === 0) return;
+  if (!r || (r.runs === 0 && r.seats.ships === 0 && r.drift.held === 0)) return;
   box.appendChild(el("div", "subhead", "Record tree · last " + r.runs + " runs that touched a record"));
   const tiles = el("div", "tiles");
+  tiles.appendChild(tile("Record seats per ship", fmtNum(r.seats.mean, 1), null,
+    sub([r.seats.seats + " seats over " + r.seats.ships + " ships · " + fmtNum(r.seats.perShip, 1) + " records written per ship"]),
+    "Record seats spawned per shipped run, over the last 20 ships. Every ship counts, whatever it spent."));
+  const overHeld = (r.drift.over ?? []).map((o) => o.project + " at " + o.held + "/" + o.threshold);
+  tiles.appendChild(tile("Drift held", String(r.drift.held), null,
+    sub([overHeld.length > 0 ? "over the threshold: " + overHeld.join(" · ") : r.drift.launched + " drift tickets launched"]),
+    "Drift tickets nobody has launched. Where the judge runs after the merge, this is what is waiting for a person; a project at its gates.driftHeld is paying what the stage would have cost."));
+  if (r.runs === 0) { box.appendChild(tiles); return; }
   tiles.appendChild(tile("Record cycles", fmtNum(r.cycles.mean, 1), null,
     sub([r.cycles.reconciliations + " reconciliations · worst " + (r.cycles.worst ?? "—")]),
     "Mean cycles per reconciliation. A re-run and a recheck each count as a stage run of their own."));
@@ -716,7 +724,7 @@ function renderRecords(box, r) {
     "What a record render's layers spent on the clock."));
   tiles.appendChild(tile("Write wall clock", fmtNum(r.writeMinutes.mean, 1), " min",
     sub([r.writeMinutes.writes + " writes · longest " + fmtNum(r.writeMinutes.longest, 1) + " min"]),
-    "First write seat to the last write stamp of a stage run. The writers run one record at a time."));
+    "First write seat to the last write stamp of a stage run. One writer holds the whole set."));
   const tree = r.tree.length > 0 ? r.tree[r.tree.length - 1] : null;
   tiles.appendChild(tile("Active records", tree ? String(tree.active) : "—", null,
     sub([r.tree.reduce((n, e) => n + e.superseded, 0) + " superseded · "

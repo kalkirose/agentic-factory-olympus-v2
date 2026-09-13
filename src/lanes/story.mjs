@@ -1481,7 +1481,9 @@ function birthRole(base, resolved, brief = null) {
     ...suiteFacts(base),
     // The card is the only path this seat has. Nothing is implemented yet, so
     // the whole active tree is what the spec is written against (ADR-0089).
-    ...governingRecordLines(base.worktree, [base.cardPath], base.recordPaths ?? []),
+    ...governingRecordLines(base.worktree, [base.cardPath], base.recordPaths ?? [], {
+      reconcile: base.reconcile,
+    }),
     'If the repository state conflicts with the card\'s intent, do not author around the conflict: set outcome "grounding-conflict" and describe the conflict.',
     ...dependencyLines(),
     'Otherwise set outcome "spec-born".',
@@ -1742,7 +1744,9 @@ function suiteAuthorRole(base, brief) {
   return [
     `Author the acceptance suite for the spec at: ${base.specPath}`,
     ...suiteReportLines(base),
-    ...governingRecordLines(base.worktree, specTouchedPaths(base), base.recordPaths ?? []),
+    ...governingRecordLines(base.worktree, specTouchedPaths(base), base.recordPaths ?? [], {
+      reconcile: base.reconcile,
+    }),
     ...briefLines(brief),
   ].join('\n');
 }
@@ -1767,7 +1771,9 @@ function redStateFixRole(base, brief) {
     // The same records the authoring seat was given. This seat rewrites the
     // assertions that seat wrote, so it decides against the same tree
     // (ADR-0089).
-    ...governingRecordLines(base.worktree, specTouchedPaths(base), base.recordPaths ?? []),
+    ...governingRecordLines(base.worktree, specTouchedPaths(base), base.recordPaths ?? [], {
+      reconcile: base.reconcile,
+    }),
     ...briefLines(brief),
   ].join('\n');
 }

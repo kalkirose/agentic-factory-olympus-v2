@@ -385,6 +385,9 @@ const IMPLEMENTATIONS = {
   'record-write-time': async ({ paths, project, window }) =>
     recordWriteTimeReading(paths, project, { window }),
 
+  'record-owed-window': async ({ paths, project, window }) =>
+    recordOwedReading(paths, project, { window }),
+
   'frontier-width': async ({ paths, project, params, readSource }) => {
     const source = await readSource(project);
     if (!source) return { value: null, eligible: false, detail: {} };
@@ -782,12 +785,11 @@ export function recordCyclesReading(paths, project, { window = 5, runs, pinTs = 
  * The mean wall clock of the record write, in minutes, over the last `window`
  * stage runs of the project that wrote anything.
  *
- * The writers run one record at a time, in one worktree, each with its own seat
- * identity and its own commit (ADR-0075). That is the owner's decision and this
- * is the reading that says when it stops paying: the span from the first write
- * seat of a stage run to the last `reconciliation-written` of it. A mean over
- * the band says the answer is to review whether the writers should run in
- * parallel.
+ * One writer holds the whole owed set, in one worktree, with one commit behind
+ * it (ADR-0090). This is the reading that says when that set is too wide for one
+ * context: the span from the first write seat of a stage run to the last
+ * `reconciliation-written` of it. A mean over the band says the answer is the
+ * width of the set.
  *
  * Wall clock and not work: what the reading is about is how long a person or a
  * queued run waits for the records, and a wait inside the span is part of that.
@@ -837,13 +839,66 @@ export function recordWriteTimeReading(paths, project, { window = 5, runs } = {}
 }
 
 /**
- * Whether a seat name is a record writer's. A write is dispatched once per
- * record, so the name a spawn stamps carries a slot suffix and the seat behind
- * it is the name before the colon (ADR-0075). The name is read here and never
- * written, the way the repair ladder reads its own dev seat's name.
+ * Whether a seat name is a record writer's. A write dispatch carries a slot
+ * suffix, and the seat behind it is the name before the colon (ADR-0090). The
+ * name is read here and never written, the way the repair ladder reads its own
+ * dev seat's name.
  */
 function writeSeat(seat) {
   return typeof seat === 'string' && seat.split(':')[0] === RECORD_WRITE_SEAT;
+}
+
+/**
+ * The share of the last `window` shipped runs of the project whose record judge
+ * owed a rewrite, over the ships whose judge ran in front of the ship token.
+ *
+ * The judge owes on a contradiction or on a decision the code cannot show, and
+ * most diffs are neither. A share near one says the criterion has drifted back
+ * to owing on every diff that lands code, which is the cost this shape removed;
+ * the causes on the judgments of the window say which word it drifted through
+ * (ADR-0090).
+ *
+ * A ship whose judge ran after the merge is out of the window. Its stamp
+ * carries `advisory: true`, the owed set it names is drift the owner holds, and
+ * counting it would mix two questions asked at two moments into one number. A
+ * window with no such ship in it is not eligible: a project that reads its
+ * records after the merge says nothing here, and a standing zero would read as
+ * a judge that owes nothing.
+ */
+export function recordOwedReading(paths, project, { window = 20, runs } = {}) {
+  const ships = [];
+  for (const { runId, events } of runs ?? projectRuns(paths, project)) {
+    const merged = events.find((e) => e.event === 'merged');
+    if (!merged) continue;
+    const judged = events.find(
+      (e) => e.event === 'reconciliation-judged' && e.ok === true && e.advisory !== true,
+    );
+    if (!judged) continue;
+    ships.push({
+      runId,
+      ts: merged.ts,
+      owed: judged.owed === true,
+      causes: judged.owed === true ? (judged.causes ?? []) : [],
+    });
+  }
+  ships.sort(byTs);
+  const inWindow = ships.slice(-window);
+  const owed = inWindow.filter((s) => s.owed);
+  const causes = {};
+  for (const s of owed) for (const cause of s.causes) causes[cause] = (causes[cause] ?? 0) + 1;
+  return {
+    value: inWindow.length > 0 ? round(owed.length / inWindow.length) : null,
+    eligible: inWindow.length > 0,
+    detail: {
+      ships: inWindow.length,
+      owed: owed.length,
+      // The words behind the share. Each names a different drift: `contradicts`
+      // climbing is a codebase moving past its records, and `undecided`
+      // climbing is a judge reading every diff as a decision nobody recorded.
+      causes,
+      runs: owed.map((s) => s.runId),
+    },
+  };
 }
 
 /**

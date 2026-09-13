@@ -64,13 +64,14 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { isAbsolute, join } from 'node:path';
 import {
   ciEvidenceDir,
+  driftTicketPath,
   repairTicketPath,
   reconcileTicketPath,
   runReportPath,
 } from '../daemon/home.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
 import { DEFAULT_PROJECT_CONFIG_PATH, recordPathIncludes } from '../config/project.mjs';
-import { assertDefectKind } from '../ledger/registry.mjs';
+import { assertDefectKind, assertJudgeCause } from '../ledger/registry.mjs';
 import { budgetOpen, ciFlakes, deterministicRed, FLAKE_LIMIT } from '../ledger/cycles.mjs';
 import { openEscapesStore } from '../telemetry/stores.mjs';
 import { stageHeartbeat } from '../telemetry/heartbeat.mjs';
@@ -105,16 +106,20 @@ import { probeCredentials, worldConfig } from './probes.mjs';
 import { MERGE_SUITE_SCHEMA } from './story.mjs';
 import { WRITE_SEAT, findingLine, remarkLine, runWindow } from './records.mjs';
 import {
+  OWED_CRITERION,
+  RECONCILE_JUDGE_SCHEMA,
   RECONCILE_STAGE,
   REMARKS_HEADING,
   lastRendered,
   reconcileCertification,
   reconcileHandler,
   runRemarks,
+  skippedReds,
+  skipsJudgment,
   unreviewedOf,
   unwrittenOf,
 } from './reconcile.mjs';
-import { recordBase, recordsCommitted } from './records-stage.mjs';
+import { recordBase, recordEntries, recordsCommitted } from './records-stage.mjs';
 import { activeOf, governingRecordLines, recordNeighbours } from './units.mjs';
 import {
   DEV_SCHEMA,
@@ -813,10 +818,16 @@ function laneWord(base) {
  * "Remarks not answered"; a record no round wrote and a record no seat read ride
  * under their own headings. The close stamp carries the same four sets by id and
  * by path (ADR-0080).
+ *
+ * A record layer the stage left red rides under "Records" for the same reason.
+ * Where the judge runs after the merge, that layer is the whole of what the
+ * harness read about these records before the request opened, and a red it
+ * blocked nothing on is a red the request has to name (ADR-0090).
  */
 export function requestBody(ctx, base, sha) {
   const events = runEvents(ctx);
   const records = recordsCommitted(events)?.paths ?? [];
+  const reds = skippedReds(events);
   const index = findingIndex(events);
   const standing = (lastRendered(events)?.open ?? [])
     .map((id) => index.get(id))
@@ -828,7 +839,17 @@ export function requestBody(ctx, base, sha) {
     `Olympus run ${ctx.runId}.`,
     `Spec: ${base.specRef}`,
     `Head: ${sha}`,
-    ...(records.length > 0 ? ['', '## Records', '', ...records.map((r) => `- ${r}`)] : []),
+    ...(records.length > 0 || reds.length > 0
+      ? [
+          '',
+          '## Records',
+          '',
+          ...records.map((r) => `- ${r}`),
+          ...(reds.length > 0
+            ? [`- record layer red over these records, and the ship did not wait: ${reds.join(', ')}`]
+            : []),
+        ]
+      : []),
     ...(standing.length > 0
       ? ['', '## Findings not answered', '', ...standing.map((f) => `- ${findingLine(f)}`)]
       : []),
@@ -2035,6 +2056,10 @@ function closeOutHandler({ forgeFor, pollMs, enqueueRepair }) {
     const directive = await watchMergeCommit(ctx, base, merged, pollMs);
     if (directive === 'stopped') return null;
     if (directive) return directive;
+    // The judge the run owes where its stage stood out of the ship path. It
+    // reads the merge commit, so it runs here and nowhere earlier, and it runs
+    // before anything else resets this tree (ADR-0090).
+    if (skipsJudgment(base)) await driftJudge(ctx, base, merged);
     if (base.storyLane && !runEvents(ctx).some((e) => e.event === 'card-sweep')) {
       await cardSweep(ctx, base, merged);
     }
@@ -2441,6 +2466,147 @@ async function watchMergeCommit(ctx, base, merged, pollMs) {
   }
 }
 
+// -- the judge after the merge (ADR-0090) ------------------------------------
+
+/**
+ * The record judge of a run whose stage stood out of the ship path.
+ *
+ * It reads the merge commit against its own first parent, which is exactly the
+ * work this run put on the default branch, and it judges on the one criterion
+ * every judge of the record work reads. Whatever it owes becomes a drift ticket
+ * the owner launches; nothing here blocks, reruns or reopens anything.
+ *
+ * The judge is derived from the ledger and never remembered. A
+ * `reconciliation-judged` with `advisory: true` says it ran, so a daemon
+ * restart inside the close-out spawns no second one. That is the guard the
+ * learning seat beside it uses, for the same reason.
+ *
+ * Every failure is quiet and the close proceeds. A judge that could not answer
+ * stamps `ok: false` with the cause, and the run closes shipped: a record
+ * blocks no run, and one the harness could not judge blocks nothing either.
+ */
+async function driftJudge(ctx, base, merged) {
+  if (judgedAfterMerge(runEvents(ctx))) return;
+  // A project with no record tree has nothing to judge, and a merge with no
+  // commit of its own has no diff to read.
+  if (recordEntries(base.recordPaths ?? []).length === 0) return;
+  if (typeof merged.mergeSha !== 'string') return;
+  const born = recordsCommitted(runEvents(ctx))?.paths ?? [];
+  const fail = (cause) =>
+    ctx.store.append('reconciliation-judged', {
+      actor: ACTOR,
+      ok: false,
+      owed: false,
+      advisory: true,
+      cause,
+      born,
+      late: [],
+      gist: gist(`the judge after the merge could not answer: ${cause}`),
+    });
+  try {
+    // The merge commit has to be in this tree before a diff of it can be read.
+    await fetchClone(cloneDir(ctx.paths, ctx.project));
+    await resetHard(base.worktree, merged.mergeSha);
+  } catch (error) {
+    fail(`worktree: ${error.message}`);
+    return;
+  }
+  let result;
+  try {
+    result = await ctx.runSeat({
+      seat: 'reconcile-judge',
+      roleBlock: driftJudgeRole(base, merged, born),
+      reportPath: runReportPath(ctx.paths, ctx.runId, 'reconcile-judge-merged'),
+      schema: RECONCILE_JUDGE_SCHEMA,
+      cwd: base.worktree,
+      env: base.env,
+      constitution: base.constitution,
+      styleFiles: base.styleFiles,
+    });
+  } catch (error) {
+    fail(`seat: ${error.message}`);
+    return;
+  }
+  if (!result.ok) {
+    fail('seat-failure');
+    return;
+  }
+  const { owed, records, reason } = result.report;
+  if (!owed) {
+    ctx.store.append('reconciliation-judged', {
+      actor: ACTOR,
+      ok: true,
+      owed: false,
+      advisory: true,
+      reason,
+      born,
+      late: [],
+    });
+    return;
+  }
+  const causes = driftCauses(result.report);
+  if (causes === null) {
+    fail('the judge owed records and named no cause for them');
+    return;
+  }
+  const bornPaths = new Set(born);
+  ctx.store.append('reconciliation-judged', {
+    actor: ACTOR,
+    ok: true,
+    owed: true,
+    advisory: true,
+    records,
+    causes,
+    reason,
+    born,
+    late: records.filter((record) => !bornPaths.has(record)),
+    gist: gist(`record drift after the merge: ${records.join(', ')}`),
+  });
+}
+
+/** Whether this run's post-merge judge already answered. */
+function judgedAfterMerge(events) {
+  return events.some((e) => e.event === 'reconciliation-judged' && e.advisory === true);
+}
+
+/** The causes of one post-merge judgment, or null where they answer for nothing. */
+function driftCauses(report) {
+  const records = report?.records ?? [];
+  const causes = report?.causes ?? [];
+  if (causes.length !== records.length) return null;
+  try {
+    return causes.map((cause) => assertJudgeCause(cause));
+  } catch {
+    return null;
+  }
+}
+
+function driftJudgeRole(base, merged, born) {
+  const tree = governingRecordLines(base.worktree, [], base.recordPaths ?? [], {
+    exclude: born,
+    reconcile: base.reconcile,
+  });
+  return [
+    'A change merged into this repository. Judge whether it contradicts any',
+    'decision record (ADR), or decides something no record holds. You judge',
+    'only; change nothing, and open no request.',
+    'The change is the merge commit against its first parent. Read it with:',
+    `git diff ${merged.mergeSha}^1 ${merged.mergeSha}`,
+    ...OWED_CRITERION,
+    ...(tree.length > 0
+      ? tree
+      : ['The project declares no decision-record tree: owed=false with that as the reason.']),
+    ...(born.length > 0
+      ? [
+          'This run wrote these records itself before it merged. List one of them',
+          'where the merged change moved past what it states, and leave it out',
+          'where the record still stands:',
+          ...born.map((record) => `- ${record}`),
+        ]
+      : []),
+  ].join('\n');
+}
+
 // -- the reconciliation ticket (ADR-0075) ------------------------------------
 
 /**
@@ -2459,11 +2625,16 @@ export function reconcileTicket({
   base,
   merged,
   records,
+  causes = [],
   reason,
   residual = [],
   remarks = [],
 }) {
   const partial = residual.length > 0;
+  // Why each record is owed, as the judge said it: the word rides the record's
+  // own line, so the run that reads this ticket writes to the ground the
+  // judgment named and to no other (ADR-0090).
+  const cause = (record, i) => (causes[i] ? `- ${record} (${causes[i]})` : `- ${record}`);
   return [
     `# Reconciliation ticket: run ${ctx.runId}`,
     '',
@@ -2478,13 +2649,13 @@ export function reconcileTicket({
           'in the records, and nothing else.',
         ]
       : [
-          'ticket is the spec of the reconciliation run: rewrite the records so they',
-          'stand as fact against the repository as shipped.',
+          'ticket is the spec of the reconciliation run: rewrite the records so their',
+          'decisions stand against the repository as shipped.',
         ]),
     '',
     '## Records to reconcile',
     '',
-    ...records.map((r) => `- ${r}`),
+    ...records.map(cause),
     '',
     `Judged reason: ${reason}`,
     ...(partial ? ['', '## Findings to answer', '', ...residual.map((f) => `- ${residualLine(f)}`)] : []),
@@ -2502,11 +2673,9 @@ export function reconcileTicket({
     '',
     '## Rules',
     '',
-    '- Rewrite the implemented parts of each record as standalone',
-    '  present-tense fact. Keep the rationale and the fallback paths.',
-    '- Parts the diff did not implement stay as explicit open sections.',
-    '- A divergence between the shipped diff and a recorded decision is never',
-    '  absorbed silently: name it in the record and in your report, verbatim.',
+    '- Rewrite each record so its decision stands against the shipped diff.',
+    '  State no implementation status and no divergence from the tree.',
+    '- Keep the rationale and the fallback paths.',
     '- Edit only the decision-record tree. No source, test, or config change',
     '  rides this run.',
     '',
@@ -2564,6 +2733,11 @@ function reconcileClose(ctx, base, merged) {
   const events = runEvents(ctx);
   const judged = sinceFreshPass(events, (e) => e.event === 'reconciliation-judged');
   if (judged?.ok !== true || judged.owed !== true) return;
+  // Where the judgment came from the close-out's own judge, the ticket is drift
+  // the owner applies rather than work the sweep launches. The ticketed line
+  // carries the word too: without it a project that flips back to `full` would
+  // auto-launch every drift ticket it ever held (ADR-0090).
+  const advisory = judged.advisory === true;
   const written = sinceFreshPass(events, (e) => e.event === 'reconciliation-written');
   // A ticket is owed for a record the judge owed and no round wrote, and for
   // nothing else. A confirmed finding that stands on a record this run did write
@@ -2572,9 +2746,12 @@ function reconcileClose(ctx, base, merged) {
   // (ADR-0080).
   const unwritten = new Set(unwrittenOf(events));
   const answered = writtenRecords(events);
-  const records = (judged.records ?? []).filter(
-    (record) => unwritten.has(record) || !answered.has(record),
-  );
+  const owed = judged.records ?? [];
+  const causes = judged.causes ?? [];
+  const kept = owed
+    .map((record, i) => ({ record, cause: causes[i] }))
+    .filter((entry) => unwritten.has(entry.record) || !answered.has(entry.record));
+  const records = kept.map((entry) => entry.record);
   if (records.length === 0) return;
   const residual = residualDetail(events, written);
   // The remarks over the record set the pass held, and never the judge's list:
@@ -2583,10 +2760,25 @@ function reconcileClose(ctx, base, merged) {
   // derivation the cap's own ticket reads (ADR-0007).
   const remarks = runRemarks(events);
   try {
-    const ticket = reconcileTicketPath(ctx.paths, ctx.runId);
+    const ticket = advisory
+      ? driftTicketPath(ctx.paths, ctx.runId)
+      : reconcileTicketPath(ctx.paths, ctx.runId);
+    // The drift directory is made by its first writer: a project that never
+    // names the word never writes one, and an empty directory reads as a
+    // mechanism that ran and found nothing (ADR-0090).
+    if (advisory) mkdirSync(ctx.paths.driftTickets, { recursive: true });
     writeFileSync(
       ticket,
-      reconcileTicket({ ctx, base, merged, records, reason: judged.reason, residual, remarks }),
+      reconcileTicket({
+        ctx,
+        base,
+        merged,
+        records,
+        causes: kept.map((entry) => entry.cause),
+        reason: judged.reason,
+        residual,
+        remarks,
+      }),
     );
     // The ticket before the stamp: a stamped ticket always exists to launch
     // from (the owed-set ordering, ADR-0024).
@@ -2594,12 +2786,14 @@ function reconcileClose(ctx, base, merged) {
       actor: ACTOR,
       ok: true,
       owed: true,
+      ...(advisory && { advisory: true }),
       records,
+      ...(kept.some((entry) => entry.cause) && { causes: kept.map((entry) => entry.cause) }),
       reason: judged.reason,
       ticket,
       cause: written?.cause ?? 'not-written',
       ...(residual.length > 0 && { residual: residual.map((f) => f.id) }),
-      gist: gist(`reconciliation ticketed: ${records.join(', ')}`),
+      gist: gist(`${advisory ? 'record drift ticketed' : 'reconciliation ticketed'}: ${records.join(', ')}`),
     });
   } catch (error) {
     gateIntegrity(ctx, {
@@ -2829,7 +3023,9 @@ function testConflictRole(base, conflicts, brief) {
  * both read the area they are resolving (ADR-0089).
  */
 function recordLines(base) {
-  return governingRecordLines(base.worktree, declaredPaths(base), base.recordPaths ?? []);
+  return governingRecordLines(base.worktree, declaredPaths(base), base.recordPaths ?? [], {
+    reconcile: base.reconcile,
+  });
 }
 
 /** The paths the run's spec or ticket declared. Source nothing can read declares none. */

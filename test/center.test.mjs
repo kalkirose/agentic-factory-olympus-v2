@@ -245,9 +245,10 @@ test('snapshot reads registry and frontier from the clone, no fetch', async (t) 
   const s = await buildSnapshot(paths, { now: NOW });
   const health = s.health.byProject[0];
   assert.equal(health.tripwires.registryRead, true);
-  // The two the project wrote, plus the six counters the harness arms on every
-  // project: the levers an operator can pull on any run (ADR-0061, ADR-0062),
-  // and the four readings of the record rule (ADR-0007, ADR-0026, ADR-0075).
+  // The two the project wrote, plus the seven counters the harness arms on
+  // every project: the levers an operator can pull on any run (ADR-0061,
+  // ADR-0062), and the five readings of the record rule (ADR-0007, ADR-0026,
+  // ADR-0075, ADR-0090).
   assert.deepEqual(
     health.tripwires.wires.map((w) => [w.id, w.state]),
     [
@@ -259,6 +260,7 @@ test('snapshot reads registry and frontier from the clone, no fetch', async (t) 
       ['reconcile-fallbacks', 'armed'],
       ['record-cycles', 'armed'],
       ['record-write-time', 'armed'],
+      ['record-owed', 'armed'],
     ],
   );
   // s-3 open, s-4 open, s-5 blocked by unshipped s-3 → width counts
@@ -448,6 +450,18 @@ test('the records section derives its measures from the ledger', async (t) => {
   assert.deepEqual(r.gateMinutes, { renders: 2, mean: 1.5 });
   // The first write seat to the last write stamp of that stage run.
   assert.deepEqual(r.writeMinutes, { mean: 45, writes: 1, longest: 45 });
+  // What the record work cost this ship in seats, and what is waiting for a
+  // person. The run holds no merge, so it is no ship and the seat mean reads
+  // nothing; the drift directory holds nothing either (ADR-0090).
+  assert.deepEqual(r.seats, {
+    ships: 0,
+    seats: 0,
+    records: 0,
+    mean: null,
+    perShip: null,
+    runs: [],
+  });
+  assert.deepEqual(r.drift, { held: 0, launched: 0, tickets: [], over: [] });
   assert.deepEqual(
     r.tree.map((e) => [e.active, e.superseded, e.split, e.merged]),
     [
@@ -455,6 +469,96 @@ test('the records section derives its measures from the ledger', async (t) => {
       [13, 0, 0, 0],
     ],
   );
+});
+
+/**
+ * Two shipped runs and the drift set behind them: one run whose stage judged
+ * and wrote before the merge, and one whose judge read the merge instead. The
+ * seat mean is over both, because every ship counts whatever it spent
+ * (ADR-0090).
+ */
+function seedSeatShips(paths) {
+  let seq = 0;
+  const line = (minutes, event, fields = {}) => ({
+    seq: ++seq,
+    ts: REC(minutes),
+    event,
+    actor: ACTOR,
+    ...fields,
+  });
+  writeRunLedger(paths, 'r-full', [
+    line(0, 'run-launched', { project: 'alpha', lane: 'story', storyKey: 's-full' }),
+    line(1, 'seat-spawned', { seat: 'reconcile-judge', model: 'm' }),
+    line(2, 'reconciliation-judged', {
+      ok: true,
+      owed: true,
+      records: ['docs/adr/a.md'],
+      causes: ['contradicts'],
+      born: [],
+      late: ['docs/adr/a.md'],
+    }),
+    line(3, 'seat-spawned', { seat: 'reconcile-write:1', model: 'm' }),
+    line(4, 'record-written', { seat: 'reconcile-write:1', record: 'docs/adr/a.md', sha: 'w' }),
+    line(5, 'seat-spawned', { seat: 'record-review:1', model: 'm' }),
+    line(6, 'record-reviewed', { seat: 'record-review:1', cycle: 2, record: 'docs/adr/a.md' }),
+    line(7, 'merged', { pr: 1, sha: 'aaa', mergeSha: 'm1' }),
+    line(8, 'run-closed', { state: 'shipped', pr: 1 }),
+  ]);
+  writeRunLedger(paths, 'r-advisory', [
+    line(0, 'run-launched', { project: 'alpha', lane: 'story', storyKey: 's-adv' }),
+    line(1, 'reconcile-skipped', { mode: 'advisory', layers: [] }),
+    line(2, 'merged', { pr: 2, sha: 'bbb', mergeSha: 'm2' }),
+    // The judge after the merge: one seat, and its judgment is out of the
+    // record window because it says the stage stood over the records.
+    line(3, 'seat-spawned', { seat: 'reconcile-judge', model: 'm' }),
+    line(4, 'reconciliation-judged', {
+      ok: true,
+      owed: true,
+      advisory: true,
+      records: ['docs/adr/b.md'],
+      causes: ['undecided'],
+      born: [],
+      late: ['docs/adr/b.md'],
+    }),
+    line(5, 'run-closed', { state: 'shipped', pr: 2 }),
+  ]);
+  // Two tickets in the drift set, one of them already applied by a launch.
+  mkdirSync(paths.driftTickets, { recursive: true });
+  writeFileSync(join(paths.driftTickets, 'drift-r-advisory.md'), '# drift\n');
+  writeFileSync(join(paths.driftTickets, 'drift-r-old.md'), '# drift\n');
+  writeRunLedger(paths, 'r-apply', [
+    line(10, 'run-launched', {
+      project: 'alpha',
+      lane: 'records',
+      driftTicket: join(paths.driftTickets, 'drift-r-old.md'),
+    }),
+  ]);
+}
+
+test('the records tile reads the record seats per ship and the drift held', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const paths = scaffoldHome(join(root, 'home'));
+  seedSeatShips(paths);
+  const s = await buildSnapshot(paths, { now: NOW });
+  const r = s.stats.records;
+  // Two ships. The one whose stage judged before the merge spent three record
+  // seats; the one whose judge read the merge spent one.
+  assert.equal(r.seats.ships, 2);
+  assert.equal(r.seats.seats, 4);
+  assert.equal(r.seats.mean, 2);
+  assert.equal(r.seats.records, 1);
+  assert.equal(r.seats.perShip, 0.5);
+  // One drift ticket is waiting; the other names a run that launched it.
+  assert.equal(r.drift.held, 1);
+  assert.equal(r.drift.launched, 1);
+  assert.deepEqual(r.drift.tickets, ['drift-r-advisory.md']);
+  // One held ticket is under the default threshold, so no project is over it.
+  assert.deepEqual(r.drift.over, []);
+  // The record window holds the run whose stage worked the records and not the
+  // one whose judge read the merge: a run that spent no record seat before its
+  // merge says nothing about what the stage costs.
+  assert.equal(r.runs, 1);
 });
 
 /**

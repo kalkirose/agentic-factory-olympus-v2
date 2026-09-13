@@ -129,6 +129,7 @@ test('the fast path cannot be turned on without the counter that measures it', (
       'reconcile-fallbacks-window',
       'record-cycles',
       'record-write-time',
+      'record-owed-window',
     ],
   );
   // Two counters ride the flag, and they measure the two halves of one trade:
@@ -148,6 +149,7 @@ test('the fast path cannot be turned on without the counter that measures it', (
       'reconcile-fallbacks-window',
       'record-cycles',
       'record-write-time',
+      'record-owed-window',
     ],
   );
   assert.match(armed[0].answer, /gates\.fastPathShip to false/);
@@ -171,6 +173,7 @@ test('the fast path cannot be turned on without the counter that measures it', (
       },
       { id: 'cycles', metric: 'record-cycles', window: 3, breach: { op: '>', value: 4 }, answer: 'c' },
       { id: 'clock', metric: 'record-write-time', window: 3, breach: { op: '>', value: 40 }, answer: 'd' },
+      { id: 'owed', metric: 'record-owed-window', window: 8, breach: { op: '>', value: 0.8 }, answer: 'e' },
     ],
   };
   assert.deepEqual(armedTripwires(own), own.tripwires);
@@ -191,16 +194,17 @@ test('the fast path cannot be turned on without the counter that measures it', (
       'reconcile-fallbacks',
       'record-cycles',
       'record-write-time',
+      'record-owed',
     ],
   );
 });
 
-test('the two record-stage bands are armed on every project and named in no config', () => {
-  // Decision 5: the bands live beside their two siblings in the harness. A ceq
-  // entry naming a metric the daemon does not implement refuses every launch of
-  // that project, so a band that landed ahead of its harness would take the
-  // project dark; and a band a project has to opt into is absent from exactly
-  // the projects nobody is watching (ADR-0075).
+test('the record-stage bands are armed on every project and named in no config', () => {
+  // The bands live in the harness and in no project config. A config entry
+  // naming a metric the daemon does not implement refuses every launch of that
+  // project, so a band that landed ahead of its harness would take the project
+  // dark; and a band a project has to opt into is absent from exactly the
+  // projects nobody is watching (ADR-0075).
   const armed = armedTripwires({ gates: { tier1: [] }, tripwires: [] });
   const cycles = armed.find((e) => e.metric === 'record-cycles');
   const clock = armed.find((e) => e.metric === 'record-write-time');
@@ -209,13 +213,22 @@ test('the two record-stage bands are armed on every project and named in no conf
   assert.match(cycles.answer, /more than two/);
   assert.deepEqual(clock.breach, { op: '>', value: 20 });
   assert.equal(clock.window, 5);
-  assert.match(clock.answer, /parallel/);
-  // The windows count reconciliations, which is a state count and not a clock.
+  assert.match(clock.answer, /too wide for/);
+  // The alarm on the judge criterion: half the ships owing a rewrite says the
+  // judge has drifted back to owing on every diff that lands code (ADR-0090).
+  const owed = armed.find((e) => e.metric === 'record-owed-window');
+  assert.deepEqual(owed.breach, { op: '>', value: 0.5 });
+  assert.equal(owed.window, 20);
+  assert.match(owed.answer, /causes/);
+  // The windows count reconciliations and ships, which are state counts and not
+  // a clock.
   assert.equal(TRIPWIRE_METRICS['record-cycles'].unit, 'reconciliations');
   assert.equal(TRIPWIRE_METRICS['record-write-time'].unit, 'reconciliations');
-  // Both validate as registry entries, so a project may write its own band.
+  assert.equal(TRIPWIRE_METRICS['record-owed-window'].unit, 'ships');
+  assert.equal(TRIPWIRE_METRICS['record-owed-window'].defaultWindow, 20);
+  // All three validate as registry entries, so a project may write its own band.
   assert.deepEqual(
-    validateProjectConfig({ version: 1, tripwires: [cycles, clock] }),
+    validateProjectConfig({ version: 1, tripwires: [cycles, clock, owed] }),
     [],
   );
 });
@@ -872,6 +885,63 @@ test('reconcile-fallbacks-window counts every fallback cause over the ships judg
     window: 10,
   });
   assert.equal(noOwedShips.eligible, false);
+});
+
+/**
+ * One shipped run and what its judge said: `causes` names one word per owed
+ * record, `null` is a judge that owed nothing, and `advisory` marks the judge
+ * that read the merge (ADR-0090).
+ */
+function judgedShip(paths, runId, project, ts, { causes = null, advisory = false } = {}) {
+  const records = (causes ?? []).map((_, i) => `docs/adr/${i + 1}.md`);
+  writeLedger(archivedRunLedgerPath(paths, runId), [
+    line(1, ts, 'run-launched', { project, lane: 'story' }),
+    line(2, ts, 'reconciliation-judged', {
+      ok: true,
+      owed: causes !== null,
+      ...(advisory && { advisory: true }),
+      ...(causes !== null && { records, causes }),
+    }),
+    line(3, ts, 'merged', { pr: 1, sha: 'aaa' }),
+  ]);
+}
+
+test('record-owed-window reads the share of ships whose judge owed, before the merge', async (t) => {
+  const paths = home(t);
+  judgedShip(paths, 's1', 'p', '2026-08-01T00:00:00Z', { causes: null });
+  judgedShip(paths, 's2', 'p', '2026-08-02T00:00:00Z', { causes: ['contradicts'] });
+  judgedShip(paths, 's3', 'p', '2026-08-03T00:00:00Z', {
+    causes: ['undecided', 'contradicts'],
+  });
+  judgedShip(paths, 's4', 'p', '2026-08-04T00:00:00Z', { causes: null });
+  // A judge that read the merge answers a different question at a different
+  // moment, and its owed set is drift the owner holds. It is out of the window.
+  judgedShip(paths, 's5', 'p', '2026-08-05T00:00:00Z', {
+    causes: ['contradicts'],
+    advisory: true,
+  });
+  const reading = await evaluateMetric('record-owed-window', { paths, project: 'p', window: 20 });
+  assert.equal(reading.eligible, true);
+  assert.equal(reading.detail.ships, 4);
+  assert.equal(reading.detail.owed, 2);
+  assert.equal(reading.value, 0.5);
+  // The words behind the share: each names a different drift.
+  assert.deepEqual(reading.detail.causes, { contradicts: 2, undecided: 1 });
+  assert.deepEqual(reading.detail.runs, ['s2', 's3']);
+  // Half is the band, and half does not breach it: the band is what says the
+  // criterion has drifted back to owing on everything.
+  const entry = standingTripwires().find((e) => e.metric === 'record-owed-window');
+  assert.deepEqual(entry.breach, { op: '>', value: 0.5 });
+  // A project whose judge always runs after the merge says nothing here, and a
+  // standing zero would read as a judge that owes nothing.
+  const paths2 = home(t);
+  judgedShip(paths2, 'a1', 'q', '2026-08-01T00:00:00Z', {
+    causes: ['contradicts'],
+    advisory: true,
+  });
+  const quiet = await evaluateMetric('record-owed-window', { paths: paths2, project: 'q', window: 20 });
+  assert.equal(quiet.eligible, false);
+  assert.equal(quiet.value, null);
 });
 
 /**

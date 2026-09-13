@@ -533,8 +533,8 @@ export function recordFiles(worktree, recordPaths = []) {
  * the active records that name it, each in id order.
  *
  * Both directions matter, and they are ranked in that order. A record this one
- * cites is one it relies on, and a record that cites this one is one this one's
- * open parts can contradict. The record's own id is out of the list, because
+ * cites is one it relies on, and a record that cites this one is one this
+ * one can contradict. The record's own id is out of the list, because
  * every record names itself on its first line.
  * @returns {{neighbours: string[], dropped: number}}
  */
@@ -640,13 +640,19 @@ export const OTHER_RECORDS_LINE =
  * `exclude` is for a seat whose brief already names records: the record it
  * judges, or the neighbourhood it carries above this block. One path named
  * twice reads as two duties.
+ *
+ * `reconcile` is where this project's record judge runs, and it decides the
+ * closing sentence. Under `advisory` no stage of this run changes one of these
+ * records: the judge reads the merge afterwards and what it finds becomes a
+ * drift ticket. A brief that told a seat the reconciliation stage owns every
+ * change would name a stage that judges nothing on this run (ADR-0090).
  * @returns {string[]}
  */
 export function governingRecordLines(
   worktree,
   paths = [],
   recordPaths = [],
-  { exclude = [] } = {},
+  { exclude = [], reconcile = 'full' } = {},
 ) {
   const dir = (recordPaths ?? []).filter((entry) => !entry.startsWith('!')).join(', ');
   if (dir.length === 0) return [];
@@ -674,10 +680,18 @@ export function governingRecordLines(
       : []),
     ...(rest.length > 0 ? [OTHER_RECORDS_LINE, ...rest.map((file) => `- ${file}`)] : []),
     `A record in ${dir} named in neither list is closed (its status line reads superseded or ` +
-      'retired) and is out of your scope. Do not open it. A record is written by a record seat; ' +
-      'the reconciliation stage owns every change to one.',
+      'retired) and is out of your scope. Do not open it. ' +
+      (reconcile === 'advisory' ? ADVISORY_RECORD_LINE : OWNED_RECORD_LINE),
   ];
 }
+
+/** What the record block closes with where the reconciliation stage judges. */
+const OWNED_RECORD_LINE =
+  'A record is written by a record seat; the reconciliation stage owns every change to one.';
+
+/** What it closes with where the judge runs after the merge instead. */
+const ADVISORY_RECORD_LINE =
+  'These records are context. No seat of this run writes or edits one.';
 
 /**
  * The active records that cite one record, minus the records this run already

@@ -1044,38 +1044,40 @@ test('a record review brief lists the rest of the tree under its neighbourhood',
   assert.ok(!brief.includes(CLOSED_RECORD), brief);
 });
 
-test('a record review is one seat per record, and each seat holds one record', async (t) => {
+test('a record review is one seat over the cycle, holding every record of it', async (t) => {
   const more = {
     'docs/adr/0004-cache.md': RECORD_TEXT.replace('ADR-0001', 'ADR-0004'),
     'docs/adr/0005-retry.md': RECORD_TEXT.replace('ADR-0001', 'ADR-0005'),
   };
   const worktree = recordTree(t, more);
   const records = [RECORD_FILE, OTHER_RECORD, ...Object.keys(more)];
-  const fx = seatsFixture(t, ({ seat }) =>
-    recordReport(worktree, records[Number(seat.split(':')[1]) - 1]),
-  );
+  const fx = seatsFixture(t, () => recordReport(worktree, RECORD_FILE));
 
   const outcome = await recordReviewRound(fx.ctx, recordBase(worktree), { records, cycle: 1 });
 
   assert.equal(outcome.fail, undefined);
-  // Four records is four seats, each with its own slot, so each holds its own
-  // attempt budget, its own cost line and its own failure record.
+  // Four records is one seat, at slot one. The budget, the cost line and the
+  // failure record are the dispatch's own, and the dispatch is the set
+  // (ADR-0090).
   assert.deepEqual(
-    fx.ctx.briefs.map((b) => b.seat).sort(),
-    ['record-review:1', 'record-review:2', 'record-review:3', 'record-review:4'],
+    fx.ctx.briefs.map((b) => b.seat),
+    ['record-review:1'],
   );
-  const first = fx.ctx.briefs.find((b) => b.seat === 'record-review:1').roleBlock;
-  const second = fx.ctx.briefs.find((b) => b.seat === 'record-review:2').roleBlock;
-  assert.ok(first.includes(`Review one decision record: ${RECORD_FILE}`), first);
-  assert.ok(second.includes(`Review one decision record: ${OTHER_RECORD}`), second);
-  // One record per seat: another record reaches a seat as a neighbour to read
-  // against, and never as a record to judge.
-  for (const { roleBlock } of fx.ctx.briefs) {
-    assert.equal((roleBlock.match(/^Review one decision record:/gm) ?? []).length, 1, roleBlock);
-    assert.equal((roleBlock.match(/^The units of /gm) ?? []).length, 1, roleBlock);
+  const brief = fx.ctx.briefs[0].roleBlock;
+  assert.ok(brief.includes(`Review these ${records.length} decision records:`), brief);
+  // Every record of the set is named once as a record to judge, with its own
+  // sentences as addresses and its own neighbourhood.
+  for (const record of records) {
+    assert.ok(brief.includes(`- ${record}\n`), record);
+    assert.ok(brief.includes(`The units of ${record},`), record);
   }
-  assert.ok(first.includes(`The units of ${RECORD_FILE},`), first);
-  assert.ok(second.includes(`The units of ${OTHER_RECORD},`), second);
+  assert.equal((brief.match(/^The units of /gm) ?? []).length, records.length, brief);
+  // One stamp per record, all of them naming the one seat.
+  const stamps = readEvents(runLedgerPath(fx.paths, 'r1')).filter(
+    (e) => e.event === 'record-reviewed',
+  );
+  assert.deepEqual(stamps.map((e) => e.record), records);
+  assert.ok(stamps.every((e) => e.seat === 'record-review:1'), JSON.stringify(stamps));
 });
 
 // The defect this test holds: the diff anchored the review. The record seat is
@@ -1319,14 +1321,12 @@ test('each record seat stamps the record it read, with its cycle and its cost', 
   assert.equal(stamps[1].record, OTHER_RECORD);
 });
 
-// A reviewer's failure is about the reviewer. The record it was given stays a
-// record: it rides the render unreviewed, the next cycle dispatches it, and no
-// run parks on it (ADR-0080).
-test('a review seat that fails leaves its record unreviewed, and parks nothing', async (t) => {
+// A reviewer's failure is about the reviewer. Every record it was given stays
+// a record: they ride the render unreviewed, the next cycle dispatches them,
+// and no run parks on it (ADR-0080, ADR-0090).
+test('a review seat that fails leaves its records unreviewed, and parks nothing', async (t) => {
   const worktree = recordTree(t);
-  const fx = seatsFixture(t, ({ seat }) =>
-    seat === 'record-review:1' ? { fail: 'seat-failure' } : recordReport(worktree, OTHER_RECORD),
-  );
+  const fx = seatsFixture(t, () => ({ fail: 'seat-failure' }));
 
   const outcome = await recordReviewRound(fx.ctx, recordBase(worktree), {
     records: [RECORD_FILE, OTHER_RECORD],
@@ -1334,18 +1334,15 @@ test('a review seat that fails leaves its record unreviewed, and parks nothing',
   });
 
   assert.equal(outcome.fail, undefined);
-  assert.deepEqual(outcome.unreviewed, [RECORD_FILE]);
+  assert.deepEqual(outcome.unreviewed, [RECORD_FILE, OTHER_RECORD]);
   const events = readEvents(runLedgerPath(fx.paths, 'r1'));
-  const missed = events.find((e) => e.event === 'record-unreviewed');
-  assert.equal(missed.record, RECORD_FILE);
-  assert.equal(missed.seat, 'record-review:1');
-  assert.equal(missed.cycle, 1);
-  assert.equal(typeof missed.reason, 'string');
-  // The other record was read, and nothing parked.
-  assert.deepEqual(
-    events.filter((e) => e.event === 'record-reviewed').map((e) => e.record),
-    [OTHER_RECORD],
-  );
+  const missed = events.filter((e) => e.event === 'record-unreviewed');
+  assert.deepEqual(missed.map((e) => e.record), [RECORD_FILE, OTHER_RECORD]);
+  assert.ok(missed.every((e) => e.seat === 'record-review:1'), JSON.stringify(missed));
+  assert.ok(missed.every((e) => e.cycle === 1));
+  assert.ok(missed.every((e) => typeof e.reason === 'string'));
+  // No record was read, and nothing parked.
+  assert.deepEqual(events.filter((e) => e.event === 'record-reviewed'), []);
   assert.deepEqual(events.filter((e) => e.event === 'park'), []);
 });
 
@@ -1621,12 +1618,12 @@ test('a code lens brief on a mixed diff holds no record', async (t) => {
   assert.deepEqual(item.required, ['lens', 'severity', 'ground', 'finding', 'evidence']);
 });
 
-test('a mixed diff is the code panel plus one record seat per record', async (t) => {
+test('a mixed diff is the code panel plus one record seat over the records', async (t) => {
   const worktree = recordTree(t);
   const base = recordBase(worktree, { lenses: ['spec', 'security'], uiPaths: [] });
   const fx = seatsFixture(t, ({ seat }) =>
     seat.startsWith('record-review')
-      ? recordReport(worktree, seat === 'record-review:1' ? RECORD_FILE : OTHER_RECORD)
+      ? recordReport(worktree, RECORD_FILE)
       : { findings: [], summary: 'clean' },
   );
 
@@ -1644,8 +1641,8 @@ test('a mixed diff is the code panel plus one record seat per record', async (t)
   assert.ok(seats.includes('fury-spec'), seats.join(','));
   assert.ok(seats.includes('fury-operational'), seats.join(','));
   assert.deepEqual(
-    seats.filter((s) => s.startsWith('record-review')).sort(),
-    ['record-review:1', 'record-review:2'],
+    seats.filter((s) => s.startsWith('record-review')),
+    ['record-review:1'],
   );
   // Every lens seat of the panel keeps the diff and judges no record. A record
   // reaches it as a path to read against and nowhere else: not in the diff, not

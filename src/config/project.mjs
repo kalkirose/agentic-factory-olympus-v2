@@ -100,6 +100,59 @@ export const DEFAULT_RECORD_LIFECYCLE = 'rewrite';
  */
 export const DEFAULT_RECONCILE_ROUNDS = 1;
 
+/**
+ * Where the record judge runs, by the project's own word.
+ *
+ * `full` runs the stage in front of the ship token: the judge, the write, the
+ * record layers, the review and one corrective round, and the ship waits on
+ * them. `advisory` takes the stage out of that path: the stage runs the record
+ * layers over a born set and hands the run on, the judge runs after the merge
+ * in the close-out, and what it finds is written as a drift ticket the owner
+ * launches. Either way is one config line, no harness change and no restart
+ * (ADR-0090).
+ *
+ * The words are closed and any other is refused with both named. A word nobody
+ * validates would read as the default, and a project that asked to take the
+ * stage off the ship path would keep paying for it in silence.
+ */
+export const RECONCILE_MODES = Object.freeze(['full', 'advisory']);
+
+/** Where the judge runs for a project that names no word. */
+export const DEFAULT_RECONCILE_MODE = 'full';
+
+/**
+ * How many drift tickets may stand unlaunched before the harness says so.
+ *
+ * Under `advisory` a merge can move past an active record and ship, and the
+ * drift ticket is the only trace of it. Nothing reads that ticket until the
+ * owner launches it, so the count of tickets nobody launched is the one alarm
+ * the mode has: past this number, `advisory` is costing what `full` would have
+ * paid (ADR-0090).
+ */
+export const DEFAULT_DRIFT_HELD = 10;
+
+/**
+ * Where this project's record judge runs. One reader per question and one
+ * derivation: the stage, the close-out, the launch door, the sweep and the
+ * brief all ask here, so no two of them can read one config two ways.
+ * @param {object} config a validated project config
+ * @returns {'full'|'advisory'}
+ */
+export function reconcileMode(config) {
+  const word = config?.gates?.reconcile;
+  return RECONCILE_MODES.includes(word) ? word : DEFAULT_RECONCILE_MODE;
+}
+
+/**
+ * How many unlaunched drift tickets this project stands.
+ * @param {object} config a validated project config
+ * @returns {number}
+ */
+export function driftHeld(config) {
+  const held = config?.gates?.driftHeld;
+  return Number.isInteger(held) && held > 0 ? held : DEFAULT_DRIFT_HELD;
+}
+
 export function defaultProjectConfig() {
   return {
     version: 1,
@@ -166,6 +219,11 @@ export function defaultProjectConfig() {
     // `recordLayers` names the Tier-1 layers a changed record path is
     // attributed to, and to no other layer, whatever any family declares. An
     // empty list is today's attribution (ADR-0026).
+    // `reconcile` says where the record judge runs: `full` in front of the ship
+    // token, `advisory` after the merge with what it finds held as a drift
+    // ticket. Absent is DEFAULT_RECONCILE_MODE. `driftHeld` is how many such
+    // tickets may stand unlaunched before the centre says so, absent is
+    // DEFAULT_DRIFT_HELD (ADR-0090).
     gates: { tier1: [], recordLayers: [] },
     // one convention per line; prompt assembly consumes these
     conventions: [],
@@ -455,6 +513,21 @@ function validateGates(gates, commands, err, launch = false) {
   if (gates.reconcileRounds !== undefined) {
     if (!Number.isInteger(gates.reconcileRounds) || gates.reconcileRounds < 1) {
       err('gates.reconcileRounds', 'must be a positive integer count of corrective record rounds');
+    }
+  }
+  // Where the record judge runs (ADR-0090). The refusal names both words: a
+  // project that spells the word it wants would otherwise get the default, and
+  // the default is the mode it asked to leave.
+  if (gates.reconcile !== undefined && !RECONCILE_MODES.includes(gates.reconcile)) {
+    err('gates.reconcile', `must be one of: ${RECONCILE_MODES.join(', ')}`);
+  }
+  // How many unlaunched drift tickets stand before the centre says so. It is
+  // read under `advisory` alone, and a project may name it either way: the word
+  // can flip in one pull request, and a number that had to land with it would
+  // make the flip two.
+  if (gates.driftHeld !== undefined) {
+    if (!Number.isInteger(gates.driftHeld) || gates.driftHeld < 1) {
+      err('gates.driftHeld', 'must be a positive integer count of held drift tickets');
     }
   }
   if (gates.tier1 !== undefined && !Array.isArray(gates.tier1)) {

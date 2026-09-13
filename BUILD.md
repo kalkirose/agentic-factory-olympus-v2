@@ -881,3 +881,37 @@ never carries a project's specifics.
   behind one, the admission gate and the certification reader each state the
   reading where it is read, and ADR-0086 names the one refusal that belongs to
   one side.
+- 2026-09-13: a record states a decision, and the judge has two places to stand.
+  A record that reported how much of its decision was built went stale the day
+  the code landed, so the judge owed a rewrite on every run that landed code,
+  and each owed record bought a writer, a reviewer and a corrective writer of
+  its own. A record now states no implementation status and no divergence from
+  the tree: the rule, the truth criterion, the birth brief, the write rules and
+  the reconciliation ticket all say so, and the code landing changes no record.
+  The judge owes on two grounds and no third, stated once and read by the
+  stage's judge, the recheck and the judge that reads a merge: `contradicts`,
+  where the diff moves past what an active record decides, and `undecided`,
+  where the diff decides something no record holds. Every owed record carries
+  its word on `reconciliation-judged.causes`, the registry holds the two, and a
+  judgment that names no ground for its records is stamped as one the seat could
+  not make. One seat writes the whole owed set with the neighbourhood the set
+  shares, one seat reviews the records of a cycle, and one seat corrects; the
+  round makes one commit whose body names the records it wrote, `roundCommits`
+  reads that body, and a stop between the commit and the stamps stamps from it
+  and dispatches nobody. A record the round's report says nothing about rides
+  the render as unwritten and the next round dispatches it by name.
+  `gates.reconcile` says where the judge runs: `full` keeps the stage in front
+  of the ship token, and `advisory` runs the record layers over the born set,
+  stamps `reconcile-skipped` and hands the run on, with the judge reading
+  `git diff <merge>^1 <merge>` in the close-out and its owed set written as a
+  drift ticket under `tickets/drift/`. The owed set skips a judged stamp with
+  `advisory: true` and one whose ticket file is gone, the sweep stands down on
+  the word, and the launch door refuses a swept records launch and a mixed
+  repair ticket in that mode. A brief's record block closes with the sentence
+  its run earns. The centre reads the record seats per ship and the drift held,
+  and `record-owed-window` breaches above half the ships owing.
+  `reconcile-skipped` enters the run registry with `causes` and `advisory` on
+  `reconciliation-judged` and `driftTicket` on `run-launched`; `gates.reconcile`
+  and `gates.driftHeld` enter the project config. ADR-0090 is new, ADR-0075 and
+  ADR-0079 carry the supersession on one seat per record and on the per-record
+  dispatch, and ADR-0080 is rewritten around it.
