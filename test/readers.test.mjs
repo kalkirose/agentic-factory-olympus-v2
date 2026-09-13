@@ -18,7 +18,7 @@ import {
   fastPathShipOf,
   storyRunsByKey,
 } from '../src/telemetry/readers.mjs';
-import { newestBaseCertification, certifiedAt } from '../src/ledger/readers.mjs';
+import { newestBaseCertification, certifiedAt, certifiedAtAll } from '../src/ledger/readers.mjs';
 import { tempDir, removeDir, initOriginRepo, commitTree, gitSync } from './helpers.mjs';
 
 function home(t) {
@@ -432,37 +432,55 @@ test('a clone the diff cannot be read in refuses the carry', async (t) => {
   );
 });
 
-test('the verdict record of a certification resolves where the run directory is now', async (t) => {
+test('a whole layer set is answered in one read, with one diff per ancestor sha', async (t) => {
   const paths = home(t);
-  const { bare, later } = projectClone(t, { 'docs/note.md': 'second\n' });
+  const { bare, first, later } = projectClone(t, { 'docs/note.md': 'second\n' });
   certify(paths, {
     project: 'p',
     runId: 'r1',
-    sha: later,
-    layers: [row('unit', 'green', { verdict: 'verdict-2.json' })],
+    sha: first,
+    layers: [row('unit', 'green'), row('lint', 'green'), row('docs-lint', 'green')],
   });
-  // The stamp carries the file's name. The run that wrote it archives, so the
-  // live directory is read first and the archive answers for the rest.
-  mkdirSync(join(paths.runs, 'r1'), { recursive: true });
-  writeFileSync(join(paths.runs, 'r1', 'verdict-2.json'), '{}');
-  const live = await certifiedAt(paths, 'p', later, 'unit', ['src'], bare);
-  assert.equal(live.record, join(paths.runs, 'r1', 'verdict-2.json'));
+  certify(paths, { project: 'p', runId: 'r2', sha: later, layers: [row('acceptance', 'green')] });
+  const certified = await certifiedAtAll(
+    paths,
+    'p',
+    later,
+    [
+      { name: 'unit', ground: ['src'] },
+      { name: 'lint', ground: ['src'] },
+      { name: 'docs-lint', ground: ['docs'] },
+      { name: 'acceptance', ground: ['src'] },
+      { name: 'e2e', ground: ['src'] },
+    ],
+    bare,
+  );
+  // The three at the earlier sha rest on one diff of that sha against this one;
+  // the fourth measured this tree; the fifth no certification names.
+  assert.deepEqual([...certified.keys()].sort(), ['acceptance', 'lint', 'unit']);
+  assert.equal(certified.get('unit').baseSha, first);
+  assert.equal(certified.get('acceptance').baseSha, later);
+  assert.equal(certified.get('unit').status, 'green');
+});
+
+test('a clone that answers no diff refuses every layer of the set', async (t) => {
+  const paths = home(t);
+  const { first, later } = projectClone(t, { 'docs/note.md': 'second\n' });
   certify(paths, {
-    project: 'q',
-    runId: 'r2',
-    sha: later,
-    layers: [row('unit', 'green', { verdict: 'verdict-3.json' })],
+    project: 'p',
+    runId: 'r1',
+    sha: first,
+    layers: [row('unit', 'green'), row('lint', 'green')],
   });
-  const archived = await certifiedAt(paths, 'q', later, 'unit', ['src'], bare);
-  assert.equal(archived.record, join(paths.archivedRuns, 'r2', 'verdict-3.json'));
-  // A certification that names no record answers with none rather than with a
-  // path to nothing.
-  certify(paths, {
-    project: 'z',
-    runId: 'r3',
-    sha: later,
-    layers: [{ name: 'unit', status: 'green', elapsedMs: 5, mode: 'run' }],
-  });
-  const unnamed = await certifiedAt(paths, 'z', later, 'unit', ['src'], bare);
-  assert.equal(unnamed.record, null);
+  const certified = await certifiedAtAll(
+    paths,
+    'p',
+    later,
+    [
+      { name: 'unit', ground: ['src'] },
+      { name: 'lint', ground: ['src'] },
+    ],
+    join(paths.home, 'no-clone'),
+  );
+  assert.equal(certified.size, 0);
 });

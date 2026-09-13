@@ -247,10 +247,12 @@ export const RUN_EVENTS = new Set([
   // spec + suite
   // The launched card, amended with a dependency the owner approved at the
   // birth park, and pushed to the default branch: the `card`, the
-  // `dependencies` written, the `sha` of the commit, and whether it `pushed`.
-  // The card is the document that authorizes a dependency, so the
-  // authorization is written where the next reader of the card meets it
-  // rather than held in a run the card never names.
+  // `dependencies` written, the `sha` of the commit, whether it `pushed`, and
+  // the `park` seq it answers. The card is the document that authorizes a
+  // dependency, so the authorization is written where the next reader of the
+  // card meets it rather than held in a run the card never names. The park seq
+  // is what makes the write once: a stage entered twice on one answer finds its
+  // own stamp and writes no second amendment.
   'card-amended',
   'spec-born',
   'spec-gate-round',
@@ -317,6 +319,16 @@ export const RUN_EVENTS = new Set([
   // derivable only by pairing this stamp with its `layer-started`, which is a
   // join every reader had to write for itself and which no reader wrote; the
   // record-diff gate time is read off this field.
+  //
+  // The layer itself carries `mode`: `run` where this cycle executed it, and
+  // `carried` where the default branch had already answered for the tree under
+  // it. A carried layer states `carriedFrom` (`base`), the `baseSha` it rests
+  // on and the `certifiedSeq` of the instance stamp that said so, and carries
+  // no `elapsedMs` and no `resources`, because nothing ran. The `baseSha` says
+  // which tree the green was earned at and the `certifiedSeq` says which stamp
+  // claimed it, which is what lets a reader take one skip apart. `mode` is also
+  // what makes a carry survive a restart, since the resume reads this stamp and
+  // nothing else (ADR-0088).
   'layer-result',
   // The attempt that ended without a verdict about the tree: the red the flake
   // filter's re-run replaced, a command that could not run, a child a signal
@@ -387,6 +399,15 @@ export const RUN_EVENTS = new Set([
   // the findings, because a round that raised nothing raises nothing to carry
   // the word, and a clean verdict over a cut diff is the one a reader most
   // needs to be able to see (ADR-0066).
+  //
+  // `sweep` says which set the cycle ran: `full`, every layer; `targeted`, the
+  // layers the diff since the last render reaches; `records`, a diff the project
+  // attributes to its record layers alone; `footprint`, the layers this run's
+  // own diff against a certified base reaches, with the rest carried. `reason`
+  // rides `full` alone and names the condition that was not met, from the closed
+  // list in `src/lanes/spectrum.mjs`. The two together are what makes "does this
+  // project ever take the footprint, and where not" a count rather than a
+  // reading of prose (ADR-0088).
   'verdict-rendered',
   // The one retry a repeated cycle fingerprint is worth, spent. The stamp
   // names the fingerprint, the render it was granted for and the cycles that

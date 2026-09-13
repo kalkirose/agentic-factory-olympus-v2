@@ -654,6 +654,33 @@ test('(n) a card that names no dependency asks for no manifest', (t) => {
   assert.deepEqual(lint(t, spec(), { tier: DEP_TIER }), []);
 });
 
+test('(n) an entry that covers the manifest declares it, whatever its own spelling', (t) => {
+  // The rule asks the question the diff policy asks: is the manifest under an
+  // entry the spec wrote. A spec that declared the importer's directory declared
+  // every file in it, and refusing that spec would refuse a true declaration.
+  // A trailing slash is rule (c)'s business and is refused there, so the
+  // directory spelling this rule meets is the bare one.
+  for (const entry of ['apps/storefront/package.json — dev', 'apps/storefront — dev']) {
+    const touched = touchedWith('src/feature.mjs — dev', entry);
+    assert.deepEqual(
+      lint(t, spec({ touched }), { tier: DEP_TIER, on: APP_DEP }),
+      [],
+      `${entry} did not declare the manifest`,
+    );
+  }
+});
+
+test('(n) the manifest entry is dev-owned, because the dev seat installs', (t) => {
+  // A manifest the spec hands to the suite seat is a manifest the capture takes
+  // back off the dev seat's write, which is the same park by a longer road.
+  const touched = touchedWith('src/feature.mjs — dev', 'apps/storefront/package.json — suite');
+  const defects = lint(t, spec({ touched }), { tier: DEP_TIER, on: APP_DEP });
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(defects[0], /the card names a dependency on apps\/storefront/);
+  assert.match(defects[0], /covering apps\/storefront\/package\.json is owned by suite/);
+  assert.match(defects[0], /the dev seat installs the dependency, so that entry is dev-owned\./);
+});
+
 // -- (o) no spec plans a denied path or a dependency path --------------------
 
 test('(o) a spec that plans a denied path is refused', (t) => {

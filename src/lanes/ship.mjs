@@ -94,6 +94,7 @@ import {
   restorePaths,
 } from '../isolation/tree.mjs';
 import { editDenyRules } from '../seats/boundary.mjs';
+import { parseTouchedPaths } from '../seats/diffpolicy.mjs';
 import { attemptOrder, noLogReason, PartialLogRefusal } from '../ship/forge.mjs';
 import { derivedLabels } from '../ship/labels.mjs';
 import { releaseShipToken, takeShipToken } from '../ship/token.mjs';
@@ -114,7 +115,7 @@ import {
   unwrittenOf,
 } from './reconcile.mjs';
 import { recordBase, recordsCommitted } from './records-stage.mjs';
-import { activeOf, recordNeighbours } from './units.mjs';
+import { activeOf, governingRecordLines, recordNeighbours } from './units.mjs';
 import {
   DEV_SCHEMA,
   triageStep,
@@ -1968,10 +1969,29 @@ async function resumeMergeFreshPass(ctx, base, pendingFresh) {
   return { next: 'verdict' };
 }
 
+/**
+ * The base a merge-born fresh pass runs on: the worktree, what the pass must
+ * restore, and what the capture judges the pass by.
+ *
+ * The capture is the whole reason the narrowing states so much. It reads the
+ * lane's diff policy off the config and the dependency grants off the card, and
+ * a base holding neither answers "no tier" and "no grant", which is every path
+ * admitted and no lockfile judged. The pass that opens here is a pass like any
+ * other, and it is judged like one (ADR-0067).
+ */
 function freshBase(base, resetSha) {
   return {
     worktree: base.worktree,
     testPaths: base.testPaths,
+    // The lane's own config, read by the capture for the diff policy and by the
+    // seat bound for the layer set.
+    config: base.config,
+    // The card, whose Dependencies section is the whole of the lockfile grant.
+    card: base.card,
+    // The cross-cutting gate allowlists. The capture tallies what a candidate
+    // touched, and a pass that reported none would leave the reading blind to
+    // this one (ADR-0010).
+    allowlistPaths: base.config?.gates?.allowlistPaths ?? [],
     // The record tree rides the carry beside the frozen suite. A merge-born pass
     // resets to the updated default branch, which never held this run's own
     // records, so without it the pass deletes the records the run was born with
@@ -2769,14 +2789,14 @@ function conflictRole(base, conflicts, brief) {
     ...conflicts.map((f) => `- ${f}`),
     `The spec of this run: ${base.specRef}`,
     'Change conflicted files only. Do not edit test files. Do not commit; the orchestrator concludes the merge.',
+    ...recordLines(base),
     ...briefLines(brief),
   ].join('\n');
 }
 
 /**
- * The record writer's conflict brief. It states the one rule the merge cannot
- * break: an accepted record is never edited, so a conflict on one is resolved by
- * keeping both sides' facts and never by dropping either (ADR-0073).
+ * The suite seat's conflict brief: the conflicted test files, the one place it
+ * may write, and what the resolved tests become.
  */
 function testConflictRole(base, conflicts, brief) {
   return [
@@ -2787,8 +2807,30 @@ function testConflictRole(base, conflicts, brief) {
     `Write test files only under: ${base.testPaths.join(', ')}. Touch nothing else.`,
     'In the report, list the resolved files as suite files; expected reds stay empty.',
     'Do not commit; the orchestrator concludes the merge.',
+    ...recordLines(base),
     ...briefLines(brief),
   ].join('\n');
+}
+
+/**
+ * The active records that govern the paths this run declared.
+ *
+ * The constitution tells every seat that its brief names them, so a brief
+ * without the block sends the seat to list the record tree and open whatever it
+ * finds there, closed records included. The merge round spawns two seats, and
+ * both read the area they are resolving (ADR-0089).
+ */
+function recordLines(base) {
+  return governingRecordLines(base.worktree, declaredPaths(base), base.recordPaths ?? []);
+}
+
+/** The paths the run's spec or ticket declared. Source nothing can read declares none. */
+function declaredPaths(base) {
+  try {
+    return parseTouchedPaths(readFileSync(base.specRef, 'utf8'));
+  } catch {
+    return [];
+  }
 }
 
 async function incomingBrief(base, mainSha) {
@@ -2815,9 +2857,10 @@ async function shipBase(ctx, forgeFor) {
   const cardPath = typeof ctx.payload.card === 'string' ? ctx.payload.card : null;
   let storyKey = null;
   let cardTitle = null;
+  let card = null;
   if (cardPath) {
     try {
-      const { card } = parseIntentCard(readFileSync(join(worktree, cardPath), 'utf8'));
+      card = parseIntentCard(readFileSync(join(worktree, cardPath), 'utf8')).card;
       storyKey = card.key ?? null;
       cardTitle = card.title ?? null;
     } catch {
@@ -2865,6 +2908,9 @@ async function shipBase(ctx, forgeFor) {
     env: runEnv(ctx, config, { rangeFrom }),
     constitution: readConstitution(worktree, config),
     cardPath,
+    // The card as parsed. It is the whole of the dependency permission, so the
+    // capture of a pass this lane opens reads its grants from here (ADR-0067).
+    card,
     storyKey,
     cardTitle,
     specRef,

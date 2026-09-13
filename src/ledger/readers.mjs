@@ -13,8 +13,6 @@
 // the files alone: a certification at an older sha stands only while the
 // branch between the two shas leaves the layer's ground alone, and that is a
 // diff in the project's clone.
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { readEvents } from './ledger.mjs';
 import { underEntry } from '../config/project.mjs';
 import { changedInRange } from '../isolation/tree.mjs';
@@ -34,25 +32,13 @@ function rowOf(stamp, layer) {
   return (stamp.layers ?? []).find((row) => row.name === layer);
 }
 
-/**
- * Where one certification's verdict record is now. A stamp carries the record
- * file's name and never a path: the run that wrote it archives, and the
- * directory it was written in is gone by the time anybody reads the stamp.
- */
-function recordPath(paths, runId, file) {
-  if (typeof file !== 'string' || file.length === 0) return null;
-  const live = join(paths.runs, runId, file);
-  return existsSync(live) ? live : join(paths.archivedRuns, runId, file);
-}
-
-function answer(paths, stamp, row) {
+function answer(stamp, row) {
   return {
     baseSha: stamp.sha,
     certifiedSeq: stamp.seq,
     runId: stamp.runId,
     status: row.status,
     elapsedMs: row.elapsedMs ?? null,
-    record: recordPath(paths, stamp.runId, row.verdict),
   };
 }
 
@@ -78,7 +64,8 @@ export function newestBaseCertification(paths, project, sha) {
 }
 
 /**
- * Whether one layer is already certified for the tree at `sha`, and on what.
+ * Which of a set of layers are already certified for the tree at `sha`, and on
+ * what.
  *
  * Two ways it can be. A certification at that sha names the layer: the answer
  * is that row, and no ground claim is involved, because the layer ran against
@@ -102,33 +89,72 @@ export function newestBaseCertification(paths, project, sha) {
  * ever stamped would cost one diff each. A refusal costs one layer execution,
  * which is what the run would have spent anyway.
  *
+ * The question is asked of a whole layer set at once, because that is how a
+ * verdict asks it. One read of the instance ledger answers for every layer, and
+ * the ancestry diff is per ancestor sha and not per layer: a project with forty
+ * layers certified at one earlier sha costs one diff, where a reader that took
+ * one layer at a time cost forty parses and forty subprocesses on every first
+ * cycle.
+ *
  * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
  * @param {string} project
  * @param {string} sha the tree the run is asking about
+ * @param {Array<{name: string, ground: string[]}>} layers
+ * @param {string} cloneDir the project's clone, where the diff is read
+ * @returns {Promise<Map<string, {baseSha: string, certifiedSeq: number,
+ *   runId: string, status: string, elapsedMs: number|null}>>} the layers that
+ *   are certified, by name
+ */
+export async function certifiedAtAll(paths, project, sha, layers, cloneDir) {
+  const held = certifications(paths, project);
+  // One diff per ancestor sha, computed on the first layer that needs it. A diff
+  // git cannot answer is remembered as null, so a broken clone costs one attempt
+  // and not one per layer.
+  const diffs = new Map();
+  const changedSince = async (from) => {
+    if (!diffs.has(from)) {
+      try {
+        diffs.set(from, await changedInRange(cloneDir, from, sha));
+      } catch {
+        diffs.set(from, null);
+      }
+    }
+    return diffs.get(from);
+  };
+  const certified = new Map();
+  for (const { name, ground } of layers) {
+    const here = held.filter((stamp) => stamp.sha === sha && rowOf(stamp, name)).pop();
+    if (here) {
+      const row = rowOf(here, name);
+      if (row.status === 'green') certified.set(name, answer(here, row));
+      continue;
+    }
+    if (!Array.isArray(ground) || ground.length === 0) continue;
+    const earlier = held
+      .filter((stamp) => stamp.sha !== sha && rowOf(stamp, name)?.status === 'green')
+      .pop();
+    if (!earlier) continue;
+    const changed = await changedSince(earlier.sha);
+    if (changed === null) continue;
+    if (changed.some((file) => ground.some((entry) => underEntry(file, entry)))) continue;
+    certified.set(name, answer(earlier, rowOf(earlier, name)));
+  }
+  return certified;
+}
+
+/**
+ * One layer's answer to the same question.
+ *
+ * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
+ * @param {string} project
+ * @param {string} sha
  * @param {string} layer
  * @param {string[]} ground the layer's declared ground, repo-relative
- * @param {string} cloneDir the project's clone, where the diff is read
+ * @param {string} cloneDir
  * @returns {Promise<{baseSha: string, certifiedSeq: number, runId: string,
- *   status: string, elapsedMs: number|null, record: string|null}|null>}
+ *   status: string, elapsedMs: number|null}|null>}
  */
 export async function certifiedAt(paths, project, sha, layer, ground, cloneDir) {
-  const held = certifications(paths, project);
-  const here = held.filter((stamp) => stamp.sha === sha && rowOf(stamp, layer)).pop();
-  if (here) {
-    const row = rowOf(here, layer);
-    return row.status === 'green' ? answer(paths, here, row) : null;
-  }
-  if (!Array.isArray(ground) || ground.length === 0) return null;
-  const earlier = held
-    .filter((stamp) => stamp.sha !== sha && rowOf(stamp, layer)?.status === 'green')
-    .pop();
-  if (!earlier) return null;
-  let changed;
-  try {
-    changed = await changedInRange(cloneDir, earlier.sha, sha);
-  } catch {
-    return null;
-  }
-  if (changed.some((file) => ground.some((entry) => underEntry(file, entry)))) return null;
-  return answer(paths, earlier, rowOf(earlier, layer));
+  const certified = await certifiedAtAll(paths, project, sha, [{ name: layer, ground }], cloneDir);
+  return certified.get(layer) ?? null;
 }

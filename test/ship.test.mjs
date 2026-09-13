@@ -2281,6 +2281,46 @@ test('textual conflicts take the merge round; test hunks go to the suite seat', 
   );
 });
 
+test("the merge round's briefs name the active records that govern the run's paths", async (t) => {
+  // The constitution tells every seat that its brief names them. The merge round
+  // spawns two seats, and a brief that named none would send each of them to
+  // list the record tree and open whatever it found there, closed records
+  // included (ADR-0089).
+  const fx = shipFixture(t, {
+    files: { [ADR_FILE]: ADR_TEXT },
+    config: { repo: { testPaths: ['tests'], recordPaths: ['docs/adr'] } },
+    seats: {
+      ...reconcileSeats(),
+      suite: () => ({
+        files: { 'tests/feature.test.mjs': STRONG_TEST },
+        report: { suiteFiles: ['tests/feature.test.mjs'], reds: [], summary: 'resolved' },
+      }),
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  commitTree(
+    fx.origin,
+    { 'src/feature.mjs': ALT_FEATURE, 'tests/feature.test.mjs': ALT_TEST },
+    'conflicting main work',
+  );
+  const round = await waitEvent(fx.paths, runId, (e) => e.event === 'merge-round', 'merge-round');
+  assert.equal(round.resolved, true);
+  for (const [seat, marker] of [
+    ['dev', 'textual conflicts'],
+    ['suite', 'conflicts in test files'],
+  ]) {
+    const call = fx.calls.find((c) => c.seat === seat && c.prompt.includes(marker));
+    assert.ok(call, `no ${seat} conflict brief`);
+    assert.match(call.prompt, /active record/);
+    assert.match(call.prompt, new RegExp(`- ${ADR_FILE.replaceAll('/', '\\/')}`));
+    assert.match(call.prompt, /named in neither list is closed/);
+    // The seat is never told to go and find the records itself.
+    assert.ok(!/locate the decision-record tree/.test(call.prompt));
+  }
+});
+
 test('an admin merge over red checks is a breach: ticket, stamp, enqueue', async (t) => {
   const fx = shipFixture(t, {
     pollMs: 300,
@@ -2961,6 +3001,55 @@ test('a failed merge round stalls into the fresh pass born on updated main', asy
   assert.equal(impl.pass, 2);
   // the fresh tree was born on updated main: no further update needed
   assert.equal(gitSync(['show', 'main:src/feature.mjs'], fx.origin), GOOD_FEATURE);
+});
+
+test('a merge-born fresh pass is captured like any other, and a denied path is refused', async (t) => {
+  // The base a merge-born pass runs on is narrowed to what the pass needs. The
+  // capture is part of what it needs: it reads the lane's diff policy off the
+  // config and the dependency grants off the card, and a base carrying neither
+  // answers "no tier" and "no grant", which admits on this one pass every path
+  // no other pass admits.
+  const fx = shipFixture(t, {
+    config: { diffPolicy: { story: { deniedPaths: ['scripts/**'] } } },
+    seats: {
+      dev: ({ prompt }) => {
+        if (prompt.includes('textual conflicts')) return { exitCode: 1 }; // the round fails
+        if (prompt.includes('stalled and was discarded')) {
+          return {
+            files: {
+              'src/feature.mjs': GOOD_FEATURE,
+              'scripts/hack.mjs': 'export const hack = 1;\n',
+            },
+            report: { summary: 'implemented' },
+          };
+        }
+        return { files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } };
+      },
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  commitTree(fx.origin, { 'src/feature.mjs': ALT_FEATURE }, 'conflicting main work');
+  const violation = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'diff-policy-violation',
+    'diff-policy-violation',
+  );
+  assert.deepEqual(
+    violation.violations.map((v) => [v.path, v.rule, v.pattern]),
+    [['scripts/hack.mjs', 'denied', 'scripts/**']],
+  );
+  // One corrective invocation carrying the path, then the park: the seat wrote
+  // the same tree again.
+  const park = await waitParked(fx.paths, runId, 'seat-failure');
+  assert.equal(park.detail.seat, 'dev');
+  const corrective = fx.calls.filter(
+    (c) => c.seat === 'dev' && c.prompt.includes('the diff policy denies this path'),
+  );
+  assert.equal(corrective.length, 1);
+  assert.match(corrective[0].prompt, /scripts\/hack\.mjs/);
 });
 
 // -- the update stage: the ship token, then the pre-verdict update -----------

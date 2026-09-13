@@ -352,21 +352,32 @@ export function lintSpec(
   }
 
   // (n) a card that names a dependency makes the spec declare that importer's
-  // manifest.
+  // manifest, to the dev seat.
   //
   // The card grants the package; the manifest is where the grant is spent. A
   // story that adds a dependency and declares no manifest reaches the capture
   // with a file the diff policy admits only when the spec declares it, spends
   // a corrective round on it, and parks. The card already said what the answer
   // is, so the lint says it here instead.
-  for (const manifest of unique(
-    (card?.dependencies ?? []).map((d) => importerManifest(d.importer)),
-  )) {
-    if (declared.has(manifest)) continue;
+  //
+  // The entry is matched the way the diff policy matches one, not by string: a
+  // spec that declares the importer's directory has declared the manifest under
+  // it, and refusing that spec would refuse a true declaration. The owner is
+  // part of the rule because the install is the dev seat's work. A manifest the
+  // spec hands to the suite seat is a manifest the capture takes back off the
+  // dev seat's write, which is the same park by a longer road.
+  for (const importer of unique((card?.dependencies ?? []).map((d) => d.importer))) {
+    const manifest = importerManifest(importer);
+    const covering = block.entries.filter((e) => underEntry(manifest, e.path));
+    if (covering.some((e) => e.owner === 'dev')) continue;
     defects.push(
-      `the card names a dependency the story adds, and the touched-paths block does not list ` +
-        `${manifest}; a story that adds a dependency writes that importer's manifest, so the ` +
-        'spec declares it.',
+      covering.length > 0
+        ? `the card names a dependency on ${importer}, and the touched-paths entry covering ` +
+            `${manifest} is owned by ${covering.map((e) => e.owner ?? 'nobody').join(', ')}; the ` +
+            'dev seat installs the dependency, so that entry is dev-owned.'
+        : `the card names a dependency the story adds, and the touched-paths block does not list ` +
+            `${manifest}; a story that adds a dependency writes that importer's manifest, so the ` +
+            'spec declares it, dev-owned.',
     );
   }
 
