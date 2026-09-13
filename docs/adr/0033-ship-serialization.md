@@ -4,8 +4,8 @@ Status: accepted (2026-08-16, the two certifications 2026-09-07)
 
 ## The condition
 
-Runs of one project parallelize cleanly through spec, suite, adversary,
-implementation and verdict. The merge is the one stage that does not. A
+Runs of one project parallelize cleanly through spec, suite, implementation and
+verdict. The merge is the one stage that does not. A
 protected default branch that requires its requests current makes every
 concurrent pair pay for the other's merge: the first merge lands, the second
 request goes behind its base or into conflict with it, and the second run buys a

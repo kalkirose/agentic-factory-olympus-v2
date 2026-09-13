@@ -50,29 +50,29 @@ review — gets these concrete shapes:
   corrective invocation, then the `seat-failure` park. A green spectrum
   resolves triage findings mechanically — their evidence is gone.
 - **Findings.** Every finding stamps a `finding` event with a run-scoped id
-  (`F<n>`). The split that decides what a round blocks on is severity, on every
-  lane and whatever the finding is about. A HIGH blocks when it is confirmed; a
-  finding below HIGH stamps `advisory` and blocks nothing. A code round confirms
-  a HIGH through the verifier, and a refuted one stamps `confirmed: false`
-  beside the verifier's evidence. A record round confirms a HIGH as its reviewer
-  raised it and spawns no verifier (ADR-0080). A finding about
-  a decision record carries `record: true`, the `criterion` it cites, and the
-  unit it is about (`unit`, `head`, `line`, and a second place on a `consistent`
-  finding), at every grade. A HIGH one enters the open set of the render it
-  belongs to. One below HIGH is a remark: the
-  render lists it under `advisory`, the corrective round that writes that record
-  for a HIGH hands it to the writer, and the run records what it ships with at
-  the close. Every run names on `run-closed.remarks` the findings it left
-  standing, by id: the remarks, and the confirmed HIGHs no round answered. The
-  finding stamp keeps `confirmed: true` on the second kind, so a reader tells
-  them apart, and the merged request's body lists them under two headings. A
-  ticket is owed for a record the judge owed and no round wrote, and for nothing
-  else. A record finding is raised by the record review of the reconcile
-  stage and by no code lens (ADR-0026, ADR-0075). The verdict's own open set
-  travels in `verdict-rendered.open`. The record file
-  (`runs/<id>/verdict-<cycle>.json`) carries the spectrum, the open and
-  just-resolved findings, and the flake list. It holds confirmed findings only;
-  advisory material stays in the ledger.
+  (`F<n>`) and the ground it rests on, which is the files and directories the
+  claim is about (ADR-0085). The split that decides what a round blocks on is
+  severity, on every lane and whatever the finding is about. A HIGH blocks when
+  it is confirmed; a finding below HIGH stamps `advisory` and blocks nothing. A
+  code round confirms a HIGH through the verifier, and a refuted one stamps
+  `confirmed: false` beside the verifier's evidence. A record round confirms a
+  HIGH as its reviewer raised it and spawns no verifier (ADR-0080). A finding
+  about a decision record carries `record: true`, the `criterion` it cites, and
+  the unit it is about (`unit`, `head`, `line`, and a second place on a
+  `consistent` finding), at every grade. A HIGH one enters the open set of the
+  render it belongs to. One below HIGH is a remark: the render lists it under
+  `advisory`, the corrective round that writes that record for a HIGH hands it
+  to the writer, and the run records what it ships with at the close. Every run
+  names on `run-closed.remarks` the findings it left standing, by id: the
+  remarks, and the confirmed HIGHs no round answered. The finding stamp keeps
+  `confirmed: true` on the second kind, so a reader tells them apart, and the
+  merged request's body lists them under two headings. A ticket is owed for a
+  record the judge owed and no round wrote, and for nothing else. A record
+  finding is raised by the record review of the reconcile stage and by no code
+  lens (ADR-0026, ADR-0075). The verdict's own open set travels in
+  `verdict-rendered.open`. The record file (`runs/<id>/verdict-<cycle>.json`)
+  carries the spectrum, the open and just-resolved findings, and the flake list.
+  It holds confirmed findings only; advisory material stays in the ledger.
 - **Review composition per cycle.** First cycle of an implementation pass:
   the Fury fan-out over the panel the project declares (`review.lenses`),
   fully parallel, then the verifier on that round's items. The default panel

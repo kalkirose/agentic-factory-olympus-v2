@@ -76,9 +76,12 @@ mechanism knows which layer that is.
   and from where, and the verdict record and the `verdict-rendered` event state
   `confirmationParts` (`ran`, `kept`) for what the sweep bought and what it
   stood on.
-- **The seats spend from the same clock.** The dev and repair briefs name the
-  mapping and the variable, so a seat checking its own work narrows the layer
-  the same way the cycle that judges it will.
+- **The narrowing is the cycle's, and no seat is told the mapping.** The dev,
+  fix and repair briefs carry no part mapping and no variable. A brief that
+  taught a seat to narrow a layer taught it to reach for layers that are not
+  its work: a seat runs the layers of its own bound and nothing else, and the
+  verdict stage runs the rest at the sha it ships (ADR-0084). So the mapping is
+  read where the plan is made and nowhere else.
 
 The derivation lives in `partPlan()` in `src/lanes/parts.mjs`, which is pure
 and reads a standing result and a file list. The two ground sources are read in

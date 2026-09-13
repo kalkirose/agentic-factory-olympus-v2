@@ -55,8 +55,11 @@ asked anything, and no answer is a judgment.
   it. A file NO set reaches also refuses, unless the project declared it inert
   (`gates.inertGround`). A layer whose ground neither source declares refuses. A
   change the harness cannot read as a file of this repository refuses.
-- **Both answers agree or the run takes the full re-verdict.** There is no
-  third ending.
+- **Each answer is settled on its own evidence.** A refusal that belongs to one
+  certification says nothing about the other, so the two are not copied across
+  (ADR-0086). A half-carry is stamped as one: `taken` stays false, the update
+  stage routes to the stage whose question re-opened, and the record says which
+  half stood and under which word.
 - **The ground question is asked once and answered twice.** `groundVerdict` lists
   the incoming files once and answers each certification the lane holds on its
   own ground (ADR-0075). The code answer is the six sets above, with every record
@@ -72,7 +75,12 @@ asked anything, and no answer is a judgment.
   last cycle that RAN that layer, never from the last cycle. A cycle runs the
   layers its own plan named and skips the rest, so a layer a record-only cycle
   left out keeps the green it earned and the record holding its declaration is
-  the record that earned it.
+  the record that earned it. A layer that carried the default branch's own
+  certification is such a green (ADR-0088), and it stands on the project config
+  ground alone: its part table belongs to another run, a part's declared inputs
+  do not survive into a verdict record, and the config ground is the claim the
+  carry itself was taken on. Each carried green names the tree it was earned at,
+  so the declaration sha is per layer where a layer carried.
 
 A fast-path ship stamps `fast-path-ship` with `taken: true`, the default-branch
 commits it examined, the declaration version they were checked against, and the
@@ -288,20 +296,26 @@ it since decided this run's claims under a version the merge target no longer
 states. The config path the run pinned is therefore one of the six sets, and a
 branch that moved it refuses with `ground-intersects`.
 
-## Why a lens finding is not carried
+## Why a lens finding is asked about its own ground
 
 A certification is two things: the deterministic gate results, and a review
-panel's reading of the tree (ADR-0022). The gates declare their ground. A lens
-declares nothing and reads the whole repository around the diff, so no claim in
-this project can say the branch did not move ground a lens finding rests on.
+panel's reading of the tree (ADR-0022). The gates declare their ground, and so
+does a finding: the seat that raises one names the files and directories the
+claim is about (ADR-0085). So a finding is asked the question every other claim
+here is asked. An incoming file under any finding's ground refuses, naming the
+finding and the file. No hit, and the findings stand with the rest of the
+certification.
 
-The honest answer is therefore the narrow one: a certification whose record
-carries any review-lens finding, open or resolved, is not carried. Where the
-panel raised nothing, the certification rests on declared ground alone and the
-two questions above cover it. The alternative considered was to give the lenses
-a declared surface of their own, and it was rejected as a fiction: the surface a
-lens reads is the repository, and writing a smaller one down would not make it
-true.
+A finding that names no ground refuses the whole check, naming the findings that
+declared nothing. That is the honest answer for a claim with no surface: nothing
+in this project can say the branch left ground alone that was never stated. Every
+certification written before a finding carried ground reads that way, and so
+does one from a seat whose list reached the record empty.
+
+The refusal is deliberately the reviewer's own claim rather than a measurement. A
+narrow ground carries a finding a rebase should have re-judged. The verifier may
+replace the ground on a confirmed HIGH, which is where the claim is worth the
+most, and below that grade the ground is the lens's word.
 
 ## One canonical path, everywhere
 

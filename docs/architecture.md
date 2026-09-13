@@ -74,15 +74,20 @@ flowchart LR
 
 A story runs as one continuous run with these internal states:
 
-readiness → spec birth → spec gate → records → suite authoring → adversary →
-freeze → implementation → verdict (repair rounds as needed) → reconcile →
+readiness → spec birth → spec gate → records → suite authoring → freeze →
+implementation → verdict (repair rounds as needed) → reconcile →
 update → ship → close-out.
+
+A lane also states the stages it no longer runs, each mapped to the stage that
+now follows the one before it. The resume guard reads that map before it refuses
+a stage the lane does not list, so a run standing in a removed stage re-enters at
+the mapped stage and stamps `stage-retired` (ADR-0087).
 
 Three lanes share the machinery:
 
 - **Story lane** — the full chain above.
 - **Repair lane** — for defects and chores: no spec birth (the intake ticket
-  is the spec), no adversary. Fix + regression test + full deterministic gates
+  is the spec). Fix + regression test + full deterministic gates
   + one generalist review round + one verdict + reconcile + ship. Writes the run
   ledger and the escapes-ledger entry at close. A ticket whose `touched-paths`
   block names ground the lane's diff policy denies is refused at launch
@@ -169,8 +174,11 @@ Two levels; the ownership test decides placement.
   the machine together (`gates.concurrencyGroups`), the ground the project
   states no suite of it reads (`gates.groundlessPaths`), what a flake re-run
   asks for (`gates.flakeRerun`), the project's own checks over every suite
-  write, in the order they run (`lanes.story.suiteChecks`), whether a run's
-  commands are
+  write, in the order they run (`lanes.story.suiteChecks`), the paths the story
+  lane may write only for the dependency its card names
+  (`diffPolicy.story.dependencyPaths`, ADR-0083), which Tier-1 layers produce the
+  tree the layers after them read (`setup` on a `gates.tier1` entry, ADR-0088),
+  whether a run's commands are
   offered a cache directory (`runCache`), the directory a route id in a
   spec resolves under (`repo.routesRoot`, default `apps/storefront/src/routes`,
   `null` for a project whose specs name no routes), the directory a component
@@ -224,6 +232,23 @@ Two levels; the ownership test decides placement.
   limit, applied everywhere) is written to a file in the run directory and the
   spawn carries the path; the substitution stamps `prompt-spilled`. Under the
   ceiling the prompt rides argv unchanged (ADR-0005).
+- **An implementation seat runs within a bound** (ADR-0084). The dev and
+  repair-dev seats are spawned with two files in the run directory: a bound file
+  stating the worktree, the base commit, every Tier-1 layer with its argv,
+  ground, `needs` and `setup` flag, the frozen suite, the declared paths and the
+  certified base's per-layer durations; and a settings file loading one pre-tool
+  hook over the command tools. The hook computes the bound from the live diff at
+  every call, which is the layers whose ground the diff touches, closed over
+  `needs`, plus every setup layer and the frozen suite, and it refuses a command
+  that runs any other layer, naming it. A setup layer, the frozen suite and a
+  layer with no duration reading always pass; doubt refuses. Refusals are
+  appended to a file beside the bound, because the run ledger has one writer,
+  and the runner stamps them at the seat's end. `seat-bound` carries the bound's
+  digest and layer names at the spawn. The load is proven from the stream: a
+  command that ran with no marker from the hook beside it ends the seat, because
+  a settings file the CLI refuses is ignored in silence. A seat the files cannot
+  be written for does not spawn. The brief lists the bound and says the verdict
+  runs the rest.
 - **Constitution.** A project may version a policy file in its own repository
   (`constitutionPath`, default `.olympus/constitution.md`). Its text rides as
   a third block between the core and the role block, for a closed set of
@@ -235,6 +260,17 @@ Two levels; the ownership test decides placement.
   reads it cannot be held to it. A slot suffix on a seat name (`reconcile-write:2`)
   is stripped before the lookup, so N dispatches of one seat read one policy and
   keep N budgets. No file, no third block.
+- **A brief names the active records; no seat lists the record tree** (ADR-0089).
+  Every seat that reads a decision record gets two blocks and one sentence,
+  computed by the harness: the active records that govern the paths this seat
+  works on, one path per line, with the count the neighbourhood cap dropped
+  stated where it dropped any; then every other active record, one path per line;
+  then the rule that a record in the tree named in neither list is closed and out
+  of the seat's scope. The paths a seat is judged on are the spec's or the
+  ticket's `touched-paths`, the card for a spec birth, and the diff's own files
+  for a review seat. The three seats that already carry a neighbourhood pass it
+  as an exclusion and gain the second block alone, so no path is named twice. A
+  project with no record tree sees no block.
 - **Seat identity per dispatch.** A seat name may carry `:<n>`. The suffix keys
   the attempt budget, the cost series and the failure record, so a round that
   dispatches one seat per record keeps one budget, one cost line and one failure
@@ -310,7 +346,7 @@ Two levels; the ownership test decides placement.
 ## Pre-freeze chain (story lane)
 
 readiness (process) → spec birth (seat) → spec gate (seat) → records (seat) →
-suite authoring (seat) → adversary → freeze (process).
+suite authoring (seat) → freeze (process).
 
 - **Readiness** is mechanical: card on the graph frontier, open decisions
   empty (a foreseen-amendment note is not one, ADR-0052), references
@@ -320,9 +356,19 @@ suite authoring (seat) → adversary → freeze (process).
   existed (ADR-0068), so what this stage catches is what moved since: a card a
   seat or a merge changed in the worktree, and a value the world stopped
   taking. It says so at every park it raises.
+- **The card lint judges the launched card and the cards behind it** (ADR-0081).
+  The harness computes the closure of `blocked-by` from the launched card,
+  stopping at a shipped key, and names each of those cards to the project's lint
+  command. A red inside that set parks the stage as any blocked precondition
+  does. A red outside it is a block of text the script writes last, which the
+  stage reads and stamps once per run as a loud `readiness-lint-beyond`, and the
+  run goes on. The close-out card sweep lints the cards it wrote the same way.
 - **Spec birth** authors the buildable spec from the intent card, grounded
   against the repo as it exists that day. AFK; escalates only on open
-  decisions or a grounding conflict with the card's intent. The born spec is
+  decisions, a grounding conflict with the card's intent, or a package the card
+  does not name (ADR-0082): that one is a `dependency-decision` park with
+  `approve` and `refuse`, and an approval is written onto the card, pushed to
+  the default branch by path, and read back by a fresh birth seat. The born spec is
   a run artifact — authoritative for its run only, archived at close. The
   spec has a fixed template (ADR-0019): a header, one section per card
   acceptance criterion in card order (intent, test mapping, named constants,
@@ -383,45 +429,29 @@ suite authoring (seat) → adversary → freeze (process).
   with the sha, the paths and whether the spec decided anything at all. The
   frozen sha therefore carries the records, and the dev seat reads them as it
   reads the tests. A project with no record tree spends no seat here.
-- **Suite writes and the surface map** (ADR-0072). Five writes answer the spec:
-  the authoring round, an adversary amendment, a strengthening round, the
-  red-state fix, and the re-freeze amendment after the freeze. Each one reports
+- **Suite writes and the surface map** (ADR-0072). Three writes answer the spec:
+  the authoring round, the red-state fix, and the re-freeze amendment after the
+  freeze. Each one reports
   the files it wrote, the expected reds with their class, and a surface map: one
   row per item of this story that sits on a security dimension, with the item's
-  kind out of a closed vocabulary of eight, where it sits, and either the test
-  that kills a wrong implementation of it or the reason the spec does not
+  kind out of a closed vocabulary of eight, where it sits, and either the test a
+  wrong implementation of it fails or the reason the spec does not
   constrain it. A dimension the story does not touch is declared out of scope
-  with a reason. The dimensions are the four the adversary weighs, off one list
-  with six readers, and they are not project config. Eleven deterministic checks
-  hold the document: every dimension accounted for once, every row closed
-  exactly once, every named test present in a declared suite file, every
-  survivor wave on a tested row, no item of the previous map dropped, no item on
+  with a reason. The dimensions are the four the security lens weighs, off one
+  list with five readers, and they are not project config. Nine deterministic
+  checks hold the document: every dimension accounted for once, every row closed
+  exactly once, every named test present in a declared suite file, no item of the
+  previous map dropped, no item on
   two rows. A defect buys one corrective invocation and then the seat-failure
-  park, the route every suite-report defect takes. The amendment and
-  strengthening briefs carry every earlier round of the run, newest first, so
-  three rounds read as one instruction instead of three requests to add one
-  test. `surface-map` stamps one set of counts per write, and the freeze record
-  carries the map of the last write.
-- **Adversary**: throwaway wrong implementations, all evaluated to verdict, in
-  disposable worktrees. The brief names the security dimensions beside the
-  behavior the spec states, so a suite that asserts nothing about
-  authorization or input trust shows a survivor and grows a test for it
-  (ADR-0038). It is never shown the surface map: the wave is the only
-  independent measure of whether the map is the surface, and an adversary that
-  read the map would prove the suite covers what the map declared (ADR-0072).
-  One wave a round by default;
-  `lanes.story.adversaryWaves` raises the count, and the launch pins the config
-  blob, so a raise lands at the next launch and never mid-run. A survivor is a
-  demonstrated suite gap: one targeted amendment round (a killing test per
-  survivor), then freeze. A residual survivor gets a disposition:
-  spec-indifferent (recorded) or unkilled gap (blocks; escalates). Zero kills:
-  one full strengthening round + a fresh round of waves; a second zero
-  escalates.
+  park, the route every suite-report defect takes. The map is the whole
+  enumeration of the surface the suite is held to, and what answers a thin one is
+  a defect that ships on an item no row listed. `surface-map` stamps one set of
+  counts per write, and the freeze record carries the map of the last write.
 - **The project's checks, run while the seat is live** (ADR-0060, ADR-0071). A
   project names its own checks over a suite write in `lanes.story.suiteChecks`,
   an ordered list of `commands` keys, and every suite write runs them over the
-  tree as the seat left it: the authoring round, an adversary amendment, a
-  strengthening round, the red-state fix, and the re-freeze amendment after the
+  tree as the seat left it: the authoring round, the red-state fix, and the
+  re-freeze amendment after the
   freeze. The order is the project's and carries every dependency between the
   checks. Every check runs even after a red, because the seat has one corrective
   round and one brief carries every fault. A red is a work-product defect and
@@ -435,43 +465,53 @@ suite authoring (seat) → adversary → freeze (process).
 - **Red-state check** (process): the suite must be red against the
   pre-implementation tree, and the freeze report classes every red as
   feature-absence. Any other cause is a suite defect to fix before freeze.
-- **Freeze record**: suite file set at a SHA, kill count, survivor
-  dispositions, red-state record, born-spec ref, the surface map of the last
+- **Freeze record**: suite file set at a SHA, red-state record, born-spec ref,
+  the surface map of the last
   suite write and the dimensions it declared out of scope, the frozen
   exclusions (the test-path files the spec assigned to the implementing pass),
-  and the frozen tests pinned to the owner. The exclusions leave the dev seats' deny rules and
-  every story-mode restore; the adversary's restore still covers them. The
+  and the frozen tests pinned to the owner. The exclusions leave the dev seats'
+  deny rules and every story-mode restore. The
   valid record is the completion signal.
 
 ## Verdict machinery
 
 - **Candidate capture gate.** Before a dev seat's tree becomes an
   implementation commit, the changed paths are judged against the lane's
-  optional `diffPolicy` tiers (denied, spec-declared, forbidden patterns).
-  A violation stamps a loud `diff-policy-violation` and buys one corrective
-  invocation before the `seat-failure` park. A take-back — a write to a path
-  the lane froze — stamps the same record and blocks nothing: the capture
-  commits the allowed set, the record and the commit both name the dropped
-  paths, and every later brief states the freeze and the re-freeze route.
-  A take-back from a path the lane declared `recapturablePaths` — a baseline
-  or fixture a re-freeze re-takes — stamps the quiet `diff-policy-recapture`
-  instead, and the hard tiers outrank the class. A write to a decision record
-  stamps the same quiet record with `class: 'record'`, in every lane and at the
-  merge-conflict site, because the record tree is frozen for every seat that
-  writes code (ADR-0074); the two classes are a closed list, so they count apart.
-  The class is decided once,
-  here, and honored by every later step that meets the same paths. A frozen
-  write under the lane's `sweptPaths` that the freeze anchor does not hold is
-  a generated artifact rather than a take-back: it is swept before the record,
-  stamps the quiet `capture-swept`, and reaches no later brief. Nothing is
-  ever discarded without a record (ADR-0017).
+  optional `diffPolicy` tiers (denied, spec-declared, forbidden patterns, and
+  dependency-gated). A violation stamps a loud `diff-policy-violation` and buys
+  one corrective invocation before the `seat-failure` park. A take-back — a
+  write to a path the lane froze — stamps the same record and blocks nothing:
+  the capture commits the allowed set, the record and the commit both name the
+  dropped paths, and every later brief states the freeze and the re-freeze
+  route. A take-back from a path the lane declared `recapturablePaths` — a
+  baseline or fixture a re-freeze re-takes — stamps the quiet
+  `diff-policy-recapture` instead, and the hard tiers outrank the class. A write
+  to a decision record stamps the same quiet record with `class: 'record'`, in
+  every lane and at the merge-conflict site, because the record tree is frozen
+  for every seat that writes code (ADR-0074); the two classes are a closed list,
+  so they count apart. The class is decided once, here, and honored by every
+  later step that meets the same paths. A frozen write under the lane's
+  `sweptPaths` that the freeze anchor does not hold is a generated artifact
+  rather than a take-back: it is swept before the record, stamps the quiet
+  `capture-swept`, and reaches no later brief. Nothing is ever discarded without
+  a record (ADR-0017).
+- **One tier is judged by content** (ADR-0083). A path the story lane lists under
+  `dependencyPaths` is answered by what the change inside it says: the capture
+  reads the file at the run's freeze against the file in the worktree and admits
+  exactly the packages the launched card names, in the importer the card names,
+  with every other block of the file held. The first block that breaks the grant
+  is the refusal text, and it rides the corrective brief under its own rule. A
+  dependency path outranks the re-capturable and swept classes, and it is never
+  answered by the spec's own declaration: the permission is on the card, and the
+  spec lint refuses a spec that lists the file.
 - **Deterministic core.** Every Tier-1 check (per-layer suites, lint, types,
   build) runs as a process. Unlimited rounds; a rerun judges nothing.
 - **Spectrum verdict.** Every runnable Tier-1 layer the cycle runs runs to
   completion; the verdict reports the union of reds. A layer whose
   prerequisite failed reports not-runnable, attributed to the prerequisite.
 - **Targeted re-runs.** The first cycle of an implementation pass runs the
-  full spectrum. A later cycle runs the targeted set — every layer the pass
+  full spectrum, unless the default branch already answered for the tree the pass
+  started from (below). A later cycle runs the targeted set — every layer the pass
   has not proven green, plus everything downstream of one through `needs` —
   and carries the remaining greens forward, marked `carried` in the record so
   no result reads as a fresh proof. A clean targeted cycle runs every layer it
@@ -485,6 +525,23 @@ suite authoring (seat) → adversary → freeze (process).
   those remedies lands outside the tree, so the operational fix stamps
   `sweep: 'skipped'` with the findings and the reason, the run goes back to
   ship, and the CI re-run is the test (ADR-0022).
+- **The first cycle is the footprint of the change** (ADR-0088). Every ship
+  close-out stamps `base-certified` on the instance ledger: the project, the run,
+  the merge sha, and per layer the status, the duration, whether it ran or
+  carried, and the verdict record it came from. A first cycle whose base that
+  record answers for runs the layers whose ground the run's own diff touches,
+  closed over `needs`, plus every layer no certification answers for, plus every
+  `setup: true` layer, whose dependents it does not pull in. The rest stamp a
+  `layer-result` with `mode: 'carried'` naming the base sha and the certification
+  they came from, so a resume keeps them carried and the next cycle targets none
+  of them. A layer is certified at a sha by a certification at that sha, or by
+  one at an ancestor whose diff to it touches none of the layer's ground; a red
+  at the sha, a layer with no declared ground and an unreadable diff all refuse.
+  Four conditions gate the narrowed sweep: a declared setup layer, ground on
+  every Tier-1 layer, a certification for the project, and a readable diff. A
+  changed file no layer's ground claims buys the whole spectrum too. Every
+  fallback stamps `sweep: 'full'` with the word that says which condition failed.
+  A dependent of a red setup layer is not-runnable rather than carried.
 - **Progress-keyed cycling.** Every verdict cycle carries a fingerprint over
   what settles its outcome: the implementation pass, the candidate sha, the
   suite sha, the open findings by identity, and, on a CI verdict, the head sha
@@ -514,13 +571,13 @@ suite authoring (seat) → adversary → freeze (process).
   `credentialAbsent` with the variable's name on its own `layer-result`, and
   triage reads it at the head of that layer's evidence. A green layer is never
   annotated (ADR-0042).
-- **Flake filter.** Each red layer re-runs once, red-only, by process policy.
-  A green re-run writes a flake event, never a finding. Survivors are
-  persistent reds; only these enter triage. The replaced red is stamped
-  `superseded-by-rerun` with what it printed, so a re-run never replaces an
-  attempt silently.
+- **Flake filter.** Each red layer re-runs once, red-only, by process policy. A
+  green re-run writes a flake event, never a finding. A red that survives the
+  re-run is a persistent red, and only a persistent red enters triage. The
+  replaced red is stamped `superseded-by-rerun` with what it printed, so a
+  re-run never replaces an attempt silently.
 - **A red from outside the tree never reaches a seat** (ADR-0069). Before
-  triage is dispatched, a survivor is read against a closed signature set
+  triage is dispatched, a persistent red is read against a closed signature set
   (`src/lanes/transient.mjs`): dropped and refused connections, name-lookup
   failures, an HTTP 429 or 5xx beside a host, rate-limit wording, an image pull
   failure, a store refusing connections at startup, the runner CLI's own retry
@@ -771,6 +828,15 @@ suite authoring (seat) → adversary → freeze (process).
   before the verdict renders. No re-fan-out over a judged tree. The verifier
   confirms or refutes each HIGH; only confirmed HIGHs enter the verdict
   (confirm-to-block).
+- **A finding names its ground** (ADR-0085). Every finding carries the files and
+  directories the claim rests on, repo-relative, and a seat that raises one
+  without them is refused once on the contract loop and then takes the
+  work-product park. The ground travels onto the ledger event, into the verdict
+  record and through every rebuild of a finding, so the ship path can ask a
+  finding the question it asks a layer: did the default branch move what this
+  claim rests on. The verifier may replace the ground on a HIGH it confirms, and
+  a finding on a decision record carries ground for the ledger and refuses
+  nothing.
 - **Repair-lane review.** Deterministic gates in full; judgment collapses to
   one generalist review seat (the same panel on one seat, diff-scoped,
   per-lens reporting). The verifier fires only when HIGHs exist.
@@ -830,7 +896,13 @@ suite authoring (seat) → adversary → freeze (process).
   holder's merge. An update that moved the tree asks two questions of the
   incoming work, one per certification, and routes on the answers: back to the
   verdict where the code question re-opened, back to the reconciliation where the
-  record question did, and on to the ship where neither did. A base that did not
+  record question did, and on to the ship where neither did. The two answers are
+  settled apart (ADR-0086): a refusal that belongs to one certification is not
+  copied onto the other, so a review finding whose ground the incoming diff
+  reached re-judges the code and keeps the records, and a records fact re-judges
+  the records and keeps the code. A refusal that says the reading itself cannot
+  be trusted still answers for both. A kept answer states why it was kept, and a
+  half-carry is not a taken fast path. A base that did not
   move costs one fetch and a stamp. A conflict surfaces
   here, before any request, and takes the merge round it always took.
   `UPDATE_CAP` bounds the updates per implementation pass, and a record re-run
@@ -1013,9 +1085,14 @@ suite authoring (seat) → adversary → freeze (process).
   daemon home and is owed a repair-lane run. The breaching run enqueues; the
   frontier sweep launches, because that run still holds its own slot.
 - Close-out: watch merge-commit checks to terminal states, run the card
-  sweep, write the reconciliation ticket where the records did not ride the
-  merge, run the learning artifact if the project configured one, close the
-  run ledger.
+  sweep, stamp what the ship certified, write the reconciliation ticket where the
+  records did not ride the merge, run the learning artifact if the project
+  configured one, close the run ledger.
+- **The ship says what it certified** (ADR-0088). `base-certified` lands on the
+  instance ledger with the merge sha and, per Tier-1 layer, the status, the
+  duration, whether the layer ran or carried, and the verdict record it came
+  from. It is what a later run's first cycle reads to know which layers the
+  default branch already answers for.
 - **The card sweep is where a supersede goes home** (ADR-0044). A run that
   amended a frozen test on its card's authority hands the sweep every executed
   supersede, and the sweep records them on that story's card under a
@@ -1035,12 +1112,15 @@ suite authoring (seat) → adversary → freeze (process).
 - **The sweep passes the project's own card lint** (ADR-0054). The sweep is the
   one writer that lands text on the default branch with no request behind it,
   so its self-check ends by running the command the project names in
-  `lanes.story.lintCommand` over what it wrote, in the sweep worktree. A red is
+  `lanes.story.lintCommand` over what it wrote, in the run's worktree reset to
+  the merge. A red is
   a work-product defect: it re-briefs the seat on the same two-attempt loop and
   nothing red is pushed. A command that could not run at all fails the attempt
   the same way, because a push behind it is a push of cards no check read. A
   sweep that wrote nothing runs no lint. The `card-sweep` stamp carries `lint`
-  every time, so the reader can tell which of them happened.
+  every time, so the reader can tell which of them happened. The lint names the
+  cards the sweep wrote, and only those the tree holds, so a red on a card the
+  sweep never touched cannot fail the push (ADR-0081).
 - **The sweep absorbs one race** (ADR-0063). A rejected push is almost always
   the branch moving under it — a person landing a card edit while the sweep
   ran — so the sweep refetches, replays its own commit onto the head that beat
@@ -1082,10 +1162,11 @@ suite authoring (seat) → adversary → freeze (process).
   it creates a fresh run worktree, seats receive the absolute path, at close
   it removes the worktree. No shared checkout exists.
 - **Recreate over residue** (ADR-0051). A worktree a run creates for itself is
-  created over whatever that run left at the same path before: the two creation
-  functions in `src/isolation/worktrees.mjs` clear the path and the clone's
-  registration for it first, and clear again after an add the clone refuses, so
-  no stage step carries a guard of its own. Clearing takes all three traces
+  created over whatever that run left at the same path before: the private
+  creation primitive in `src/isolation/worktrees.mjs` clears the path and the
+  clone's registration for it first, and clears again after an add the clone
+  refuses, so no stage step carries a guard of its own and a creation added later
+  carries the property by construction. Clearing takes all three traces
   (`worktree remove --force`, a direct delete in the extended-length path form,
   `worktree prune`), and the run worktree resets its branch with `-B`, because
   residue of a crash carries the branch as well as the directory. Every path is
@@ -1147,12 +1228,16 @@ suite authoring (seat) → adversary → freeze (process).
 
 ## Escalations and the human
 
-- **Touchpoint catalog** (closed, eleven park events): open decisions at build
+- **Touchpoint catalog** (closed, fourteen park types): open decisions at build
   start; grounding conflict at spec birth; intent conflict at spec gate;
-  spec-gate non-convergence; unkilled-gap survivor; second 0/3 adversary
-  round; second stall; card invalidated at ship-time sweep; card decision at
-  ship-time sweep; provisioning gate; the record cap on the records lane, which
-  offers the rounds that finish the work (ADR-0079).
+  spec-gate non-convergence; a package the launched card does not name
+  (ADR-0082); second stall; a verdict cycle that judged what an earlier cycle
+  already judged; card invalidated at ship-time sweep; card decision at
+  ship-time sweep; provisioning gate; a red pull-request check a records-lane run
+  holds no seat for; and the three recovery parks for a condition a run cannot
+  settle itself, which are a seat past its allowance, a stage precondition whose
+  repair lands outside the run, and a configured command that could not run at
+  all. No decision record parks a lane (ADR-0080).
 - A park is the last resort, not the first: a stop whose answer is a clock the
   harness can read is a wait instead, and only a spent wait asks (ADR-0069).
 - Park = stamped escalation record (question, context refs, answer forms) + a
@@ -1500,8 +1585,8 @@ project, at the windows the project's own registry declares — the daemon stamp
 
 Standing quality bar (written by the runs themselves, never mined from
 outside): escaped defects per story (ceiling 0.5, rolling 10 ships),
-gate-integrity defects (zero-tolerance incidents), adversary kill rate at
-freeze (0/N blocks), per-lens review yield (zero-yield lane = cut candidate).
+gate-integrity defects (zero-tolerance incidents), per-lens review yield
+(zero-yield lane = cut candidate).
 
 ## Cost and budgets
 
@@ -1542,7 +1627,8 @@ substituted runners in place of compose and the forge.
 `npm run test:e2e` is the binary proof under `e2e/`: `bin/olympusd.mjs`
 started as a child process and driven by `bin/olympusctl.mjs` through a whole
 story run, a whole repair run and a whole records-lane run against a throwaway
-git project. Real control
+git project, and through a second ship of the same project, which meets a
+certified base and carries a layer it did not run. Real control
 files, real ledgers, real worktrees, real gate commands; the seat CLI and the
 forge CLI are stubs behind their instance-config seams, and nothing else is
 substituted. What it does not reach — docker stacks, a live forge, model

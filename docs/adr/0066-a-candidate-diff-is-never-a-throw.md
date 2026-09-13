@@ -36,8 +36,9 @@ The diff a judgment seat reads is produced by `reviewDiff()` in
   brief and nothing else. The file holds the whole diff at any value.
 - **Every full-text diff read carries an explicit output cap.** The cap is
   `MAX_DIFF_BYTES` in `src/isolation/git.mjs`, 256 MB, and it is the harness's
-  only number for this. `reviewDiff()` carries it, `evidenceDiff()` carries it,
-  and the fast-path ship's two patch reads carry it. The runner's default cap is
+  only number for this. `reviewDiff()` carries it, every name-only and
+  full-text read in `src/isolation/tree.mjs` carries it, and the fast-path
+  ship's two patch reads carry it. The runner's default cap is
   one megabyte, which a lockfile clears on its own. A read past the cap answers
   short: `gitCapped()` is the seam, Node stops the stream at exactly the cap,
   kills the child, and hands back the bytes it kept, so the read resolves with

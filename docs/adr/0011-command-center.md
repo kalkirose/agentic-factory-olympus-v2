@@ -23,8 +23,8 @@ shapes:
   path, so a symlink inside the home cannot serve a file outside it.
 - **The server derives, the page renders.** `buildSnapshot` assembles the
   full display state through the same pull-only readers the console uses —
-  run replay, open-loud and queue joins, escapes window, yield and kill-rate
-  collectors, frontier compute. The page holds no derivation beyond
+  run replay, open-loud and queue joins, escapes window, the lens-yield
+  collector, frontier compute. The page holds no derivation beyond
   formatting, so display logic cannot drift from the tested reader code.
   Clone-backed sections (tripwire registry, frontier) read the bare clone
   without fetching and degrade to null while no clone exists.
@@ -39,8 +39,8 @@ shapes:
   round, last event; parked runs dimmed with the freed slot named),
   escalations (loud first, then the queue in FIFO order with the roadmap
   tiebreak), build health (escapes rolling-10 meter against the registry
-  ceiling, open escapes, open gate-integrity count, kill rate at the last
-  freeze, per-lens yield over the baseline window, tripwire board), run-time
+  ceiling, open escapes, open gate-integrity count, per-lens yield over the
+  baseline window, tripwire board), run-time
   statistics (median story wall-clock against the 4 h target, last-10 ships
   chart, green-ship p50, CI critical path p50, frontier width, stage
   medians), and the ledger tail (newest first across all stores).

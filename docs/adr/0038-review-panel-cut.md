@@ -77,18 +77,18 @@ is smaller than the vocabulary.
 - **Security has no seat of its own; it rides `fury-operational`.** One
   confirmed HIGH across the same ten ships does not pay for a seat. The lens
   itself stays on the panel, on a seat that always runs.
-- **The adversary waves carry the security dimensions.** The wave brief names
+- **The suite carries the security dimensions.** Every suite brief names
   authorization on every entry point, input trust, secrets and trust boundaries
-  beside the behavior the spec states.
-- **One definition of the dimensions, six readers.** The list lives in the lens
+  beside the behavior the spec states, and owes an enumeration of the story
+  along each of them (ADR-0072).
+- **One definition of the dimensions, five readers.** The list lives in the lens
   registry and imports nothing. The lens criteria read it for the verdict panel.
-  The wave brief reads it for the adversary. The suite brief and the re-freeze
-  brief read it for the surface map every suite write owes, and the
-  deterministic check over that map reads it again in each of the two lanes that
-  hold a suite write (ADR-0072). Six readers of one list, so no surface can
-  narrow what another one still probes. The list is not project config: a
-  project that drops the security lens from its panel still gets the dimensions
-  in its waves and in its maps.
+  The suite brief and the re-freeze brief read it for the surface map every
+  suite write owes, and the deterministic check over that map reads it again in
+  each of the two lanes that hold a suite write (ADR-0072). Five readers of one
+  list, so no surface can narrow what another one still probes. The list is not
+  project config: a project that drops the security lens from its panel still
+  gets the dimensions in its maps.
 
 The default panel is three seats where it was five. Two rounds spawn seats in
 parallel: this fan-out, and the record review's one seat per record.
@@ -112,10 +112,9 @@ not.
 
 ## Why the fold keeps a route to a block
 
-Adversary waves test the suite. A wave writes a wrong implementation, the
-frozen suite either kills it or does not, and a survivor buys a killing test.
-Nothing in that loop looks at the candidate. A design that moved security
-probing into the waves and took the lens off the panel would leave a security
+The suite is a claim about behavior at Tier-1, and it looks at no candidate: it
+states what any implementation has to satisfy. A design that put security
+entirely into the suite and took the lens off the panel would leave a security
 defect in the shipped diff with no reader at all, and the one confirmed HIGH of
 the window is the evidence that such a defect happens.
 
@@ -126,19 +125,14 @@ So the fold is two-sided, and each side answers a different failure.
   a confirmed HIGH enters `verdict-rendered.open`, turns the verdict red and
   takes the code arm of the ladder. The route a security defect needs to stop
   a ship is the route it always had, minus the seat.
-- **On the suite**: the wave brief names the dimensions, so a suite that
-  asserts nothing about authorization shows a survivor. The amendment round
-  turns that survivor into a frozen test, and every candidate after it is
-  judged by that test at Tier-1.
+- **On the suite**: every suite brief names the dimensions and the write owes a
+  row per item of the story that sits on one, with the test that a wrong
+  implementation of it fails or the reason the spec does not constrain it. The
+  map is checked before the write commits (ADR-0072), so a suite that asserts
+  nothing about authorization does not freeze, and every candidate after the
+  freeze is judged by those tests at Tier-1.
 
 The first side blocks this ship. The second side makes the next one cheaper.
-
-The suite side has a second half. A survivor names one member of a set, and a
-seat that closes the member and never lists the set makes the adversary an
-enumeration device, at a full round per member. So every suite write also maps
-the story's own surface along the same four dimensions, and the map is checked
-before the write commits (ADR-0072). The wave stays the measure of whether the
-map is the surface, and it is never shown the map.
 
 ## Why the record criteria are not on the panel
 
@@ -178,9 +172,9 @@ window. Reversal cost: one config line, at the next launch.
 If the folded security lens under-reports — the operational seat's own findings
 crowd it out — split it back onto a seat of its own: one entry in the seat map,
 one entry in the lens registry's seat table, one line in the prompt seat sets.
-Trigger: a confirmed security HIGH found by the adversary waves or after a ship,
-that the operational seat saw the diff for and did not raise. Reversal cost:
-low, and the panel config does not change.
+Trigger: a confirmed security HIGH found after a ship, that the operational seat
+saw the diff for and did not raise. Reversal cost: low, and the panel config
+does not change.
 
 If the record criteria prove too narrow, and real record defects fall outside all
 three, a criterion joins `RECORD_CRITERIA` with its line. The key is what a
@@ -193,11 +187,10 @@ batches: one seat over several records, with the addresses of all of them.
 Trigger: a stage whose review seats cost more than the ship they hold.
 Reversal cost: moderate, one loop in `recordReviewRound`.
 
-If the security dimensions crowd the adversary's spec-behavior probing instead
-of adding to it — kill rates fall while survivors cluster on security wrongness
-the spec never named — move them to a dedicated wave: the wave loop already
-runs `lanes.story.adversaryWaves` per round, so the change is which brief wave
-1 gets. Trigger: two consecutive freezes whose survivors are all security-shaped
-and declared spec-indifferent. A freeze whose survivors were all closed by
-tests does not meet it: those survivors were spec-relevant, and they were real
-gaps in the suite. Reversal cost: moderate, one branch in the wave loop.
+If the security dimensions crowd the behavior the spec states instead of adding
+to it, so that maps account for every dimension while the suite thins on the
+story's own acceptance criteria, the dimensions move out of the suite brief and
+into a lens of their own over the frozen suite. Trigger: two consecutive ships
+whose escapes are all ordinary behavior the suite never asserted, on stories
+whose maps were full. Reversal cost: moderate, one brief and one reader of the
+dimension list.

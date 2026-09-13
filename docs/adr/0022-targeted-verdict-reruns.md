@@ -13,10 +13,14 @@ that sha, instead of running the layer whole.
 A verdict cycle re-runs what the last cycle left unproven, not the whole
 Tier-1 spectrum, and no green verdict rests on a result the cycle did not earn.
 
-- **The first cycle of an implementation pass runs the full spectrum.** So
+- **The first cycle of an implementation pass runs the full spectrum**, unless
+  the default branch already answered for the tree the pass started from. So
   does the first cycle after a CI red, whose red checks name no Tier-1 layer
   of this tree. A fresh pass discards the tree, so its first cycle is a first
-  cycle again.
+  cycle again. Where a certification of the run's base stands, that cycle runs
+  the footprint of the run's own diff and carries the rest from the
+  certification, and the sweep it stamps says which of the two it took
+  (ADR-0088).
 - **Every later cycle runs the targeted set.** That set is every layer the
   cycles before it did not prove green — red, not-runnable, or never judged —
   plus every layer downstream of one of those through `gates.tier1[].needs`,

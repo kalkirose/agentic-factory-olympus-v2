@@ -24,21 +24,25 @@ path, that the freeze never held: nobody authored it, so reverting it takes
 nothing back, and the capture clears it before it decides what was taken back
 at all.
 
-- **Three tiers, declared per lane in project config.** The optional
+- **Four tiers, declared per lane in project config.** The optional
   `diffPolicy` block keys tiers by lane name (`story`, `repair`). A changed
   path matching `deniedPaths` is a violation. A path matching
   `declaredPaths` is a violation unless the run declared it. A path matching
   `forbiddenPatterns`, a regular expression over the repo-relative path, is
-  always a violation. Everything else is allowed, and the test-path rules
-  that already governed the seats are unchanged.
+  always a violation. A path matching `dependencyPaths` is judged by its
+  content instead, against the dependency the card names (ADR-0083), and the
+  three hard tiers outrank it. Everything else is allowed, and the test-path
+  rules that already governed the seats are unchanged.
 - **An absent block means the tiers are off.** A project that declares no
   `diffPolicy` captures exactly what it captured before. A lane the block
   omits is unpoliced. The take-back record is not a tier and holds either
   way: it is the capture refusing to discard a seat's work in silence.
-- **The gate reads paths, never content.** A file the policy names violates
-  it whatever the change inside says. The point of the gate is that the seat
-  under judgment cannot move the ground it is judged on, and no reading of
-  the change itself can settle that question.
+- **Three of the four tiers read paths, never content.** A file one of them
+  names violates it whatever the change inside says. The point of the gate is
+  that the seat under judgment cannot move the ground it is judged on, and no
+  reading of the change itself can settle that question. The fourth tier is the
+  one file a path answer gets wrong in both directions, and it is the exception
+  the record beside it argues for.
 - **The declaration is machine-readable.** A spec declares paths in a fenced
   ` ```touched-paths ` block, one repo-relative path per line, with an
   optional owner after a dash. Prose naming a path declares nothing. A
@@ -125,7 +129,7 @@ touched-paths entries, and they join the freeze exclusions. A file the spec
 declares that way is never taken back at all.
 
 Nothing else changes. The park machinery, the suite seat's own checks, the
-adversary restore and every seat prompt are untouched; the corrective brief
+story-mode restore and every seat prompt are untouched; the corrective brief
 rides plumbing that already existed.
 
 ## Why a mechanical gate, and not a reviewer

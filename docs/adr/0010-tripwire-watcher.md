@@ -32,8 +32,8 @@ proposals get these concrete shapes:
   entries — escapes ceiling 0.5 over 10 ships, CI p50 over 25 minutes,
   frontier width under 2, more than 3 failed workspace releases in 10, a
   workspace leftover older than 4 hours — seedable at config seeding.
-  Kill-rate and lens-yield bands are self-baselined, so their entries land by
-  PR after the proposal.
+  The lens-yield band is self-baselined, so its entry lands by PR after the
+  proposal.
 - **The event key holds by construction.** `TelemetryStore` takes an
   `onAppend` hook that fires after every append; the hook owns its errors.
   The engine opens every run store with the hook bound to the run's project
@@ -60,9 +60,11 @@ proposals get these concrete shapes:
     (`product-escape`, `spec-deviation` final) recorded at or after the
     oldest ship in the window; divisor is the window size. Recency-based —
     unknown origin still counts.
-  - `kill-rate`: kills over initial adversary waves, summed across the last
-    N freeze records — a weighted mean, so a two-wave freeze cannot swing
-    the band the way a per-freeze average would.
+  - `kill-rate`: retired, and the one entry of the table with no reading
+    behind it. The stage it counted is gone, so the watcher evaluates nothing
+    under the name. The name stays because a run pins its project config at
+    launch and config validation refuses a metric this table does not name: a
+    blob written before the retirement still has to parse.
   - `fury-lens-yield`: confirmed findings for one lens across the runs
     holding the last N verdicts. Zero with verdicts in the window is a live
     value, and the zero-yield lane is the cut candidate. Findings that carry
@@ -212,11 +214,9 @@ proposals get these concrete shapes:
   carries a `harnessSha`, and a ledger older than the field reads every render as
   old shape. Every record reading calls it, so a window that straddles the pin
   reads one number.
-- **Baseline proposals.** At the 5th freeze the watcher stamps a kill-rate
-  proposal (observed kills, waves, per-freeze rates, and the observed floor
-  as the suggested band); at the 5th verdict a per-lens yield proposal,
-  zero-filled across all lenses. `baseline-proposal` joins the instance
-  registry, queued-classed and resolvable — the human commits the band to
+- **Baseline proposals.** At the 5th verdict the watcher stamps a per-lens
+  yield proposal, zero-filled across all lenses. `baseline-proposal` joins the
+  instance registry, queued-classed and resolvable — the human commits the band to
   the project registry by PR, then resolves the queue item. Stamped once per
   project and metric, checked against the instance ledger.
 
