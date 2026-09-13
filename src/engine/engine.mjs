@@ -1135,16 +1135,25 @@ export class RunEngine {
       // the ladder the run was climbing resumes where it stood (ADR-0069).
       recoverOpenWaits(run.store, { actor: ACTOR, trigger: 'daemon-start' });
       resumed.push(runId);
-      if (run.parked || run.violated) continue;
       const lane = this.lanes.get(run.lane);
       const stage = lane ? resumeStageOf(lane, run.stage) : null;
+      // The retired map is read before the run is set aside, because a parked
+      // run is set aside holding a stage name, and the answer to its park
+      // executes that name. A stage this harness retired has no handler, so a
+      // park answered under the old name would reach nothing at all. The record
+      // is written once per retirement: a run that stays parked across two
+      // restarts is sent on twice and that is one fact, not two.
+      if (stage !== null && stage !== run.stage) {
+        const said = events.some(
+          (e) => e.event === 'stage-retired' && e.from === run.stage && e.to === stage,
+        );
+        if (!said) this.stampRetiredStage(run, run.stage, stage);
+        run.stage = stage;
+      }
+      if (run.parked || run.violated) continue;
       if (stage === null) {
         this.stampViolation(run, `cannot resume: lane ${run.lane}, stage ${run.stage}`);
         continue;
-      }
-      if (stage !== run.stage) {
-        this.stampRetiredStage(run, run.stage, stage);
-        run.stage = stage;
       }
       // A held run resumes as a held run: the stage it completed is not run
       // again, and the stage behind the boundary waits for the release exactly

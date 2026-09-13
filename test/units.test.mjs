@@ -704,7 +704,7 @@ test('a birth over a touched record reads that record own neighbourhood (W2)', (
   );
 });
 
-// -- the record block a brief carries (point 9) --------------------------------
+// -- the record block a brief carries -----------------------------------------
 
 // A seat handed the record directory cannot tell an active record from a closed
 // one without opening both, because the status is a line of the text. These
@@ -774,7 +774,14 @@ test('the count above the cap is stated, and no path is named twice', (t) => {
   const lines = governingRecordLines(dir, ['src/feature.mjs'], ['docs/adr']);
   const governing = blockPaths(lines, GOVERNING_RECORDS_LINE);
   assert.equal(governing.length, NEIGHBOUR_CAP);
-  assert.ok(lines.includes('and 3 more, by the same rule, under docs/adr'), lines.join('\n'));
+  // The count says where the records under the cut went, and they are named in
+  // full below: a brief that withheld them would send the seat looking.
+  assert.ok(
+    lines.includes(
+      '3 further record(s) rank under this list by the same rule; this brief names each of them.',
+    ),
+    lines.join('\n'),
+  );
   // Every active record is named once: the cap moves a record from the first
   // list to the second and never into both.
   const named = [...governing, ...blockPaths(lines, OTHER_RECORDS_LINE)];

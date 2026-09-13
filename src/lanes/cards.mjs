@@ -22,6 +22,7 @@ import {
   changedInRange,
   cherryPick,
   commitPaths,
+  headSha,
   push,
   resetHard,
 } from '../isolation/tree.mjs';
@@ -119,15 +120,24 @@ const LINT_OUTPUT_LIMIT = 65536;
  * cards is a writer that lands unjudged code on the default branch.
  *
  * `lintCards` names the cards the project's own lint is asked about. The lint
- * runs over the replayed result before the second push, as it ran before the
- * first: a branch that moved is a tree nothing has read yet.
+ * runs here, over the commit, before the push leaves the machine; it runs again
+ * over the replayed result before the second push, because a branch that moved
+ * is a tree nothing has read yet. An empty list is a caller that named no card
+ * to check, and a whole-directory reading is not this writer's answer to give:
+ * it would refuse the push over a card somebody else left red (ADR-0054).
+ *
+ * A write that changes nothing is not a write. The card already says what the
+ * caller came to say, so there is nothing to commit and nothing to push, and a
+ * push of an empty commit would spend the retry and could report a loss that
+ * cost the caller nothing.
  *
  * @param {{ctx: object, paths: string[], message: string, lintCards?: string[]}} opts
  * @returns {Promise<{ok: boolean, pushed: boolean, attempts: number, sha?: string,
  *   reason?: string, error?: string, replay?: object}>}
  *   `reason` on a refusal: `outside-cards` for a path past the card directory,
- *   `lint-red` for a replayed result the project's lint refuses, `push-lost`
- *   for a push that lost twice and for the git error that ended it.
+ *   `lint-red` for a result the project's lint refuses, `push-lost` for a push
+ *   that lost twice, for a lint that could not run, and for the git error that
+ *   ended it.
  */
 export async function pushCardPaths({ ctx, paths, message, lintCards = [] }) {
   const worktree = ctx.payload.worktree;
@@ -153,13 +163,51 @@ export async function pushCardPaths({ ctx, paths, message, lintCards = [] }) {
       error: `the push reaches outside ${cardDir}: ${outside.join(', ')}`,
     };
   }
+  const before = await headSha(worktree);
   const sha = await commitPaths(worktree, paths, message);
+  if (sha === before) return { ok: true, pushed: false, attempts: 0, sha };
+  const config = await loadProjectConfig(ctx);
+  if (lintCards.length > 0) {
+    const defects = [];
+    const lint = await cardLint({
+      ctx,
+      config,
+      env: runEnv(ctx, config),
+      worktree,
+      changed: paths,
+      cards: lintCards,
+      defects,
+      logName: `card-push-lint-${sha.slice(0, 8)}`,
+    });
+    if (defects.length > 0) {
+      // The commit goes with the refusal. The caller's tree is a run's tree,
+      // and a card commit left on a run branch rides into a pull request the
+      // lane denies that path to.
+      await resetHard(worktree, before);
+      return {
+        ok: false,
+        pushed: false,
+        attempts: 0,
+        reason: lint === 'red' ? 'lint-red' : 'push-lost',
+        lint,
+        error: defects[0],
+      };
+    }
+  }
   try {
     // Cards are planning artifacts; they land directly on the default branch.
     await push(worktree, 'origin', `HEAD:${defaultBranch}`);
     return { ok: true, pushed: true, attempts: 1, sha };
   } catch (error) {
-    const again = await replayCards({ ctx, worktree, defaultBranch, cardDir, sha, lintCards });
+    const again = await replayCards({
+      ctx,
+      config,
+      worktree,
+      defaultBranch,
+      cardDir,
+      sha,
+      lintCards,
+    });
     if (again.ok) return { ok: true, pushed: true, attempts: 2, sha: again.sha, replay: again.replay };
     return {
       ok: false,
@@ -190,10 +238,9 @@ export async function pushCardPaths({ ctx, paths, message, lintCards = [] }) {
  * race, and a loop against it would run for as long as somebody keeps writing.
  * @returns {Promise<{ok: boolean, sha?: string, reason?: string, replay: object}>}
  */
-async function replayCards({ ctx, worktree, defaultBranch, cardDir, sha, lintCards }) {
+async function replayCards({ ctx, config, worktree, defaultBranch, cardDir, sha, lintCards }) {
   const replay = { onto: null };
   try {
-    const config = await loadProjectConfig(ctx);
     const clone = cloneDir(ctx.paths, ctx.project);
     await fetchClone(clone);
     const head = await branchSha(clone, defaultBranch);
@@ -225,9 +272,10 @@ async function replayCards({ ctx, worktree, defaultBranch, cardDir, sha, lintCar
       changed,
       cards: lintCards,
       defects,
-      // The replay's own lint file sits beside the first one rather than on
-      // top of it: two reads of two trees are two records (ADR-0043).
-      logName: `card-push-lint-${sha.slice(0, 8)}`,
+      // Named by the tree it read, so the replay's log sits beside the first
+      // one rather than on top of it: two reads of two trees are two records
+      // (ADR-0043).
+      logName: `card-push-lint-${picked.sha.slice(0, 8)}`,
     });
     if (defects.length > 0) {
       return {
@@ -478,11 +526,12 @@ async function sweepChecks(ctx, base, cardDir, report) {
  * as long as that other card stayed broken. The project's own cards check is
  * what holds the directory clean.
  *
- * A red is a work-product defect. It fails this attempt and re-briefs the seat
- * on the two-attempt loop the sweep already has, so nothing red is pushed. A
- * command that could not run at all fails the attempt the same way: it is not
- * a red, but it is not a green either, and a push behind it is a push of cards
- * no check read. The stamp keeps the two apart, so a reader can tell a refused
+ * A red is a defect of the work, and it is read by whichever caller asked. A
+ * seat's own check loop takes it as a defect and re-briefs the seat; the push
+ * takes it as a refusal and lands nothing. Either way nothing red is pushed. A
+ * command that could not run at all is refused the same way: it is not a red,
+ * but it is not a green either, and a push behind it is a push of cards no
+ * check read. The word keeps the two apart, so a reader can tell a refused
  * card from a host that could not answer. A writer that wrote nothing is not a
  * writer, and the lint of the tree as it stood is not its answer to give.
  */

@@ -44,8 +44,13 @@ export const FORESEEN_SECTION = /foreseen amendments/i;
  * lockfile spells (`.`, `apps/storefront`), so the root has a spelling; the
  * name is the package, never a version, because the card states which package
  * the story may add and the lockfile states which version it resolved to.
+ *
+ * The whole heading, and not the word in it. Every line of this section is read
+ * as one dependency and a line that is not one is an error, so a heading that
+ * merely holds the word would take a card's prose about its dependencies and
+ * refuse the card for it.
  */
-export const DEPENDENCIES_SECTION = /dependencies/i;
+export const DEPENDENCIES_SECTION = /^dependencies$/i;
 
 const EMPHASIS = /^[`*_]+/;
 

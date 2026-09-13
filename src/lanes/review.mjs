@@ -42,9 +42,10 @@
 // for a Tier-1 layer of its own run to be run again and read the output, where
 // a finding turns on what the code does under this host's credentials. The
 // lane seats never reach it — they judge a diff (ADR-0042).
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { runReportPath } from '../daemon/home.mjs';
-import { groundEntry, recordPathIncludes } from '../config/project.mjs';
+import { groundEntry, isGlobEntry, recordPathIncludes } from '../config/project.mjs';
 import {
   FINDING_GROUND_DUTY,
   LENS_CRITERIA,
@@ -480,6 +481,14 @@ function recordSeatDefects(base, record, report) {
  * canonicalise is a declaration that matches nothing wearing a declaration's
  * clothes.
  *
+ * An entry is also held to something the tree really has. A sentence about the
+ * subject canonicalises as readily as a path does, and a path nothing stands at
+ * is a claim no merge can ever be compared against: both would pass the shape
+ * and answer the moved-base question for nothing. A glob is exempt, because a
+ * pattern is not a path and the one whole-tree ground is a pattern. The cost is
+ * that a finding about a file the diff deletes names the directory it stood in,
+ * which the duty tells the seat.
+ *
  * On the records lane nothing reads the result: a record finding reaches no
  * verdict record, and the lane holds no code certification. The duty is the
  * same anyway, because the ledger and the eval count these fields across
@@ -494,7 +503,7 @@ function groundDefects(base, findings) {
       defects.push(
         `finding ${label} names no ground. Put the repo-relative paths or directories the ` +
           'finding is about in "ground". A finding about a package names the manifest that ' +
-          'declares it or the file that imports it.',
+          'declares it or the file that imports it. A finding about the whole tree names "**".',
       );
       continue;
     }
@@ -503,6 +512,17 @@ function groundDefects(base, findings) {
       defects.push(
         `finding ${label} states ground this repository cannot read: ${bad.join(', ')}. Every ` +
           'entry is a path inside the repository, written as the repository names it.',
+      );
+    }
+    const absent = raw.filter((entry) => {
+      const norm = groundOf(entry, base.worktree);
+      return norm !== null && !isGlobEntry(norm) && !existsSync(join(base.worktree, norm));
+    });
+    if (absent.length > 0) {
+      defects.push(
+        `finding ${label} states ground this tree has nothing at: ${absent.join(', ')}. Every ` +
+          'entry is a file or a directory of the tree you are reading, or a glob over them; a ' +
+          'finding about the whole tree names "**".',
       );
     }
   }

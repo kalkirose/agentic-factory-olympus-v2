@@ -147,4 +147,11 @@ test('the ground duty names what a ground is and what it is not', () => {
   assert.ok(text.includes('manifest that declares'), text);
   assert.ok(text.includes('file that imports it'), text);
   assert.ok(text.includes('names no ground is refused'), text);
+  // A finding about no single file has one legal ground, and the duty names it.
+  // Without it the seat either writes a sentence, which is not a path, or
+  // leaves the field empty, which is the refusal.
+  assert.ok(text.includes('"**", the one whole-tree ground'), text);
+  // And the entries are held to what the tree has, so a path nothing stands at
+  // is not a ground either.
+  assert.ok(text.includes('a path this tree holds, or a glob'), text);
 });
