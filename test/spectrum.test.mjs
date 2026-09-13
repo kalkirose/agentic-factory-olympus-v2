@@ -732,7 +732,10 @@ test('a pass runs its first cycle full and its later cycles targeted', () => {
   assert.deepEqual(cyclePlan(rendered, { cycle: 2, pass: 2, layers: CHAIN }), { sweep: 'full' });
   // A CI red names no Tier-1 layer of this tree, so it targets nothing.
   const ci = [...rendered, { event: 'verdict-rendered', cycle: 2, pass: 1, source: 'ci', verdict: 'red' }];
-  assert.deepEqual(cyclePlan(ci, { cycle: 3, pass: 1, layers: CHAIN }), { sweep: 'full' });
+  assert.deepEqual(cyclePlan(ci, { cycle: 3, pass: 1, layers: CHAIN }), {
+    sweep: 'full',
+    reason: 'ci-red',
+  });
 });
 
 test('a restart mid-cycle derives the same targeted set', () => {
@@ -1488,6 +1491,40 @@ test('a change no layer claims buys the whole spectrum', () => {
   assert.deepEqual([...stated.run], ['install']);
 });
 
+test('the frozen suite runs on the footprint cycle and pulls no dependent in with it', () => {
+  // The suite asserts the story, the run wrote it inside this pass, and the
+  // certification of the default branch was earned before it existed. A carry of
+  // it would be a carry of the one layer that answers the spec.
+  const plan = cyclePlan([], {
+    cycle: 1,
+    pass: 1,
+    layers: FOOTPRINT,
+    suite: 'docs',
+    footprint: { changed: ['manifest.json'], certified: certifiedAll() },
+  });
+  assert.equal(plan.sweep, 'footprint');
+  assert.deepEqual([...plan.run].sort(), ['docs', 'install']);
+});
+
+test('a CI red keeps the whole spectrum, whatever footprint the caller offers', () => {
+  // The red is stamped against the check's own name and maps to no Tier-1 layer,
+  // so no standing green is the one it contradicts and no footprint can be drawn
+  // around it.
+  const events = [
+    { event: 'verdict-rendered', cycle: 1, pass: 1, verdict: 'green' },
+    { event: 'verdict-rendered', cycle: 2, pass: 1, source: 'ci', verdict: 'red' },
+  ];
+  assert.deepEqual(
+    cyclePlan(events, {
+      cycle: 3,
+      pass: 1,
+      layers: FOOTPRINT,
+      footprint: { changed: ['src/api/f.mjs'], certified: certifiedAll() },
+    }),
+    { sweep: 'full', reason: 'ci-red' },
+  );
+});
+
 test('a refused footprint is the full sweep, and the sweep names the condition', () => {
   for (const reason of [
     'no-setup-layer',
@@ -1736,7 +1773,7 @@ test('a certification of the base answers per layer, and the diff decides the re
 test('the sweep reasons are a closed vocabulary', () => {
   // The reading that says whether the footprint is ever taken on a project is a
   // count of these words, and a word nobody registered cannot be counted.
-  assert.equal(SWEEP_REASONS.size, 5);
+  assert.equal(SWEEP_REASONS.size, 6);
   for (const reason of SWEEP_REASONS) assert.equal(assertSweepReason(reason), reason);
   assert.throws(() => assertSweepReason('no-footprint'), /unknown sweep reason/);
   assert.throws(

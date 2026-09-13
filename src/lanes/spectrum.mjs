@@ -1259,28 +1259,37 @@ export function groundedLayers(
 }
 
 /**
- * Why a first cycle ran the whole spectrum instead of the footprint of its own
- * diff. A closed vocabulary, because the reading that says whether the footprint
- * is ever taken on a project is a count of these words, and prose cannot be
- * counted (ADR-0008).
+ * The one sweep reason the footprint attribution decides for itself. The others
+ * are read off the config, the instance ledger and the ledger's own renders.
+ */
+export const UNCLAIMED_GROUND = 'unclaimed-ground';
+
+/**
+ * A red PR check names no layer of this tree, so no layer's standing green is
+ * the one the check contradicts, and the whole spectrum is the only search the
+ * harness has.
+ */
+export const CI_RED = 'ci-red';
+
+/**
+ * Why a cycle ran the whole spectrum instead of the footprint of its own diff. A
+ * closed vocabulary, because the reading that says whether the footprint is ever
+ * taken on a project is a count of these words, and prose cannot be counted
+ * (ADR-0008).
  *
  * The project declares no setup layer, so nothing says which layers make the
  * others runnable. A Tier-1 layer declares no ground, so it has claimed nothing.
  * The project holds no certification of its default branch. The diff of the run
  * against its base will not read. A changed file lies under no layer's ground.
+ * A CI red is the cycle's cause and it names no layer.
  */
-/**
- * The one sweep reason this module decides for itself. The other four are read
- * off the config and the instance ledger by the caller, which hands them here.
- */
-export const UNCLAIMED_GROUND = 'unclaimed-ground';
-
 export const SWEEP_REASONS = new Set([
   'no-setup-layer',
   'groundless-layer',
   'no-base-certification',
   'unreadable-diff',
   UNCLAIMED_GROUND,
+  CI_RED,
 ]);
 
 /** @param {string} reason */
@@ -1312,6 +1321,14 @@ export function assertSweepReason(reason) {
  * The rule is a statement about this host and not about the diff, so it widens
  * nothing beyond the layer itself.
  *
+ * The frozen suite runs on the same footing, and for the reason the seat bound
+ * takes it by declaration: it is the layer that asserts the story, the run wrote
+ * it inside this pass, and a certification of the default branch was earned
+ * before it existed. Its dependents are not pulled in either, for the setup
+ * layer's reason: the claim is about this run's own suite and not about ground
+ * any other layer reads. A caller with no frozen suite names none, which is
+ * every repair round.
+ *
  * A record path is attributed by the project, exactly as it is in
  * `groundedLayers`: it selects the layers of `gates.recordLayers` and no other,
  * whatever any ground declares.
@@ -1325,15 +1342,24 @@ export function assertSweepReason(reason) {
  *
  * @param {Array<{name: string, needs?: string[], ground?: string[],
  *   setup?: boolean}>} layers
- * @param {{changed: string[], certified: Map<string, object>,
+ * @param {{changed: string[], certified: Map<string, object>, suite?: string|null,
  *   breadth?: string[], groundless?: string[], recordPaths?: string[],
  *   recordLayers?: string[]}} diff
- *   `changed` is the run's own diff against the certified base
+ *   `changed` is the run's own diff against the certified base; `suite` the
+ *   frozen suite's layer name, null where the lane has no frozen suite
  * @returns {{run: Set<string>, unclaimed: string[]}}
  */
 export function footprintLayers(
   layers,
-  { changed, certified, breadth = [], groundless = [], recordPaths = [], recordLayers = [] },
+  {
+    changed,
+    certified,
+    suite = null,
+    breadth = [],
+    groundless = [],
+    recordPaths = [],
+    recordLayers = [],
+  },
 ) {
   const records = recordAttribution({ recordPaths, recordLayers });
   const moved = changed.filter((file) => !groundless.some((entry) => underEntry(file, entry)));
@@ -1352,7 +1378,9 @@ export function footprintLayers(
   }
   const run = withDependents(layers, touched);
   for (const layer of layers) {
-    if (layer.setup === true || !certified.has(layer.name)) run.add(layer.name);
+    if (layer.setup === true || layer.name === suite || !certified.has(layer.name)) {
+      run.add(layer.name);
+    }
   }
   return { run, unclaimed: moved.filter((file) => !claimed.has(file)) };
 }
@@ -1458,11 +1486,16 @@ export function withDependents(layers, target) {
 
 /**
  * What one verdict cycle runs. The first cycle of an implementation pass has
- * proven nothing of its own, and so has the first cycle after a CI red, whose
- * red checks name no Tier-1 layer of this tree. Both run the footprint of the
- * run's own diff against a certified base, and the full spectrum where the
- * caller could not offer one. Every other cycle judges a tree a repair round, a
- * re-freeze, or an operational fix touched, and runs the targeted set.
+ * proven nothing of its own, and runs the footprint of the run's own diff against
+ * a certified base, or the full spectrum where the caller could not offer one.
+ * Every other cycle judges a tree a repair round, a re-freeze, or an operational
+ * fix touched, and runs the targeted set.
+ *
+ * The first cycle after a CI red is the exception that runs everything. A red
+ * check is stamped against the check's own name and maps to no Tier-1 layer of
+ * this tree, so no standing green is the one the red contradicts and no
+ * footprint can be drawn around it. The full spectrum is the only search there
+ * is, and it says so with its reason.
  *
  * `footprint` is the caller's answer about the base: `{changed, certified}` to
  * take the footprint, or `{reason}` where one of the conditions the caller reads
@@ -1497,6 +1530,7 @@ export function cyclePlan(
     recordPaths = [],
     recordLayers = [],
     footprint = null,
+    suite = null,
   },
 ) {
   const records = recordAttribution({ recordPaths, recordLayers });
@@ -1515,23 +1549,25 @@ export function cyclePlan(
   }
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   const previous = renders[renders.length - 1];
-  if (!previous || previous.pass !== pass || previous.source === 'ci') {
-    if (footprint?.reason !== undefined) {
-      return { sweep: 'full', reason: assertSweepReason(footprint.reason) };
-    }
-    if (footprint === null) return { sweep: 'full' };
-    const scoped = footprintLayers(layers, {
-      changed: footprint.changed,
-      certified: footprint.certified,
-      breadth,
-      groundless,
-      recordPaths,
-      recordLayers,
-    });
-    // A change no layer's ground reaches is a change nothing here can attribute.
-    // Carrying over it would rest a green on a claim the project never made.
-    if (scoped.unclaimed.length > 0) return { sweep: 'full', reason: UNCLAIMED_GROUND };
-    return { sweep: 'footprint', run: scoped.run, certified: footprint.certified };
+  if (previous !== undefined && previous.pass === pass) {
+    if (previous.source === 'ci') return { sweep: 'full', reason: assertSweepReason(CI_RED) };
+    return { sweep: 'targeted', run: targetedLayers(layers, prior), prior };
   }
-  return { sweep: 'targeted', run: targetedLayers(layers, prior), prior };
+  if (footprint?.reason !== undefined) {
+    return { sweep: 'full', reason: assertSweepReason(footprint.reason) };
+  }
+  if (footprint === null) return { sweep: 'full' };
+  const scoped = footprintLayers(layers, {
+    changed: footprint.changed,
+    certified: footprint.certified,
+    suite,
+    breadth,
+    groundless,
+    recordPaths,
+    recordLayers,
+  });
+  // A change no layer's ground reaches is a change nothing here can attribute.
+  // Carrying over it would rest a green on a claim the project never made.
+  if (scoped.unclaimed.length > 0) return { sweep: 'full', reason: UNCLAIMED_GROUND };
+  return { sweep: 'footprint', run: scoped.run, certified: footprint.certified };
 }
