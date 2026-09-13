@@ -390,8 +390,10 @@ export const RUN_EVENTS = new Set([
   // certification (ADR-0056).
   'finding',
   // The cycle boundary, and what the cycle did not have to buy. `partsRun`,
-  // `partsCarried` and `carryShare` are the cycle's carry (ADR-0058);
-  // `confirmationParts` (ran, kept) is the confirmation sweep's, over the
+  // `partsCarried` and `carryShare` are the cycle's carry (ADR-0058); a
+  // footprint cycle carries whole layers and holds no part table, so it stamps
+  // none of the three. `confirmationParts` (ran, kept) is the confirmation
+  // sweep's, over the
   // layers it narrowed — what it executed, and what an earlier pass of the same
   // cycle had already proven at this sha (ADR-0046). `diffTruncated: true` says
   // the read cap cut this cycle's candidate diff, so its judgment seats could

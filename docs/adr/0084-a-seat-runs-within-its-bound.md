@@ -44,10 +44,16 @@ suite and is already held to the test paths; a judging seat runs no layer.
   string, normalises whitespace, and matches it against each layer's argv. A
   command that contains no layer's argv passes. For a matched layer it computes
   the bound from the worktree as it stands: the layers whose ground the live diff
-  touches, closed over `needs`, plus every setup layer, plus the frozen suite.
-  The bound is computed at the call and not at the spawn, because the seat's diff
-  grows while it works and a bound fixed at the spawn would refuse the layer the
-  seat's newest file needs.
+  touches, closed over `needs` in both directions, plus every setup layer, plus
+  the frozen suite. Downward, a layer that needs a touched layer is in the bound
+  because its answer moved. Upward, every layer a bound layer needs is in the
+  bound because the seat cannot run the one without the other: a project whose
+  install and build layers are prerequisites of everything, and which declares
+  no setup layer, would otherwise refuse the seat the install its own suite
+  needs. One module computes the bound for the hook, the brief and the stamp,
+  so the three cannot drift. The bound is computed at the call and not at the
+  spawn, because the seat's diff grows while it works and a bound fixed at the
+  spawn would refuse the layer the seat's newest file needs.
 - **Three readings pass whatever the diff says.** A setup layer is what makes a
   worktree runnable at all, so it is in the bound by declaration and its own
   ground decides nothing. The frozen suite is the seat's own question. A layer
