@@ -238,10 +238,14 @@ Two levels; the ownership test decides placement.
   ground, `needs` and `setup` flag, the frozen suite, the declared paths and the
   certified base's per-layer durations; and a settings file loading one pre-tool
   hook over the command tools. The hook computes the bound from the live diff at
-  every call, which is the layers whose ground the diff touches, closed over
-  `needs`, plus every setup layer and the frozen suite, and it refuses a command
-  that runs any other layer, naming it. A setup layer, the frozen suite and a
-  layer with no duration reading always pass; doubt refuses. Refusals are
+  every call: the layers whose ground the diff touches, the layers downstream of
+  those, every setup layer and the frozen suite, and then everything any of them
+  needs, transitively. The prerequisite closure runs last and walks `needs`
+  upward alone. A bound holding a suite and refusing the install under it is a
+  bound no seat can meet, and pulling a prerequisite's dependents back in would
+  hand a one-file diff the whole spectrum. The hook refuses a command that runs
+  any other layer, naming it. A setup layer, the frozen suite and a layer with no
+  duration reading always pass the time cap; doubt refuses. Refusals are
   appended to a file beside the bound, because the run ledger has one writer,
   and the runner stamps them at the seat's end. `seat-bound` carries the bound's
   digest and layer names at the spawn. The load is proven from the stream: a
@@ -529,19 +533,21 @@ suite authoring (seat) → freeze (process).
   close-out stamps `base-certified` on the instance ledger: the project, the run,
   the merge sha, and per layer the status, the duration, whether it ran or
   carried, and the verdict record it came from. A first cycle whose base that
-  record answers for runs the layers whose ground the run's own diff touches,
-  closed over `needs`, plus every layer no certification answers for, plus every
-  `setup: true` layer, whose dependents it does not pull in. The rest stamp a
-  `layer-result` with `mode: 'carried'` naming the base sha and the certification
-  they came from, so a resume keeps them carried and the next cycle targets none
-  of them. A layer is certified at a sha by a certification at that sha, or by
-  one at an ancestor whose diff to it touches none of the layer's ground; a red
-  at the sha, a layer with no declared ground and an unreadable diff all refuse.
-  Four conditions gate the narrowed sweep: a declared setup layer, ground on
-  every Tier-1 layer, a certification for the project, and a readable diff. A
-  changed file no layer's ground claims buys the whole spectrum too. Every
-  fallback stamps `sweep: 'full'` with the word that says which condition failed.
-  A dependent of a red setup layer is not-runnable rather than carried.
+  record answers for runs the layers whose ground the run's own diff touches and
+  the layers downstream of those, plus every layer no certification answers for,
+  plus every `setup: true` layer and the frozen suite; it pulls in the dependents
+  of neither of those two. The rest stamp a `layer-result` with `mode: 'carried'`
+  naming the base sha and the certification they came from, so a resume keeps
+  them carried and the next cycle targets none of them. A layer is certified at a
+  sha by a certification at that sha, or by one at an ancestor whose diff to it
+  touches none of the layer's ground; a red at the sha, a layer with no declared
+  ground and an unreadable diff all refuse. Four conditions gate the narrowed
+  sweep: a declared setup layer, ground on every Tier-1 layer, a certification
+  for the project, and a readable diff. A changed file no layer's ground claims
+  buys the whole spectrum too, and so does the cycle that follows a CI red, whose
+  check names no Tier-1 layer to draw a footprint around. Every fallback stamps
+  `sweep: 'full'` with one of six words that says which reading sent it there. A
+  dependent of a red setup layer is not-runnable rather than carried.
 - **Progress-keyed cycling.** Every verdict cycle carries a fingerprint over
   what settles its outcome: the implementation pass, the candidate sha, the
   suite sha, the open findings by identity, and, on a CI verdict, the head sha
@@ -653,7 +659,10 @@ suite authoring (seat) → freeze (process).
   verdict record, because those paths are why every part of that layer ran. The
   verdict record and the `verdict-rendered` event state `partsRun`,
   `partsCarried` and `carryShare` over the whole cycle, and `olympusctl status`
-  prints the last share on the line of every run standing in the verdict stage.
+  prints the last share on the line of every run standing in the verdict stage. A
+  footprint cycle carries whole layers and holds no part table under them, so it
+  states none of the three, and the line reads `carry by layer` instead of a
+  percentage the render never stated.
   A full spectrum and a confirmation sweep derive no plan from a diff, so
   neither gives any part a reason; a part the sweep keeps holds the reason of
   the pass that ran it, which is the pass its `seq` names.

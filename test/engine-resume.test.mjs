@@ -299,6 +299,71 @@ test('a run parked in a retired stage is mapped, and its answer runs the mapped 
   assert.equal(events.at(-1).state, 'shipped');
 });
 
+// A held run carries a second stage name, the one the release will run, and it
+// reads the map at every start. The record is one fact per retirement, so a run
+// held over two restarts states it once.
+test('a held run deferring a retired stage is mapped, and the record is written once', async (t) => {
+  const { home, paths } = setupHome(t);
+  const before = {
+    story: {
+      stages: ['suite', 'adversary', 'freeze'],
+      handlers: {
+        suite: () => ({ next: 'adversary' }),
+        adversary: () => ({ next: 'freeze' }),
+        freeze: () => ({ close: { state: 'shipped' } }),
+      },
+    },
+  };
+  const d1 = new Daemon(home, { waitSleep: NO_WAIT, lanes: before });
+  await d1.start();
+  writeControl(paths, 'hold', { command: 'hold', actor: 'operator', all: true });
+  await waitFor(() => d1.hold.isHeld('proj'), { label: 'the hold to apply' });
+  d1.engine.launch({ runId: 'r1', project: 'proj', lane: 'story' });
+  await waitFor(() => readEvents(runLedgerPath(paths, 'r1')).some((e) => e.event === 'stage-held'), {
+    label: 'the run to hold at the boundary',
+  });
+  await d1.stop();
+
+  const after = {
+    story: {
+      stages: ['suite', 'freeze'],
+      retired: { adversary: 'freeze' },
+      handlers: {
+        suite: () => ({ next: 'freeze' }),
+        freeze: () => ({ close: { state: 'shipped' } }),
+      },
+    },
+  };
+  const d2 = new Daemon(home, { waitSleep: NO_WAIT, lanes: after });
+  assert.deepEqual((await d2.start()).runsResumed, ['r1']);
+  const retired = readEvents(runLedgerPath(paths, 'r1')).filter((e) => e.event === 'stage-retired');
+  assert.equal(retired.length, 1);
+  assert.deepEqual([retired[0].lane, retired[0].from, retired[0].to], ['story', 'adversary', 'freeze']);
+  await d2.stop();
+
+  const d3 = new Daemon(home, { waitSleep: NO_WAIT, lanes: after });
+  t.after(async () => {
+    await d3.stop();
+  });
+  await d3.start();
+  // The ledger still holds the old name in the hold stamp, so this start maps it
+  // again and writes nothing.
+  assert.equal(
+    readEvents(runLedgerPath(paths, 'r1')).filter((e) => e.event === 'stage-retired').length,
+    1,
+  );
+
+  writeControl(paths, 'release', { command: 'release', actor: 'operator', all: true });
+  await waitFor(
+    () => readEvents(archivedRunLedgerPath(paths, 'r1')).some((e) => e.event === 'run-closed'),
+    { label: 'the released run to close' },
+  );
+  const events = readEvents(archivedRunLedgerPath(paths, 'r1'));
+  assert.equal(events.find((e) => e.event === 'stage-released').next, 'freeze');
+  assert.equal(events.filter((e) => e.event === 'stage-retired').length, 1);
+  assert.equal(events.at(-1).state, 'shipped');
+});
+
 // The map is a claim about two stage names, and a wrong claim would only show
 // at a resume, where the run it was written to save is the thing that breaks.
 test('a lane refuses a retired entry that names a stage it still runs or does not run', (t) => {

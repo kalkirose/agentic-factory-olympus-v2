@@ -723,6 +723,70 @@ test('a verifier that states no ground leaves the seat ground standing', async (
   assert.deepEqual(outcome.confirmed[0].ground, ['src/pay.mjs']);
 });
 
+// The verifier's ground wins, so it is held to what the review seat's is held
+// to. A sentence about the subject answers the moved-base question for nothing,
+// and the ladder would carry a certification over ground the branch moved.
+test('verifier ground the tree has nothing at is dropped, and the seat ground stands', async (t) => {
+  const fx = seatsFixture(t, ({ seat }) =>
+    seat === 'fury-verifier'
+      ? {
+          results: [
+            {
+              id: 'new-1',
+              verdict: 'confirmed',
+              evidence: 'src/token.mjs:12 reads the header',
+              ground: ['the whole repository'],
+            },
+          ],
+          summary: 'one confirmed',
+        }
+      : groundFinding(['src/pay.mjs'], 'HIGH'),
+  );
+
+  const outcome = await generalistReview(fx.ctx, groundBase(t), {
+    cycle: 1,
+    diff: excerpted(),
+    priorConfirmed: [],
+  });
+
+  // The verdict on the finding still counts: the item is confirmed, and only
+  // the ground it named for it is dropped.
+  assert.equal(outcome.confirmed.length, 1);
+  assert.deepEqual(outcome.confirmed[0].ground, ['src/pay.mjs']);
+  const [finding] = readEvents(runLedgerPath(fx.paths, 'r1')).filter(
+    (e) => e.event === 'finding',
+  );
+  assert.deepEqual(finding.ground, ['src/pay.mjs']);
+});
+
+test('a mixed verifier ground keeps the entries the tree holds', async (t) => {
+  const fx = seatsFixture(t, ({ seat }) =>
+    seat === 'fury-verifier'
+      ? {
+          results: [
+            {
+              id: 'new-1',
+              verdict: 'confirmed',
+              evidence: 'src/token.mjs:12 reads the header',
+              ground: ['everything under src', 'src/token.mjs', 'src/api/', 'src/**'],
+            },
+          ],
+          summary: 'one confirmed',
+        }
+      : groundFinding(['src/pay.mjs'], 'HIGH'),
+  );
+
+  const outcome = await generalistReview(fx.ctx, groundBase(t), {
+    cycle: 1,
+    diff: excerpted(),
+    priorConfirmed: [],
+  });
+
+  // A path the tree stands at and a glob over it both survive; the sentence
+  // does not, and it takes nothing with it.
+  assert.deepEqual(outcome.confirmed[0].ground, ['src/token.mjs', 'src/api', 'src/**']);
+});
+
 test('every review brief states the ground duty in the same words', async (t) => {
   const worktree = recordTree(t);
   const panel = seatsFixture(t, () => ({ findings: [], summary: 'clean' }));

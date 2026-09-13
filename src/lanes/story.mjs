@@ -328,23 +328,17 @@ function closureCards(ctx, worktree, cardPath) {
 }
 
 /**
- * The shape one error of the block reads in: a path, a short upper-case code,
- * and what is wrong, each separated by a colon.
+ * The shape one error of the block reads in, which is the contract the script
+ * writes it to: a path, then a short upper-case code, then what is wrong, each
+ * separated by a colon and a space.
+ *
+ * The path is whatever stands before the first such colon, and the code is as
+ * long as the script's own vocabulary makes it. Both belong to the script, so a
+ * narrower reading of either drops a real error and reports the directory
+ * clean.
  */
-const BEYOND_LINE = /^[^\s:]+:\s*[A-Z][A-Z0-9]{0,7}:\s*\S/;
+const BEYOND_LINE = /^.+?:\s+[A-Z][A-Z0-9]*:\s*\S/;
 
-/**
- * The errors the lint found beyond the cards it was asked about: the block it
- * writes last, from its opening line to the end of the output.
- *
- * Read from the end, because the marker is a line a card could also carry and
- * the script writes the block after everything else it has to say.
- *
- * Only the lines that read as one error are kept. The harness reads a merged
- * stream of the command's two pipes, so a warning, a progress line or a tool's
- * own summary can land after the marker, and a record that counted those would
- * report errors nobody wrote.
- */
 /**
  * How many times this run has run readiness, this run included. The stage is
  * entered once and executed again on every park answer and every resume, so an
@@ -356,11 +350,37 @@ function readinessReads(events) {
   ).length;
 }
 
+/**
+ * The errors the lint found beyond the cards it was asked about: the block it
+ * writes last, from its opening line to the end of the output.
+ *
+ * Read from the end, because the marker is a line a card could also carry and
+ * the script writes the block after everything else it has to say.
+ *
+ * The lines that read as one error are the record's errors. The harness reads a
+ * merged stream of the command's two pipes, so a warning, a progress line or a
+ * tool's own summary can land after the marker, and a record that quoted those
+ * as errors would report errors nobody wrote.
+ *
+ * Every other line of the block is counted. The harness cannot tell a warning
+ * from an error the two sides spell differently, and either reading of a
+ * discarded line has to be visible: a block whose lines all went unread is a
+ * contract that has drifted, and a drop in silence would report it as a clean
+ * directory.
+ *
+ * @returns {{errors: string[], unreadable: number}}
+ */
 function beyondTheCard(output) {
   const lines = output.split(/\r?\n/).map((line) => line.trim());
   const opened = lines.lastIndexOf(BEYOND_MARKER);
-  if (opened === -1) return [];
-  return lines.slice(opened + 1).filter((line) => BEYOND_LINE.test(line));
+  if (opened === -1) return { errors: [], unreadable: 0 };
+  const errors = [];
+  let unreadable = 0;
+  for (const line of lines.slice(opened + 1)) {
+    if (BEYOND_LINE.test(line)) errors.push(line);
+    else if (line.length > 0) unreadable += 1;
+  }
+  return { errors, unreadable };
 }
 
 /**
@@ -436,14 +456,22 @@ function readinessHandler(postFreezeStage, forgeFor) {
         });
       }
       const beyond = beyondTheCard(lint.output);
+      // A block whose every line went unread is still a report: the script found
+      // something beyond the cards, and the count is what says the two sides
+      // spell one line differently.
+      const found = beyond.errors.length + beyond.unreadable;
       // One record per run. Readiness re-runs whole on every park answer and
       // on every resume, and one directory read many times is one report.
-      if (beyond.length > 0 && !events.some((e) => e.event === 'readiness-lint-beyond')) {
+      if (found > 0 && !events.some((e) => e.event === 'readiness-lint-beyond')) {
         ctx.store.append('readiness-lint-beyond', {
           actor: ACTOR,
           cards,
-          errors: beyond,
-          gist: gist(`${beyond.length} error(s) beyond the card`),
+          errors: beyond.errors,
+          unreadable: beyond.unreadable,
+          gist: gist(
+            `${beyond.errors.length} error(s) beyond the card` +
+              (beyond.unreadable > 0 ? `, ${beyond.unreadable} line(s) unread` : ''),
+          ),
         });
       }
     }

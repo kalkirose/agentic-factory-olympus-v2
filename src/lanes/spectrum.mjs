@@ -1303,7 +1303,7 @@ export function assertSweepReason(reason) {
  * the layers whose ground the run's own diff touches, closed over `needs`, plus
  * every layer no certification answers for, plus every setup layer.
  *
- * The three clauses answer three different questions, and each fails towards
+ * The four clauses answer four different questions, and each fails towards
  * running.
  *
  * A layer whose ground the diff touches runs. The certification says the layer

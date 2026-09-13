@@ -516,7 +516,7 @@ function groundDefects(base, findings) {
     }
     const absent = raw.filter((entry) => {
       const norm = groundOf(entry, base.worktree);
-      return norm !== null && !isGlobEntry(norm) && !existsSync(join(base.worktree, norm));
+      return norm !== null && !groundStands(norm, base.worktree);
     });
     if (absent.length > 0) {
       defects.push(
@@ -535,10 +535,39 @@ function groundOf(entry, worktree) {
   return relative === null ? null : groundEntry(relative);
 }
 
+/**
+ * Whether a readable entry names something the reviewed tree stands at. A glob
+ * is exempt: a pattern is not a path, and the one whole-tree ground is a
+ * pattern.
+ */
+function groundStands(entry, worktree) {
+  return isGlobEntry(entry) || existsSync(join(worktree, entry));
+}
+
 /** Every readable ground entry of a finding, deduped, in the form a path entry is written. */
 function findingGround(finding, worktree) {
   const raw = Array.isArray(finding?.ground) ? finding.ground : [];
   return [...new Set(raw.map((entry) => groundOf(entry, worktree)).filter((e) => e !== null))];
+}
+
+/**
+ * The ground of a verifier's item, held to exactly what a review seat's ground
+ * is held to: readable, in the form a path entry is written, and a glob or
+ * something the reviewed tree stands at. An entry that fails is dropped.
+ *
+ * The entries are held because this ground wins. It replaces the seat's on a
+ * confirmed HIGH and rides into the ledger and the verdict record, so a
+ * sentence about the subject here would answer the moved-base question for
+ * nothing and hand the next rebase a certification over ground the branch
+ * moved.
+ *
+ * A report whose every entry fails is not refused. The verifier's verdict on
+ * the finding is what the ladder spawned it for, and the seat's own ground
+ * stands where none of the verifier's survives: a claim this repository can
+ * compare is what the field is for, and the review seat already wrote one.
+ */
+function heldGround(finding, worktree) {
+  return findingGround(finding, worktree).filter((entry) => groundStands(entry, worktree));
 }
 
 /**
@@ -791,8 +820,10 @@ async function settleFindings(
     // The verifier's own ground on a confirmed finding. It read the code and
     // the review seat read a diff, so the seat that proved the finding is the
     // one whose word the ladder carries. A verifier that states none leaves
-    // the seat's, and a refuted finding is nobody's claim about the tree.
-    const verified = isConfirmed ? findingGround(result, base.worktree) : [];
+    // the seat's, and a refuted finding is nobody's claim about the tree. The
+    // entries are held to what a seat's are held to, because this ground
+    // replaces a claim the harness already checked.
+    const verified = isConfirmed ? heldGround(result, base.worktree) : [];
     const finding = {
       id: `F${nextId++}`,
       source: f.source,
@@ -1385,7 +1416,9 @@ function verifierRole(base, items, brief, probe = null) {
     'For a "resolution-check" item, the verdict is "resolved" or "unresolved": resolved only when the code no longer shows the finding.',
     'Set "approach": true on a confirmed finding only when it names the implementation structure as wrong against the spec.',
     'On a confirmed finding, name the files your own evidence reads in "ground", repo-relative. ' +
-      'It replaces the ground the review seat named: you read the code and that seat read a diff.',
+      'It replaces the ground the review seat named: you read the code and that seat read a diff. ' +
+      'Every entry is a file or a directory of this tree, or a glob over them; an entry that is ' +
+      'neither is dropped, and the ground that seat named stands.',
     `The spec: ${base.specRef}`,
     ...recordVerifierLines(items),
     'Items:',

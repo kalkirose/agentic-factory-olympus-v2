@@ -54,14 +54,22 @@ footprint of the run's own diff over that certification.**
   cycle because a sweep is one decision about one cycle. A project with no
   certification at all is the ordinary state of one that has never shipped under
   this. A diff git cannot read says nothing about what the run changed.
-- **The footprint is three clauses, each failing towards running.** A layer whose
+- **The cycle that follows a CI red runs the whole spectrum, with a word of its
+  own.** A red check is stamped against the check's own name and maps to no
+  Tier-1 layer of the tree, so no standing green is the one the red contradicts
+  and no footprint can be drawn around it. The full spectrum is the only search
+  there is.
+- **The footprint is four clauses, each failing towards running.** A layer whose
   ground the diff touches runs, and its dependents run with it, because a layer
   judged against a prerequisite the run changed was judged against something else.
   A layer no certification answers for runs. A setup layer runs whatever the diff
   and the certification say, and its dependents are not pulled in with it: a setup
   layer produces a tree that is not in the repository, so no certification earned
   on another host stands in for it, and that is a statement about this host rather
-  than about the diff.
+  than about the diff. The frozen suite runs on the same footing and pulls in no
+  dependent either: it is the layer that asserts the story, the run wrote it
+  inside this pass, and a certification of the default branch was earned before it
+  existed. A lane with no frozen suite names none, which is every repair round.
 - **A changed file no layer's ground claims buys the whole spectrum.** The project
   has not said which layer reads it, so no carry over it rests on anything. The
   ground a project states no suite reads leaves the diff before any of this, because
@@ -88,7 +96,13 @@ footprint of the run's own diff over that certification.**
 - **The cycle says which sweep it took.** The rendered verdict carries the sweep,
   and a full sweep carries the reason it fell back, so a project that never
   narrows reads as a project with a missing declaration rather than as a quiet
-  default.
+  default. The six reasons are a closed list, because the reading that says
+  whether a project ever narrows is a count of them and prose cannot be counted.
+  A footprint cycle carries whole layers and holds no part table under them, so
+  it states no part counts and no carried share at all, and the console says the
+  carry was by layer where it would print a percentage: a share measured over the
+  parts of a cycle that carried its heaviest work whole would read near nought,
+  which is the opposite of what the number means.
 
 ## Consequences
 
@@ -102,9 +116,9 @@ The saving is bounded by the project's own ground. A project whose heaviest suit
 declare wide ground keeps running them on every cycle, and narrowing those
 declarations is a decision for the project rather than for the harness.
 
-The instance ledger gains one record per ship, and the per-layer durations in it
-are the history a per-layer time bound would need. Nothing reads them that way
-yet.
+The instance ledger gains one record per ship. The per-layer durations in it are
+the only per-layer duration history the harness holds, and the bound an
+implementation seat runs inside reads them as its time cap.
 
 A run launched against a base the project has never certified takes the full sweep
 and says so, which is also what every run of a project that has just adopted this

@@ -237,10 +237,12 @@ export const RUN_EVENTS = new Set([
   // readiness
   // Card errors the readiness lint found outside the launched card and the
   // closure it blocks on: the `cards` that were judged, the `errors` beyond
-  // them, one line each, and the `gist`. Loud, because a person has to repair
-  // a card this run will never touch. The run carries on: a card the launched
-  // one does not depend on cannot make this story wrong, and holding every
-  // launch on the state of a whole directory is what this record replaces.
+  // them, one line each, the count of `unreadable` lines of the block the
+  // harness could not read as an error, and the `gist`. Loud, because a person
+  // has to repair a card this run will never touch. The run carries on: a card
+  // the launched one does not depend on cannot make this story wrong, and
+  // holding every launch on the state of a whole directory is what this record
+  // replaces.
   // One per run. Readiness re-runs whole on every park answer and on every
   // resume, and a record per re-entry would report one directory many times.
   'readiness-lint-beyond',
@@ -393,14 +395,13 @@ export const RUN_EVENTS = new Set([
   // `partsCarried` and `carryShare` are the cycle's carry (ADR-0058); a
   // footprint cycle carries whole layers and holds no part table, so it stamps
   // none of the three. `confirmationParts` (ran, kept) is the confirmation
-  // sweep's, over the
-  // layers it narrowed — what it executed, and what an earlier pass of the same
-  // cycle had already proven at this sha (ADR-0046). `diffTruncated: true` says
-  // the read cap cut this cycle's candidate diff, so its judgment seats could
-  // not reach the end of the work anywhere; it is stamped here as well as on
-  // the findings, because a round that raised nothing raises nothing to carry
-  // the word, and a clean verdict over a cut diff is the one a reader most
-  // needs to be able to see (ADR-0066).
+  // sweep's, over the layers it narrowed — what it executed, and what an earlier
+  // pass of the same cycle had already proven at this sha (ADR-0046).
+  // `diffTruncated: true` says the read cap cut this cycle's candidate diff, so
+  // its judgment seats could not reach the end of the work anywhere; it is
+  // stamped here as well as on the findings, because a round that raised nothing
+  // raises nothing to carry the word, and a clean verdict over a cut diff is the
+  // one a reader most needs to be able to see (ADR-0066).
   //
   // `sweep` says which set the cycle ran: `full`, every layer; `targeted`, the
   // layers the diff since the last render reaches; `records`, a diff the project

@@ -121,6 +121,21 @@ process.stdout.write('## Summary' + String.fromCharCode(10));
 process.exit(0);
 `;
 
+// A lint whose own spelling of the contract is wider than the narrowest
+// reading of it: a card path that holds a space, and a code of more than eight
+// characters. Both are the script's to choose.
+const CARD_LINT_WIDE = `process.stdout.write('beyond the card:' + String.fromCharCode(10));
+process.stdout.write('stories/beta two.md: DEPENDENCYCYCLE: blocked-by loops' + String.fromCharCode(10));
+process.exit(0);
+`;
+
+// A lint that writes the block and spells every line of it another way. The
+// harness reads none of them, and the count is what says so.
+const CARD_LINT_UNREADABLE = `process.stdout.write('beyond the card:' + String.fromCharCode(10));
+process.stdout.write('stories/beta.md - F2 - no goal' + String.fromCharCode(10));
+process.exit(0);
+`;
+
 // -- fixture -----------------------------------------------------------------
 
 function fixtureParse(line) {
@@ -426,10 +441,10 @@ test('a card red outside the closure is reported once and the launch goes on', a
   assert.ok(lintLog(fx.paths, runId, 2).includes('card lint: reporting 1 of 2 cards'));
 });
 
-test('a line after the block that is not an error is not read as one', async (t) => {
+test('a line after the block that is not an error is counted, not quoted as one', async (t) => {
   // The block runs to the end of the output, so whatever the tool says last
-  // rides it. A record that counted those lines would report errors nobody
-  // wrote and name a count no card answers for.
+  // rides it. A record that quoted those lines as errors would report errors
+  // nobody wrote and name a count no card answers for.
   const fx = fixture(t, { card: CARD_OPEN, lint: CARD_LINT_CHATTY });
   const { runId } = await fx.launch();
   const reported = await waitFound(
@@ -439,7 +454,49 @@ test('a line after the block that is not an error is not read as one', async (t)
     'the record of the errors beyond the card',
   );
   assert.deepEqual(reported.errors, [`${SECOND_CARD}: F2: no goal`]);
+  // The two lines the harness cannot read are on the record as a count. A drop
+  // in silence is what would let a changed contract read as a clean directory.
+  assert.equal(reported.unreadable, 2);
+  assert.equal(reported.gist, '1 error(s) beyond the card, 2 line(s) unread');
+});
+
+test('an error naming a path with a space and a long code is read as an error', async (t) => {
+  // The path and the code are the script's own vocabulary, and the contract is
+  // the two colons. A narrower reading would drop a real error and report the
+  // directory clean.
+  const fx = fixture(t, { card: CARD_OPEN, lint: CARD_LINT_WIDE });
+  const { runId } = await fx.launch();
+  const reported = await waitFound(
+    fx.paths,
+    runId,
+    (e) => e.event === 'readiness-lint-beyond',
+    'the record of the errors beyond the card',
+  );
+  assert.deepEqual(reported.errors, ['stories/beta two.md: DEPENDENCYCYCLE: blocked-by loops']);
+  assert.equal(reported.unreadable, 0);
   assert.equal(reported.gist, '1 error(s) beyond the card');
+});
+
+test('a block the harness reads no line of is still reported, as a count', async (t) => {
+  const fx = fixture(t, { card: CARD_OPEN, lint: CARD_LINT_UNREADABLE });
+  const { runId } = await fx.launch();
+  const reported = await waitFound(
+    fx.paths,
+    runId,
+    (e) => e.event === 'readiness-lint-beyond',
+    'the record of the lines beyond the card',
+  );
+  assert.deepEqual(reported.errors, []);
+  assert.equal(reported.unreadable, 1);
+  assert.equal(reported.gist, '0 error(s) beyond the card, 1 line(s) unread');
+  // The launch goes on: a line the harness cannot read is not a red on this
+  // story's own cards.
+  await waitFound(
+    fx.paths,
+    runId,
+    (e) => e.event === 'park' && e.type === 'open-decisions',
+    'the open-decisions park',
+  );
 });
 
 test('a park of another class buys no refresh', async (t) => {

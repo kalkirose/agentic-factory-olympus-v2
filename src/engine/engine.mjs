@@ -1080,6 +1080,23 @@ export class RunEngine {
     run.store.append('stage-retired', { actor: ACTOR, lane: run.lane, from, to });
   }
 
+  /**
+   * The stage a retired name is read as, recorded once. Both names a resume
+   * carries are read through here: the stage the run was standing in, and the
+   * stage a held run deferred.
+   *
+   * The record is written once per retirement. A parked or held run reads the
+   * map again at every start, and a run that waits a week on a person would
+   * otherwise stamp one record per restart for one retirement.
+   * @returns {string} the stage to go on with
+   */
+  sendOnRetired(run, events, from, to) {
+    if (to === from) return to;
+    const said = events.some((e) => e.event === 'stage-retired' && e.from === from && e.to === to);
+    if (!said) this.stampRetiredStage(run, from, to);
+    return to;
+  }
+
   // -- resume at daemon start ----------------------------------------------
 
   /**
@@ -1140,16 +1157,8 @@ export class RunEngine {
       // The retired map is read before the run is set aside, because a parked
       // run is set aside holding a stage name, and the answer to its park
       // executes that name. A stage this harness retired has no handler, so a
-      // park answered under the old name would reach nothing at all. The record
-      // is written once per retirement: a run that stays parked across two
-      // restarts is sent on twice and that is one fact, not two.
-      if (stage !== null && stage !== run.stage) {
-        const said = events.some(
-          (e) => e.event === 'stage-retired' && e.from === run.stage && e.to === stage,
-        );
-        if (!said) this.stampRetiredStage(run, run.stage, stage);
-        run.stage = stage;
-      }
+      // park answered under the old name would reach nothing at all.
+      if (stage !== null) run.stage = this.sendOnRetired(run, events, run.stage, stage);
       if (run.parked || run.violated) continue;
       if (stage === null) {
         this.stampViolation(run, `cannot resume: lane ${run.lane}, stage ${run.stage}`);
@@ -1165,10 +1174,7 @@ export class RunEngine {
           this.stampViolation(run, `cannot resume a hold: unknown deferred stage ${run.deferred}`);
           continue;
         }
-        if (deferred !== run.deferred) {
-          this.stampRetiredStage(run, run.deferred, deferred);
-          run.deferred = deferred;
-        }
+        run.deferred = this.sendOnRetired(run, events, run.deferred, deferred);
         this.openPulse(run);
         continue;
       }
