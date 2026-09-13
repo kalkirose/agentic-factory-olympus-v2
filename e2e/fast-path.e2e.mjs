@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import {
   CARD_PATH,
   PROJECT,
@@ -29,6 +29,7 @@ import {
   instanceEvents,
   originTree,
   pollFor,
+  runDir,
   runEvents,
   stalled,
   startDaemon,
@@ -353,11 +354,11 @@ test('a ship over a disjoint merge keeps the certification it earned', async (t)
   await stopDaemon(fx);
 });
 
-// The fourth half of the claim: a review finding is a claim about the tree like
-// any other, so it carries the ground it rests on and the check asks the moved
-// base about that ground. A run with a standing finding and a merge that moves
-// none of its ground keeps its certification; the unit tests hold the refusal
-// the other way round.
+// One more part of the claim: a review finding is a statement about the tree
+// like any other, so it carries the ground it rests on and the check asks the
+// moved base about that ground. A run with a standing finding and a merge that
+// moves none of its ground keeps its certification; the unit tests hold the
+// refusal the other way round.
 const LENS_SCENARIO = {
   ...SCENARIO,
   // The finding is graded to block, so the verifier is asked and confirms it.
@@ -411,8 +412,11 @@ test('a review finding rides the record with its ground, and a merge past it car
   assert.deepEqual(finding.ground, ['src/feature.mjs']);
 
   // The record the carry rested on: the same finding, with the same ground, in
-  // the file the fast path read it out of.
-  const record = JSON.parse(readFileSync(fast.certification.record, 'utf8'));
+  // the file the fast path read it out of. The run archives at its close, so the
+  // record is read under the directory the archive left it in.
+  const record = JSON.parse(
+    readFileSync(join(runDir(fx, runId), basename(fast.certification.record)), 'utf8'),
+  );
   const recorded = record.findings.filter((f) => f.lens === 'spec');
   assert.equal(recorded.length, 1, JSON.stringify(record.findings));
   assert.deepEqual(recorded[0].ground, ['src/feature.mjs']);
