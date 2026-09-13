@@ -25,7 +25,11 @@ import {
   ticketPathClass,
   withReconcileStage,
 } from '../src/lanes/records-stage.mjs';
-import { recordUnits } from '../src/lanes/units.mjs';
+import {
+  GOVERNING_RECORDS_LINE,
+  OTHER_RECORDS_LINE,
+  recordUnits,
+} from '../src/lanes/units.mjs';
 import { commitAll, headSha, resetHard } from '../src/isolation/tree.mjs';
 import {
   tempDir,
@@ -45,6 +49,7 @@ import {
 const CONFIG_PATH = '.olympus/project.json';
 const CARD_PATH = 'stories/alpha.md';
 const RECORD_PATH = 'docs/adr/adr-0002-double-the-input.md';
+const EXISTING_PATH = 'docs/adr/adr-0001-keep-one-entry-point.md';
 const TEMPLATE_PATH = 'docs/adr/TEMPLATE.md';
 
 const CARD = `---
@@ -122,6 +127,19 @@ function ticketText(paths) {
 }
 
 // -- fixture machinery -------------------------------------------------------
+
+/** The paths one block of a brief's record lines names, in order. */
+function blockPaths(brief, heading) {
+  const lines = brief.split('\n');
+  const start = lines.indexOf(heading);
+  if (start === -1) return [];
+  const paths = [];
+  for (const line of lines.slice(start + 1)) {
+    if (!line.startsWith('- ')) break;
+    paths.push(line.slice(2));
+  }
+  return paths;
+}
 
 function specPathFrom(prompt) {
   return /absolute path: (.+)$/m.exec(prompt)[1].trim();
@@ -232,7 +250,7 @@ function laneFixture(t, { seats, files = {}, config = {}, realReconcile = false 
     }),
     [CARD_PATH]: CARD,
     'src/base.mjs': 'export const base = 1;\n',
-    'docs/adr/adr-0001-keep-one-entry-point.md': EXISTING_RECORD,
+    [EXISTING_PATH]: EXISTING_RECORD,
     [TEMPLATE_PATH]: '# ADR-<id>: <title>\n\n**Status:** Accepted\n',
     ...files,
   });
@@ -558,9 +576,12 @@ test('the story dev seat is denied the record tree, and a write to one is taken 
   const dev = fx.calls.find((c) => c.seat === 'dev');
   assert.ok(dev.denyTools.includes('Edit(docs/adr/**)'), dev.denyTools.join(' '));
   assert.ok(dev.denyTools.includes('Edit(tests/**)'));
-  // The brief says it beside the test line, so the seat is told rather than
-  // left to discover the boundary at the capture.
-  assert.match(dev.prompt, /Decision records \(read-only\): docs\/adr\./);
+  // The brief names the record its own touched paths are governed by, and the
+  // rule beside the test line, so the seat is told rather than left to discover
+  // the boundary at the capture (ADR-0089).
+  assert.ok(dev.prompt.includes(`${GOVERNING_RECORDS_LINE}\n- ${EXISTING_PATH}`), dev.prompt);
+  assert.ok(dev.prompt.includes('A record is written by a record seat'), dev.prompt);
+  assert.ok(!dev.prompt.includes('Decision records (read-only)'), dev.prompt);
   const recapture = events.find((e) => e.event === 'diff-policy-recapture');
   assert.equal(recapture.class, 'record');
   assert.equal(recapture.kind, 'capture-takeback');
@@ -699,12 +720,29 @@ function citingTree(count = 23, id = '0001') {
   return out;
 }
 
+/** A record the tree has closed. It is in no seat's scope and in no brief. */
+const CLOSED_PATH = 'docs/adr/adr-0040-hold-the-gateway.md';
+const CLOSED_RECORD = [
+  '# ADR-0040: Hold the gateway',
+  '',
+  '**Status:** Retired (2026-09-02): the gateway it named is gone.',
+  '',
+  '## Decision',
+  '',
+  'The module src/feature.mjs held the gateway.',
+  '',
+].join('\n');
+
 test('the birth brief names the gate command, and the birth installs what it needs', async (t) => {
-  const touched = 'docs/adr/adr-0001-keep-one-entry-point.md';
+  const touched = EXISTING_PATH;
   const probe = join(tempDir(), 'birth-env.json');
   const fx = laneFixture(t, {
     config: SUPERSEDE_LAYERS,
-    files: { 'tickets/records.md': ticketText([touched]), ...citingTree() },
+    files: {
+      'tickets/records.md': ticketText([touched]),
+      [CLOSED_PATH]: CLOSED_RECORD,
+      ...citingTree(),
+    },
     seats: {
       'record-author': () => ({
         files: { [RECORD_PATH]: RECORD_TEXT },
@@ -721,6 +759,17 @@ test('the birth brief names the gate command, and the birth installs what it nee
   // with the count above the cap stated.
   assert.match(brief, /The neighbourhood\. Read each one whole/);
   assert.match(brief, /11 more active records cite these or are cited by them/);
+  // The rest of the active tree follows it by path, so the seat knows what the
+  // cap left out and what the tree holds beside its own work. The neighbourhood
+  // and the touched path are named once, and the closed record in neither list
+  // (ADR-0089).
+  const rest = blockPaths(brief, OTHER_RECORDS_LINE);
+  assert.ok(!brief.includes(GOVERNING_RECORDS_LINE), brief);
+  assert.equal(rest.length, 11);
+  assert.ok(rest.includes('docs/adr/adr-0033-cites.md'), rest.join(' '));
+  assert.ok(!rest.includes(touched), rest.join(' '));
+  assert.ok(!brief.includes(CLOSED_PATH), brief);
+  assert.ok(brief.includes('A record in docs/adr named in neither list is closed'), brief);
   // The gate command, by name, and the duty to run it before reporting. It is a
   // brief line and not a check: the harness reads no token of a record
   // (ADR-0080).

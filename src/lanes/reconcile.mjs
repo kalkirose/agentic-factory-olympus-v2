@@ -54,6 +54,7 @@ import { RECONCILE_STAGE, recordBase, recordsCommitted } from './records-stage.m
 import {
   activeOf,
   activeRecords,
+  governingRecordLines,
   matchUnits,
   readText,
   recordFiles,
@@ -439,17 +440,22 @@ async function judgeStep(ctx, base) {
 
 function judgeRole(base) {
   const born = recordEntriesOf(base.born);
+  // The active tree by path, minus the records the brief names below. A judge
+  // told to find the tree itself read closed records, and a closed record is a
+  // decision nobody owes an answer for (ADR-0089).
+  const tree = governingRecordLines(base.worktree, [], base.recordPaths ?? [], { exclude: born });
   return [
     'Judge whether the diff of this run implements or contradicts any decision',
     'record (ADR). You judge only; change nothing.',
     `The diff is this branch against ${base.defaultBranch}. Read it with:`,
     `git diff ${base.defaultBranch}...HEAD`,
-    'Locate the decision-record tree (commonly docs/adr/). No such tree means',
-    'owed=false with that as the reason.',
     'owed=true when the diff implements a recorded decision, contradicts one,',
     'or deviates from one. Implementation counts even when the diff never',
     'touches the record files themselves. List every affected record path in',
     'records, and state the reason in one or two sentences.',
+    ...(tree.length > 0
+      ? tree
+      : ['The project declares no decision-record tree: owed=false with that as the reason.']),
     ...(born.length > 0
       ? [
           'This run already wrote these records before its suite was frozen. List',

@@ -39,7 +39,9 @@ import {
 } from '../src/lanes/lenses.mjs';
 import { UNITS_BIN } from '../src/lanes/records.mjs';
 import {
+  GOVERNING_RECORDS_LINE,
   NEIGHBOUR_CAP,
+  OTHER_RECORDS_LINE,
   recordUnits,
 } from '../src/lanes/units.mjs';
 import { scaffoldHome, reviewDiffPath, runLedgerPath } from '../src/daemon/home.mjs';
@@ -705,6 +707,28 @@ const OTHER_RECORD = 'docs/adr/0002-surface.md';
 /** A lane base whose project declares a record tree. */
 const RECORD_BASE = { ...BASE, worktree: process.cwd(), recordPaths: ['docs/adr'] };
 
+/** The paths one block of a brief's record lines names, in order. */
+function blockPaths(brief, heading) {
+  const lines = brief.split('\n');
+  const start = lines.indexOf(heading);
+  if (start === -1) return [];
+  const paths = [];
+  for (const line of lines.slice(start + 1)) {
+    if (!line.startsWith('- ')) break;
+    paths.push(line.slice(2));
+  }
+  return paths;
+}
+
+/** The brief minus its record block: what the seat is told beside the paths. */
+function withoutRecordBlock(brief) {
+  const lines = brief.split('\n');
+  const start = lines.findIndex((l) => l === GOVERNING_RECORDS_LINE || l === OTHER_RECORDS_LINE);
+  if (start === -1) return brief;
+  const end = lines.findIndex((l, i) => i >= start && l.startsWith('A record in '));
+  return [...lines.slice(0, start), ...lines.slice(end + 1)].join('\n');
+}
+
 /** A verifier report answering each item with the verdict the map names. */
 function verdicts(map) {
   return ({ roleBlock }) => ({
@@ -806,6 +830,98 @@ function claimFinding(overrides = {}) {
     ...overrides,
   };
 }
+
+// The two record blocks a review seat carries (ADR-0089). A judgment seat reads
+// the diff against the decisions that govern it, and the paths are what let it
+// tell an active record from a closed one without opening either.
+
+/** A third active record, and a closed one, beside the fixture's pair. */
+const ELSEWHERE_RECORD = 'docs/adr/0007-ship.md';
+const CLOSED_RECORD = 'docs/adr/0008-price.md';
+const WIDER_TREE = {
+  [ELSEWHERE_RECORD]: [
+    '# ADR-0007: Ship on one branch',
+    '',
+    'Status: Accepted',
+    '',
+    '## Decision',
+    '',
+    'The ship reads src/ship.mjs.',
+    '',
+  ].join('\n'),
+  [CLOSED_RECORD]: [
+    '# ADR-0008: Round the price',
+    '',
+    'Status: Retired (2026-09-02): the rounding moved to the gateway.',
+    '',
+    '## Decision',
+    '',
+    'The rounding happens in src/pay.mjs.',
+    '',
+  ].join('\n'),
+};
+
+test('a lens brief names the records that govern the diff, and the rest by path', async (t) => {
+  const worktree = recordTree(t, WIDER_TREE);
+  const base = recordBase(worktree, { lenses: ['spec', 'security'], uiPaths: [] });
+  const fx = seatsFixture(t, () => ({ findings: [], summary: 'clean' }));
+
+  await furyRound(fx.ctx, base, {
+    cycle: 1,
+    diff: excerpted(),
+    diffFiles: ['src/pay.mjs'],
+  });
+
+  for (const { seat, roleBlock } of fx.ctx.briefs) {
+    // The two records whose text names the changed file, and no other.
+    assert.deepEqual(
+      blockPaths(roleBlock, GOVERNING_RECORDS_LINE),
+      [RECORD_FILE, OTHER_RECORD],
+      seat,
+    );
+    assert.deepEqual(blockPaths(roleBlock, OTHER_RECORDS_LINE), [ELSEWHERE_RECORD], seat);
+    // The closed record names the changed file too, and reaches no brief.
+    assert.ok(!roleBlock.includes(CLOSED_RECORD), seat);
+    assert.ok(roleBlock.includes('A record in docs/adr named in neither list is closed'), seat);
+  }
+});
+
+test('the generalist brief carries the same two blocks as the panel', async (t) => {
+  const worktree = recordTree(t, WIDER_TREE);
+  const base = recordBase(worktree, { lenses: ['spec', 'security'], uiPaths: [] });
+  const fx = seatsFixture(t, () => ({ findings: [], summary: 'clean' }));
+
+  await generalistReview(fx.ctx, base, {
+    cycle: 1,
+    diff: excerpted(),
+    diffFiles: ['src/pay.mjs', CLOSED_RECORD],
+    priorConfirmed: [],
+  });
+
+  const brief = fx.ctx.briefs[0].roleBlock;
+  assert.deepEqual(blockPaths(brief, GOVERNING_RECORDS_LINE), [RECORD_FILE, OTHER_RECORD]);
+  assert.deepEqual(blockPaths(brief, OTHER_RECORDS_LINE), [ELSEWHERE_RECORD]);
+  assert.ok(!brief.includes(CLOSED_RECORD), brief);
+});
+
+test('a record review brief lists the rest of the tree under its neighbourhood', async (t) => {
+  const worktree = recordTree(t, WIDER_TREE);
+  const fx = seatsFixture(t, () => recordReport(worktree, RECORD_FILE));
+
+  await recordReviewRound(fx.ctx, recordBase(worktree), {
+    records: [RECORD_FILE],
+    neighbours: { [RECORD_FILE]: { neighbours: [OTHER_RECORD], dropped: 0 } },
+    cycle: 1,
+  });
+
+  const brief = fx.ctx.briefs[0].roleBlock;
+  // The neighbourhood it already carries is its first list, so the second block
+  // is the remainder: the record under judgment and its neighbour are named once.
+  assert.ok(!brief.includes(GOVERNING_RECORDS_LINE), brief);
+  assert.deepEqual(blockPaths(brief, OTHER_RECORDS_LINE), [ELSEWHERE_RECORD]);
+  assert.ok(brief.indexOf('The neighbourhood.') < brief.indexOf(OTHER_RECORDS_LINE), brief);
+  assert.ok(!brief.includes(CLOSED_RECORD), brief);
+});
 
 test('a record review is one seat per record, and each seat holds one record', async (t) => {
   const more = {
@@ -1410,11 +1526,14 @@ test('a mixed diff is the code panel plus one record seat per record', async (t)
     seats.filter((s) => s.startsWith('record-review')).sort(),
     ['record-review:1', 'record-review:2'],
   );
-  // Every lens seat of the panel keeps the diff and holds no record.
+  // Every lens seat of the panel keeps the diff and judges no record. A record
+  // reaches it as a path to read against and nowhere else: not in the diff, not
+  // as a document to read whole, not as a unit list to answer.
   for (const { seat, roleBlock } of fx.ctx.briefs.filter((b) => b.seat.startsWith('fury-'))) {
     assert.ok(roleBlock.includes(DIFF_ONLY), seat);
-    assert.ok(!roleBlock.includes(RECORD_FILE), seat);
+    assert.ok(!withoutRecordBlock(roleBlock).includes(RECORD_FILE), seat);
     assert.ok(!roleBlock.includes('read whole'), seat);
+    assert.ok(!roleBlock.includes('The units of '), seat);
   }
 });
 

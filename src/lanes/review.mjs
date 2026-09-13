@@ -56,6 +56,7 @@ import {
 import { REVIEW_SEAT, UNITS_BIN } from './records.mjs';
 import {
   NEIGHBOUR_CAP,
+  governingRecordLines,
   isActiveRecord,
   readText,
   recordNeighbours,
@@ -256,7 +257,7 @@ export async function furyRound(ctx, base, { cycle, diff, diffFiles }) {
         seat,
         label: `${seat}-c${cycle}`,
         schema: reviewSchema(panel[seat]),
-        buildRole: (brief) => furyRole(panel[seat], base, diff, supersedes, brief),
+        buildRole: (brief) => furyRole(panel[seat], base, diff, codeFiles, supersedes, brief),
       }),
     ),
   );
@@ -288,13 +289,14 @@ function codeOnly(base, diffFiles) {
  * finding, or a prior confirmed finding needing a resolution-check. So a clean
  * small fix costs one review agent.
  */
-export async function generalistReview(ctx, base, { cycle, diff, priorConfirmed }) {
+export async function generalistReview(ctx, base, { cycle, diff, diffFiles, priorConfirmed }) {
   const supersedes = authorizedSupersedes(runEvents(ctx));
+  const codeFiles = codeOnly(base, diffFiles);
   const outcome = await codeReviewSeat(ctx, base, {
     seat: 'generalist-review',
     label: `generalist-review-c${cycle}`,
     schema: reviewSchema(base.lenses),
-    buildRole: (brief) => generalistRole(base, diff, supersedes, brief),
+    buildRole: (brief) => generalistRole(base, diff, codeFiles, supersedes, brief),
   });
   if (outcome.fail) return { fail: outcome.fail };
   const collected = outcome.report.findings.map((f) => ({ ...f, source: 'generalist-review' }));
@@ -1120,7 +1122,7 @@ function verifierCoverageDefects(items, results) {
 
 // -- role blocks -------------------------------------------------------------
 
-function furyRole(lenses, base, diff, supersedes = [], brief = null) {
+function furyRole(lenses, base, diff, files = [], supersedes = [], brief = null) {
   return [
     `Review the candidate implementation diff through these lenses, and label every finding with its lens:`,
     ...lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
@@ -1131,12 +1133,13 @@ function furyRole(lenses, base, diff, supersedes = [], brief = null) {
     'Put the repo-relative path of the one file a finding is about in "file"; leave it out for a finding about no single file.',
     ...FINDING_GROUND_DUTY,
     ...(lenses.includes('spec') ? supersedeDutyLines(base, supersedes) : []),
+    ...governingRecordLines(base.worktree, files, base.recordPaths ?? []),
     ...diffLines(diff),
     ...briefLines(brief),
   ].join('\n');
 }
 
-function generalistRole(base, diff, supersedes = [], brief = null) {
+function generalistRole(base, diff, files = [], supersedes = [], brief = null) {
   return [
     'Review the diff below through these lenses, and label every finding with its lens:',
     ...base.lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
@@ -1147,6 +1150,7 @@ function generalistRole(base, diff, supersedes = [], brief = null) {
     'Put the repo-relative path of the one file a finding is about in "file"; leave it out for a finding about no single file.',
     ...FINDING_GROUND_DUTY,
     ...(base.lenses.includes('spec') ? supersedeDutyLines(base, supersedes) : []),
+    ...governingRecordLines(base.worktree, files, base.recordPaths ?? []),
     ...diffLines(diff),
     ...briefLines(brief),
   ].join('\n');
@@ -1188,6 +1192,12 @@ function recordReviewRole(base, { record, units, neighbours, moved, spec }, brie
     ...unitListLines(record, units),
     ...movedLines(moved, units),
     ...neighbourhoodLines(neighbours),
+    // The neighbourhood above is this seat's first list, so the rest of the tree
+    // is what it has not been given: the record it judges and its neighbours are
+    // named once (ADR-0089).
+    ...governingRecordLines(base.worktree, [], base.recordPaths ?? [], {
+      exclude: [record, ...(neighbours?.neighbours ?? [])],
+    }),
     ...recordFindingLines(record),
     ...CONSTITUTION_DUTY,
     ...briefLines(brief),

@@ -144,6 +144,7 @@ import {
   supersedeRuling,
 } from './supersede.mjs';
 import { SUITE_SCHEMA, SPEC_AMEND_SCHEMA, specLintDefects } from './story.mjs';
+import { governingRecordLines } from './units.mjs';
 import {
   runSuiteChecks,
   storySuiteChecks,
@@ -784,12 +785,13 @@ async function runCycle(ctx, base, mode, { cycle }) {
     const round =
       mode === 'story'
         ? await furyRound(ctx, base, { cycle, diff, diffFiles })
-        : await generalistReview(ctx, base, { cycle, diff, priorConfirmed: [] });
+        : await generalistReview(ctx, base, { cycle, diff, diffFiles, priorConfirmed: [] });
     if (round.fail) return { directive: round.fail };
     reviewOpen = round.confirmed;
   } else if (repaired) {
     const diff = await readDiff(impl.baseSha, impl.sha);
-    const round = await generalistReview(ctx, base, { cycle, diff, priorConfirmed });
+    const diffFiles = await readFiles(impl.baseSha, impl.sha);
+    const round = await generalistReview(ctx, base, { cycle, diff, diffFiles, priorConfirmed });
     if (round.fail) return { directive: round.fail };
     reviewOpen = [
       ...priorConfirmed.filter((f) => !round.resolved.includes(f.id)),
@@ -802,7 +804,8 @@ async function runCycle(ctx, base, mode, { cycle }) {
     // assertion that changed is a judgment. So the panel reads that amendment's
     // own diff — one seat, only where nobody was asked (ADR-0044).
     const diff = await readDiff(cardRuled.baseSha, cardRuled.sha);
-    const round = await generalistReview(ctx, base, { cycle, diff, priorConfirmed });
+    const diffFiles = await readFiles(cardRuled.baseSha, cardRuled.sha);
+    const round = await generalistReview(ctx, base, { cycle, diff, diffFiles, priorConfirmed });
     if (round.fail) return { directive: round.fail };
     reviewOpen = [
       ...priorConfirmed.filter((f) => !round.resolved.includes(f.id)),
@@ -3116,7 +3119,7 @@ function devRole(base, brief = null, bound = null) {
     `Implement the story spec at: ${base.specRef}`,
     'The frozen acceptance suite defines done. Do not edit or delete test files.',
     `Test paths (read-only): ${base.testPaths.join(', ')}`,
-    ...recordPathLines(base),
+    ...recordLines(base),
     ...gateCommandLines(base, bound),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
@@ -3128,7 +3131,7 @@ function fixRole(base, brief = null, bound = null) {
     `Fix the defect described by the intake ticket at: ${base.specRef}`,
     'The ticket is the spec. Stay inside its scope.',
     'Add a regression test when the defect class demands one.',
-    ...recordPathLines(base),
+    ...recordLines(base),
     ...gateCommandLines(base, bound),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
@@ -3136,18 +3139,18 @@ function fixRole(base, brief = null, bound = null) {
 }
 
 /**
- * The record tree, as a seat that writes code is told about it: read-only, in
- * every lane. A record is written by a record seat and by nothing else, and the
- * capture takes a write to one back whatever the brief says, so the seat is
- * told rather than left to discover it (ADR-0074).
+ * The record tree, as a seat that writes code is told about it: the records its
+ * own declared paths are governed by, the rest of the active tree by path, and
+ * the read-only rule. A record is written by a record seat and by nothing else,
+ * and the capture takes a write to one back whatever the brief says, so the
+ * seat is told rather than left to discover it (ADR-0074, ADR-0089).
+ *
+ * The paths are the ones the run declared: the spec's in the story lane, the
+ * ticket's in the repair lane, which is the same list the seat's bound rests
+ * on.
  */
-function recordPathLines(base) {
-  const entries = (base.recordPaths ?? []).filter((entry) => !entry.startsWith('!'));
-  if (entries.length === 0) return [];
-  return [
-    `Decision records (read-only): ${entries.join(', ')}. A record is written by a record ` +
-      'seat; the reconciliation stage owns every change to one.',
-  ];
+function recordLines(base) {
+  return governingRecordLines(base.worktree, declaredTouchedPaths(base), base.recordPaths ?? []);
 }
 
 /**
@@ -3174,6 +3177,7 @@ function repairRole(base, open, record, brief = null, recaptured = [], bound = n
     'Repair the candidate tree in place. Fix every open finding below; change nothing else.',
     `The spec: ${base.specRef}`,
     'Do not edit or delete test files.',
+    ...recordLines(base),
     ...(structural.length > 0
       ? [STRUCTURAL_HEADING, ...structural.map((f) => `- ${findingLine(f)}`), STRUCTURAL_NOTE]
       : []),

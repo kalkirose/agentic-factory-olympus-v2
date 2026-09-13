@@ -336,6 +336,30 @@ function seatFixture(seats) {
   return { commandFor, calls };
 }
 
+// A record tree an origin can ship: one record whose text names the file the
+// fixture spec declares, one that names another file, and one the tree closed on
+// the same declared file. A brief is derived from all three and names the closed
+// one nowhere (ADR-0089).
+const ENTRY_ADR = 'docs/adr/0001-keep-one-entry-point.md';
+const SHIP_ADR = 'docs/adr/0002-ship-on-one-branch.md';
+const CLOSED_ADR = 'docs/adr/0003-hold-the-gateway.md';
+const RECORD_TREE = {
+  [ENTRY_ADR]:
+    '# ADR-0001: Keep one entry point\n\n**Status:** Accepted\n\n## Decision\n\n' +
+    'The module src/feature.mjs holds the entry point.\n',
+  [SHIP_ADR]:
+    '# ADR-0002: Ship on one branch\n\n**Status:** Accepted\n\n## Decision\n\n' +
+    'The ship reads src/ship.mjs.\n',
+  [CLOSED_ADR]:
+    '# ADR-0003: Hold the gateway\n\n**Status:** Retired (2026-09-02): the gateway is gone.\n\n' +
+    '## Decision\n\nThe module src/feature.mjs held the gateway.\n',
+};
+
+const GOVERNING_BLOCK = 'Decision records that govern your paths (read these):';
+const OTHER_BLOCK =
+  'Every other active record, by path (open one only when your work reaches its area):';
+const RECORD_SENTENCE = 'A record in docs/adr named in neither list is closed';
+
 // The birth seat's report where a story decides no record: no file written,
 // and nothing to answer by unit. Every scenario runs through the records stage,
 // and the ones whose subject is not the records take this (ADR-0074).
@@ -506,7 +530,10 @@ test('a fixture story reaches a valid freeze record', async (t) => {
     }),
   };
   const policy = '# Constitution\n\nA deliverable exists only where the card names it.\n';
-  const fx = storyFixture(t, { seats, files: { '.olympus/constitution.md': policy } });
+  const fx = storyFixture(t, {
+    seats,
+    files: { '.olympus/constitution.md': policy, ...RECORD_TREE },
+  });
   const runId = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
@@ -553,6 +580,22 @@ test('a fixture story reaches a valid freeze record', async (t) => {
   assert.match(birthPrompt, /name each of those files in the block as a dev-owned entry/);
   assert.match(birthPrompt, /A baseline the block does not name is frozen/);
   assert.match(birthPrompt, /costs a verdict round-trip/);
+  // The spec seat holds the card and nothing else, so no record governs its
+  // paths and the active tree is the whole block. The suite seat holds the
+  // spec's declared paths, so the record that names one of them is its first
+  // list. Neither brief names the closed record (ADR-0089).
+  assert.ok(!birthPrompt.includes(GOVERNING_BLOCK), birthPrompt);
+  assert.ok(birthPrompt.includes(`${OTHER_BLOCK}\n- ${ENTRY_ADR}\n- ${SHIP_ADR}\n`), birthPrompt);
+  assert.ok(
+    suiteCall.prompt.includes(
+      `${GOVERNING_BLOCK}\n- ${ENTRY_ADR}\n${OTHER_BLOCK}\n- ${SHIP_ADR}\n`,
+    ),
+    suiteCall.prompt,
+  );
+  for (const prompt of [birthPrompt, suiteCall.prompt]) {
+    assert.ok(prompt.includes(RECORD_SENTENCE), prompt);
+    assert.ok(!prompt.includes(CLOSED_ADR), prompt);
+  }
   // A project that names no suite checks runs no such step and stamps nothing,
   // which is what every project had before the step existed (ADR-0071).
   assert.ok(!events.some((e) => e.event === 'suite-check'));

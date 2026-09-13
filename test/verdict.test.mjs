@@ -114,6 +114,35 @@ test('g increments', async () => {
 });
 `;
 
+// A record tree an origin can ship: one record whose text names the file the
+// fixture spec declares, one that names another file, and one the tree closed
+// on the same declared file. The block a seat is given is derived from all
+// three, and a closed record is in no brief (ADR-0089).
+const ENTRY_ADR = 'docs/adr/0001-keep-one-entry-point.md';
+const SHIP_ADR = 'docs/adr/0002-ship-on-one-branch.md';
+const CLOSED_ADR = 'docs/adr/0003-hold-the-gateway.md';
+const RECORD_TREE = {
+  [ENTRY_ADR]:
+    '# ADR-0001: Keep one entry point\n\n**Status:** Accepted\n\n## Decision\n\n' +
+    'The module src/feature.mjs holds the entry point.\n',
+  [SHIP_ADR]:
+    '# ADR-0002: Ship on one branch\n\n**Status:** Accepted\n\n## Decision\n\n' +
+    'The ship reads src/ship.mjs.\n',
+  [CLOSED_ADR]:
+    '# ADR-0003: Hold the gateway\n\n**Status:** Retired (2026-09-02): the gateway is gone.\n\n' +
+    '## Decision\n\nThe module src/feature.mjs held the gateway.\n',
+};
+
+/** The two blocks, in the order a brief carries them. */
+const RECORD_BLOCK = [
+  'Decision records that govern your paths (read these):',
+  `- ${ENTRY_ADR}`,
+  'Every other active record, by path (open one only when your work reaches its area):',
+  `- ${SHIP_ADR}`,
+].join('\n');
+
+const RECORD_SENTENCE = 'A record in docs/adr named in neither list is closed';
+
 const SUITE_CMD = ['node', '--test', 'tests/*.test.mjs'];
 const GREEN_CMD = ['node', '-e', 'process.exit(0)'];
 const BUILD_CMD = [
@@ -632,7 +661,7 @@ test('a code defect routes triage → repair round → generalist re-verdict', a
     'repair-dev': () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'fixed' } }),
     'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
   };
-  const fx = verdictFixture(t, { seats });
+  const fx = verdictFixture(t, { seats, originFiles: RECORD_TREE });
   const { runId } = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
@@ -667,6 +696,17 @@ test('a code defect routes triage → repair round → generalist re-verdict', a
   assert.equal(fx.calls.filter((c) => c.seat === 'generalist-review').length, 1);
   assert.ok(!fx.calls.some((c) => c.seat === 'fury-verifier'));
   assert.ok(fx.calls.find((c) => c.seat === 'repair-dev').denyTools.includes('Edit(tests/**)'));
+  // Every seat that writes code is named the active records that govern the
+  // paths the spec declared, then the rest of the tree, and never the directory
+  // alone. The closed record names a declared path too and reaches no brief
+  // (ADR-0089).
+  for (const seat of ['dev', 'repair-dev']) {
+    const prompt = fx.calls.find((c) => c.seat === seat).prompt;
+    assert.ok(prompt.includes(RECORD_BLOCK), seat);
+    assert.ok(prompt.includes(RECORD_SENTENCE), seat);
+    assert.ok(!prompt.includes(CLOSED_ADR), seat);
+    assert.ok(!prompt.includes('Decision records (read-only)'), seat);
+  }
   // The record closes the finding.
   const record = readRecord(fx.paths, runId, 2);
   assert.deepEqual(
@@ -3419,7 +3459,10 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
     seats,
     gates: [{ name: 'unit', command: 'suite' }],
     commands: { suite: SUITE_CMD },
-    originFiles: { 'tickets/t1.md': '## Defect\n\ng(x) is missing; add g(x) = x + 1 with a regression test.\n' },
+    originFiles: {
+      'tickets/t1.md': '## Defect\n\ng(x) is missing; add g(x) = x + 1 with a regression test.\n',
+      ...RECORD_TREE,
+    },
   });
   const { runId, worktree } = await fx.launchFromConsole({
     lane: 'repair',
@@ -3445,6 +3488,19 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
     'Write(docs/adr/**)',
     'NotebookEdit(docs/adr/**)',
   ]);
+  // The tree is named to it by path, not by directory. This ticket declares no
+  // path, so the first list is empty and the active tree is the whole block; the
+  // closed record is in no list (ADR-0089).
+  assert.ok(!dev.prompt.includes('Decision records that govern your paths'), dev.prompt);
+  assert.ok(
+    dev.prompt.includes(
+      'Every other active record, by path (open one only when your work reaches its area):\n' +
+        `- ${ENTRY_ADR}\n- ${SHIP_ADR}\n`,
+    ),
+    dev.prompt,
+  );
+  assert.ok(dev.prompt.includes(RECORD_SENTENCE), dev.prompt);
+  assert.ok(!dev.prompt.includes(CLOSED_ADR), dev.prompt);
   // Generalist review replaces the Fury fan-out; the LOW stays advisory.
   assert.ok(!fx.calls.some((c) => c.seat.startsWith('fury-')));
   assert.equal(fx.calls.filter((c) => c.seat === 'generalist-review').length, 1);

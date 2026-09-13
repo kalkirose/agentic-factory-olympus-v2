@@ -33,7 +33,7 @@ import {
   treeFiles,
 } from '../isolation/tree.mjs';
 import { editDenyRules } from '../seats/boundary.mjs';
-import { laneDiffPolicy, parseTouchedBlock } from '../seats/diffpolicy.mjs';
+import { laneDiffPolicy, parseTouchedBlock, parseTouchedPaths } from '../seats/diffpolicy.mjs';
 import {
   DEPENDENCIES_SECTION,
   cardClosure,
@@ -59,6 +59,7 @@ import {
   surfaceMapLines,
 } from './surfacemap.mjs';
 import { recordBase, recordsStageHandler } from './records-stage.mjs';
+import { governingRecordLines } from './units.mjs';
 import { readInheritance } from './resume.mjs';
 import {
   SUPERSEDE_BRIEF_LINES,
@@ -1426,6 +1427,9 @@ function birthRole(base, resolved, brief = null) {
     // where a test can live and what will run it. Without them a plan can
     // name a runner the suite seat is not allowed to reach.
     ...suiteFacts(base),
+    // The card is the only path this seat has. Nothing is implemented yet, so
+    // the whole active tree is what the spec is written against (ADR-0089).
+    ...governingRecordLines(base.worktree, [base.cardPath], base.recordPaths ?? []),
     'If the repository state conflicts with the card\'s intent, do not author around the conflict: set outcome "grounding-conflict" and describe the conflict.',
     ...dependencyLines(),
     'Otherwise set outcome "spec-born".',
@@ -1686,8 +1690,21 @@ function suiteAuthorRole(base, brief) {
   return [
     `Author the acceptance suite for the spec at: ${base.specPath}`,
     ...suiteReportLines(base),
+    ...governingRecordLines(base.worktree, specTouchedPaths(base), base.recordPaths ?? []),
     ...briefLines(brief),
   ].join('\n');
+}
+
+/**
+ * The paths the born spec declared. A spec the run cannot read declares none,
+ * which leaves the seat the active tree and no neighbourhood.
+ */
+function specTouchedPaths(base) {
+  try {
+    return parseTouchedPaths(readFileSync(base.specPath, 'utf8'));
+  } catch {
+    return [];
+  }
 }
 
 function redStateFixRole(base, brief) {

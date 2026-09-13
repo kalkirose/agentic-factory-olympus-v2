@@ -6,11 +6,14 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { removeDir, tempDir, writeTree } from './helpers.mjs';
 import {
+  GOVERNING_RECORDS_LINE,
   NEIGHBOUR_CAP,
+  OTHER_RECORDS_LINE,
   activeOf,
   activeRecords,
   birthNeighbours,
   citingRecords,
+  governingRecordLines,
   isActiveRecord,
   matchUnits,
   recordFiles,
@@ -699,6 +702,99 @@ test('a birth over a touched record reads that record own neighbourhood (W2)', (
       dropped: 0,
     },
   );
+});
+
+// -- the record block a brief carries (point 9) --------------------------------
+
+// A seat handed the record directory cannot tell an active record from a closed
+// one without opening both, because the status is a line of the text. These
+// tests hold the two lists that answer it, and the rule that a closed record is
+// in neither (ADR-0089).
+
+/** The paths one block of the record lines names, in order. */
+function blockPaths(lines, heading) {
+  const start = lines.indexOf(heading);
+  if (start === -1) return [];
+  const paths = [];
+  for (const line of lines.slice(start + 1)) {
+    if (!line.startsWith('- ')) break;
+    paths.push(line.slice(2));
+  }
+  return paths;
+}
+
+test('a project with no record tree gets no record block', (t) => {
+  const dir = tree(t, { 'docs/adr/adr-001-first.md': record('001') });
+  assert.deepEqual(governingRecordLines(dir, ['src/feature.mjs'], []), []);
+  // An exclusion entry alone names no tree either.
+  assert.deepEqual(governingRecordLines(dir, ['src/feature.mjs'], ['!docs/adr/TEMPLATE.md']), []);
+});
+
+test('the first block is the records that govern the paths, the second the rest', (t) => {
+  const dir = tree(t, {
+    'docs/adr/adr-001-first.md': record('001', {
+      body: 'The helper lives at `src/feature.mjs` and ADR-002 states its budget.',
+    }),
+    'docs/adr/adr-002-second.md': record('002', { body: 'The budget is stated here.' }),
+    'docs/adr/adr-003-third.md': record('003', { body: 'It decides something else.' }),
+    // Closed: named in neither list, so no brief points a seat at it.
+    'docs/adr/adr-004-fourth.md': record('004', {
+      status: 'Superseded by ADR-003 (2026-09-07)',
+      body: 'It named src/feature.mjs as well.',
+    }),
+  });
+  const lines = governingRecordLines(dir, ['src/feature.mjs'], ['docs/adr']);
+  assert.deepEqual(blockPaths(lines, GOVERNING_RECORDS_LINE), [
+    'docs/adr/adr-001-first.md',
+    'docs/adr/adr-002-second.md',
+  ]);
+  assert.deepEqual(blockPaths(lines, OTHER_RECORDS_LINE), ['docs/adr/adr-003-third.md']);
+  assert.ok(!lines.join('\n').includes('adr-004-fourth'), lines.join('\n'));
+  // The closing sentence names the tree and what a record outside both lists is.
+  assert.equal(
+    lines.at(-1),
+    'A record in docs/adr named in neither list is closed (its status line reads superseded or ' +
+      'retired) and is out of your scope. Do not open it. A record is written by a record seat; ' +
+      'the reconciliation stage owns every change to one.',
+  );
+});
+
+test('the count above the cap is stated, and no path is named twice', (t) => {
+  const files = {};
+  const cited = [];
+  for (let i = 1; i <= 14; i++) {
+    const id = String(i).padStart(3, '0');
+    files[`docs/adr/adr-${id}-neighbour.md`] = record(id, { body: 'It cites nothing.' });
+    cited.push(`ADR-${id}`);
+  }
+  files['docs/adr/adr-100-wide.md'] = record('100', {
+    body: `The helper lives at src/feature.mjs. It relies on ${cited.join(', ')}.`,
+  });
+  const dir = tree(t, files);
+  const lines = governingRecordLines(dir, ['src/feature.mjs'], ['docs/adr']);
+  const governing = blockPaths(lines, GOVERNING_RECORDS_LINE);
+  assert.equal(governing.length, NEIGHBOUR_CAP);
+  assert.ok(lines.includes('and 3 more, by the same rule, under docs/adr'), lines.join('\n'));
+  // Every active record is named once: the cap moves a record from the first
+  // list to the second and never into both.
+  const named = [...governing, ...blockPaths(lines, OTHER_RECORDS_LINE)];
+  assert.equal(new Set(named).size, named.length);
+  assert.equal(named.length, 15);
+});
+
+test('an excluded path is named in neither block', (t) => {
+  const dir = tree(t, {
+    'docs/adr/adr-001-first.md': record('001', {
+      body: 'The helper lives at `src/feature.mjs`.',
+    }),
+    'docs/adr/adr-002-second.md': record('002', { body: 'It decides something else.' }),
+  });
+  const lines = governingRecordLines(dir, ['src/feature.mjs'], ['docs/adr'], {
+    exclude: ['docs/adr/adr-001-first.md'],
+  });
+  assert.deepEqual(blockPaths(lines, GOVERNING_RECORDS_LINE), []);
+  assert.ok(!lines.includes(GOVERNING_RECORDS_LINE), lines.join('\n'));
+  assert.deepEqual(blockPaths(lines, OTHER_RECORDS_LINE), ['docs/adr/adr-002-second.md']);
 });
 
 test('the siblings of a superseded record leave out the run own scope', (t) => {
