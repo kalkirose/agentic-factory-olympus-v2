@@ -371,6 +371,13 @@ function treeSnapshot(worktree) {
   return {
     worktree,
     subjects: gitSync(['log', '--format=%s'], worktree).trim().split('\n'),
+    // The whole message of each commit, subject and body, one entry per commit.
+    // A round names the records it wrote in the body, and the workspace is gone
+    // by the time a scenario reads (ADR-0051, ADR-0090).
+    messages: gitSync(['log', '--format=%s%n%b%x1e', '-n', '20'], worktree)
+      .split('\u001e')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0),
     records: existsSync(records) ? readdirSync(records).sort() : [],
   };
 }
@@ -3274,8 +3281,7 @@ test('a restart mid-round dispatches the set the round stamped', async (t) => {
   // One commit for the round, with the set in its body: the subject names the
   // run, the seat and the ledger position, and the body names the records
   // (ADR-0090).
-  const log = gitSync(['log', '--format=%s%n%b%x1e', '-n', '10'], fx.trees.at(-1).worktree);
-  const commit = log.split('\u001e').find((entry) => entry.includes('reconcile: '));
+  const commit = fx.trees.at(-1).messages.find((entry) => entry.includes('reconcile: '));
   assert.ok(/reconcile: \S+ reconcile-write:1 @\d+/.test(commit), commit);
   for (const record of [ADR, ADR_TWO]) assert.ok(commit.includes(record), commit);
 });
