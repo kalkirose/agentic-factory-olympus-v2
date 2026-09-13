@@ -16,8 +16,8 @@ and nothing else.
   in `src/seats/seatmap.mjs`, carried by `dev`, `repair-dev`, and `suite` —
   the seats that run gate and suite commands to check their own work. Every
   other seat is spawned with every matching variable removed: spec birth, the
-  spec gate, the adversary, every review seat, the Fury verifier, verdict
-  triage, the card sweep, and the eval seat. A seat name the map does not hold
+  spec gate, every review seat, the Fury verifier, verdict triage, every record
+  seat, the card sweep, and the eval seat. A seat name the map does not hold
   reads false and is stripped, so being wrong about the policy is safe.
 - **A strip, never an allowlist.** Only the matching names go. The seat command
   needs its own auth and system environment to run at all, and no list of what
@@ -38,10 +38,9 @@ The strip sits at the one place a seat's environment is assembled,
 The daemon host holds a payment provider's test-mode keys and other
 credentials as user-scope environment variables, because the project's gate
 commands and its test suite need them to run at all. Every spawned process
-inherited the whole host environment. So the adversary seat, which writes
-deliberately wrong implementations into a throwaway tree, held the same
-credentials as the seat that runs the tests, and so did every judging seat that
-only ever reads a diff.
+inherited the whole host environment. So a seat that only ever reads a diff held
+the same credentials as the seat that runs the tests, and so did a seat whose
+whole work is one text file.
 
 That is a wide blast radius for no gain. A seat that never executes a command
 against the project cannot spend a credential on anything the harness wants;

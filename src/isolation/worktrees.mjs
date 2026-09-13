@@ -1,9 +1,7 @@
 // Run worktrees off the bare clone. Layout under the daemon home:
 //   worktrees/<runId>/tree     — the run worktree, on branch run/<runId>
-//   worktrees/<runId>/<tag>    — disposable worktrees (adversary waves),
-//                                detached at a named sha
 // Seats receive absolute paths. The whole <runId> root goes away at run
-// close; a disposable goes away when its wave reaches verdict.
+// close.
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { git } from './git.mjs';
@@ -56,14 +54,6 @@ export async function addRunWorktree(clone, paths, runId, base, { io = {} } = {}
     io,
   });
   return { path, branch };
-}
-
-/** Creates a disposable worktree, detached at a sha. */
-export async function addDisposableWorktree(clone, paths, runId, tag, sha, { io = {} } = {}) {
-  const path = join(workspaceRoot(paths, runId), tag);
-  const argv = ['worktree', 'add', '--detach', path, sha];
-  await addWorktree(clone, paths, runId, path, { add: argv, recreate: argv, io });
-  return path;
 }
 
 // The line the clone's own exclude file carries, anchored at the top of a
@@ -260,7 +250,7 @@ export async function removeRunWorktrees(
     try {
       await git(['branch', '-D', runBranch(runId)], { cwd: clone });
     } catch {
-      // The branch may not exist (disposables only, or a partial provision).
+      // The branch may not exist: a provision that stopped before it.
     }
   }
   await removeTree(root, { ...io, attempts: 1 });

@@ -40,7 +40,7 @@ test('no semaphores key at all caps nothing, before and after a live edit', asyn
   const releases = await Promise.all(seats.map((seat) => semaphores.acquire(MODEL, { store, seat })));
   assert.equal(releases.length, seats.length);
   semaphores.setLimits(undefined);
-  releases.push(await semaphores.acquire(MODEL, { store, seat: 'adversary' }));
+  releases.push(await semaphores.acquire(MODEL, { store, seat: 'card-sweep' }));
   for (const release of releases) release();
   assert.deepEqual(semaphores.limits, {});
   assert.equal(readEvents(runLedgerPath(paths, 'r1')).length, 0);

@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { removeDir, tempDir, writeTree } from './helpers.mjs';
 import {
   FORESEEN_MARKER,
+  cardClosure,
   isForeseenNote,
   noCriteriaMessage,
   parseIntentCard,
@@ -175,4 +177,118 @@ test('the note marker is read through markdown emphasis and leading space', () =
 
 test('a card with no foreseen section carries no notes', () => {
   assert.deepEqual(parseIntentCard(CARD).card.foreseenAmendments, []);
+});
+
+// -- named dependencies ------------------------------------------------------
+
+function dependencies(section) {
+  return parseIntentCard(`---\nkey: a-1\n---\n\n${section}`);
+}
+
+test('a dependency line names one importer and one package', () => {
+  const { card, errors } = dependencies(
+    ['## Dependencies', '', '- apps/storefront: zod', '- .: @scope/tool', ''].join('\n'),
+  );
+  assert.deepEqual(errors, []);
+  assert.deepEqual(card.dependencies, [
+    { importer: 'apps/storefront', name: 'zod' },
+    { importer: '.', name: '@scope/tool' },
+  ]);
+});
+
+test('a dependency line is read through the markdown a writer wraps it in', () => {
+  const { card, errors } = dependencies('## Dependencies\n\n- `apps/storefront`: **zod**\n');
+  assert.deepEqual(errors, []);
+  assert.deepEqual(card.dependencies, [{ importer: 'apps/storefront', name: 'zod' }]);
+});
+
+test('a card that names no dependency names none', () => {
+  assert.deepEqual(parseIntentCard(CARD).card.dependencies, []);
+  assert.deepEqual(dependencies('## Dependencies\n\n- None\n').card.dependencies, []);
+});
+
+test('a dependency line the parser cannot read is an error, never an omission', () => {
+  for (const line of ['- apps/storefront zod', '- apps/storefront: zod ^3.0.0', '- : zod']) {
+    const { card, errors } = dependencies(`## Dependencies\n\n${line}\n`);
+    assert.deepEqual(card.dependencies, []);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /<importer>: <name>/);
+  }
+});
+
+test('only the dependencies heading opens the section', () => {
+  // Every line of the section is read as one dependency and a line that is not
+  // one is an error, so a heading that merely holds the word would take a
+  // card's prose about its dependencies and refuse the card for it.
+  for (const heading of [
+    '## Dependencies and risks',
+    '## Open dependencies',
+    '### Dependency notes',
+  ]) {
+    const { card, errors } = dependencies(
+      [heading, '', '- this story waits on the payment work landing first', ''].join('\n'),
+    );
+    assert.deepEqual(errors, [], heading);
+    assert.deepEqual(card.dependencies, [], heading);
+  }
+  // The heading itself, at any level a card writes it and in any case.
+  assert.deepEqual(dependencies('### dependencies\n\n- .: zod\n').card.dependencies, [
+    { importer: '.', name: 'zod' },
+  ]);
+});
+
+// -- the closure a launch is judged on ---------------------------------------
+
+function cardText(key, blockedBy) {
+  const edges = blockedBy.map((b) => `"${b}"`).join(', ');
+  return `---\nkey: ${key}\nblocked-by: [${edges}]\n---\n\n## Goal\n\nDo the thing.\n`;
+}
+
+/** A cards directory, one file per key, named for its key. */
+function cardTree(t, graph) {
+  const dir = tempDir('olympus-cards-');
+  t.after(() => removeDir(dir));
+  writeTree(
+    dir,
+    Object.fromEntries(
+      Object.entries(graph).map(([key, blockedBy]) => [`${key}.md`, cardText(key, blockedBy)]),
+    ),
+  );
+  return dir;
+}
+
+test('the closure is the launched card and the cards it waits on', (t) => {
+  const dir = cardTree(t, { top: ['mid'], mid: ['base'], base: [] });
+  assert.deepEqual(cardClosure(dir, `${dir}/top.md`, { shipped: new Set() }), [
+    `${dir}/top.md`,
+    `${dir}/mid.md`,
+    `${dir}/base.md`,
+  ]);
+});
+
+test('the walk stops at a shipped card and never reaches behind it', (t) => {
+  const dir = cardTree(t, { top: ['mid'], mid: ['base'], base: [] });
+  assert.deepEqual(cardClosure(dir, `${dir}/top.md`, { shipped: new Set(['mid']) }), [
+    `${dir}/top.md`,
+  ]);
+});
+
+test('a diamond names each card once', (t) => {
+  const dir = cardTree(t, { top: ['left', 'right'], left: ['base'], right: ['base'], base: [] });
+  assert.deepEqual(cardClosure(dir, `${dir}/top.md`, {}), [
+    `${dir}/top.md`,
+    `${dir}/left.md`,
+    `${dir}/right.md`,
+    `${dir}/base.md`,
+  ]);
+});
+
+test('a blocker with no card file adds no path, and the rest of the walk holds', (t) => {
+  const dir = cardTree(t, { top: ['ghost', 'mid'], mid: [] });
+  assert.deepEqual(cardClosure(dir, `${dir}/top.md`, {}), [`${dir}/top.md`, `${dir}/mid.md`]);
+});
+
+test('the launched card is named once, whatever else in the directory names it', (t) => {
+  const dir = cardTree(t, { top: ['mid'], mid: ['top'] });
+  assert.deepEqual(cardClosure(dir, `${dir}/top.md`, {}), [`${dir}/top.md`, `${dir}/mid.md`]);
 });

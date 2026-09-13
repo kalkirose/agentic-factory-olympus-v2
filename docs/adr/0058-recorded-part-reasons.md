@@ -39,7 +39,11 @@ did.
   event carry `partsRun`, `partsCarried` and `carryShare`, over every layer of
   the cycle. A layer the cycle carried whole carried every part in it. A cycle
   that recorded no part carries no share at all: nought over nought is not a
-  share.
+  share. A footprint cycle is that case by construction: it carries whole
+  layers from a base certification and holds no part table, so it stamps none
+  of the three fields, and the console names the reading it has instead, the
+  carry by layer, rather than a share that would read as the inverse of the
+  truth.
 - **The share is watched from below.** The `carry-share-window` metric is the
   mean `carryShare` of the last N verdict cycles of a project that narrowed,
   and the `carry-share-floor` tripwire breaches under a configured floor. It is
@@ -125,10 +129,12 @@ be sixty-four copies of one fact. Three of them ride the layer.
 
 ## Why the share leaves out the cycles that run whole on purpose
 
-The metric reads targeted cycles alone. A full sweep is the first cycle of a
-pass and has nothing to carry from. A confirming cycle runs every layer at its
-own sha so the green it certifies rests on no carry (ADR-0046). Both are the
-design working, and both record a share of zero.
+The metric reads targeted cycles alone. A first cycle carries no part: it runs
+every part of every layer it runs, whether it runs the whole spectrum or only
+the footprint of its own diff, and a layer it carries whole from a base
+certification reports no part at all (ADR-0088). A confirming cycle runs every
+layer at its own sha so the green it certifies rests on no carry (ADR-0046).
+Both are the design working, and both record a share of zero.
 
 Counting them would read the design as a decay, and it would drag the mean down
 hardest on the runs that reached green fastest, which is exactly backwards. The
@@ -146,9 +152,9 @@ to catch, and a band that cries is a band an operator learns to ignore.
 The standing entry therefore ships at zero, which no share can fall below, so
 it cannot fire. It is a placeholder with the machinery behind it working, and
 the project raises the one value in its own registry once ten narrowed cycles
-stand on the ledger. That is the same self-baselining path the kill-rate and
-lens-yield bands take (ADR-0010), with the proposal done by hand because the
-reading has no baseline stamp of its own.
+stand on the ledger. That is the same self-baselining path the lens-yield band
+takes (ADR-0010), with the proposal done by hand because the reading has no
+baseline stamp of its own.
 
 ## Replay
 

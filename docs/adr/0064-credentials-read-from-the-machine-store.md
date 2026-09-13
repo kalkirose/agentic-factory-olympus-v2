@@ -116,11 +116,11 @@ are read by people and by seats, so it must be safe to carry off this machine.
 
 ## Why the strip stays where it is
 
-The seat strip is the rule that keeps a credential away from a throwaway
-adversary tree and a read-only review seat. A fresh value is a credential like
-any other, so it meets that rule rather than a new one. The alternative, a
-separate path that hands stored values to seats directly, would give the host's
-secrets a second route out and two rules to keep in step.
+The seat strip is the rule that keeps a credential away from a read-only review
+seat and from a seat whose whole work is a text file. A fresh value is a
+credential like any other, so it meets that rule rather than a new one. The
+alternative, a separate path that hands stored values to seats directly, would
+give the host's secrets a second route out and two rules to keep in step.
 
 ## Fallback paths
 

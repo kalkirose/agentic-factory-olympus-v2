@@ -16,8 +16,18 @@
 // does a part that named no file.
 //
 // The cycle plan decides which layers run (ADR-0022). The first cycle of an
-// implementation pass has nothing proven, so it runs every layer. A later
-// cycle judges a tree a repair round, a re-freeze, or an operational fix
+// implementation pass has proven nothing of its own, so it asks what the
+// default branch has already proven: a layer the branch holds a certification
+// for, whose ground the run's own diff leaves alone, carries that certification
+// instead of running. Everything else runs, and so does every layer the project
+// declares a setup layer, whatever the diff says of its ground. A setup layer
+// builds the tree the layers after it read, and a certification of another tree
+// does not stand in for that. Doubt buys the whole spectrum: no setup layer
+// declared, a layer with no ground, no certification of the base, a diff git
+// cannot answer, or a changed file no layer's ground claims. The cycle then runs
+// every layer and records which of the five it was.
+//
+// A later cycle judges a tree a repair round, a re-freeze, or an operational fix
 // touched, so it runs the targeted set — every layer the pass has not proven
 // green, plus every layer downstream of one of those through `needs` — and
 // carries the remaining greens forward. A carried result is marked `carried`,
@@ -147,7 +157,8 @@ const ATTEMPTS = 2;
  *   commands: Record<string, string[]>, cwd: string, env?: object,
  *   cycle: number, sha: string, run?: Set<string>|null,
  *   skip?: Set<string>|null,
- *   prior?: Map<string, object>|null, confirmation?: boolean,
+ *   prior?: Map<string, object>|null,
+ *   certified?: Map<string, object>|null, confirmation?: boolean,
  *   parts?: Map<string, {narrow: {run: string[], carry: Array<object>}|null,
  *     reasons: Map<string, string>, blindPaths: string[]}>|null,
  *   groups?: Array<string[]>|null, flakeRerun?: 'narrowed'|'whole',
@@ -159,6 +170,12 @@ const ATTEMPTS = 2;
  *   them, because a layer the diff cannot reach earns no green here and a
  *   layer with no green to carry would otherwise run. Absent is the behaviour
  *   of every cycle before the record attribution existed.
+ *   `certified` is what the default branch already answered for, per layer this
+ *   cycle's plan left out of `run`: the base sha, the certification's seq and
+ *   the status it holds. Such a layer stamps a result of its own that says it
+ *   carried the branch's proof rather than buying one here. Absent means the
+ *   only carry is this run's own `prior`, which is every cycle before the base
+ *   certification existed.
  *   `groups` names the layers this project lets hold the machine together
  *   (ADR-0047). Absent is the strict sequence, which is what every project ran
  *   before the field existed.
@@ -200,6 +217,9 @@ const ATTEMPTS = 2;
  *   `carriedFrom` at all.
  *   `blindPaths` names up to three changed paths the plan could attribute to
  *   no part of this layer, which is why every part of it ran.
+ *   `carriedFrom`, `baseSha` and `certifiedSeq` ride a layer that carried the
+ *   default branch's certification rather than running: the tree the green was
+ *   earned at, and the certification that holds it.
  *   `log` is the file holding that layer's whole output, for the red that has
  *   one: the tail and the parts are the summary, the file is the text.
  *   `resources` is what the layer's process tree peaked at, and `exhaustion`
@@ -220,6 +240,7 @@ export async function runSpectrum(
     run = null,
     skip = null,
     prior = null,
+    certified = null,
     confirmation = false,
     parts = null,
     groups = null,
@@ -252,7 +273,18 @@ export async function runSpectrum(
     // the layers that are left are the ones that really do run together.
     const planned = batch.map((layer) => ({
       layer,
-      ...planLayer(ctx, { layer, stamped, confirmation, run, prior, status, cycle, sha, mark }),
+      ...planLayer(ctx, {
+        layer,
+        stamped,
+        confirmation,
+        run,
+        prior,
+        certified,
+        status,
+        cycle,
+        sha,
+        mark,
+      }),
     }));
     const running = planned.filter((p) => p.record === null).map((p) => p.layer.name);
     // The record stays in declared order however the machine interleaved the
@@ -299,6 +331,13 @@ export async function runSpectrum(
         status: record.status,
         mode,
         ...(record.attributedTo && { attributedTo: record.attributedTo }),
+        // Where a carry of the default branch's own certification came from. A
+        // reader of the verdict record sees which tree answered for this layer
+        // and which certification said so, because a skip is a claim and the
+        // claim has to be checkable from the record alone.
+        ...(record.carriedFrom !== undefined && { carriedFrom: record.carriedFrom }),
+        ...(record.baseSha && { baseSha: record.baseSha }),
+        ...(record.certifiedSeq !== undefined && { certifiedSeq: record.certifiedSeq }),
         ...(record.credentialAbsent?.length > 0 && { credentialAbsent: record.credentialAbsent }),
         ...(record.resources && { resources: record.resources }),
         ...(record.exhaustion && { exhaustion: record.exhaustion }),
@@ -325,12 +364,16 @@ export async function runSpectrum(
 
 /**
  * What one layer of a batch is before any child process runs: the stamp this
- * cycle already holds, the green it carries, or the not-runnable it earns.
- * `record: null` means the layer has to run, and `confirm` is what the
- * confirmation sweep runs of it. Synchronous by design, so a whole batch is
- * decided before any of it is dispatched.
+ * cycle already holds, the green it carries from this run or from the default
+ * branch's own certification, or the not-runnable it earns. `record: null` means
+ * the layer has to run, and `confirm` is what the confirmation sweep runs of it.
+ * Synchronous by design, so a whole batch is decided before any of it is
+ * dispatched.
  */
-function planLayer(ctx, { layer, stamped, confirmation, run, prior, status, cycle, sha, mark }) {
+function planLayer(
+  ctx,
+  { layer, stamped, confirmation, run, prior, certified, status, cycle, sha, mark },
+) {
   const record = stamped.get(layer.name);
   // The confirmation sweep is the cycle whose green the verdict ships on, and
   // it will not stand on a part nothing ran at this sha. A result this cycle
@@ -349,7 +392,11 @@ function planLayer(ctx, { layer, stamped, confirmation, run, prior, status, cycl
     if (keep.length === 0) return { record: null, mode: 'run' };
     return { record: null, mode: 'run', confirm: { narrow: { run, carry: [] }, keep } };
   }
-  if (record) return { record, mode: 'run' };
+  // The stamp is the fact, and what it says includes how the layer got there. A
+  // result this cycle stamped as a carry stays a carry when the daemon comes
+  // back: re-reading it as a run would turn a claim about another tree into a
+  // proof of this one, and nothing later in the run could tell.
+  if (record) return { record, mode: record.mode === 'carried' ? 'carried' : 'run' };
   const carried = carriedResult(layer, run, prior);
   if (carried) return { record: carried, mode: 'carried' };
   // No layer of a batch may need another layer of the same batch, so this
@@ -368,6 +415,30 @@ function planLayer(ctx, { layer, stamped, confirmation, run, prior, status, cycl
         ...mark,
       }),
       mode: 'run',
+    };
+  }
+  // The base carry comes after the blocked test and never before it. A layer
+  // whose prerequisite has just gone red is not-runnable, and a certification of
+  // another tree says nothing about that: stamped as a green it would report a
+  // proof nobody holds and would close an open exhaustion record on the way
+  // (`resolution.mjs`).
+  const base = certified && !run?.has(layer.name) ? certified.get(layer.name) : undefined;
+  if (base) {
+    return {
+      record: stampLayer(ctx, 'layer-result', {
+        cycle,
+        layer: layer.name,
+        status: base.status,
+        // The tree this cycle judged, as every result of the cycle carries it.
+        // Where the green was earned is `baseSha`, so the two shas stay apart.
+        sha,
+        mode: 'carried',
+        carriedFrom: 'base',
+        baseSha: base.baseSha,
+        certifiedSeq: base.certifiedSeq,
+        ...mark,
+      }),
+      mode: 'carried',
     };
   }
   return { record: null, mode: 'run' };
@@ -1188,6 +1259,133 @@ export function groundedLayers(
 }
 
 /**
+ * The one sweep reason the footprint attribution decides for itself. The others
+ * are read off the config, the instance ledger and the ledger's own renders.
+ */
+export const UNCLAIMED_GROUND = 'unclaimed-ground';
+
+/**
+ * A red PR check names no layer of this tree, so no layer's standing green is
+ * the one the check contradicts, and the whole spectrum is the only search the
+ * harness has.
+ */
+export const CI_RED = 'ci-red';
+
+/**
+ * Why a cycle ran the whole spectrum instead of the footprint of its own diff. A
+ * closed vocabulary, because the reading that says whether the footprint is ever
+ * taken on a project is a count of these words, and prose cannot be counted
+ * (ADR-0008).
+ *
+ * The project declares no setup layer, so nothing says which layers make the
+ * others runnable. A Tier-1 layer declares no ground, so it has claimed nothing.
+ * The project holds no certification of its default branch. The diff of the run
+ * against its base will not read. A changed file lies under no layer's ground.
+ * A CI red is the cycle's cause and it names no layer.
+ */
+export const SWEEP_REASONS = new Set([
+  'no-setup-layer',
+  'groundless-layer',
+  'no-base-certification',
+  'unreadable-diff',
+  UNCLAIMED_GROUND,
+  CI_RED,
+]);
+
+/** @param {string} reason */
+export function assertSweepReason(reason) {
+  if (!SWEEP_REASONS.has(reason)) throw new Error(`unknown sweep reason: ${reason}`);
+  return reason;
+}
+
+/**
+ * The set the first cycle of a pass runs when the default branch is certified:
+ * the layers whose ground the run's own diff touches, closed over `needs`, plus
+ * every layer no certification answers for, plus every setup layer.
+ *
+ * The four clauses answer four different questions, and each fails towards
+ * running.
+ *
+ * A layer whose ground the diff touches runs. The certification says the layer
+ * was green at the base; the diff says the run changed something the layer
+ * reads, so the certification no longer answers. Its dependents run with it: a
+ * layer judged against a prerequisite the run changed was judged against
+ * something else.
+ *
+ * A layer no certification answers for runs. No claim, no carry.
+ *
+ * A setup layer runs whatever the diff and the certification say, and its
+ * dependents are NOT pulled in with it. A setup layer produces the tree the
+ * layers after it read: installed modules, a build output. That tree is not in
+ * the repository, so no certification of another run's host stands in for it.
+ * The rule is a statement about this host and not about the diff, so it widens
+ * nothing beyond the layer itself.
+ *
+ * The frozen suite runs on the same footing, and for the reason the seat bound
+ * takes it by declaration: it is the layer that asserts the story, the run wrote
+ * it inside this pass, and a certification of the default branch was earned
+ * before it existed. Its dependents are not pulled in either, for the setup
+ * layer's reason: the claim is about this run's own suite and not about ground
+ * any other layer reads. A caller with no frozen suite names none, which is
+ * every repair round.
+ *
+ * A record path is attributed by the project, exactly as it is in
+ * `groundedLayers`: it selects the layers of `gates.recordLayers` and no other,
+ * whatever any ground declares.
+ *
+ * `unclaimed` names the changed files no layer's ground reaches. They are the
+ * one thing this attribution cannot answer: the project has not said which
+ * layer reads them, so no carry over them rests on anything, and the caller
+ * buys the whole spectrum instead. The ground the project states no suite reads
+ * leaves the diff before any of this, because that list is the project saying
+ * these files reach no layer on purpose.
+ *
+ * @param {Array<{name: string, needs?: string[], ground?: string[],
+ *   setup?: boolean}>} layers
+ * @param {{changed: string[], certified: Map<string, object>, suite?: string|null,
+ *   breadth?: string[], groundless?: string[], recordPaths?: string[],
+ *   recordLayers?: string[]}} diff
+ *   `changed` is the run's own diff against the certified base; `suite` the
+ *   frozen suite's layer name, null where the lane has no frozen suite
+ * @returns {{run: Set<string>, unclaimed: string[]}}
+ */
+export function footprintLayers(
+  layers,
+  {
+    changed,
+    certified,
+    suite = null,
+    breadth = [],
+    groundless = [],
+    recordPaths = [],
+    recordLayers = [],
+  },
+) {
+  const records = recordAttribution({ recordPaths, recordLayers });
+  const moved = changed.filter((file) => !groundless.some((entry) => underEntry(file, entry)));
+  const touched = new Set();
+  const claimed = new Set();
+  for (const layer of layers) {
+    const ground = layerGround(layer, null, breadth, recordPaths);
+    const reaches = (file) =>
+      records !== null && records.isRecord(file)
+        ? records.layers.has(layer.name)
+        : ground.entries.some((entry) => underEntry(file, entry));
+    for (const file of moved.filter(reaches)) {
+      claimed.add(file);
+      touched.add(layer.name);
+    }
+  }
+  const run = withDependents(layers, touched);
+  for (const layer of layers) {
+    if (layer.setup === true || layer.name === suite || !certified.has(layer.name)) {
+      run.add(layer.name);
+    }
+  }
+  return { run, unclaimed: moved.filter((file) => !claimed.has(file)) };
+}
+
+/**
  * The set a record-only cycle runs: the layers the project attributes its
  * records to, the layers downstream of those, and the prerequisites of both
  * that hold no green to stand on.
@@ -1267,7 +1465,7 @@ function skippedLayers(layers, run, prior) {
  * one that runs either reported not-runnable or was judged against a
  * prerequisite that may change, so neither has a green worth carrying.
  */
-function withDependents(layers, target) {
+export function withDependents(layers, target) {
   const dependents = new Map();
   for (const layer of layers) {
     for (const need of layer.needs ?? []) {
@@ -1288,10 +1486,23 @@ function withDependents(layers, target) {
 
 /**
  * What one verdict cycle runs. The first cycle of an implementation pass has
- * nothing proven, so it runs the full spectrum; so does the first cycle after
- * a CI red, whose red checks name no Tier-1 layer of this tree. Every other
- * cycle judges a tree a repair round, a re-freeze, or an operational fix
- * touched, and runs the targeted set.
+ * proven nothing of its own, and runs the footprint of the run's own diff against
+ * a certified base, or the full spectrum where the caller could not offer one.
+ * Every other cycle judges a tree a repair round, a re-freeze, or an operational
+ * fix touched, and runs the targeted set.
+ *
+ * The first cycle after a CI red is the exception that runs everything. A red
+ * check is stamped against the check's own name and maps to no Tier-1 layer of
+ * this tree, so no standing green is the one the red contradicts and no
+ * footprint can be drawn around it. The full spectrum is the only search there
+ * is, and it says so with its reason.
+ *
+ * `footprint` is the caller's answer about the base: `{changed, certified}` to
+ * take the footprint, or `{reason}` where one of the conditions the caller reads
+ * is not met and the full sweep names which. The condition this module reads for
+ * itself is the diff: a changed file no layer's ground claims buys the full
+ * sweep here. A caller that offers nothing takes the full sweep with no reason,
+ * which is what every cycle took before a base was ever certified.
  *
  * A cycle whose whole diff is the record tree runs a third set, and it runs it
  * before every other clause, on the first cycle of a pass as much as on a later
@@ -1309,7 +1520,18 @@ function withDependents(layers, target) {
  */
 export function cyclePlan(
   events,
-  { cycle, pass, layers, changed = null, recordPaths = [], recordLayers = [] },
+  {
+    cycle,
+    pass,
+    layers,
+    changed = null,
+    breadth = [],
+    groundless = [],
+    recordPaths = [],
+    recordLayers = [],
+    footprint = null,
+    suite = null,
+  },
 ) {
   const records = recordAttribution({ recordPaths, recordLayers });
   const prior = priorStatus(events, cycle);
@@ -1327,6 +1549,25 @@ export function cyclePlan(
   }
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   const previous = renders[renders.length - 1];
-  if (!previous || previous.pass !== pass || previous.source === 'ci') return { sweep: 'full' };
-  return { sweep: 'targeted', run: targetedLayers(layers, prior), prior };
+  if (previous !== undefined && previous.pass === pass) {
+    if (previous.source === 'ci') return { sweep: 'full', reason: assertSweepReason(CI_RED) };
+    return { sweep: 'targeted', run: targetedLayers(layers, prior), prior };
+  }
+  if (footprint?.reason !== undefined) {
+    return { sweep: 'full', reason: assertSweepReason(footprint.reason) };
+  }
+  if (footprint === null) return { sweep: 'full' };
+  const scoped = footprintLayers(layers, {
+    changed: footprint.changed,
+    certified: footprint.certified,
+    suite,
+    breadth,
+    groundless,
+    recordPaths,
+    recordLayers,
+  });
+  // A change no layer's ground reaches is a change nothing here can attribute.
+  // Carrying over it would rest a green on a claim the project never made.
+  if (scoped.unclaimed.length > 0) return { sweep: 'full', reason: UNCLAIMED_GROUND };
+  return { sweep: 'footprint', run: scoped.run, certified: footprint.certified };
 }

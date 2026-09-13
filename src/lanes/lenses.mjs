@@ -87,6 +87,33 @@ export function recordCriteriaLines() {
 }
 
 /**
+ * The ground duty, stated once for every brief that asks a seat for a finding.
+ *
+ * The ground is what decides whether a finding survives a moved base. A merge
+ * that touches ground the finding rests on costs the run its code
+ * certification; a merge that touches nothing the finding names leaves the
+ * certification standing. A finding with no ground answers that question for
+ * nothing, so every claim in the project has to re-earn itself.
+ *
+ * Paths, and not package names: a package is not a file of this repository and
+ * no diff can be compared against it, while the manifest that declares it and
+ * the file that imports it both are. A sentence is not a path either, so the
+ * duty names the one legal form for a finding whose subject is the whole tree:
+ * the glob every file matches. It is a claim that stands only while nothing at
+ * all moves, and stating it that way makes the cost visible to the seat that
+ * makes it, which a phrase like "the whole repository" never could.
+ */
+export const FINDING_GROUND_DUTY = Object.freeze([
+  'Name the ground of every finding in "ground": the repo-relative paths or directories the',
+  'finding is about, one entry each. Every entry is a path this tree holds, or a glob over such',
+  'paths; a finding about a file the diff deletes names the directory it stood in. A finding',
+  'about a package names the manifest that declares it or the file that imports it. A finding',
+  'whose subject is the whole tree names "**", the one whole-tree ground, and it stands only',
+  'while nothing at all moves. A finding that names no ground is refused, and so is an entry',
+  'this tree has nothing at.',
+]);
+
+/**
  * The panel a project gets when it declares none. Architecture and minimality
  * are out of it: across ten ships they raised 82 findings and the verifier
  * confirmed none, so the two seats' worth of work bought no block (ADR-0038).
@@ -95,18 +122,17 @@ export function recordCriteriaLines() {
 export const DEFAULT_LENSES = Object.freeze(['spec', 'operational', 'security', 'interface']);
 
 /**
- * The dimensions a security probe covers, and one definition of them with six
- * readers (ADR-0038, ADR-0072). The verdict panel reads them as one lens over
- * the candidate diff. The adversary waves read them as directions to be wrong
- * in. Every suite write reads them twice more, once in the brief that asks the
- * seat to map the story's surface along them and once in the deterministic
- * check over the map that comes back, and the story lane and the verdict lane
- * each hold one of those two pairs. One list, so no reader can narrow what
- * another one still probes.
+ * The dimensions a security probe covers, and one definition of them with
+ * several readers (ADR-0038, ADR-0072). The verdict panel reads them as one
+ * lens over the candidate diff. Every suite write reads them twice, once in
+ * the brief that asks the seat to map the story's surface along them and once
+ * in the deterministic check over the map that comes back, and the story lane
+ * and the verdict lane each hold one of those two pairs. One list, so no
+ * reader can narrow what another one still probes.
  *
  * They are not project config. A project that drops the security lens from its
- * verdict panel still gets the dimensions in its waves, because they ride the
- * wave brief and not the panel, and a suite must map what the adversary probes.
+ * verdict panel still gets the dimensions in every suite brief, because they
+ * ride the map rule and not the panel.
  */
 export const SECURITY_DIMENSIONS = Object.freeze([
   'authorization on every entry point',

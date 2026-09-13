@@ -288,10 +288,10 @@ export function superviseSeat(
  *
  * The machine's secrets follow the ability to execute the project's suite and
  * nothing else. A seat that never runs a gate command has no use for a payment
- * or auth credential, and a throwaway adversary tree or a read-only review seat
- * is the last place one should be readable. So every variable whose name
- * matches a configured `secretEnv` pattern is removed before the spawn, for
- * every seat the seat map does not mark `executesSuite`. Only those names go:
+ * or auth credential, and a read-only review seat is the last place one should
+ * be readable. So every variable whose name matches a configured `secretEnv`
+ * pattern is removed before the spawn, for every seat the seat map does not
+ * mark `executesSuite`. Only those names go:
  * the CLI still needs its own auth and system environment to run at all, so
  * this is a strip, never an allowlist. Without patterns the environment is
  * exactly what it was before the feature existed, for every seat.

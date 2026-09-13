@@ -7,7 +7,12 @@ import { isAbsolute, join } from 'node:path';
 import { readEvents } from '../ledger/ledger.mjs';
 import { ACK_OPTION } from '../ledger/acks.mjs';
 import { isAbandon } from '../ledger/parks.mjs';
-import { runLedgerPath, runReportPath } from '../daemon/home.mjs';
+import {
+  runLedgerPath,
+  runReportPath,
+  seatBoundPath,
+  seatSettingsPath,
+} from '../daemon/home.mjs';
 import { credentialEnv, declaredNames } from '../daemon/credentials.mjs';
 import {
   DEFAULT_CONSTITUTION_PATH,
@@ -482,26 +487,40 @@ export function withTreeRefresh(handlers) {
  * `stage-blocked` park, and stamps what it did. Returns the stamp, or null
  * where there is nothing to do.
  *
- * The reach is exactly the tree the run has written nothing to: a clean tree
- * whose HEAD the default branch already holds. A tree with the run's own work
- * in it keeps that work, because a reset would take what a verdict is owed,
- * and the stamp says so. One stamp per park, so the tree moves once per answer
- * and every later entry of the stage reads the ledger and stops.
- *
- * The refresh never fails a stage. A fetch or a reset that throws is recorded
- * with its cause, and the stage runs against the tree it already had, exactly
- * as it did before this guard existed.
+ * That park class is the one the run cannot repair itself, so the repair lands
+ * on the branch and the retry has to meet it. Every other class is answered
+ * against the tree the run already has.
  */
 export async function refreshForRetry(ctx) {
   const events = runEvents(ctx);
   const asked = lastPark(events);
   if (!asked?.answer || asked.park.type !== 'stage-blocked') return null;
   if (isAbandon(asked.answer)) return null;
-  if (events.some((e) => e.event === 'tree-refreshed' && e.park === asked.park.seq)) return null;
+  return refreshTree(ctx, { parkSeq: asked.park.seq });
+}
+
+/**
+ * The refresh itself, for one park, whoever asks for it. The retry route above
+ * is one caller; a stage that has just written to the default branch itself is
+ * the other, and it needs the same tree afterwards for the same reason.
+ *
+ * The reach is exactly the tree the run has written nothing to: a clean tree
+ * whose HEAD the default branch already holds. A tree with the run's own work
+ * in it keeps that work, because a reset would take what a verdict is owed,
+ * and the stamp says so. One stamp per park, read from the ledger, so a stage
+ * entered twice on one answer moves the tree once.
+ *
+ * The refresh never fails a stage. A fetch or a reset that throws is recorded
+ * with its cause, and the stage runs against the tree it already had, exactly
+ * as it did before this guard existed.
+ * @param {{parkSeq: number}} at the park the refresh belongs to
+ */
+export async function refreshTree(ctx, { parkSeq }) {
+  if (runEvents(ctx).some((e) => e.event === 'tree-refreshed' && e.park === parkSeq)) return null;
   const worktree = ctx.payload.worktree;
   const branch = ctx.payload.defaultBranch ?? 'main';
   const stamp = (fields) =>
-    ctx.store.append('tree-refreshed', { actor: ACTOR, park: asked.park.seq, branch, ...fields });
+    ctx.store.append('tree-refreshed', { actor: ACTOR, park: parkSeq, branch, ...fields });
   let from = null;
   try {
     await fetchClone(cloneDir(ctx.paths, ctx.project));
@@ -700,6 +719,10 @@ export function attemptLimit(events, seat) {
  * stamp, the invocation count and the park detail. The cost comes back beside
  * the report, because a caller that stamps one entry per record needs what the
  * dispatch spent and the ledger's own per-seat total cannot say which slot.
+ *
+ * `settings` is the bound the seat runs inside, as the caller computed it. The
+ * two files it needs are named here, per dispatch, from the invocation count
+ * the ledger already holds.
  */
 export async function seatWithChecks(
   ctx,
@@ -718,6 +741,7 @@ export async function seatWithChecks(
     park = null,
     brief: opening = null,
     resumeByReport = null,
+    settings = null,
   },
 ) {
   // The report the ledger already holds for this seat's label, past the stamp
@@ -757,6 +781,17 @@ export async function seatWithChecks(
       constitution,
       ...(styleFiles && { styleFiles }),
       ...(denyTools && { denyTools }),
+      // The bound this dispatch runs inside, with the two files it needs named
+      // per dispatch: the invocation count is what makes them this dispatch's
+      // own, and the refusals of one seat are then readable against the bound
+      // that produced them.
+      ...(settings && {
+        settings: {
+          bound: settings,
+          settingsPath: seatSettingsPath(ctx.paths, ctx.runId, seat, n),
+          boundPath: seatBoundPath(ctx.paths, ctx.runId, seat, n),
+        },
+      }),
     });
     if (!result.ok) return { fail: seatFail(ctx, seat, result, park) };
     const defects = await checks(result.report);

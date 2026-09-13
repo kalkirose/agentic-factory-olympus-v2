@@ -47,7 +47,6 @@ export const SEATS = Object.freeze({
   // subagents (ADR-0074).
   'record-author': seat(),
   suite: seat({ executesSuite: true }),
-  adversary: seat(),
   // implementation
   dev: seat({ web: true, explore: 2, executesSuite: true }),
   'repair-dev': seat({ web: true, explore: 2, executesSuite: true }),

@@ -267,9 +267,6 @@ function seedPriorRun(paths, { baseSha, frozenSha, launch = {}, freeze = {}, clo
     store.append('freeze', {
       actor: 'daemon',
       sha: frozenSha,
-      killCount: 3,
-      amendmentKills: 0,
-      dispositions: 0,
       files: 1,
       record: 'seeded',
       ...freeze,
@@ -292,9 +289,6 @@ function seedPriorRun(paths, { baseSha, frozenSha, launch = {}, freeze = {}, clo
           storyKey: 'alpha-1',
           suiteSha: frozenSha,
           suiteFiles: ['tests/feature.test.mjs'],
-          killCount: 3,
-          amendmentKills: 0,
-          dispositions: [],
           redState: { result: 'red', sha: frozenSha, reds: [] },
           ...record,
         },
@@ -334,10 +328,6 @@ test('a resume inherits a real freeze and enters the post-freeze stage seatless'
         summary: 'authored',
       },
     }),
-    adversary: () => ({
-      files: { 'src/feature.mjs': 'export const f = () => 0;\n' },
-      report: { approach: 'stub', wrongness: 'f returns 0' },
-    }),
   };
   const fx = fixture(t);
   const seat = seatFixture(seats);
@@ -351,7 +341,6 @@ test('a resume inherits a real freeze and enters the post-freeze stage seatless'
   const firstEvents = await waitClosed(fx.paths, first.runId);
   await waitReleased(fx.paths, first.runId);
   const frozen = firstEvents.find((e) => e.event === 'freeze');
-  assert.equal(frozen.killCount, 1);
   // The branch a resume inherits from survives a close that did not ship.
   const clone = cloneDir(fx.paths, 'proj');
   assert.match(gitSync(['branch', '--list', runBranch(first.runId)], clone), /run\//);
@@ -388,7 +377,6 @@ test('a resume inherits a real freeze and enters the post-freeze stage seatless'
   assert.equal(inherited.frozenSha, frozen.sha);
   assert.equal(inherited.sha, frozen.sha); // the base did not move: no merge
   assert.equal(inherited.files, 1);
-  assert.equal(inherited.killCount, 1);
   assert.deepEqual(inherited.priorFindings, []);
   assert.deepEqual(inherited.priorLoud, []);
   // The artifacts travelled, and the record still names the run that earned it.

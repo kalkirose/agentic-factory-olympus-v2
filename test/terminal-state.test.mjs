@@ -67,6 +67,11 @@ Provide f(x) that doubles x in src/feature.mjs.
 const CLOSE_SET = new Set([
   'shipped', // the ship step's close-out
   'failed:<answer>', // the abandon route (lanes/shared.mjs)
+  // The owner refusing a dependency the card does not name. It is not a
+  // failure the run met: it is the answer to the one question the story
+  // cannot settle, and the answer is no, so there is nothing left to author.
+  // The route is the owner's word on a park, which is why it closes at all.
+  'failed:dependency-refused',
 ]);
 
 // -- source scan -------------------------------------------------------------

@@ -272,13 +272,13 @@ export function validateProjectConfig(config, { launch = false } = {}) {
 /**
  * The frozen suite has to be a Tier-1 layer. A verdict runs `gates.tier1` and
  * nothing else, while the lane's `suiteCommand` runs only before an
- * implementation exists: the freeze red-state check, the inherited-base
- * red-state check, and the adversary waves in their disposable trees. So a
- * suite command no layer carries runs against the pre-implementation tree and
- * never against the candidate, and the green verdict is silent about the one
- * suite the run was created to satisfy. The match is on the command, not the
- * layer name: a layer may call the suite whatever the project's gate
- * vocabulary calls it. Launch-only: see `validateProjectConfig`.
+ * implementation exists: the freeze red-state check and the inherited-base
+ * red-state check. So a suite command no layer carries runs against the
+ * pre-implementation tree and never against the candidate, and the green
+ * verdict is silent about the one suite the run was created to satisfy. The
+ * match is on the command, not the layer name: a layer may call the suite
+ * whatever the project's gate vocabulary calls it. Launch-only: see
+ * `validateProjectConfig`.
  */
 function validateSuiteIsGated(gates, story, err) {
   const suite = story.suiteCommand;
@@ -497,6 +497,17 @@ function validateGates(gates, commands, err, launch = false) {
         err(at('memoryCeilingMb'), 'must be a positive number of mebibytes');
       }
     }
+    // Whether this layer is what makes the others runnable: an install, a
+    // generated client, a built image. Such a layer runs whatever the change
+    // touches, because its ground says which files it reads and says nothing
+    // about which layers cannot run without it. A reader that scopes work by
+    // the footprint of a diff takes these by declaration, and `needs` cannot
+    // stand in for the declaration: a layer reaches the run set through
+    // `needs` only when a dependent of it is already in that set. Absent is
+    // false, which is every layer that only proves something.
+    if (layer.setup !== undefined && typeof layer.setup !== 'boolean') {
+      err(at('setup'), 'must be a boolean');
+    }
     validateLayerGround(layer, at, gates.fastPathShip === true && launch, err);
     if (typeof layer.name === 'string') seen.add(layer.name);
   });
@@ -694,9 +705,8 @@ function validateStoryLane(lane, commands, err) {
       );
     }
   }
-  // Adversary waves per round. The lane defaults it, so the entry is only
-  // ever a raise; a zero or a fraction would read as a raise and disarm the
-  // stage instead, which is why the figure is validated rather than clamped.
+  // Retired: no stage reads this figure. The key stays accepted, and
+  // validated, so a pinned config blob that still carries it parses.
   if (lane.adversaryWaves !== undefined) {
     if (!Number.isInteger(lane.adversaryWaves) || lane.adversaryWaves < 1) {
       err('lanes.story.adversaryWaves', 'must be a positive integer wave count');
@@ -942,13 +952,26 @@ const POLICED_LANES = new Set(['story', 'repair']);
 // recorded quietly rather than as an open loud item. `sweptPaths` names where a
 // red test run drops generated artifacts, so a file the freeze never held is
 // cleared instead of reported as a take-back (ADR-0017).
+//
+// `dependencyPaths` is the one tier judged by content rather than by path. A
+// dependency lockfile carries every package of every workspace member, so
+// "the lane may write it" and "the lane may not write it" are both wrong: the
+// lane may write exactly the dependency the card names. The path tiers cannot
+// say that, so the capture reads the file.
 const TIER_KEYS = [
   'deniedPaths',
   'declaredPaths',
+  'dependencyPaths',
   'forbiddenPatterns',
   'recapturablePaths',
   'sweptPaths',
 ];
+
+// The lane whose card names the dependencies the content tier admits. A lane
+// with no card has nothing to judge the file against, so declaring the tier
+// there would either admit every write or refuse every one; both are worse
+// than the path tiers that lane already has.
+const DEPENDENCY_LANE = 'story';
 
 function validateDiffPolicy(policy, err) {
   if (policy === undefined) return;
@@ -974,8 +997,16 @@ function validateDiffPolicy(policy, err) {
     }
     validateStringList(tiers.deniedPaths, at('deniedPaths'), err);
     validateStringList(tiers.declaredPaths, at('declaredPaths'), err);
+    validateStringList(tiers.dependencyPaths, at('dependencyPaths'), err);
     validateStringList(tiers.recapturablePaths, at('recapturablePaths'), err);
     validateStringList(tiers.sweptPaths, at('sweptPaths'), err);
+    if (tiers.dependencyPaths !== undefined && lane !== DEPENDENCY_LANE) {
+      err(
+        at('dependencyPaths'),
+        `only the ${DEPENDENCY_LANE} lane takes this tier: the capture holds the file to the ` +
+          "dependencies the run's intent card names, and no other lane carries a card",
+      );
+    }
     if (tiers.forbiddenPatterns === undefined) continue;
     if (!isStringList(tiers.forbiddenPatterns)) {
       err(at('forbiddenPatterns'), 'must be an array of non-empty strings');

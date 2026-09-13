@@ -114,6 +114,12 @@ export const RUN_EVENTS = new Set([
   // ledgers before it existed (ADR-0061).
   'run-reconfigured',
   'stage-entered',
+  // A run resumed in a stage this harness no longer runs, sent to the stage
+  // the lane's `retired` map names: `from`, `to`, and the `lane` that holds
+  // the map. A stage removal leaves ledgers standing in the removed name, and
+  // the resume guard refuses a stage its lane does not list, so without the
+  // map and this stamp a removal would strand every run that sat there.
+  'stage-retired',
   // The stage that settled while an operator hold stood, and the stage the run
   // did not enter behind it. A hold interrupts nothing: the running stage keeps
   // its seats and finishes, and the chain stops at the boundary. Quiet — the
@@ -176,6 +182,19 @@ export const RUN_EVENTS = new Set([
   // (ADR-0080).
   'run-closed',
   ...SEAT_EVENTS,
+  // The bound one dev seat was spawned inside: the digest of the bound file
+  // its hook reads, and the layers that file names. The hook decides alone and
+  // appends to a file rather than to a ledger, because one in-process writer
+  // holds the seq and a second corrupts it. So this stamp is the whole record
+  // of what a seat was allowed to run, and a refusal below is readable only
+  // against it.
+  'seat-bound',
+  // One command the bound refused: the `seat`, the `layer` the command named,
+  // the `command` as the tool was given it, and the `reason`. Stamped when the
+  // seat ends, from the file the hook appended to. A count above a few on one
+  // seat says the brief does not state the bound and the seat is fighting the
+  // hook, which is a defect of the brief rather than of the seat.
+  'seat-command-refused',
   // One read-only probe of one external credential, at the launch gate or at
   // the ship gate: `ok` carries the answer, and both answers are stamped, so
   // a run always says which credentials it proved and when. The probe's own
@@ -215,7 +234,28 @@ export const RUN_EVENTS = new Set([
   // nothing and stops nothing, and the route carries on as it did before the
   // probe existed (ADR-0022).
   'substrate-probe',
+  // readiness
+  // Card errors the readiness lint found outside the launched card and the
+  // closure it blocks on: the `cards` that were judged, the `errors` beyond
+  // them, one line each, the count of `unreadable` lines of the block the
+  // harness could not read as an error, and the `gist`. Loud, because a person
+  // has to repair a card this run will never touch. The run carries on: a card
+  // the launched one does not depend on cannot make this story wrong, and
+  // holding every launch on the state of a whole directory is what this record
+  // replaces.
+  // One per run. Readiness re-runs whole on every park answer and on every
+  // resume, and a record per re-entry would report one directory many times.
+  'readiness-lint-beyond',
   // spec + suite
+  // The launched card, amended with a dependency the owner approved at the
+  // birth park, and pushed to the default branch: the `card`, the
+  // `dependencies` written, the `sha` of the commit, whether it `pushed`, and
+  // the `park` seq it answers. The card is the document that authorizes a
+  // dependency, so the authorization is written where the next reader of the
+  // card meets it rather than held in a run the card never names. The park seq
+  // is what makes the write once: a stage entered twice on one answer finds its
+  // own stamp and writes no second amendment.
+  'card-amended',
   'spec-born',
   'spec-gate-round',
   // The decision records the run was born with, committed on its own branch
@@ -230,6 +270,8 @@ export const RUN_EVENTS = new Set([
   // and late counts read.
   'records-committed',
   'suite-committed',
+  // Retired names, kept so an archived ledger still reads. Nothing writes
+  // them: the stage that did is gone from the lane.
   'adversary-wave',
   'survivor-disposition',
   'red-state-check',
@@ -247,8 +289,8 @@ export const RUN_EVENTS = new Set([
   // rows name. Counts only, so the ledger stays small; the rows stay in the
   // seat report on disk and the freeze record carries the map of the last
   // write. Two readings sit on it: a run that reaches the freeze with no stamp
-  // at all ran no map step, and a row count that grows between the author write
-  // and the freeze is a map the adversary wrote (ADR-0072).
+  // at all ran no map step, and a row count that grows between the author
+  // write and the freeze is a map a corrective round wrote (ADR-0072).
   'surface-map',
   'freeze',
   // A launch that inherited a prior run's freeze instead of deriving one.
@@ -279,6 +321,16 @@ export const RUN_EVENTS = new Set([
   // derivable only by pairing this stamp with its `layer-started`, which is a
   // join every reader had to write for itself and which no reader wrote; the
   // record-diff gate time is read off this field.
+  //
+  // The layer itself carries `mode`: `run` where this cycle executed it, and
+  // `carried` where the default branch had already answered for the tree under
+  // it. A carried layer states `carriedFrom` (`base`), the `baseSha` it rests
+  // on and the `certifiedSeq` of the instance stamp that said so, and carries
+  // no `elapsedMs` and no `resources`, because nothing ran. The `baseSha` says
+  // which tree the green was earned at and the `certifiedSeq` says which stamp
+  // claimed it, which is what lets a reader take one skip apart. `mode` is also
+  // what makes a carry survive a restart, since the resume reads this stamp and
+  // nothing else (ADR-0088).
   'layer-result',
   // The attempt that ended without a verdict about the tree: the red the flake
   // filter's re-run replaced, a command that could not run, a child a signal
@@ -332,17 +384,33 @@ export const RUN_EVENTS = new Set([
   // about two records, so it carries `file2`, `unit2` and `head2` for the
   // second place: without them the reader of the finding has one half of a
   // contradiction.
+  //
+  // A finding names its ground: the repo-relative paths it rests on, brought to
+  // the form a path entry is written in at the stamp. The fast path asks one
+  // question of a moved base per finding, whether the branch touched that
+  // ground, and a finding that names none costs the run its whole code
+  // certification (ADR-0056).
   'finding',
   // The cycle boundary, and what the cycle did not have to buy. `partsRun`,
-  // `partsCarried` and `carryShare` are the cycle's carry (ADR-0058);
-  // `confirmationParts` (ran, kept) is the confirmation sweep's, over the
-  // layers it narrowed — what it executed, and what an earlier pass of the same
-  // cycle had already proven at this sha (ADR-0046). `diffTruncated: true` says
-  // the read cap cut this cycle's candidate diff, so its judgment seats could
-  // not reach the end of the work anywhere; it is stamped here as well as on
-  // the findings, because a round that raised nothing raises nothing to carry
-  // the word, and a clean verdict over a cut diff is the one a reader most
-  // needs to be able to see (ADR-0066).
+  // `partsCarried` and `carryShare` are the cycle's carry (ADR-0058); a
+  // footprint cycle carries whole layers and holds no part table, so it stamps
+  // none of the three. `confirmationParts` (ran, kept) is the confirmation
+  // sweep's, over the layers it narrowed — what it executed, and what an earlier
+  // pass of the same cycle had already proven at this sha (ADR-0046).
+  // `diffTruncated: true` says the read cap cut this cycle's candidate diff, so
+  // its judgment seats could not reach the end of the work anywhere; it is
+  // stamped here as well as on the findings, because a round that raised nothing
+  // raises nothing to carry the word, and a clean verdict over a cut diff is the
+  // one a reader most needs to be able to see (ADR-0066).
+  //
+  // `sweep` says which set the cycle ran: `full`, every layer; `targeted`, the
+  // layers the diff since the last render reaches; `records`, a diff the project
+  // attributes to its record layers alone; `footprint`, the layers this run's
+  // own diff against a certified base reaches, with the rest carried. `reason`
+  // rides `full` alone and names the condition that was not met, from the closed
+  // list in `src/lanes/spectrum.mjs`. The two together are what makes "does this
+  // project ever take the footprint, and where not" a count rather than a
+  // reading of prose (ADR-0088).
   'verdict-rendered',
   // The one retry a repeated cycle fingerprint is worth, spent. The stamp
   // names the fingerprint, the render it was granted for and the cycles that
@@ -442,6 +510,9 @@ export const RUN_EVENTS = new Set([
   // own records and their neighbourhood. One answer never implies the other,
   // and a reader who cannot see which ground the incoming work touched cannot
   // tell a wide ground from a busy branch (ADR-0075).
+  // A records answer carries `reason` as well: `no-record-moved` where it
+  // stands, the record that moved where it does not, and the closed refusal
+  // that settled it where one did.
   'pre-verdict-update',
   // The clean-rebase fast path's answer about one moved base: whether the
   // certification the run already earned stands over the tree the update
@@ -810,6 +881,16 @@ export const INSTANCE_EVENTS = new Set([
   // against the ship that carried it. Stamped here and not in the run,
   // because the run that made the trade closed hours or days before.
   'proof-settled',
+  // What stood green at the sha the default branch became, written by one
+  // ship's close-out: the `project`, the `runId` that shipped, the `sha` of
+  // the merge, and per layer its `name`, `status`, `elapsedMs`, `mode` and the
+  // `verdict` record file it was decided in. Instance-scoped, because it is a
+  // statement about the branch and not about the run that moved it: the run
+  // that writes it archives, and the runs that read it are the ones launched
+  // after it. Two readers: the duration a seat bound is measured against, and
+  // the evidence that a layer whose ground a change does not touch has already
+  // answered for the tree under it.
+  'base-certified',
   // The tripwire registry one project is armed with, stamped whenever the
   // daemon reads a set that differs from the one it last read: the entry ids,
   // their metrics, their windows and their bands. It exists so a console can
@@ -867,14 +948,23 @@ export const LOUD_EVENTS = new Set([
   'workflow-red',
   'external-outage',
   'reconcile-stall',
+  'readiness-lint-beyond',
 ]);
 
 // The close-out backstop. A loud record resolves at the event that owns it
-// (`resolution.mjs`); these two are the classes a run may also close on its
-// own when no owner ever landed. They ask the owner for no decision — the run
-// they reported on is over — so leaving them open would build the owner an
-// alert strip of finished runs (ADR-0021).
-export const CLOSE_RESOLVED_EVENTS = new Set(['budget-breach', 'diff-policy-violation']);
+// (`resolution.mjs`); these are the classes a run may also close on its own
+// when no owner ever landed. Each of them reports on the run itself, and the
+// run is over, so leaving one open would build the owner an alert strip of
+// finished runs (ADR-0021). The card errors a readiness lint found beyond the
+// launched card are such a report: they say what one run read in one
+// directory at one moment, the request that repairs another card stamps
+// nothing in this ledger, and the cards-lane check is what holds the
+// directory clean.
+export const CLOSE_RESOLVED_EVENTS = new Set([
+  'budget-breach',
+  'diff-policy-violation',
+  'readiness-lint-beyond',
+]);
 
 export function streamOf(event) {
   if (QUEUED_EVENTS.has(event)) return 'queued';
@@ -895,8 +985,6 @@ export const PARK_TYPES = new Set([
   // the type, because `reason` on a park already carries the close an
   // answered recovery park takes (ADR-0020).
   'spec-gate-stalled',
-  'unkilled-gap-survivor', // adversary survivor without a killing test
-  'second-zero-kill', // second 0/N adversary round
   'second-stall', // response ladder
   // A verdict cycle that judged what an earlier cycle of the same run already
   // judged — same candidate sha, same suite, same open findings by identity,
@@ -904,6 +992,12 @@ export const PARK_TYPES = new Set([
   // decision park: it names its condition in the type, and the run holds
   // every result it earned while it waits (ADR-0022).
   'cycle-repeat',
+  // A package the spec needs that the launched card does not name. The card
+  // is the whole authorization for a dependency, so the answer is written
+  // onto the card and pushed: `approve` amends the card and runs the birth
+  // seat again against it, `refuse` ends the run. A decision park, and an
+  // owner call by the rule the constitution already states.
+  'dependency-decision',
   'card-invalidated', // ship-time card sweep
   // A choice a shipped story left open on a later card, asked at close-out
   // while the context is fresh. Like `card-invalidated` it belongs to the card

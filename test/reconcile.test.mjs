@@ -24,7 +24,7 @@ import {
 import { withReconcileStage } from '../src/lanes/records-stage.mjs';
 import { withAbandonGuard } from '../src/lanes/shared.mjs';
 import { RECORD_CRITERION_KEYS } from '../src/lanes/lenses.mjs';
-import { recordUnits } from '../src/lanes/units.mjs';
+import { OTHER_RECORDS_LINE, recordUnits } from '../src/lanes/units.mjs';
 import {
   tempDir,
   removeDir,
@@ -66,6 +66,21 @@ const ADR_CORRECTED = ADR_REWRITTEN.replace(
   'The module src/base.mjs holds the base value.',
   'The module src/base.mjs holds the base value the feature reads.',
 );
+
+/** A record the tree has closed: out of every seat's scope and every brief. */
+const CLOSED_ADR = 'docs/adr/adr-0009-hold-the-gateway.md';
+const CLOSED_TEXT = [
+  '# ADR-0009: Hold the gateway',
+  '',
+  '**Status:** Superseded by ADR-0001 (2026-09-02)',
+  '',
+  '## Decision',
+  '',
+  'The module src/base.mjs held the gateway.',
+  '',
+].join('\n');
+
+const RECORD_SENTENCE = 'A record in docs/adr named in neither list is closed';
 
 const ADR_TWO_TEXT = [
   '# ADR-0002: Hold the base',
@@ -456,6 +471,7 @@ function recordReview(summaries) {
                   criterion: RECORD_CRITERION_KEYS[0],
                   severity: 'HIGH',
                   file: record,
+                  ground: [record, 'src/base.mjs'],
                   unit: target.id,
                   head: target.head,
                   line: 1,
@@ -546,6 +562,7 @@ function reviewOnce(record, summary) {
                 criterion: RECORD_CRITERION_KEYS[0],
                 severity: 'HIGH',
                 file: read,
+                ground: [read, 'src/base.mjs'],
                 unit: target.id,
                 head: target.head,
                 line: 1,
@@ -624,6 +641,7 @@ function reviewUnanswered(summary) {
                 criterion: RECORD_CRITERION_KEYS[0],
                 severity: 'HIGH',
                 file: read,
+                ground: [read, 'src/base.mjs'],
                 unit: target.id,
                 head: target.head,
                 line: 1,
@@ -949,11 +967,21 @@ test('an owed judgment writes the record, runs the record layers and renders gre
 });
 
 test('no born record and nothing owed: no cycle, and the run is handed on', async (t) => {
-  const fx = stageFixture(t, { seats: { 'reconcile-judge': judgeClean } });
+  const fx = stageFixture(t, {
+    seats: { 'reconcile-judge': judgeClean },
+    files: { [CLOSED_ADR]: CLOSED_TEXT },
+  });
   const runId = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   const judged = events.find((e) => e.event === 'reconciliation-judged');
   assert.equal(judged.owed, false);
+  // The judge is given the active tree by path and is no longer told to find it
+  // itself. The record the tree closed is in no list (ADR-0089).
+  const judge = fx.calls.find((c) => c.seat === 'reconcile-judge');
+  assert.ok(judge.prompt.includes(`${OTHER_RECORDS_LINE}\n- ${ADR}\n`), judge.prompt);
+  assert.ok(judge.prompt.includes(RECORD_SENTENCE), judge.prompt);
+  assert.ok(!judge.prompt.includes(CLOSED_ADR), judge.prompt);
+  assert.ok(!judge.prompt.includes('Locate the decision-record tree'), judge.prompt);
   // The lists ride the stamp whatever the answer, and this pass bore nothing.
   assert.deepEqual(judged.born, []);
   assert.deepEqual(judged.late, []);
@@ -983,6 +1011,13 @@ test('a born record takes the cycle, and spends no writer', async (t) => {
   // No write of any kind: the birth wrote the record and the judge owes none.
   assert.ok(!events.some((e) => e.event === 'reconciliation-written'));
   assert.ok(!fx.calls.some((c) => c.seat === 'reconcile-write'));
+
+  // The judge's brief names the born record once. The brief lists it as the
+  // pass's own, so the active-tree block leaves it out (ADR-0089).
+  const judge = fx.calls.find((c) => c.seat === 'reconcile-judge');
+  assert.equal(judge.prompt.split(ADR).length - 1, 1, judge.prompt);
+  assert.ok(!judge.prompt.includes(OTHER_RECORDS_LINE), judge.prompt);
+  assert.ok(judge.prompt.includes(RECORD_SENTENCE), judge.prompt);
 
   // One review seat for the born record, and the record layers over its commit.
   const reviews = fx.calls.filter((c) => c.seat === 'record-review');
@@ -1550,6 +1585,7 @@ function reviewGraded(record, { high = null, remark = null } = {}) {
         criterion: RECORD_CRITERION_KEYS[0],
         severity,
         file: read,
+        ground: [read, 'src/base.mjs'],
         unit: target.id,
         head: target.head,
         line: 1,

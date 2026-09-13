@@ -10,6 +10,7 @@ import { basename, dirname, join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
 import {
+  fileAtSha,
   findingIndex,
   findingLine,
   interruptedStep,
@@ -17,6 +18,7 @@ import {
   repairLane,
   repairRounds,
 } from '../src/lanes/verdict.mjs';
+import { boundLayerNames } from '../src/seats/bound.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
 import { Ledger, readEvents } from '../src/ledger/ledger.mjs';
 import { INSTANCE_EVENTS } from '../src/ledger/registry.mjs';
@@ -34,11 +36,13 @@ import {
   removeDir,
   waitFor,
   NO_WAIT,
+  gitSync,
   initOriginRepo,
   projectConfigJson,
   FIXTURE_ACCEPTANCE,
   FIXTURE_SPEC,
   NO_SURFACE,
+  answeredReport,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -111,6 +115,35 @@ test('g increments', async () => {
   assert.equal(g(1), 2);
 });
 `;
+
+// A record tree an origin can ship: one record whose text names the file the
+// fixture spec declares, one that names another file, and one the tree closed
+// on the same declared file. The block a seat is given is derived from all
+// three, and a closed record is in no brief (ADR-0089).
+const ENTRY_ADR = 'docs/adr/0001-keep-one-entry-point.md';
+const SHIP_ADR = 'docs/adr/0002-ship-on-one-branch.md';
+const CLOSED_ADR = 'docs/adr/0003-hold-the-gateway.md';
+const RECORD_TREE = {
+  [ENTRY_ADR]:
+    '# ADR-0001: Keep one entry point\n\n**Status:** Accepted\n\n## Decision\n\n' +
+    'The module src/feature.mjs holds the entry point.\n',
+  [SHIP_ADR]:
+    '# ADR-0002: Ship on one branch\n\n**Status:** Accepted\n\n## Decision\n\n' +
+    'The ship reads src/ship.mjs.\n',
+  [CLOSED_ADR]:
+    '# ADR-0003: Hold the gateway\n\n**Status:** Retired (2026-09-02): the gateway is gone.\n\n' +
+    '## Decision\n\nThe module src/feature.mjs held the gateway.\n',
+};
+
+/** The two blocks, in the order a brief carries them. */
+const RECORD_BLOCK = [
+  'Decision records that govern your paths (read these):',
+  `- ${ENTRY_ADR}`,
+  'Every other active record, by path (open one only when your work reaches its area):',
+  `- ${SHIP_ADR}`,
+].join('\n');
+
+const RECORD_SENTENCE = 'A record in docs/adr named in neither list is closed';
 
 const SUITE_CMD = ['node', '--test', 'tests/*.test.mjs'];
 const GREEN_CMD = ['node', '-e', 'process.exit(0)'];
@@ -192,12 +225,32 @@ function seatFixture(seats) {
     const out = behavior({ seat, label, prompt: opts.prompt, attempt: opts.attempt }) ?? {};
     return {
       cmd: process.execPath,
-      args: ['-e', seatScript({ reportPath, model: opts.model, ...out })],
+      args: [
+        '-e',
+        seatScript({
+          reportPath,
+          model: opts.model,
+          ...out,
+          report: answeredReport(out.report, opts.prompt),
+        }),
+      ],
       parseLine: fixtureParse,
     };
   };
   return { commandFor, calls };
 }
+
+/** The layers one brief lists as the seat's bound, in the order it lists them. */
+function boundLayersOf(prompt) {
+  const names = [];
+  for (const line of prompt.split(`${BOUND_HEADING}\n`)[1].split('\n')) {
+    if (!line.startsWith('- ')) break;
+    names.push(line.slice(2).split(':')[0]);
+  }
+  return names;
+}
+
+const BOUND_HEADING = 'The Tier-1 gate commands your work is bounded to:';
 
 /** Seeds the freeze boundary: suite files committed, freeze stamped. */
 function seedHandler(files, extra, specText = FIXTURE_SPEC, exclusions = []) {
@@ -223,7 +276,7 @@ function seedHandler(files, extra, specText = FIXTURE_SPEC, exclusions = []) {
         2,
       ) + '\n',
     );
-    ctx.store.append('freeze', { actor: 'daemon', sha, killCount: 3, amendmentKills: 0 });
+    ctx.store.append('freeze', { actor: 'daemon', sha });
     if (extra) await extra(ctx, worktree);
     return { next: 'implementation' };
   };
@@ -496,7 +549,7 @@ test('a clean implementation ships green in one cycle; advisory findings never b
     'fury-operational': () => ({
       report: {
         findings: [
-          { lens: 'operational', severity: 'MED', finding: 'no retry handling', evidence: 'src/feature.mjs:1' },
+          { lens: 'operational', severity: 'MED', ground: ['src/feature.mjs'], finding: 'no retry handling', evidence: 'src/feature.mjs:1' },
         ],
         summary: 'one advisory',
       },
@@ -554,9 +607,11 @@ test('a clean implementation ships green in one cycle; advisory findings never b
   // The dev seat carried the test-edit deny rules.
   const dev = fx.calls.find((c) => c.seat === 'dev');
   assert.ok(dev.denyTools.includes('Edit(tests/**)'));
-  // The Tier-1 gates reach the dev seat as commands, not as a self-check.
+  // The Tier-1 gates reach the dev seat as commands, not as a self-check. No
+  // layer of this project declares ground, so the bound is the frozen suite
+  // alone and every other layer is the verdict's.
+  assert.deepEqual(boundLayersOf(dev.prompt), ['unit']);
   assert.ok(dev.prompt.includes('- unit: node --test tests/*.test.mjs'));
-  assert.ok(dev.prompt.includes('- lint: node -e process.exit(0)'));
   assert.ok(!dev.prompt.includes('gate commands from the project config'));
   // No constitution file in this project: no policy block anywhere.
   for (const call of fx.calls) assert.ok(!call.prompt.includes('constitution'), call.seat);
@@ -570,7 +625,7 @@ test('the constitution reaches the working seats, and the judges get the authori
     'fury-spec': () => ({
       report: {
         findings: [
-          { lens: 'spec', severity: 'HIGH', finding: 'missing platform file', evidence: 'src/feature.mjs:1' },
+          { lens: 'spec', severity: 'HIGH', ground: ['src/feature.mjs'], finding: 'missing platform file', evidence: 'src/feature.mjs:1' },
         ],
         summary: 'one',
       },
@@ -608,7 +663,7 @@ test('a code defect routes triage → repair round → generalist re-verdict', a
     'repair-dev': () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'fixed' } }),
     'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
   };
-  const fx = verdictFixture(t, { seats });
+  const fx = verdictFixture(t, { seats, originFiles: RECORD_TREE });
   const { runId } = await fx.launch();
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
@@ -643,6 +698,17 @@ test('a code defect routes triage → repair round → generalist re-verdict', a
   assert.equal(fx.calls.filter((c) => c.seat === 'generalist-review').length, 1);
   assert.ok(!fx.calls.some((c) => c.seat === 'fury-verifier'));
   assert.ok(fx.calls.find((c) => c.seat === 'repair-dev').denyTools.includes('Edit(tests/**)'));
+  // Every seat that writes code is named the active records that govern the
+  // paths the spec declared, then the rest of the tree, and never the directory
+  // alone. The closed record names a declared path too and reaches no brief
+  // (ADR-0089).
+  for (const seat of ['dev', 'repair-dev']) {
+    const prompt = fx.calls.find((c) => c.seat === seat).prompt;
+    assert.ok(prompt.includes(RECORD_BLOCK), seat);
+    assert.ok(prompt.includes(RECORD_SENTENCE), seat);
+    assert.ok(!prompt.includes(CLOSED_ADR), seat);
+    assert.ok(!prompt.includes('Decision records (read-only)'), seat);
+  }
   // The record closes the finding.
   const record = readRecord(fx.paths, runId, 2);
   assert.deepEqual(
@@ -809,7 +875,7 @@ function partTriageSeat() {
 }
 
 /** One scenario: two seeded part reds, repaired one at a time. */
-function partsScenario(t, { partTargeting, flakeRerun } = {}) {
+function partsScenario(t, { partTargeting, flakeRerun, originFiles } = {}) {
   const root = tempDir('olympus-parts-lane-');
   t.after(() => removeDir(root));
   const logFile = join(root, 'parts.log');
@@ -841,6 +907,7 @@ function partsScenario(t, { partTargeting, flakeRerun } = {}) {
     commands: { suite: SUITE_CMD, acceptance: partsGate(logFile) },
     ...(partTargeting !== undefined && { partTargeting }),
     ...(flakeRerun !== undefined && { flakeRerun }),
+    ...(originFiles !== undefined && { originFiles }),
   });
   return {
     fx,
@@ -1029,12 +1096,13 @@ test('gates.partTargeting false runs every layer whole, whatever its parts say',
       .flatMap((e) => (e.parts ?? []).filter((p) => p.carriedFrom !== undefined)),
     [],
   );
-  // The seat brief drops the line with the mechanism it describes. (The gate
-  // command's own argv is quoted in that brief and mentions the variable, so
-  // the test reads the sentence and not the name.)
+  // The brief offers no narrowing inside a layer, here or anywhere else: the
+  // bound states which layers are the seat's, and which parts of one a diff
+  // reaches is the cycle's own reading. (The gate command's argv is quoted in
+  // that brief and names the variable, so the test reads the sentence.)
   const dev = fx.calls.find((c) => c.seat === 'dev');
   assert.ok(
-    !dev.prompt.includes('Check your own work with the parts your diff can reach'),
+    !dev.prompt.includes('runs those parts alone'),
     'the brief offered a narrowing nothing honours',
   );
 });
@@ -1060,18 +1128,148 @@ test('gates.flakeRerun "whole" sends the re-run back over the layer', async (t) 
   );
 });
 
-test('the dev and repair briefs name the mapping the cycle uses', async (t) => {
-  const { fx } = partsScenario(t);
+test('the dev and repair briefs list the bound and name the verdict as the rest', async (t) => {
+  const { fx } = partsScenario(t, { originFiles: { [FIXTURE_CARD_PATH]: DEP_CARD } });
   const { runId } = await fx.launch();
   await waitClosed(fx.paths, runId);
   for (const seat of ['dev', 'repair-dev']) {
     const prompt = fx.calls.find((c) => c.seat === seat).prompt;
-    assert.match(prompt, new RegExp(`${PARTS_ENV}=<comma-separated part names>`), seat);
-    assert.match(prompt, /a part is affected unless your diff falls entirely outside its input set/, seat);
-    assert.match(prompt, /its own test sources and the source trees it exercises/, seat);
-    assert.match(prompt, /A path no part claims \(a lockfile, a shared package, a migration, a config file\) reaches every part/, seat);
-    assert.match(prompt, /The verdict proves every part of every layer at the sha it ships\./, seat);
+    // No layer of this project declares ground, so the bound is the frozen
+    // suite alone and the acceptance layer is the verdict's.
+    assert.deepEqual(boundLayersOf(prompt), ['unit'], seat);
+    assert.match(prompt, /A refused layer is not yours to run and not a defect to work around/, seat);
+    assert.match(prompt, /the verdict stage runs every layer of the project at the sha it ships/, seat);
+    assert.match(prompt, /A layer enters your bound when your own work reaches what it reads/, seat);
+    // A layer the bound admits brings its own prerequisites, and the seat is
+    // told so: the list holds layers its diff never reached.
+    assert.match(prompt, /and so does every layer it needs/, seat);
+    // The narrowing the seat may take inside the bound, which is the frozen
+    // suite on every story spawn and the heaviest layer it holds.
+    assert.match(
+      prompt,
+      new RegExp(`A layer above that names its parts takes ${PARTS_ENV}=<comma-separated part names>`),
+      seat,
+    );
+    assert.match(prompt, /The verdict proves every part of every layer at the sha it ships/, seat);
+    // The packages the card gave this story, since the seat never sees the card
+    // and the capture holds the lockfile to exactly these.
+    assert.match(prompt, /The dependencies this story ships, as its card names them:\n- \.: tiny-invariant/, seat);
+    assert.match(prompt, /A package the card does not name is refused at the capture/, seat);
   }
+});
+
+test('a brief names no dependency where the card names none, and the part line follows the config', async (t) => {
+  const { fx } = partsScenario(t, { partTargeting: false });
+  const { runId } = await fx.launch();
+  await waitClosed(fx.paths, runId);
+  const prompt = fx.calls.find((c) => c.seat === 'dev').prompt;
+  assert.ok(!prompt.includes('The dependencies this story ships'), prompt);
+  // A project that runs no layer in parts is told nothing about narrowing one.
+  assert.ok(!prompt.includes(PARTS_ENV), prompt);
+});
+
+// The bound at the spawn is what the declared paths select. The hook recomputes
+// it from the seat's live diff, so these are the layers the brief names and the
+// floor the seat starts from.
+test('the bound at a spawn is the declared footprint, its prerequisites, the setup layers and the suite', () => {
+  const layers = [
+    { name: 'unit', ground: ['tests'] },
+    { name: 'lint', ground: ['src'] },
+    { name: 'build', ground: ['src'], needs: ['unit'] },
+    { name: 'install', ground: ['pnpm-lock.yaml'], setup: true },
+    { name: 'e2e', ground: ['e2e'] },
+  ];
+  const of = (declared, suite = 'unit') => [...boundLayerNames({ layers, declared, suite })].sort();
+  // A layer whose ground the declared diff touches, every layer downstream of
+  // one, every setup layer, and the frozen suite.
+  assert.deepEqual(of(['src/feature.mjs']), ['build', 'install', 'lint', 'unit']);
+  // A declared diff inside the test paths reaches the suite's ground and the
+  // layers that need it.
+  assert.deepEqual(of(['tests/feature.test.mjs']), ['build', 'install', 'unit']);
+  // The repair lane declares no path when its ticket carries no block, and has
+  // no frozen suite: what is left is the layers that make a tree runnable.
+  assert.deepEqual(of([], null), ['install']);
+  // A layer that declares no ground is reached by nothing, which is the same
+  // reading the verdict's own footprint takes.
+  assert.deepEqual([...boundLayerNames({ layers: [{ name: 'wide' }], declared: ['src/a'], suite: null })], []);
+  // What a bound layer needs is in the bound with it, transitively and whatever
+  // its own ground says. A project that declares no setup layer states the
+  // install as an ordinary prerequisite, and a seat refused it could not run a
+  // single layer it was given.
+  const chained = [
+    { name: 'lockfile', ground: ['**/package.json'] },
+    { name: 'contracts', ground: ['packages/**'], needs: ['lockfile'] },
+    { name: 'api', ground: ['apps/api/**'], needs: ['contracts'] },
+    { name: 'web', ground: ['apps/web/**'], needs: ['contracts'] },
+  ];
+  assert.deepEqual(
+    [...boundLayerNames({ layers: chained, declared: ['apps/api/handler.ts'], suite: null })].sort(),
+    ['api', 'contracts', 'lockfile'],
+  );
+  // The closure walks `needs` upward only. A prerequisite carries no dependent
+  // of its own into the bound, or one file would buy the whole spectrum.
+  assert.deepEqual(
+    [...boundLayerNames({ layers: chained, declared: ['apps/api/handler.ts'], suite: 'web' })].sort(),
+    ['api', 'contracts', 'lockfile', 'web'],
+  );
+});
+
+test('a dev seat that reports the frozen suite red is refused', async (t) => {
+  const fx = verdictFixture(t, {
+    seats: {
+      dev: ({ label }) => ({
+        files: { 'src/feature.mjs': GOOD_FEATURE },
+        // The first report hands over a tree the seat itself calls red. The
+        // corrective round finishes the work and reports what the suite says.
+        report: { summary: 'implemented', suiteState: label === 'dev-1' ? 'red' : 'green' },
+      }),
+      ...furyClean(),
+    },
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const refused = events.filter((e) => e.event === 'seat-refused' && e.seat === 'dev');
+  assert.equal(refused.length, 1);
+  assert.match(refused[0].defects[0], /states the frozen suite is red/);
+  assert.equal(fx.calls.filter((c) => c.seat === 'dev').length, 2);
+});
+
+test('an implementation seat is spawned inside a bound the ledger names', async (t) => {
+  const fx = verdictFixture(t, {
+    seats: {
+      dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+      ...furyClean(),
+    },
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const stamp = events.find((e) => e.event === 'seat-bound' && e.seat === 'dev');
+  // The stamp is the bound at the spawn: it is the whole record of what this
+  // seat was allowed to run. No layer of this project declares ground, so the
+  // bound is the frozen suite alone.
+  assert.deepEqual(stamp.layers, ['unit']);
+  const bound = JSON.parse(
+    readFileSync(join(fx.paths.archivedRuns, runId, 'seats', 'dev-1.bound.json'), 'utf8'),
+  );
+  // Every Tier-1 layer of the project is in the file the hook reads, because
+  // the hook needs the ground and the `needs` of the ones it refuses too.
+  assert.deepEqual(
+    bound.layers.map((l) => l.name),
+    ['unit', 'lint', 'build'],
+  );
+  assert.equal(bound.seat, 'dev');
+  // The suite layer is named by its command, so a project may call it anything.
+  assert.equal(bound.suite, 'unit');
+  assert.deepEqual(bound.declared, ['src/feature.mjs', 'tests/feature.test.mjs']);
+  assert.equal(bound.capMs, 300000);
+  // No base certification yet, so the seat runs under no time bound at all.
+  assert.equal(bound.elapsedMs, null);
+  assert.deepEqual(
+    bound.layers.find((l) => l.name === 'build'),
+    { name: 'build', argv: BUILD_CMD, ground: [], needs: ['unit'], setup: false },
+  );
 });
 
 test('a red the confirmation sweep turns up enters triage like any other', async (t) => {
@@ -2554,8 +2752,8 @@ test('confirm-to-block: only verifier-confirmed HIGHs enter the verdict, and a c
     'fury-operational': () => ({
       report: {
         findings: [
-          { lens: 'operational', severity: 'HIGH', finding: 'no retry handling', evidence: 'src/feature.mjs:1' },
-          { lens: 'security', severity: 'HIGH', finding: 'injection risk in query', evidence: 'src/feature.mjs:1' },
+          { lens: 'operational', severity: 'HIGH', ground: ['src/feature.mjs'], finding: 'no retry handling', evidence: 'src/feature.mjs:1' },
+          { lens: 'security', severity: 'HIGH', ground: ['src/feature.mjs'], finding: 'injection risk in query', evidence: 'src/feature.mjs:1' },
         ],
         summary: 'two',
       },
@@ -2611,7 +2809,7 @@ test('a project that names the cut lenses gets the code-shape seat back, and it 
     'fury-code-shape': () => ({
       report: {
         findings: [
-          { lens: 'architecture', severity: 'HIGH', finding: 'logic in the wrong layer', evidence: 'src/feature.mjs:1' },
+          { lens: 'architecture', severity: 'HIGH', ground: ['src/feature.mjs'], finding: 'logic in the wrong layer', evidence: 'src/feature.mjs:1' },
         ],
         summary: 'one',
       },
@@ -2656,7 +2854,7 @@ test('stall → fresh pass → second stall parks; abandon closes the run', asyn
     'fury-spec': () => ({
       report: {
         findings: [
-          { lens: 'spec', severity: 'HIGH', finding: 'the criterion is unimplemented', evidence: 'src/feature.mjs:1' },
+          { lens: 'spec', severity: 'HIGH', ground: ['src/feature.mjs'], finding: 'the criterion is unimplemented', evidence: 'src/feature.mjs:1' },
         ],
         summary: 'one',
       },
@@ -2745,6 +2943,7 @@ test('a confirmed approach finding rides the repair brief, and the stall behind 
                 {
                   lens: 'spec',
                   severity: 'HIGH',
+                  ground: ['src/feature.mjs'],
                   finding: 'the implementation structure contradicts the spec',
                   evidence: 'spec section 1',
                   approach: true,
@@ -2752,6 +2951,7 @@ test('a confirmed approach finding rides the repair brief, and the stall behind 
                 {
                   lens: 'spec',
                   severity: 'HIGH',
+                  ground: ['src/feature.mjs'],
                   finding: 'the criterion is unimplemented',
                   evidence: 'src/feature.mjs:1',
                 },
@@ -3304,7 +3504,7 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
     'generalist-review': () => ({
       report: {
         findings: [
-          { lens: 'operational', severity: 'LOW', finding: 'no failure path', evidence: 'src/g.mjs:1' },
+          { lens: 'operational', severity: 'LOW', ground: ['src/g.mjs'], finding: 'no failure path', evidence: 'src/g.mjs:1' },
         ],
         summary: 'advisory only',
       },
@@ -3314,7 +3514,10 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
     seats,
     gates: [{ name: 'unit', command: 'suite' }],
     commands: { suite: SUITE_CMD },
-    originFiles: { 'tickets/t1.md': '## Defect\n\ng(x) is missing; add g(x) = x + 1 with a regression test.\n' },
+    originFiles: {
+      'tickets/t1.md': '## Defect\n\ng(x) is missing; add g(x) = x + 1 with a regression test.\n',
+      ...RECORD_TREE,
+    },
   });
   const { runId, worktree } = await fx.launchFromConsole({
     lane: 'repair',
@@ -3328,8 +3531,15 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
   assert.ok(dev.prompt.includes('intake ticket'));
   assert.ok(dev.prompt.includes(join(worktree, 'tickets/t1.md')));
   assert.ok(dev.prompt.includes('regression test'));
-  // The fix seat is judged by the same gates, so it is given them too.
-  assert.ok(dev.prompt.includes('- unit: node --test tests/*.test.mjs'));
+  // This ticket carries no touched-paths block, so the work as declared reaches
+  // no layer's ground and the seat opens on an empty bound. Its own first
+  // command is what widens it.
+  assert.ok(dev.prompt.includes('No Tier-1 gate command is yours yet'));
+  assert.ok(!dev.prompt.includes('- unit: '));
+  // No card speaks for this work, so nothing is pre-approved and nothing is
+  // gated by content either: the brief says which it is.
+  assert.ok(dev.prompt.includes('This lane names no dependency tier'), dev.prompt);
+  assert.ok(!dev.prompt.includes('The dependencies this story ships'), dev.prompt);
   // The record tree is denied in this lane too; the test paths are not, because
   // this seat writes the regression test (ADR-0074).
   assert.deepEqual(dev.denyTools, [
@@ -3337,6 +3547,19 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
     'Write(docs/adr/**)',
     'NotebookEdit(docs/adr/**)',
   ]);
+  // The tree is named to it by path, not by directory. This ticket declares no
+  // path, so the first list is empty and the active tree is the whole block; the
+  // closed record is in no list (ADR-0089).
+  assert.ok(!dev.prompt.includes('Decision records that govern your paths'), dev.prompt);
+  assert.ok(
+    dev.prompt.includes(
+      'Every other active record, by path (open one only when your work reaches its area):\n' +
+        `- ${ENTRY_ADR}\n- ${SHIP_ADR}\n`,
+    ),
+    dev.prompt,
+  );
+  assert.ok(dev.prompt.includes(RECORD_SENTENCE), dev.prompt);
+  assert.ok(!dev.prompt.includes(CLOSED_ADR), dev.prompt);
   // Generalist review replaces the Fury fan-out; the LOW stays advisory.
   assert.ok(!fx.calls.some((c) => c.seat.startsWith('fury-')));
   assert.equal(fx.calls.filter((c) => c.seat === 'generalist-review').length, 1);
@@ -3401,6 +3624,7 @@ test('a confirmed finding in the repair lane takes an ordinary repair round', as
                   {
                     lens: 'operational',
                     severity: 'HIGH',
+                    ground: ['src/base.mjs'],
                     finding: 'the base value the record states is not the one the module holds',
                     evidence: 'src/base.mjs:1',
                     file: 'src/base.mjs',
@@ -3513,6 +3737,7 @@ function capRepairSeats({ claims, alsoCode = false }) {
                 {
                   lens: 'operational',
                   severity: 'HIGH',
+                  ground: ['src/base.mjs'],
                   finding: `the module holds no ${claim} the ticket asks for`,
                   evidence: `src/base.mjs, on the ${claim} claim`,
                   file: 'src/base.mjs',
@@ -4274,6 +4499,194 @@ test('the repair lane keeps its regression test and answers its own tiers', asyn
   );
 });
 
+// -- the dependency tier the capture judges by content -----------------------
+
+// A lockfile small enough to read whole, in the one format the grant reads.
+// The rules it proves are rules about bytes, so the fixture is bytes.
+const LOCK_BEFORE = `lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+
+importers:
+
+  .:
+    dependencies:
+      left-pad:
+        specifier: ^1.3.0
+        version: 1.3.0
+
+packages:
+
+  left-pad@1.3.0:
+    resolution: {integrity: sha512-aaa}
+`;
+
+/** The file one `pnpm add tiny-invariant` on the root importer leaves. */
+const LOCK_ADDED = `lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+
+importers:
+
+  .:
+    dependencies:
+      left-pad:
+        specifier: ^1.3.0
+        version: 1.3.0
+      tiny-invariant:
+        specifier: ^1.3.3
+        version: 1.3.3
+
+packages:
+
+  left-pad@1.3.0:
+    resolution: {integrity: sha512-aaa}
+
+  tiny-invariant@1.3.3:
+    resolution: {integrity: sha512-bbb}
+`;
+
+/** The same install with the resolution of a package already there moved. */
+const LOCK_MOVED = LOCK_ADDED.replace('sha512-aaa', 'sha512-zzz');
+
+const DEP_POLICY = { story: { dependencyPaths: ['pnpm-lock.yaml'] } };
+
+const DEP_CARD = FIXTURE_CARD.replace(
+  '## Goal',
+  ['## Dependencies', '', '- .: tiny-invariant', '', '## Goal'].join('\n'),
+);
+
+function depFixture(t, seats, { cardText = DEP_CARD } = {}) {
+  return verdictFixture(t, {
+    seats,
+    diffPolicy: DEP_POLICY,
+    originFiles: { 'pnpm-lock.yaml': LOCK_BEFORE, [FIXTURE_CARD_PATH]: cardText },
+  });
+}
+
+test('the capture admits a lockfile that holds exactly the dependency the card names', async (t) => {
+  const seats = {
+    dev: () => ({
+      files: { 'src/feature.mjs': GOOD_FEATURE, 'pnpm-lock.yaml': LOCK_ADDED },
+      report: { summary: 'implemented' },
+    }),
+    ...furyClean(),
+  };
+  const fx = depFixture(t, seats);
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // No violation, one pass, and the file rode the implementation commit.
+  assert.ok(!events.some((e) => e.event === 'diff-policy-violation'));
+  assert.equal(fx.calls.filter((c) => c.seat === 'dev').length, 1);
+});
+
+test('the capture refuses a lockfile that moved more than the card names', async (t) => {
+  const seats = {
+    dev: ({ label }) => ({
+      files: {
+        'src/feature.mjs': GOOD_FEATURE,
+        'pnpm-lock.yaml': label === 'dev-1' ? LOCK_MOVED : LOCK_ADDED,
+      },
+      report: { summary: 'implemented' },
+    }),
+    ...furyClean(),
+  };
+  const fx = depFixture(t, seats);
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const stamp = events.find((e) => e.event === 'diff-policy-violation');
+  assert.deepEqual(
+    stamp.violations.map((v) => [v.path, v.rule, v.pattern]),
+    [['pnpm-lock.yaml', 'dependency-grant', 'pnpm-lock.yaml']],
+  );
+  // The refusal names the block that broke, so the seat knows what to put back.
+  assert.match(stamp.violations[0].reason, /^packages: left-pad@1\.3\.0 moved its resolution/);
+  const corrective = fx.calls.find((c) => c.label === 'dev-2');
+  assert.match(corrective.prompt, /pnpm-lock\.yaml: the diff policy admits this path only for/);
+  assert.match(corrective.prompt, /packages: left-pad@1\.3\.0 moved its resolution/);
+  assert.match(corrective.prompt, /Hold the file to the dependency the card names/);
+});
+
+test('a card that names no dependency shuts the lockfile', async (t) => {
+  const seats = {
+    dev: ({ label }) =>
+      label === 'dev-1'
+        ? {
+            files: { 'src/feature.mjs': GOOD_FEATURE, 'pnpm-lock.yaml': LOCK_ADDED },
+            report: { summary: 'implemented' },
+          }
+        : {
+            files: { 'src/feature.mjs': GOOD_FEATURE, 'pnpm-lock.yaml': LOCK_BEFORE },
+            report: { summary: 'implemented without the package' },
+          },
+    ...furyClean(),
+  };
+  const fx = depFixture(t, seats, { cardText: FIXTURE_CARD });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const stamp = events.find((e) => e.event === 'diff-policy-violation');
+  assert.deepEqual(stamp.violations.map((v) => v.rule), ['dependency-grant']);
+  assert.match(stamp.violations[0].reason, /^The card names no dependency/);
+  // The second pass put the file back, so nothing stood in the way of it.
+  assert.equal(fx.calls.filter((c) => c.seat === 'dev').length, 2);
+});
+
+test('a read at a sha answers empty for an absent path and throws for every other failure', async (t) => {
+  const root = tempDir('olympus-file-at-sha-');
+  t.after(() => removeDir(root));
+  const repo = join(root, 'repo');
+  initOriginRepo(repo, { 'pnpm-lock.yaml': LOCK_BEFORE });
+  const sha = gitSync(['rev-parse', 'HEAD'], repo).trim();
+  assert.equal(await fileAtSha(repo, sha, 'pnpm-lock.yaml'), LOCK_BEFORE);
+  // The one absence this read answers for: git's own words for a path the tree
+  // does not hold.
+  assert.equal(await fileAtSha(repo, sha, 'apps/web/pnpm-lock.yaml'), '');
+  // A sha the repository cannot reach is a fact about the repository. Read as
+  // an absent file it would make the whole lockfile new and refuse a capture
+  // over a file that never moved.
+  await assert.rejects(
+    () => fileAtSha(repo, 'not-a-commit', 'pnpm-lock.yaml'),
+    /invalid object name/,
+  );
+  // A run that never froze has no sha to read, which is no failure at all.
+  assert.equal(await fileAtSha(repo, '', 'pnpm-lock.yaml'), '');
+});
+
+test('an unchanged lockfile is no question, and a lane without the tier reads none', async (t) => {
+  const seats = {
+    dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
+    ...furyClean(),
+  };
+  // The card names a dependency the seat never installed. The file did not
+  // move, so there is nothing for the grant to answer for.
+  const held = depFixture(t, seats);
+  const first = await held.launch();
+  const one = await waitClosed(held.paths, first.runId);
+  assert.ok(!one.some((e) => e.event === 'diff-policy-violation'));
+  // The same install with no tier declared: the config merge has not landed,
+  // and the capture reads the file by its path tiers alone.
+  const inert = verdictFixture(t, {
+    seats: {
+      dev: () => ({
+        files: { 'src/feature.mjs': GOOD_FEATURE, 'pnpm-lock.yaml': LOCK_MOVED },
+        report: { summary: 'implemented' },
+      }),
+      ...furyClean(),
+    },
+    diffPolicy: { story: { deniedPaths: ['scripts/**'] } },
+    originFiles: { 'pnpm-lock.yaml': LOCK_BEFORE, [FIXTURE_CARD_PATH]: DEP_CARD },
+  });
+  const second = await inert.launch();
+  const two = await waitClosed(inert.paths, second.runId);
+  assert.equal(two.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!two.some((e) => e.event === 'diff-policy-violation'));
+});
+
 // -- the card authorizes a supersede (ADR-0044) -------------------------------
 
 // The collision of the run that paid for this decision: the story's criterion
@@ -4560,6 +4973,7 @@ test('a stretched authorization surfaces as a confirmed HIGH on the spec lens', 
                 {
                   lens: 'spec',
                   severity: 'HIGH',
+                  ground: ['tests/pinned.test.mjs'],
                   finding: 'the scope line covers a second export, not the closed-set shape the amendment dropped',
                   evidence: 'tests/pinned.test.mjs',
                 },
@@ -4802,8 +5216,6 @@ test('the re-freeze carries the map brief and its check, and stamps its own map'
   assert.equal(calls.length, 2);
   assert.ok(calls[0].prompt.includes('map the surface of this story'));
   for (const d of SECURITY_DIMENSIONS) assert.ok(calls[0].prompt.includes(d), d);
-  // A re-freeze answers no survivor wave, so the survivor line stays off it.
-  assert.ok(!calls[0].prompt.includes('Put the wave number in "survivors"'));
   assert.match(calls[1].prompt, /Correction brief/);
   assert.ok(
     calls[1].prompt.includes(
@@ -4894,5 +5306,153 @@ test('a record finding prints its unit and the second place; a code finding is u
     }),
     '[record MEDIUM] [unit: U2 "The helper doubles its input"] ' +
       'the record states a rule the tree does not hold (evidence: src/feature.mjs:1)',
+  );
+});
+
+// -- the first cycle over a certified base -----------------------------------
+//
+// The first cycle of a pass has proven nothing of its own. Where the default
+// branch holds a certification, it runs the footprint of the run's own diff
+// against that base and carries the rest.
+
+const FOOTPRINT_GATES = [
+  { name: 'install', command: 'lint', ground: ['manifest.json'], setup: true },
+  { name: 'unit', command: 'suite', ground: ['src', 'tests'] },
+  { name: 'suite-form', command: 'lint', ground: ['tests'] },
+  { name: 'docs-lint', command: 'lint', ground: ['docs'] },
+];
+
+/** Certifies the tree the run branched from, for every layer of the project. */
+function certifyLaunchBase(ctx) {
+  ctx.instanceStore.append('base-certified', {
+    actor: 'daemon',
+    project: 'proj',
+    runId: 'seed',
+    sha: ctx.payload.baseSha,
+    layers: FOOTPRINT_GATES.map((layer) => ({
+      name: layer.name,
+      status: 'green',
+      elapsedMs: 1000,
+      mode: 'run',
+      verdict: 'verdict-1.json',
+    })),
+  });
+}
+
+test('the first cycle runs the footprint of the run own diff and carries the rest', async (t) => {
+  const fx = verdictFixture(t, {
+    gates: FOOTPRINT_GATES,
+    seats: { dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }), ...furyClean() },
+    seedExtra: (ctx) => certifyLaunchBase(ctx),
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.equal(renders.length, 1);
+  assert.equal(renders[0].verdict, 'green');
+  assert.equal(renders[0].sweep, 'footprint');
+  // A footprint is not a condition that failed, so it names none.
+  assert.equal(renders[0].reason, undefined);
+  const record = readRecord(fx.paths, runId, 1);
+  assert.deepEqual(
+    record.spectrum.map(({ resources, exhaustion, ...decision }) => decision.layer + ':' + decision.mode),
+    ['install:run', 'unit:run', 'suite-form:run', 'docs-lint:carried'],
+  );
+  // The suite commit is inside the footprint: it lands before the dev seat, and
+  // the layer that reads the tests alone ran because of it. A diff taken from
+  // the tree the dev seat started on would have missed it.
+  const suiteForm = events.find((e) => e.event === 'layer-result' && e.layer === 'suite-form');
+  assert.equal(suiteForm.status, 'green');
+  assert.equal(suiteForm.mode, undefined);
+  // And the carried layer names the tree its green was earned at.
+  const carried = record.spectrum.find((r) => r.layer === 'docs-lint');
+  assert.equal(carried.carriedFrom, 'base');
+  assert.equal(carried.status, 'green');
+  const launched = events.find((e) => e.event === 'run-launched');
+  assert.equal(carried.baseSha, launched.baseSha ?? carried.baseSha);
+  const stamp = events.find((e) => e.event === 'layer-result' && e.layer === 'docs-lint');
+  assert.equal(stamp.mode, 'carried');
+  assert.equal(stamp.elapsedMs, undefined);
+  assert.ok(!events.some((e) => e.event === 'layer-started' && e.layer === 'docs-lint'));
+});
+
+// The same project with the frozen suite's layer grounded away from the run's
+// own work, and another layer claiming what the run touched. The certification
+// holds the suite layer green at the base, so a footprint that judged it by
+// ground alone would carry it.
+const SUITE_AWAY_GATES = FOOTPRINT_GATES.map((layer) => {
+  if (layer.name === 'unit') return { ...layer, ground: ['vendor'] };
+  if (layer.name === 'suite-form') return { ...layer, ground: ['src', 'tests'] };
+  return layer;
+});
+
+test('the frozen suite runs on the footprint cycle, whatever its ground says', async (t) => {
+  const fx = verdictFixture(t, {
+    gates: SUITE_AWAY_GATES,
+    seats: { dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }), ...furyClean() },
+    seedExtra: (ctx) => certifyLaunchBase(ctx),
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const record = readRecord(fx.paths, runId, 1);
+  assert.equal(record.sweep, 'footprint');
+  // The suite this run froze is the question the cycle exists to answer. The
+  // base certification predates the suite, so its green answers another one.
+  assert.deepEqual(
+    record.spectrum.map((r) => `${r.layer}:${r.mode}`),
+    ['install:run', 'unit:run', 'suite-form:run', 'docs-lint:carried'],
+  );
+});
+
+test('a footprint cycle states no part share, and names the tree its carries came from', async (t) => {
+  const fx = verdictFixture(t, {
+    gates: FOOTPRINT_GATES,
+    seats: {
+      dev: () => ({ files: { 'src/feature.mjs': BAD_FEATURE }, report: { summary: 'implemented' } }),
+      'verdict-triage': triageSeat(() => ({ class: 'code-defect' })),
+      ...furyClean(),
+      'repair-dev': () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'fixed' } }),
+      'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+    },
+    seedExtra: (ctx) => certifyLaunchBase(ctx),
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const first = events.filter((e) => e.event === 'verdict-rendered')[0];
+  assert.equal(first.sweep, 'footprint');
+  // The share counts parts, and a layer carried whole holds no part table. A
+  // number near nought on the cycle that carried the most work of any is the
+  // opposite of what the reading means, so the cycle states none.
+  assert.equal(first.carryShare, undefined);
+  assert.equal(first.partsRun, undefined);
+  assert.equal(first.partsCarried, undefined);
+  assert.equal(readRecord(fx.paths, runId, 1).carryShare, undefined);
+  // The repair seat reads a green no cycle of its run ran. The line names the
+  // tree that earned it, which is not a cycle of this run.
+  const repair = fx.calls.find((c) => c.seat === 'repair-dev');
+  assert.ok(
+    repair.prompt.includes('- docs-lint: green (carried from the default branch, not re-run)'),
+    repair.prompt,
+  );
+});
+
+test('a project with no setup layer keeps the full sweep, and the record says why', async (t) => {
+  const fx = verdictFixture(t, {
+    gates: FOOTPRINT_GATES.map(({ setup, ...layer }) => layer),
+    seats: { dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }), ...furyClean() },
+    seedExtra: (ctx) => certifyLaunchBase(ctx),
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  const render = events.filter((e) => e.event === 'verdict-rendered').at(-1);
+  assert.equal(render.sweep, 'full');
+  assert.equal(render.reason, 'no-setup-layer');
+  assert.equal(readRecord(fx.paths, runId, 1).reason, 'no-setup-layer');
+  // Every layer ran, and nothing carried.
+  assert.deepEqual(
+    readRecord(fx.paths, runId, 1).spectrum.map((r) => r.mode),
+    ['run', 'run', 'run', 'run'],
   );
 });

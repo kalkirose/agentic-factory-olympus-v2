@@ -62,6 +62,7 @@ import {
   commitTree,
   projectConfigJson,
   writeTree,
+  answeredReport,
 } from './helpers.mjs';
 
 const CONFIG_PATH = '.olympus/project.json';
@@ -415,7 +416,15 @@ function seatFixture(seats) {
     const out = behavior({ seat, named, label, prompt: opts.prompt, attempt: opts.attempt }) ?? {};
     return {
       cmd: process.execPath,
-      args: ['-e', seatScript({ reportPath, model: opts.model, ...out })],
+      args: [
+        '-e',
+        seatScript({
+          reportPath,
+          model: opts.model,
+          ...out,
+          report: answeredReport(out.report, opts.prompt),
+        }),
+      ],
       parseLine: fixtureParse,
     };
   };
@@ -439,7 +448,7 @@ function seedHandler(seedExtra = null) {
     writeFileSync(full, STRONG_TEST);
     const sha = await commitAll(worktree, 'suite: seed');
     writeFileSync(join(ctx.paths.runs, ctx.runId, 'spec.md'), '# Spec\n\nf(x) returns 2*x.\n');
-    ctx.store.append('freeze', { actor: 'daemon', sha, killCount: 3, amendmentKills: 0 });
+    ctx.store.append('freeze', { actor: 'daemon', sha });
     if (seedExtra) await seedExtra(ctx);
     return { next: 'implementation' };
   };
@@ -785,6 +794,7 @@ function reviewRemarks() {
       criterion: 'truth',
       severity,
       file: ADR_FILE,
+      ground: [ADR_FILE, 'src/feature.mjs'],
       unit: target.id,
       head: target.head,
       line: 1,
@@ -1065,6 +1075,7 @@ function reviewStanding() {
             criterion: 'truth',
             severity: 'HIGH',
             file: ADR_FILE,
+            ground: [ADR_FILE, 'src/feature.mjs'],
             unit: target.id,
             head: target.head,
             line: 1,
@@ -2270,6 +2281,46 @@ test('textual conflicts take the merge round; test hunks go to the suite seat', 
   );
 });
 
+test("the merge round's briefs name the active records that govern the run's paths", async (t) => {
+  // The constitution tells every seat that its brief names them. The merge round
+  // spawns two seats, and a brief that named none would send each of them to
+  // list the record tree and open whatever it found there, closed records
+  // included (ADR-0089).
+  const fx = shipFixture(t, {
+    files: { [ADR_FILE]: ADR_TEXT },
+    config: { repo: { testPaths: ['tests'], recordPaths: ['docs/adr'] } },
+    seats: {
+      ...reconcileSeats(),
+      suite: () => ({
+        files: { 'tests/feature.test.mjs': STRONG_TEST },
+        report: { suiteFiles: ['tests/feature.test.mjs'], reds: [], summary: 'resolved' },
+      }),
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  commitTree(
+    fx.origin,
+    { 'src/feature.mjs': ALT_FEATURE, 'tests/feature.test.mjs': ALT_TEST },
+    'conflicting main work',
+  );
+  const round = await waitEvent(fx.paths, runId, (e) => e.event === 'merge-round', 'merge-round');
+  assert.equal(round.resolved, true);
+  for (const [seat, marker] of [
+    ['dev', 'textual conflicts'],
+    ['suite', 'conflicts in test files'],
+  ]) {
+    const call = fx.calls.find((c) => c.seat === seat && c.prompt.includes(marker));
+    assert.ok(call, `no ${seat} conflict brief`);
+    assert.match(call.prompt, /active record/);
+    assert.match(call.prompt, new RegExp(`- ${ADR_FILE.replaceAll('/', '\\/')}`));
+    assert.match(call.prompt, /named in neither list is closed/);
+    // The seat is never told to go and find the records itself.
+    assert.ok(!/locate the decision-record tree/.test(call.prompt));
+  }
+});
+
 test('an admin merge over red checks is a breach: ticket, stamp, enqueue', async (t) => {
   const fx = shipFixture(t, {
     pollMs: 300,
@@ -2952,6 +3003,55 @@ test('a failed merge round stalls into the fresh pass born on updated main', asy
   assert.equal(gitSync(['show', 'main:src/feature.mjs'], fx.origin), GOOD_FEATURE);
 });
 
+test('a merge-born fresh pass is captured like any other, and a denied path is refused', async (t) => {
+  // The base a merge-born pass runs on is narrowed to what the pass needs. The
+  // capture is part of what it needs: it reads the lane's diff policy off the
+  // config and the dependency grants off the card, and a base carrying neither
+  // answers "no tier" and "no grant", which admits on this one pass every path
+  // no other pass admits.
+  const fx = shipFixture(t, {
+    config: { diffPolicy: { story: { deniedPaths: ['scripts/**'] } } },
+    seats: {
+      dev: ({ prompt }) => {
+        if (prompt.includes('textual conflicts')) return { exitCode: 1 }; // the round fails
+        if (prompt.includes('stalled and was discarded')) {
+          return {
+            files: {
+              'src/feature.mjs': GOOD_FEATURE,
+              'scripts/hack.mjs': 'export const hack = 1;\n',
+            },
+            report: { summary: 'implemented' },
+          };
+        }
+        return { files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } };
+      },
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  commitTree(fx.origin, { 'src/feature.mjs': ALT_FEATURE }, 'conflicting main work');
+  const violation = await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'diff-policy-violation',
+    'diff-policy-violation',
+  );
+  assert.deepEqual(
+    violation.violations.map((v) => [v.path, v.rule, v.pattern]),
+    [['scripts/hack.mjs', 'denied', 'scripts/**']],
+  );
+  // One corrective invocation carrying the path, then the park: the seat wrote
+  // the same tree again.
+  const park = await waitParked(fx.paths, runId, 'seat-failure');
+  assert.equal(park.detail.seat, 'dev');
+  const corrective = fx.calls.filter(
+    (c) => c.seat === 'dev' && c.prompt.includes('the diff policy denies this path'),
+  );
+  assert.equal(corrective.length, 1);
+  assert.match(corrective[0].prompt, /scripts\/hack\.mjs/);
+});
+
 // -- the update stage: the ship token, then the pre-verdict update -----------
 
 test('a base that did not move costs one stamped no-op, and the token comes first', async (t) => {
@@ -3577,6 +3677,44 @@ test('the resume routes on what the ledger proves, never on merge idempotence', 
     code: null,
     records: { sha: RECORDS, ok: true },
   });
+});
+
+/** The fast-path fixture on a lane that also reconciles a record. */
+function carryingReconcileFixture(t) {
+  return shipFixture(t, {
+    files: { [ADR_FILE]: ADR_TEXT, '.olympus/suite.mjs': DECLARING_SUITE },
+    seats: reconcileSeats(),
+    config: {
+      repo: { testPaths: ['tests'], recordPaths: ['docs/adr'] },
+      commands: { suite: ['node', '.olympus/suite.mjs'] },
+      gates: {
+        tier1: [{ name: 'unit', command: 'suite', ground: ['src'] }],
+        fastPathShip: true,
+        breadthGround: ['package-lock.json'],
+        inertGround: ['docs'],
+      },
+    },
+  });
+}
+
+test('a records answer that stands says why it stands', async (t) => {
+  // Two certifications, one moved base, two answers. The merge is a document
+  // outside the record tree, so neither question is touched by it, and the
+  // records answer carries the reason it stands: no record this run rests on
+  // moved. A stamp that said `kept` and nothing else could not tell that
+  // apart from a reconciliation nobody asked about (ADR-0075).
+  const fx = carryingReconcileFixture(t);
+  const { events } = await shipOverMerge(
+    fx,
+    { 'docs/note.md': 'unrelated main work\n' },
+    'docs: a note',
+  );
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const fast = events.find((e) => e.event === 'fast-path-ship');
+  assert.equal(fast.taken, true, `the fast path refused: ${fast.refusal} (${fast.detail})`);
+  const update = events.find((e) => e.event === 'pre-verdict-update' && e.ran);
+  assert.deepEqual(update.code, { answer: 'kept', files: [] });
+  assert.deepEqual(update.records, { answer: 'kept', reason: 'no-record-moved', files: [] });
 });
 
 test('a project that declares no breadth ground never fast-paths', async (t) => {
@@ -4929,6 +5067,80 @@ test('a project that declares no card lint sweeps as it always did', async (t) =
   assert.ok(!fx.calls.find((c) => c.seat === 'card-sweep').prompt.includes('card lint'));
 });
 
+// A card lint that reads the cards it is named, and reports the rest. The
+// project's own script is the one the harness runs, and this is the shape the
+// harness asks a project's script for: a named set judged, everything else
+// reported after a clean exit.
+const CARD_LINT_BY_NAME = `import { readdirSync, readFileSync } from 'node:fs';
+
+const named = [];
+for (let i = 2; i < process.argv.length; i++) {
+  if (process.argv[i] === '--card') named.push(process.argv[i + 1]);
+}
+const all = readdirSync('stories')
+  .filter((name) => name.endsWith('.md'))
+  .map((name) => \`stories/\${name}\`);
+const broken = all.filter((card) => !readFileSync(card, 'utf8').startsWith('---'));
+const set = named.length > 0 ? named : all;
+const red = broken.filter((card) => set.includes(card));
+if (red.length > 0) {
+  console.error(\`card lint: \${red.join(', ')} carries no frontmatter\`);
+  process.exit(1);
+}
+const beyond = broken.filter((card) => !set.includes(card));
+if (beyond.length > 0) {
+  process.stdout.write(
+    'beyond the card:\\n' + beyond.map((card) => \`\${card}: F1: no frontmatter\`).join('\\n') + '\\n',
+  );
+}
+`;
+
+const BY_NAME = {
+  config: {
+    commands: { cardlint: ['node', 'scripts/cardlint.mjs'] },
+    lanes: { story: { suiteCommand: 'suite', lintCommand: 'cardlint' } },
+  },
+  files: { 'scripts/cardlint.mjs': CARD_LINT_BY_NAME },
+};
+
+test('the sweep asks the card lint about the cards it wrote', async (t) => {
+  const fx = shipFixture(t, BY_NAME);
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const sweep = events.find((e) => e.event === 'card-sweep');
+  assert.equal(sweep.lint, 'green');
+  assert.equal(sweep.pushed, true);
+  // The commit carries the cards and nothing else: the writer stages the paths
+  // it wrote, never the tree it stands in.
+  assert.deepEqual(
+    gitSync(['show', '--name-only', '--format=', 'main'], fx.origin).trim().split('\n'),
+    ['stories/alpha.md'],
+  );
+});
+
+test('a card red beyond the ones the sweep wrote does not hold its notes out of the branch', async (t) => {
+  // A person left another card broken. The sweep judges what it wrote; the
+  // project's cards check is what holds the directory clean.
+  const fx = shipFixture(t, {
+    ...BY_NAME,
+    files: { ...BY_NAME.files, 'stories/beta.md': 'A card with no frontmatter.\n' },
+  });
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const sweep = events.find((e) => e.event === 'card-sweep');
+  assert.equal(sweep.lint, 'green');
+  assert.equal(sweep.pushed, true);
+  // One attempt: the red beyond the set is not a defect of this sweep.
+  assert.equal(fx.calls.filter((c) => c.seat === 'card-sweep').length, 1);
+  assert.match(gitSync(['show', 'main:stories/alpha.md'], fx.origin), /<!-- swept -->/);
+  // The other card is untouched: the sweep repaired nobody else's work.
+  assert.equal(gitSync(['show', 'main:stories/beta.md'], fx.origin), 'A card with no frontmatter.\n');
+});
+
 // -- the card sweep absorbs one race (ADR-0063) ------------------------------
 
 const HUMAN_CARD = `---
@@ -5100,4 +5312,55 @@ test('a body edit rides a file too', async () => {
   const out = await gitHubForge({ repo: 'acme/widgets', runner }).editBody(12, body);
   assert.deepEqual(out, { edited: true });
   assert.equal(content, body);
+});
+
+// -- what the branch is certified for ----------------------------------------
+
+test('a ship certifies the branch it moved, layer by layer, on the instance ledger', async (t) => {
+  const fx = shipFixture(t);
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  const merged = events.find((e) => e.event === 'merged');
+  const stamps = readEvents(fx.paths.instanceLedger).filter((e) => e.event === 'base-certified');
+  // One per ship, whatever brings the close-out back.
+  assert.equal(stamps.length, 1);
+  const [stamp] = stamps;
+  assert.equal(stamp.project, 'proj');
+  assert.equal(stamp.runId, runId);
+  // The sha the default branch became, and never the run's own head.
+  assert.equal(stamp.sha, merged.mergeSha);
+  assert.deepEqual(
+    stamp.layers.map((row) => [row.name, row.status, row.mode, row.verdict]),
+    [['unit', 'green', 'run', 'verdict-1.json']],
+  );
+  // What the layer cost, so a seat bound has a duration to measure against.
+  assert.ok(stamp.layers[0].elapsedMs > 0, 'the certification carries no duration');
+});
+
+test('a lane that renders no code verdict certifies nothing', async (t) => {
+  // The records lane holds no code certification, and a stamp from it would
+  // claim one for every layer of the project.
+  const fx = recordsLaneFixture(t, {
+    seats: {
+      'record-author': () => ({
+        files: { [ADR_FILE]: ADR_REWRITTEN },
+        report: { rewritten: [ADR_FILE], unchanged: [], summary: 'the record states what stands' },
+      }),
+      'record-review': reviewClean,
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch({ lane: 'records', ticket: 'tickets/records.md', card: undefined });
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.ok(!events.some((e) => e.event === 'verdict-rendered'));
+  assert.deepEqual(
+    readEvents(fx.paths.instanceLedger).filter((e) => e.event === 'base-certified'),
+    [],
+  );
 });

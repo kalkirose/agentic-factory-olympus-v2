@@ -77,17 +77,52 @@ const SCENARIO = {
   spec: SPEC,
   suiteFiles: { 'tests/feature.test.mjs': SUITE },
   suiteReds: [{ test: 'f doubles its input', class: 'feature-absence' }],
-  adversaryFiles: { 'src/feature.mjs': 'export const f = (x) => x + x + 1;\n' },
   devFiles: { 'src/feature.mjs': 'export function f(x) {\n  return x * 2;\n}\n' },
 };
 
 // The second card of the project, in the two states this scenario needs: the
-// one the project's card lint refuses, and the repair.
+// one the project's card lint refuses, and the repair. It carries its key, so
+// the closure of a card blocked by it reaches it; what it does not carry is
+// the goal the lint demands.
 const BROKEN_CARD_PATH = '.olympus/cards/beta-1.md';
 
-const BROKEN_CARD = `# Halving helper
+const BROKEN_CARD = `---
+key: beta-1
+title: Halving helper
+---
 
-This card carries no frontmatter, and the card lint of the project refuses it.
+Provide g(x) in src/feature.mjs, stated here under no heading at all.
+`;
+
+// The card lint of the project, asked about the cards of one launch. It
+// refuses a card it was asked about and reports the rest in one block at the
+// end of its output, where the harness reads them off a green exit.
+const CARD_LINT_GATE = `import { readdirSync, readFileSync } from 'node:fs';
+import { mark } from './mark.mjs';
+
+mark('cardlint');
+const named = process.argv.filter((token, i) => process.argv[i - 1] === '--card');
+const errors = [];
+let cards = 0;
+for (const name of readdirSync('.olympus/cards').sort()) {
+  if (!name.endsWith('.md')) continue;
+  cards++;
+  const path = \`.olympus/cards/\${name}\`;
+  const text = readFileSync(path, 'utf8');
+  if (!text.startsWith('---')) errors.push({ path, line: \`\${path}: F1: no frontmatter\` });
+  else if (!/^## Goal\\s*$/m.test(text)) errors.push({ path, line: \`\${path}: F2: no goal\` });
+}
+const reported = errors.filter((e) => named.length === 0 || named.includes(e.path));
+if (reported.length > 0) {
+  console.error(reported.map((e) => e.line).join('\\n'));
+  process.exit(1);
+}
+console.log(\`card lint: reporting \${named.length} of \${cards} cards: \${named.join(' ')}\`);
+const beyond = errors.filter((e) => !reported.includes(e));
+if (beyond.length > 0) {
+  process.stdout.write(\`beyond the card:\\n\${beyond.map((e) => e.line).join('\\n')}\\n\`);
+}
+process.exit(0);
 `;
 
 const REPAIRED_CARD = `---
@@ -109,20 +144,37 @@ function git(args, cwd) {
 }
 
 /** One commit on the default branch of the fixture origin. Returns its sha. */
-function pushToBranch(fx, path, content, message) {
-  writeFileSync(join(fx.seed, path), content);
+function pushToBranch(fx, files, message) {
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(fx.seed, path), content);
+  }
   git(['add', '-A'], fx.seed);
   git(['-c', 'commit.gpgsign=false', 'commit', '-m', message], fx.seed);
   git(['push', '--quiet', fx.origin, 'main'], fx.seed);
   return git(['rev-parse', 'HEAD'], fx.seed).trim();
 }
 
+/** The launched card of the fixture, blocked by one key it names. */
+function blockedOn(fx, key) {
+  const text = readFileSync(join(fx.seed, CARD_PATH), 'utf8');
+  return text.replace(/^---\r?\n/, `---\nblocked-by: ["${key}"]\n`);
+}
+
 test('a retry runs against the branch head, so a repair on it is met', async (t) => {
   const fx = buildFixture({ prefix: 'olympus-e2e-refresh-', scenario: SCENARIO });
   t.after(() => cleanup(fx));
 
-  // The block: a card the project's own lint refuses, on the default branch.
-  const blocked = pushToBranch(fx, BROKEN_CARD_PATH, BROKEN_CARD, 'cards: a second card');
+  // The block: a card the project's own lint refuses, inside the closure of
+  // the card being launched, on the default branch.
+  const blocked = pushToBranch(
+    fx,
+    {
+      '.olympus/gates/cardlint.mjs': CARD_LINT_GATE,
+      [CARD_PATH]: blockedOn(fx, 'beta-1'),
+      [BROKEN_CARD_PATH]: BROKEN_CARD,
+    },
+    'cards: a second card, and the card that waits on it',
+  );
 
   await startDaemon(fx);
   ctl(fx, ['launch', '--project', PROJECT, '--card', CARD_PATH]);
@@ -137,14 +189,18 @@ test('a retry runs against the branch head, so a repair on it is met', async (t)
     { diagnose: () => diagnostics(fx, runId) },
   );
   assert.equal(park.reason, 'readiness-lint');
-  assert.ok(park.question.includes('carries no frontmatter'), park.question);
+  assert.ok(park.question.includes(`${BROKEN_CARD_PATH}: F2: no goal`), park.question);
   assert.ok(gateMarks(fx).includes('cardlint'), 'the project card lint never ran');
   // The run parked on the branch as it stood at the launch.
   const launched = runEvents(fx, runId).find((e) => e.event === 'run-launched');
   assert.equal(launched.baseSha, blocked);
 
   // The operator repairs the card where it lives, then answers.
-  const repaired = pushToBranch(fx, BROKEN_CARD_PATH, REPAIRED_CARD, 'cards: repair the second card');
+  const repaired = pushToBranch(
+    fx,
+    { [BROKEN_CARD_PATH]: REPAIRED_CARD },
+    'cards: repair the second card',
+  );
   assert.notEqual(repaired, blocked);
   ctl(fx, ['answer', '--run', runId, '--option', 'retry']);
 
@@ -187,6 +243,50 @@ test('a retry runs against the branch head, so a repair on it is met', async (t)
 
   // The run has proved what this scenario asks of it; the rest is the ladder
   // the other scenarios already walk.
+  ctl(fx, ['kill', '--run', runId]);
+  await pollFor('the run to close', () =>
+    runEvents(fx, runId).find((e) => e.event === 'run-closed'),
+  );
+  await stopDaemon(fx);
+});
+
+test('a card red outside the closure is reported, and the launch goes on', async (t) => {
+  const fx = buildFixture({ prefix: 'olympus-e2e-beyond-', scenario: SCENARIO });
+  t.after(() => cleanup(fx));
+
+  // The launched card waits on nothing, so the closure is the card itself and
+  // the second card's red is beyond it. Nothing about that card can make this
+  // story wrong, and holding the launch on it is what this replaces.
+  pushToBranch(
+    fx,
+    { '.olympus/gates/cardlint.mjs': CARD_LINT_GATE, [BROKEN_CARD_PATH]: BROKEN_CARD },
+    'cards: a second card the launch does not wait on',
+  );
+
+  await startDaemon(fx);
+  ctl(fx, ['launch', '--project', PROJECT, '--card', CARD_PATH]);
+  const runId = await pollFor(
+    'the launch stamp',
+    () => instanceEvents(fx).find((e) => e.event === 'launch')?.runId,
+    { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
+  );
+  const reported = await pollFor(
+    'the record of the card errors beyond the launched card',
+    () => runEvents(fx, runId).find((e) => e.event === 'readiness-lint-beyond'),
+    { abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  assert.deepEqual(reported.cards, [CARD_PATH]);
+  assert.deepEqual(reported.errors, [`${BROKEN_CARD_PATH}: F2: no goal`]);
+  assert.equal(reported.gist, '1 error(s) beyond the card');
+  // Readiness went past it. The next question is the card's own open decision,
+  // and no step of the run is blocked on another card.
+  await pollFor(
+    'readiness to reach the open decision of the launched card',
+    () => runEvents(fx, runId).some((e) => e.event === 'park' && e.type === 'open-decisions'),
+    { abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  assert.ok(!runEvents(fx, runId).some((e) => e.event === 'park' && e.type === 'stage-blocked'));
+
   ctl(fx, ['kill', '--run', runId]);
   await pollFor('the run to close', () =>
     runEvents(fx, runId).find((e) => e.event === 'run-closed'),

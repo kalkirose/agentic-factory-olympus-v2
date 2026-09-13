@@ -21,20 +21,22 @@ external tools a build machine cannot hold.
   seat owes; the JSON report at the path the prompt names). `ghCommand` names a
   node script that answers every forge call the ship step makes. Nothing in
   `src/` knows either of them exists.
-- **Everything else is real.** A bare git origin, a bare clone, run worktrees,
-  a disposable adversary worktree, commits, a push, a merge commit, a
+- **Everything else is real.** A bare git origin, a bare clone, the run
+  worktree, commits, a push, a merge commit, a
   fetch, the project's four configured commands, and an acceptance suite that
   is red before the implementation and green after it.
-- **Two scenarios.** The story lane carries one intent card from launch to
+- **The lane scenarios.** The story lane carries one intent card from launch to
   `run-closed: shipped`: readiness parks on the card's open decision and the
   console answers it, the spec is born and passes a clean gate round, the suite
-  is authored, the adversary wave is killed, the freeze records the kill
-  count, the dev pass leaves one red layer, triage classes it, one repair round
-  clears it, the second cycle is targeted with a confirmation sweep, the Fury
+  is authored, the freeze records the suite red against the tree before any
+  implementation, the dev pass leaves one red layer, triage classes it, one
+  repair round clears it, the second cycle is targeted with a confirmation
+  sweep, the Fury
   round and the generalist review come back clean, the PR opens, the checks
   transition, the merge lands and close-out sweeps the cards. The repair lane
   carries a committed intake ticket from `olympusctl launch --lane repair`
-  through fix, verdict and ship to the same close.
+  through fix, verdict and ship to the same close. One scenario ships twice, so
+  the second run meets a certified base and carries a layer it did not run.
 - **The claims are sequences and states, never wall-clock.** Each scenario
   asserts a milestone sequence over its ledger, the per-layer results of both
   cycles, the seat argv the supervisor spawned, the gate commands that really

@@ -80,10 +80,7 @@ structured field the freeze acts on.
   `frozenExclusions`. Downstream, exactly three things read it: the dev seats'
   tool deny rules exempt those files, every story-mode `restorePaths` call
   leaves them alone, and the capture stops counting them as changes it took
-  back. The adversary keeps the whole boundary — its restore covers the full
-  test-path set, exclusions included — because an adversary editing a
-  dev-owned test-infrastructure file is still tampering. The suite seat's own
-  checks are unchanged.
+  back. The suite seat's own checks are unchanged.
 - **An exemption narrows the deny rules; it never rides beside them.** A
   denied tool call is denied whatever else the invocation allows, and the rule
   patterns carry no negation. So `testEditDenyRules` walks the entry's subtree
@@ -149,11 +146,6 @@ frozen set is fixed. Deriving the exclusions later, from the spec, would mean
 every consumer re-parses a document that later stages may amend, and two
 consumers could disagree about what the boundary is. One record, written
 once, read by all three consumers.
-
-The adversary is the deliberate exception. Its restore covers the full set,
-including exclusions, because the adversary's job is to be wrong in a way the
-suite fails to catch — and a wrong implementation that quietly rewrites a
-shared test harness is exactly the tampering the restore exists to void.
 
 ## Correction, 2026-08-14
 

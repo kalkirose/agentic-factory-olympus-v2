@@ -100,11 +100,17 @@ export const LOUD_OWNERSHIP = {
     // smaller step — so the owner is that layer's own green, in this run.
     // A run that never gets one leaves the record open, which is the true
     // report: the layer is still dying and nobody has fixed it (ADR-0045).
+    //
+    // A carried result is not that green. It says the layer stood green at
+    // another sha and that this run did not execute it, so it reports nothing
+    // about the host that ran out of memory. Only a green the run bought
+    // answers this record.
     {
       name: 'resource-exhaustion',
       match: (item) => item.kind === 'resource-exhaustion',
       owner: 'layer-result',
-      owns: (item, result) => result.layer === item.layer && result.status === 'green',
+      owns: (item, result) =>
+        result.layer === item.layer && result.status === 'green' && result.mode !== 'carried',
       fields: (item) => ({ layer: item.layer }),
     },
     // The story merged and its owed records went nowhere. The run that could
@@ -135,6 +141,12 @@ export const LOUD_OWNERSHIP = {
   // A threshold informs and asks nothing, so the run it reported on closing is
   // the whole of its life (ADR-0021).
   'budget-breach': [{ name: 'threshold', by: 'the run close' }],
+  // Card errors outside the launched card and the closure it blocks on. The
+  // run reports them and repairs nothing: a card this story does not depend
+  // on is repaired by a cards-lane request, which stamps nothing in this
+  // ledger, and no event a run can write makes another card valid. So the
+  // record lives as long as the reading behind it, which is this run.
+  'readiness-lint-beyond': [{ name: 'beyond-the-card', by: 'the run close' }],
   // The run stopped being a run. Nothing the run can stamp answers that.
   'liveness-violation': [{ name: 'stall', by: 'the human, from a console' }],
   // The run closed and its directory did not move. What answers that is the

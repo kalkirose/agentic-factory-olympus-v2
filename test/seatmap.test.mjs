@@ -75,7 +75,6 @@ test('the seat list is exactly these names', () => {
     'spec-gate',
     'record-author',
     'suite',
-    'adversary',
     'dev',
     'repair-dev',
     'verdict-triage',
@@ -265,6 +264,43 @@ test('the claude argv names the model and blocks tools per policy, never a fallb
   // between the last flag and the prompt.
   assert.equal(dev.args.at(-1), 'P');
   assert.equal(dev.args.at(-2), '--dangerously-skip-permissions');
+});
+
+test('a bound settings file sits between the flag list and the permission flag', () => {
+  const bounded = claudeSeatCommand({
+    prompt: 'P',
+    model: DEFAULT_MODEL,
+    effort: 'high',
+    def: seatDef('dev'),
+    denyTools: ['Edit(tests/**)'],
+    resume: 'session-1',
+    settingsPath: '/home/runs/r1/seats/dev-1.settings.json',
+  });
+  // The prompt stays last and the permission flag stays in front of it, so the
+  // settings path is the last value the CLI reads before the list closes.
+  assert.equal(bounded.args.at(-1), 'P');
+  assert.equal(bounded.args.at(-2), '--dangerously-skip-permissions');
+  assert.equal(bounded.args.at(-3), '/home/runs/r1/seats/dev-1.settings.json');
+  assert.equal(bounded.args.at(-4), '--settings');
+  // The events have to be in the stream: a settings file the CLI refuses is
+  // ignored without a word in print mode, and the hook's own line is the proof.
+  assert.ok(bounded.args.includes('--include-hook-events'));
+  // The variadic deny list ends at the first flag after it, which is still a
+  // flag and never the prompt.
+  const disallowed = bounded.args.slice(
+    bounded.args.indexOf('--disallowedTools') + 1,
+    bounded.args.indexOf('--resume'),
+  );
+  assert.deepEqual(disallowed, ['Edit(tests/**)']);
+  // A seat with no bound carries neither flag.
+  const plain = claudeSeatCommand({
+    prompt: 'P',
+    model: DEFAULT_MODEL,
+    effort: 'high',
+    def: seatDef('dev'),
+  });
+  assert.ok(!plain.args.includes('--settings'));
+  assert.ok(!plain.args.includes('--include-hook-events'));
 });
 
 test('the stream-json parser maps init, assistant, and result lines', () => {

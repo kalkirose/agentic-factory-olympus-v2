@@ -19,7 +19,7 @@ A seat that writes no code writes every record, and it writes it before the
 freeze.
 
 **The story lane.** `PRE_FREEZE_STAGES` in `src/lanes/story.mjs` is readiness,
-spec-birth, spec-gate, records, suite, adversary, freeze. The `records` stage
+spec-birth, spec-gate, records, suite, freeze. The `records` stage
 dispatches one `record-author` seat over the validated spec and the birth
 neighbourhood. The seat writes the records the spec decides and answers every
 unit (ADR-0073). The files commit as `records: <key>` and stamp

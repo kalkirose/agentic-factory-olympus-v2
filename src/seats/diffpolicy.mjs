@@ -1,13 +1,22 @@
-// The diff-policy gate at candidate capture. Three tiers stand between what a
+// The diff-policy gate at candidate capture. Four tiers stand between what a
 // dev seat left in the tree and the implementation commit: paths the lane may
-// never ship, paths it may ship only when the run declared them, and path
-// patterns no run ships at all. The tiers are project config, so a project
-// that declares none keeps every changed file allowed.
+// never ship, paths it may ship only when the run declared them, path patterns
+// no run ships at all, and paths the lane ships only for the dependency its
+// card names. The tiers are project config, so a project that declares none
+// keeps every changed file allowed.
 //
-// The gate reads the repo-relative path and nothing else. A file the policy
-// names violates it whatever the change inside that file says — the point is
-// that the seat under judgment cannot quietly move the ground it is judged
-// on, and content review cannot settle that.
+// Three of the four read the repo-relative path and nothing else. A file one
+// of them names violates it whatever the change inside that file says. The
+// seat under judgment cannot quietly move the ground it is judged on, and
+// content review cannot settle that.
+//
+// `dependencyPaths` is the fourth, and it is the one file a path answer gets
+// wrong in both directions. A dependency lockfile holds every package of
+// every workspace member: denying it sends a story that needs one package
+// through a second run, and admitting it lets a seat move the resolution of
+// anything. The path tier says which file asks the question; `lockfileGrant`
+// answers it from the file's own bytes, and the refusal it writes rides
+// `violationLine` like every other.
 //
 // The same block carries two classes that block nothing. `recapturablePaths`
 // names the frozen artifacts a re-freeze re-takes, and a write the capture
@@ -102,9 +111,14 @@ export function laneDiffPolicy(config, lane) {
 }
 
 /**
- * Judges changed paths against one lane's tiers. The first tier that matches
- * a path names the violation, so a path both forbidden and merely declarable
- * reports as forbidden.
+ * Judges changed paths against one lane's tiers by path. The first tier that
+ * matches a path names the violation, so a path both forbidden and merely
+ * declarable reports as forbidden.
+ *
+ * The content tier is not judged here. A path under `dependencyPaths` that no
+ * hard tier holds leaves this clean, and the caller reads the file itself; a
+ * refusal it raises carries the rule `dependency-grant` into `violationLine`
+ * beside the ones this returns.
  *
  * @param {string[]} changed repo-relative paths the capture holds
  * @param {object|null} tier the lane's policy tiers
@@ -128,12 +142,38 @@ export function diffPolicyViolations(changed, tier, declares = () => false) {
       violations.push({ path, rule: 'forbidden', pattern: forbidden });
       continue;
     }
+    // A dependency path is answered by its content and never by a spec: the
+    // card carries the permission, and the spec lint refuses a spec that
+    // lists the file. Reading it as undeclarable here would refuse every
+    // dependency story on the one declaration nobody is allowed to write.
+    if ((tier.dependencyPaths ?? []).some((entry) => underEntry(path, entry))) continue;
     const declarable = (tier.declaredPaths ?? []).find((entry) => underEntry(path, entry));
     if (declarable && !declares(path)) {
       violations.push({ path, rule: 'undeclared', pattern: declarable });
     }
   }
   return violations;
+}
+
+/**
+ * The changed paths this lane admits only for the dependency its card names.
+ * The gate cannot judge them: what is legal in one of these files is a fact
+ * about its content, so the caller reads the file and calls the grant.
+ *
+ * @param {string[]} changed repo-relative paths the capture holds
+ * @param {object|null} tier the lane's policy tiers
+ * @returns {{path: string, pattern: string}[]} in the order the paths arrived
+ */
+export function dependencyWrites(changed, tier) {
+  const entries = tier?.dependencyPaths ?? [];
+  if (entries.length === 0) return [];
+  const writes = [];
+  for (const raw of changed) {
+    const path = raw.replaceAll('\\', '/');
+    const pattern = entries.find((entry) => underEntry(path, entry));
+    if (pattern) writes.push({ path, pattern });
+  }
+  return writes;
 }
 
 /** The corrective-brief line for one violation. */
@@ -143,6 +183,13 @@ export function violationLine(v) {
   }
   if (v.rule === 'forbidden') {
     return `${v.path}: the diff policy forbids this path shape (forbiddenPatterns: ${v.pattern}). Restore it to its committed state.`;
+  }
+  // The content tier states the block that broke and asks for that block back,
+  // not for the file back: the story is allowed to hold the dependency its
+  // card names, and a seat told to restore the whole file would drop the one
+  // change it was sent to make.
+  if (v.rule === 'dependency-grant') {
+    return `${v.path}: the diff policy admits this path only for the dependency the card names (dependencyPaths: ${v.pattern}). ${v.reason} Hold the file to the dependency the card names and put the rest of it back.`;
   }
   return `${v.path}: the diff policy admits this path only when the spec declares it (declaredPaths: ${v.pattern}), and the spec does not. Restore it to its committed state.`;
 }
@@ -224,10 +271,17 @@ export function sweptTakeBacks(dropped, tier, frozen) {
   return sweepCandidates(dropped, tier).filter((raw) => !held.has(raw.replaceAll('\\', '/')));
 }
 
-/** Whether a hard tier holds this path — the classes no quiet reading reaches. */
+/**
+ * Whether a hard tier holds this path — the classes no quiet reading reaches.
+ *
+ * `dependencyPaths` is one of them. A write to a dependency path is judged by
+ * the file's own bytes, and a take-back that the quiet class or the sweep
+ * carried away would leave that judgment with nothing to read.
+ */
 function guardedByTier(path, tier) {
   return (
     (tier?.deniedPaths ?? []).some((entry) => underEntry(path, entry)) ||
+    (tier?.dependencyPaths ?? []).some((entry) => underEntry(path, entry)) ||
     (tier?.forbiddenPatterns ?? []).some((pattern) => compile(pattern).test(path))
   );
 }

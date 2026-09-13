@@ -79,12 +79,26 @@ export const PROJECT_CONFIG = {
     cardlint: ['node', '.olympus/gates/cardlint.mjs'],
   },
   gates: {
+    // Every layer states what its command reads, so the first cycle of a run
+    // can be the footprint of that run's own diff. `lint` reads the sources,
+    // `suite` reads the sources and the tests, and `smoke` boots what the
+    // sources build. The smoke layer is also this project's setup layer, which
+    // is what arms the footprint at all: a project that names none has not said
+    // which layers make the others runnable, and every cycle of it runs
+    // everything.
     tier1: [
-      { name: 'lint', command: 'lint' },
-      { name: 'suite', command: 'suite' },
+      { name: 'lint', command: 'lint', ground: ['src'] },
+      { name: 'suite', command: 'suite', ground: ['src', 'tests'] },
       // The one layer that declares what it may hold, so the e2e proves the
       // declaration reaches the reading in the ledger (ADR-0045).
-      { name: 'smoke', command: 'smoke', needs: ['suite'], memoryCeilingMb: SMOKE_CEILING_MB },
+      {
+        name: 'smoke',
+        command: 'smoke',
+        needs: ['suite'],
+        memoryCeilingMb: SMOKE_CEILING_MB,
+        ground: ['src'],
+        setup: true,
+      },
     ],
     // The layers a changed record path is attributed to, and no other. A
     // record-only diff runs this one and skips the code suite, which is what
@@ -740,6 +754,11 @@ export function originTree(fx, ref) {
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
+}
+
+/** One file as a ref of the fixture origin holds it. */
+export function originFile(fx, ref, path) {
+  return git(['show', `${ref}:${path}`], fx.origin);
 }
 
 // -- shared assertions -------------------------------------------------------

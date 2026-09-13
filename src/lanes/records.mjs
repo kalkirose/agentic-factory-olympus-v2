@@ -36,7 +36,7 @@ import {
   unwindSeatCommits,
 } from '../isolation/tree.mjs';
 import { recordCriteriaLines } from './lenses.mjs';
-import { NEIGHBOUR_CAP, isActiveRecord, readText } from './units.mjs';
+import { NEIGHBOUR_CAP, governingRecordLines, isActiveRecord, readText } from './units.mjs';
 import { ACTOR, againstClause, briefLines, gist, underAny } from './shared.mjs';
 
 /** The seat that rewrites the records at a reconciliation and at a correction. */
@@ -131,6 +131,12 @@ export function birthRole(base, spec, neighbours, brief) {
     'decides nothing the record tree does not already hold, write no file and say so in',
     '"unchanged" with the reason.',
     ...neighbourhoodLines(neighbours),
+    // The neighbourhood above is this seat's first list, so the rest of the tree
+    // is what it has not been given: the paths the work touches and the
+    // neighbourhood are each named once (ADR-0089).
+    ...governingRecordLines(base.worktree, [], base.recordPaths ?? [], {
+      exclude: [...neighbourList(neighbours), ...(spec?.touchedPaths ?? [])],
+    }),
     ...renderLines(base),
     '',
     'Rules:',
@@ -314,9 +320,14 @@ function judgedRules(records) {
   ];
 }
 
+/** The neighbourhood as a list, in either form a caller holds it. */
+function neighbourList(neighbours) {
+  return Array.isArray(neighbours) ? neighbours : (neighbours?.neighbours ?? []);
+}
+
 /** The neighbourhood, by path, and the count the cap dropped. */
 function neighbourhoodLines(neighbours) {
-  const list = Array.isArray(neighbours) ? neighbours : (neighbours?.neighbours ?? []);
+  const list = neighbourList(neighbours);
   const dropped = Array.isArray(neighbours) ? 0 : (neighbours?.dropped ?? 0);
   if (list.length === 0) {
     return ['', 'Neighbourhood: no active record cites these records, and they cite none.'];

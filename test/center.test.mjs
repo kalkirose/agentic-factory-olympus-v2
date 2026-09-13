@@ -38,9 +38,7 @@ function seedShippedRun(paths, runId, storyKey, { start, hours, archived = false
   stamp('run-launched', 0, { project: 'alpha', lane: 'story', storyKey });
   const stages = LANE_STAGES.story;
   stages.forEach((stage, i) => stamp('stage-entered', i * 10, { stage }));
-  stamp('adversary-wave', 41, { round: 1, wave: 1, phase: 'initial', result: 'killed', sha: 'a' });
-  stamp('adversary-wave', 42, { round: 1, wave: 2, phase: 'initial', result: 'killed', sha: 'b' });
-  stamp('freeze', 50, { sha: 'f'.repeat(40), killCount: 2, amendmentKills: 0, dispositions: 0, files: 3 });
+  stamp('freeze', 50, { sha: 'f'.repeat(40), files: 3 });
   stamp('pr-opened', hours * 60 - 38, { pr: 7, url: 'x', branch: `run/${runId}`, base: 'main', sha: 'c1', required: ['ci'], autoMerge: 'squash' });
   stamp('check-transition', hours * 60 - 10, { name: 'ci', sha: 'c1', status: 'success', duration: 22 * 60_000 });
   stamp('merged', hours * 60, { pr: 7, sha: 'c1', mergeSha: 'm1', red: false });
@@ -216,10 +214,6 @@ test('snapshot derives every section from the files alone', async (t) => {
   // is another project's defect.
   assert.equal(health.escapes.counted, 1);
   assert.equal(health.escapes.rate, 0.1);
-  assert.deepEqual(
-    { kills: health.killRate.kills, waves: health.killRate.waves },
-    { kills: 2, waves: 2 },
-  );
   assert.equal(health.tripwires.registryRead, false);
   // The open breach shows even while the registry is unread.
   assert.deepEqual(health.tripwires.wires.map((w) => [w.id, w.state]), [
@@ -234,7 +228,7 @@ test('snapshot derives every section from the files alone', async (t) => {
   assert.equal(s.stats.greenShipP50Minutes, 38);
   assert.equal(s.stats.ciCriticalPathP50Minutes, 22);
   const stageNames = s.stats.stageMedians.map((m) => m.stage);
-  assert.ok(stageNames.includes('adversary'));
+  assert.ok(stageNames.includes('suite'));
   assert.ok(stageNames.indexOf('readiness') < stageNames.indexOf('verdict'));
 
   // tail: newest first, loud flagged
@@ -328,6 +322,17 @@ function seedRecordRun(paths) {
       cost: 1.2,
     }),
     line(80, 'layer-result', { cycle: 4, layer: 'adr-form', status: 'green', elapsedMs: 120_000 }),
+    // A layer of the same cycle that carried the default branch's own
+    // certification. It ran nothing, so it spent no minutes and measures none.
+    line(81, 'layer-result', {
+      cycle: 4,
+      layer: 'unit',
+      status: 'green',
+      mode: 'carried',
+      carriedFrom: 'base',
+      baseSha: 'b'.repeat(40),
+      certifiedSeq: 3,
+    }),
     // The review's own answer over the same record.
     line(84, 'record-reviewed', {
       seat: 'record-review:1',
@@ -437,7 +442,9 @@ test('the records section derives its measures from the ledger', async (t) => {
   assert.deepEqual(r.movedTree, { updates: 1, rejudged: 0, rerun: 1, both: 0, neither: 0 });
   assert.deepEqual(r.recheck, { rechecks: 1, answered: 0, yield: 0 });
   // Two minutes of layers on the first render, one on the second; the third
-  // ran no layer and is no reading.
+  // ran no layer and is no reading. The carried layer of the first render adds
+  // nothing: a carry spends no time, and a reading that counted it as nought
+  // would report a gate that got faster.
   assert.deepEqual(r.gateMinutes, { renders: 2, mean: 1.5 });
   // The first write seat to the last write stamp of that stage run.
   assert.deepEqual(r.writeMinutes, { mean: 45, writes: 1, longest: 45 });

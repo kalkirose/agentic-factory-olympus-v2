@@ -27,10 +27,12 @@ concrete shapes:
   home) pins a heads-only refspec; every launch fetches with prune first. A
   failed fetch fails the launch. No run starts on silently stale refs.
 - **Worktree layout.** `worktrees/<runId>/tree` is the run worktree, on a
-  fresh branch `run/<runId>` off the default branch head. Disposable
-  worktrees (adversary waves) sit beside it as `worktrees/<runId>/<tag>`,
-  detached at a named sha. At close, every worktree under the run root, the
-  root, and the run branch go away. Shipped work lives on the remote; the
+  fresh branch `run/<runId>` off the default branch head. A run holds that one
+  checkout: every tree the run is judged on is that tree at a commit, so there
+  is no second checkout of the run to drift from it. The close still clears the
+  whole run root, because a crash that left a directory there leaves it under
+  the run's own path and nowhere else. At close, every worktree under the run
+  root, the root, and the run branch go away. Shipped work lives on the remote; the
   archived ledger records the base sha. The root the runs sit under is the
   daemon home's own unless instance config names another (`worktreeRoot`, an
   absolute path) — it describes the machine, like `composeCommand`, and it

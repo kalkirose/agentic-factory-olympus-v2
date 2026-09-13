@@ -28,6 +28,7 @@ import {
   forgeCalls,
   gateMarks,
   instanceEvents,
+  originFile,
   originSha,
   originTree,
   pollFor,
@@ -124,8 +125,6 @@ const SCENARIO = {
     { test: 'f doubles its input', class: 'feature-absence' },
     { test: 'f is a function', class: 'feature-absence' },
   ],
-  // A wrong implementation the frozen suite kills: the wave is a kill.
-  adversaryFiles: { 'src/feature.mjs': 'export const f = (x) => x + x + 1;\n' },
   // The first pass is off by one, so the suite layer is red and the layer that
   // needs it is not runnable. The repair round turns both green.
   devFiles: { 'src/feature.mjs': 'export function f(x) {\n  return x * 2 + 1;\n}\n' },
@@ -204,7 +203,6 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
     'spec-born',
     'spec-gate-round',
     'suite-committed',
-    'adversary-wave',
     'red-state-check',
     'freeze',
     'implementation-committed',
@@ -231,15 +229,8 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
     [[1, 'pass', 0]],
     'the spec gate did not pass in one clean round',
   );
-  const waves = events.filter((e) => e.event === 'adversary-wave');
-  assert.equal(waves.length, 1);
-  assert.ok(
-    waves.every((w) => w.phase === 'initial' && w.result === 'killed'),
-    'the frozen suite did not kill every wave',
-  );
   assert.equal(events.find((e) => e.event === 'red-state-check').result, 'red');
-  const freeze = events.find((e) => e.event === 'freeze');
-  assert.equal(freeze.killCount, 1);
+  assert.ok(events.some((e) => e.event === 'freeze'));
   const record = JSON.parse(readFileSync(join(runDir(fx, runId), 'freeze.json'), 'utf8'));
   assert.equal(record.storyKey, 'alpha-1');
   assert.ok(record.suiteFiles.includes('tests/feature.test.mjs'));
@@ -270,9 +261,12 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
   );
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   assert.equal(renders.length, 2);
+  // The first cycle would scope itself to the footprint of the run's own diff,
+  // and on a fresh origin nothing has certified the tree it branched from. So it
+  // runs every layer and the record says which condition was not met.
   assert.deepEqual(
-    [renders[0].verdict, renders[0].sweep],
-    ['red', 'full'],
+    [renders[0].verdict, renders[0].sweep, renders[0].reason],
+    ['red', 'full', 'no-base-certification'],
   );
   assert.deepEqual(
     [renders[1].verdict, renders[1].sweep, renders[1].confirmation],
@@ -383,10 +377,10 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
   assert.ok(marks.includes('cardlint'), 'the readiness lint command never ran');
   assert.ok(marks.includes('lint'), 'the lint layer never ran');
   assert.ok(marks.includes('smoke'), 'the smoke layer never ran');
-  // The adversary wave, the red-state check, the first cycle with its flake
-  // re-run, the targeted cycle: the suite command is the busiest of them.
+  // The red-state check, the first cycle with its flake re-run, the targeted
+  // cycle: the suite command is the busiest of them.
   assert.ok(
-    marks.filter((m) => m === 'suite').length >= 4,
+    marks.filter((m) => m === 'suite').length >= 3,
     `the suite command ran ${marks.filter((m) => m === 'suite').length} times`,
   );
   // The run's cache directory reached the gate commands, kept what one of them
@@ -448,7 +442,6 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
     'spec-birth',
     'spec-gate',
     'suite',
-    'adversary',
     'dev',
     'verdict-triage',
     'repair-dev',
@@ -465,26 +458,49 @@ test('the story lane ships a card through the assembled binaries', async (t) => 
   // never spawns and the security lens rides the operational seat.
   assert.ok(!seats.includes('fury-code-shape'), 'the cut lenses spawned a seat');
   assert.ok(!seats.includes('fury-security'), 'a standalone security seat ran');
-  // Every seat that writes code is told to check its work with the parts of a
-  // layer its diff can reach, and told the same mapping the cycle uses
-  // (ADR-0046). The seats spend from the same clock the cycles do.
+  // Every seat that writes code is bounded to the layers its own work reaches,
+  // and told whose job the rest is. One stage judges a tree, and it is the
+  // verdict.
   for (const seat of ['dev', 'repair-dev']) {
     const brief = calls.find((c) => c.seat === seat).prompt;
     assert.ok(
-      brief.includes('Check your own work with the parts your diff can reach'),
-      `the ${seat} seat was not told which parts its diff reaches`,
+      brief.includes('The Tier-1 gate commands your work is bounded to:'),
+      `the ${seat} seat was not told its bound`,
     );
     assert.ok(
-      brief.includes('OLYMPUS_PARTS=<comma-separated part names>'),
-      `the ${seat} seat was not told how to run a narrowed layer`,
+      brief.includes('A refused layer is not yours to run and not a defect to work around'),
+      `the ${seat} seat was not told whose job a refused layer is`,
+    );
+  }
+  // The bound the seat actually ran inside, and the hook's own answer beside
+  // its first command: a settings file the CLI refuses is ignored without a
+  // word, so the load is proven from the stream and never from the write.
+  for (const seat of ['dev', 'repair-dev']) {
+    const stamp = events.find((e) => e.event === 'seat-bound' && e.seat === seat);
+    assert.ok(stamp, `the ${seat} seat carried no bound`);
+    assert.deepEqual(
+      stamp.layers,
+      ['lint', 'suite', 'smoke'],
+      `the ${seat} bound named other layers`,
+    );
+    const bound = JSON.parse(
+      readFileSync(join(runDir(fx, runId), 'seats', `${seat}-1.bound.json`), 'utf8'),
+    );
+    assert.equal(bound.seat, seat);
+    assert.equal(bound.suite, 'suite');
+    assert.ok(bound.declared.includes('src/feature.mjs'));
+    assert.ok(
+      !events.some((e) => e.event === 'seat-failure' && e.reason === 'bound-not-loaded'),
+      'a seat ran a command with no answer from its bound hook',
     );
   }
   const operational = calls.find((c) => c.seat === 'fury-operational').prompt;
   assert.ok(operational.includes('- security: authorization on every entry point'));
-  // The adversary waves carry the same dimensions into the suite.
-  const adversary = calls.find((c) => c.seat === 'adversary').prompt;
-  assert.ok(adversary.includes('- authorization on every entry point'));
-  assert.ok(adversary.includes('- trust boundaries'));
+  // The suite brief carries the same dimensions, because the map it asks for
+  // is enumerated along them.
+  const suite = calls.find((c) => c.seat === 'suite').prompt;
+  assert.ok(suite.includes('- authorization on every entry point'));
+  assert.ok(suite.includes('- trust boundaries'));
 
   // The machine's credential follows suite execution and nothing else.
   assert.equal(calls.find((c) => c.seat === 'dev').secret, true);
@@ -668,5 +684,133 @@ test('a story birth that spends its ladder ships, and the judge names the record
   assert.ok(tree.includes('src/feature.mjs'), 'the code did not ride the merge');
   assert.ok(!events.some((e) => e.event === 'reconciliation-judged' && e.ticket));
 
+  await stopDaemon(fx);
+});
+
+// A birth that needs a package the card does not name asks the owner once.
+// The approve answer writes the dependency onto the card on the default
+// branch, refreshes the run tree onto that head, and a fresh birth seat reads
+// the amended card and writes the spec. The run then ships as any other.
+test('a dependency the card does not name is approved onto the card and the story ships', async (t) => {
+  const fx = buildFixture({
+    prefix: 'olympus-e2e-dependency-',
+    scenario: {
+      ...SCENARIO,
+      specDependencies: [{ importer: '.', name: 'left-pad', reason: 'AC-1 pads the answer' }],
+      // A story that adds a dependency writes the importer's manifest, and the
+      // spec lint holds the spec to declaring it.
+      spec: SPEC.replace(
+        'src/feature.mjs (new) — dev\n',
+        'src/feature.mjs (new) — dev\npackage.json (new) — dev\n',
+      ),
+    },
+    tree: { '.olympus/project.json': ONE_ROUND },
+  });
+  t.after(() => cleanup(fx));
+  await startDaemon(fx);
+  ctl(fx, ['launch', '--project', PROJECT, '--card', CARD_PATH]);
+  const runId = await pollFor(
+    'the launch stamp',
+    () => instanceEvents(fx).find((e) => e.event === 'launch')?.runId,
+    { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
+  );
+  await pollFor(
+    'the open-decisions park',
+    () => runEvents(fx, runId).some((e) => e.event === 'park' && e.type === 'open-decisions'),
+    { abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  ctl(fx, ['answer', '--run', runId, '--text', 'No; f trusts the value it is given.']);
+  await pollFor(
+    'the dependency-decision park',
+    () => runEvents(fx, runId).some((e) => e.event === 'park' && e.type === 'dependency-decision'),
+    { abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  ctl(fx, ['answer', '--run', runId, '--option', 'approve']);
+  await pollFor(
+    'the run to close',
+    () => runEvents(fx, runId).some((e) => e.event === 'run-closed'),
+    { attempts: 1800, abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  const events = runEvents(fx, runId);
+
+  // The park was raised before any spec was born, and answered once.
+  const park = events.find((e) => e.event === 'park' && e.type === 'dependency-decision');
+  assert.ok(park.seq < events.find((e) => e.event === 'spec-born').seq);
+  const amended = events.find((e) => e.event === 'card-amended');
+  assert.equal(amended.card, CARD_PATH);
+  assert.equal(amended.pushed, true);
+  assert.deepEqual(
+    amended.dependencies.map((d) => `${d.importer}: ${d.name}`),
+    ['.: left-pad'],
+  );
+  const refreshed = events.find((e) => e.event === 'tree-refreshed' && e.seq > amended.seq);
+  assert.ok(refreshed, 'the run tree was not refreshed onto the amended head');
+
+  // The amendment is a commit on the default branch of the origin, and the
+  // story shipped behind it.
+  const card = originFile(fx, 'main', CARD_PATH);
+  assert.ok(/^## Dependencies\s*$/m.test(card), 'the card on main carries no Dependencies section');
+  assert.ok(card.includes('- .: left-pad'), 'the card on main does not name the package');
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+
+  await stopDaemon(fx);
+});
+
+// A settings file the CLI refuses is ignored in print mode with nothing said
+// about it, so a seat can run the whole battery while the harness believes it is
+// bounded. The proof is the hook's own answer in the stream, and a seat that ran
+// a command without one is a seat nobody bounded: the run parks rather than
+// judge a tree on an unbounded pass.
+test('a seat whose bound never loaded parks the run', async (t) => {
+  const fx = buildFixture({
+    prefix: 'olympus-e2e-story-unbound-',
+    scenario: { ...SCENARIO, unboundSeat: 'dev' },
+  });
+  t.after(() => cleanup(fx));
+  await startDaemon(fx);
+  ctl(fx, ['launch', '--project', PROJECT, '--card', CARD_PATH]);
+  const runId = await pollFor(
+    'the launch stamp',
+    () => instanceEvents(fx).find((e) => e.event === 'launch')?.runId,
+    { abort: () => stalled(fx), diagnose: () => diagnostics(fx) },
+  );
+  await pollFor(
+    'the open-decisions park',
+    () => runEvents(fx, runId).some((e) => e.event === 'park' && e.type === 'open-decisions'),
+    { abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  ctl(fx, ['answer', '--run', runId, '--text', 'No; f trusts the value it is given.']);
+
+  const park = await pollFor(
+    'the seat-failure park',
+    () =>
+      runEvents(fx, runId).find(
+        (e) =>
+          e.event === 'park' &&
+          e.type === 'seat-failure' &&
+          e.detail?.cause === 'bound-not-loaded',
+      ),
+    // The park is what this waits for, so the abort watches the daemon and the
+    // launch alone: a run-scoped abort reads this very park as a stall.
+    { attempts: 600, abort: () => stalled(fx), diagnose: () => diagnostics(fx, runId) },
+  );
+  assert.match(park.question, /The dev seat failed \(bound-not-loaded\)/);
+  const events = runEvents(fx, runId);
+  // The seat was bounded at the spawn: the file was written and stamped, and
+  // what failed is the load the CLI never reported.
+  assert.ok(events.some((e) => e.event === 'seat-bound' && e.seat === 'dev'));
+  assert.equal(
+    events.filter((e) => e.event === 'seat-spawned' && e.seat === 'dev').length,
+    1,
+    'the run bought a second child on a settings file the CLI had already ignored',
+  );
+  // Nothing was judged on the pass: no verdict, and no commit of the seat work.
+  assert.ok(!events.some((e) => e.event === 'implementation-committed'));
+  assert.ok(!events.some((e) => e.event === 'verdict-rendered'));
+
+  ctl(fx, ['kill', '--run', runId]);
+  await pollFor('the run to close', () =>
+    runEvents(fx, runId).find((e) => e.event === 'run-closed'),
+  );
   await stopDaemon(fx);
 });

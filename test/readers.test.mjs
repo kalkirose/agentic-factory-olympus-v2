@@ -18,7 +18,8 @@ import {
   fastPathShipOf,
   storyRunsByKey,
 } from '../src/telemetry/readers.mjs';
-import { tempDir, removeDir } from './helpers.mjs';
+import { newestBaseCertification, certifiedAt, certifiedAtAll } from '../src/ledger/readers.mjs';
+import { tempDir, removeDir, initOriginRepo, commitTree, gitSync } from './helpers.mjs';
 
 function home(t) {
   const dir = tempDir();
@@ -293,4 +294,193 @@ test('story-run history is read per project, because a story key is a project wo
   const all = storyRunsByKey(paths);
   assert.equal(all.get('alpha-1').open, 1);
   assert.equal(all.get('alpha-1').shipped, 1);
+});
+
+// -- what the default branch is already certified for -------------------------
+
+/** Stamps one base certification and answers the line it wrote. */
+function certify(paths, fields) {
+  const store = openInstanceStore(paths);
+  const line = store.append('base-certified', { actor: 'daemon', ...fields });
+  store.close();
+  return line;
+}
+
+function row(name, status, { elapsedMs = 100, mode = 'run', verdict = 'verdict-1.json' } = {}) {
+  return { name, status, elapsedMs, mode, verdict };
+}
+
+/**
+ * A project clone holding two commits, the second touching `changed` alone.
+ * Bare, because that is the form the daemon holds a project in, and a diff of
+ * two shas is read in it without a working tree.
+ */
+function projectClone(t, changed) {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const origin = join(dir, 'origin');
+  initOriginRepo(origin, { 'src/feature.mjs': 'first\n', 'docs/note.md': 'first\n' });
+  const first = gitSync(['rev-parse', 'HEAD'], origin).trim();
+  const later = commitTree(origin, changed, 'second');
+  const bare = join(dir, 'p.git');
+  gitSync(['clone', '--bare', origin, bare], dir);
+  return { bare, first, later };
+}
+
+test('the newest certification of one project at one sha is what a carry reads', (t) => {
+  const paths = home(t);
+  assert.equal(newestBaseCertification(paths, 'p', 'aaa'), null);
+  certify(paths, { project: 'p', runId: 'r1', sha: 'aaa', layers: [row('unit', 'red')] });
+  const newer = certify(paths, {
+    project: 'p',
+    runId: 'r2',
+    sha: 'aaa',
+    layers: [row('unit', 'green')],
+  });
+  // Another project's word about the same sha, and this project's word about
+  // another sha, are both somebody else's answer.
+  certify(paths, { project: 'q', runId: 'r3', sha: 'aaa', layers: [row('unit', 'green')] });
+  certify(paths, { project: 'p', runId: 'r4', sha: 'bbb', layers: [row('unit', 'green')] });
+  const held = newestBaseCertification(paths, 'p', 'aaa');
+  assert.equal(held.seq, newer.seq);
+  assert.equal(held.runId, 'r2');
+  assert.equal(newestBaseCertification(paths, 'p', 'ccc'), null);
+  assert.equal(newestBaseCertification(paths, 'other', 'aaa'), null);
+});
+
+test('with no sha the newest certification of the project answers, which is the duration', (t) => {
+  const paths = home(t);
+  assert.equal(newestBaseCertification(paths, 'p'), null);
+  certify(paths, { project: 'p', runId: 'r1', sha: 'aaa', layers: [row('unit', 'green')] });
+  const newest = certify(paths, {
+    project: 'p',
+    runId: 'r2',
+    sha: 'bbb',
+    layers: [row('unit', 'green', { elapsedMs: 4000 })],
+  });
+  // A layer takes about as long as it took last time, and the sha it took
+  // that long at says nothing about the number.
+  const held = newestBaseCertification(paths, 'p');
+  assert.equal(held.seq, newest.seq);
+  assert.equal(held.layers[0].elapsedMs, 4000);
+});
+
+test('a certification at the sha answers for its layers, and a red there is final', async (t) => {
+  const paths = home(t);
+  const { bare, first, later } = projectClone(t, { 'docs/note.md': 'second\n' });
+  // An older green for the layer the newer certification calls red. The older
+  // claim is about another tree; the newer one measured this one.
+  certify(paths, { project: 'p', runId: 'r0', sha: first, layers: [row('lint', 'green')] });
+  certify(paths, {
+    project: 'p',
+    runId: 'r1',
+    sha: later,
+    layers: [row('unit', 'green', { elapsedMs: 2000 }), row('lint', 'red')],
+  });
+  const unit = await certifiedAt(paths, 'p', later, 'unit', ['src'], bare);
+  assert.equal(unit.baseSha, later);
+  assert.equal(unit.status, 'green');
+  assert.equal(unit.elapsedMs, 2000);
+  assert.equal(await certifiedAt(paths, 'p', later, 'lint', ['docs'], bare), null);
+  // A layer the certification never named is not certified by it either.
+  assert.equal(await certifiedAt(paths, 'p', later, 'acceptance', ['src'], bare), null);
+});
+
+test('a certification at the sha needs no ground: the layer ran on this tree', async (t) => {
+  const paths = home(t);
+  const { bare, later } = projectClone(t, { 'docs/note.md': 'second\n' });
+  certify(paths, { project: 'p', runId: 'r1', sha: later, layers: [row('unit', 'green')] });
+  const held = await certifiedAt(paths, 'p', later, 'unit', [], bare);
+  assert.equal(held.baseSha, later);
+});
+
+test('an earlier certification stands while the diff leaves the ground alone', async (t) => {
+  const paths = home(t);
+  const { bare, first, later } = projectClone(t, { 'docs/note.md': 'second\n' });
+  const stamp = certify(paths, {
+    project: 'p',
+    runId: 'r1',
+    sha: first,
+    layers: [row('unit', 'green'), row('docs-lint', 'green')],
+  });
+  const carried = await certifiedAt(paths, 'p', later, 'unit', ['src'], bare);
+  assert.equal(carried.baseSha, first);
+  assert.equal(carried.certifiedSeq, stamp.seq);
+  assert.equal(carried.runId, 'r1');
+  // The same branch move touches the second layer's ground, so that one has
+  // to answer for the tree itself.
+  assert.equal(await certifiedAt(paths, 'p', later, 'docs-lint', ['docs'], bare), null);
+  // A layer that declares no ground has claimed nothing to carry.
+  assert.equal(await certifiedAt(paths, 'p', later, 'unit', [], bare), null);
+});
+
+test('an earlier certification that holds the layer red carries nothing', async (t) => {
+  const paths = home(t);
+  const { bare, first, later } = projectClone(t, { 'docs/note.md': 'second\n' });
+  certify(paths, { project: 'p', runId: 'r1', sha: first, layers: [row('unit', 'red')] });
+  assert.equal(await certifiedAt(paths, 'p', later, 'unit', ['src'], bare), null);
+});
+
+test('a clone the diff cannot be read in refuses the carry', async (t) => {
+  const paths = home(t);
+  const { first, later } = projectClone(t, { 'docs/note.md': 'second\n' });
+  certify(paths, { project: 'p', runId: 'r1', sha: first, layers: [row('unit', 'green')] });
+  // Doubt runs the layer, and a clone that answers nothing is doubt.
+  assert.equal(
+    await certifiedAt(paths, 'p', later, 'unit', ['src'], join(paths.home, 'no-clone')),
+    null,
+  );
+});
+
+test('a whole layer set is answered in one read, with one diff per ancestor sha', async (t) => {
+  const paths = home(t);
+  const { bare, first, later } = projectClone(t, { 'docs/note.md': 'second\n' });
+  certify(paths, {
+    project: 'p',
+    runId: 'r1',
+    sha: first,
+    layers: [row('unit', 'green'), row('lint', 'green'), row('docs-lint', 'green')],
+  });
+  certify(paths, { project: 'p', runId: 'r2', sha: later, layers: [row('acceptance', 'green')] });
+  const certified = await certifiedAtAll(
+    paths,
+    'p',
+    later,
+    [
+      { name: 'unit', ground: ['src'] },
+      { name: 'lint', ground: ['src'] },
+      { name: 'docs-lint', ground: ['docs'] },
+      { name: 'acceptance', ground: ['src'] },
+      { name: 'e2e', ground: ['src'] },
+    ],
+    bare,
+  );
+  // The three at the earlier sha rest on one diff of that sha against this one;
+  // the fourth measured this tree; the fifth no certification names.
+  assert.deepEqual([...certified.keys()].sort(), ['acceptance', 'lint', 'unit']);
+  assert.equal(certified.get('unit').baseSha, first);
+  assert.equal(certified.get('acceptance').baseSha, later);
+  assert.equal(certified.get('unit').status, 'green');
+});
+
+test('a clone that answers no diff refuses every layer of the set', async (t) => {
+  const paths = home(t);
+  const { first, later } = projectClone(t, { 'docs/note.md': 'second\n' });
+  certify(paths, {
+    project: 'p',
+    runId: 'r1',
+    sha: first,
+    layers: [row('unit', 'green'), row('lint', 'green')],
+  });
+  const certified = await certifiedAtAll(
+    paths,
+    'p',
+    later,
+    [
+      { name: 'unit', ground: ['src'] },
+      { name: 'lint', ground: ['src'] },
+    ],
+    join(paths.home, 'no-clone'),
+  );
+  assert.equal(certified.size, 0);
 });

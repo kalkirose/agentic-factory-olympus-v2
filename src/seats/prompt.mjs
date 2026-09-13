@@ -28,11 +28,9 @@ export const ONE_TURN_RULE = [
 ].join('\n');
 
 /**
- * The seats that receive the project constitution. The adversary is out by
- * design: it writes deliberately wrong implementations on purpose, and policy
- * text only dilutes that brief. The card sweep is out because it edits intent
- * cards rather than the tree. The eval seat is instance-scoped and holds no
- * worktree to read a constitution from.
+ * The seats that receive the project constitution. The card sweep is out
+ * because it edits intent cards rather than the tree. The eval seat is
+ * instance-scoped and holds no worktree to read a constitution from.
  *
  * The four record seats are in. The constitution is where a project writes the
  * standard its decision records are held to, so a seat that writes a record or

@@ -1,7 +1,7 @@
-// The edit boundary at the tool level. Implementation seats (dev, adversary)
-// are denied edits to every test path — not only the frozen suite — so a test
-// change can only route through the suite seat, and to every record path, so a
-// decision record is written by a record seat and by nothing else (ADR-0074).
+// The edit boundary at the tool level. An implementation seat is denied edits
+// to every test path — not only the frozen suite — so a test change can only
+// route through the suite seat, and to every record path, so a decision
+// record is written by a record seat and by nothing else (ADR-0074).
 // The rules ride the seat invocation as disallowed-tool entries.
 //
 // A record-path entry may be an exclusion, `!<path>`, which names a file that

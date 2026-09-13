@@ -24,11 +24,9 @@ judging seat where it ranks against the other documents in the run.
 - **A closed seat set.** The set lives beside the seat map and changes only by
   decision: spec birth, the spec gate, the suite seat in every mode, the dev
   and fix seats, the repair-dev seat, every Fury lens, the generalist review,
-  the Fury verifier, and verdict triage. The adversary is out, because its
-  brief is to write a plausible wrong implementation and policy text only
-  dilutes that brief. The card sweep is out, because it edits intent cards
-  rather than the tree. The eval seat is instance-scoped and holds no worktree
-  to read from.
+  the Fury verifier, verdict triage, and the four record seats. The card sweep
+  is out, because it edits intent cards rather than the tree. The eval seat is
+  instance-scoped and holds no worktree to read from.
 - **The authority order, for judging seats only.** The nine judging seats
   carry one fixed paragraph after the policy text: the constitution outranks
   the intent card, the card outranks the run's spec, a spec clause that

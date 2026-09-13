@@ -31,9 +31,28 @@ const CONFIG_PATH = '.olympus/project.json';
 const CARD_PATH = 'stories/alpha.md';
 const SECOND_CARD = 'stories/beta.md';
 
-const CARD = `---
+// The launched card, blocked by nothing and leaving one question open, so
+// readiness runs a second time on one launch.
+const CARD_OPEN = `---
 key: alpha-1
 title: Alpha feature
+---
+
+## Goal
+
+Provide f(x) that doubles x in src/feature.mjs.
+
+## Open decisions
+
+- Does f round half up?
+${FIXTURE_ACCEPTANCE}`;
+
+// The same card, blocked by the second one, so the second is inside the
+// closure the launch is judged on.
+const CARD_BLOCKED = `---
+key: alpha-1
+title: Alpha feature
+blocked-by: ["beta-1"]
 ---
 
 ## Goal
@@ -51,21 +70,70 @@ title: Beta feature
 Provide g(x) that halves x in src/feature.mjs.
 ${FIXTURE_ACCEPTANCE}`;
 
-// The card the project's lint refuses, and the repair for it. The lint reads
-// every card, so one bad card holds every launch behind it.
-const BETA_BROKEN = 'Beta feature, with no frontmatter at all.\n';
+// The card the project's lint refuses, and the repair for it. It carries its
+// key, so a card blocked by it reaches it through the closure; what it does
+// not carry is the goal the lint demands.
+const BETA_BROKEN = `---
+key: beta-1
+title: Beta feature
+---
 
-// The lint a project puts in front of every writer of a card.
+Beta feature, stated in one line and under no heading at all.
+`;
+
+// The lint a project puts in front of every writer of a card. It reports the
+// cards it is asked about and exits red on those; an error on a card it was
+// not asked about rides one block at the end of its output, and the exit
+// stays green.
 const CARD_LINT = `import { readdirSync, readFileSync } from 'node:fs';
 
-for (const name of readdirSync('stories')) {
+const named = process.argv.filter((token, i) => process.argv[i - 1] === '--card');
+const errors = [];
+let cards = 0;
+for (const name of readdirSync('stories').sort()) {
   if (!name.endsWith('.md')) continue;
-  if (!readFileSync(\`stories/\${name}\`, 'utf8').startsWith('---')) {
-    console.error(\`card lint: \${name} carries no frontmatter\`);
-    process.exit(1);
-  }
+  cards++;
+  const path = \`stories/\${name}\`;
+  const text = readFileSync(path, 'utf8');
+  if (!text.startsWith('---')) errors.push({ path, line: \`\${path}: F1: no frontmatter\` });
+  else if (!/^## Goal\\s*$/m.test(text)) errors.push({ path, line: \`\${path}: F2: no goal\` });
 }
-console.log('card lint: every card carries frontmatter');
+const reported = errors.filter((e) => named.length === 0 || named.includes(e.path));
+if (reported.length > 0) {
+  console.error(reported.map((e) => e.line).join('\\n'));
+  process.exit(1);
+}
+console.log(\`card lint: reporting \${named.length} of \${cards} cards: \${named.join(' ')}\`);
+const beyond = errors.filter((e) => !reported.includes(e));
+if (beyond.length > 0) {
+  process.stdout.write(\`beyond the card:\\n\${beyond.map((e) => e.line).join('\\n')}\\n\`);
+}
+process.exit(0);
+`;
+
+// A lint that has more to say after the block. The harness reads one merged
+// stream of the command's two pipes, so a tool's own summary, a warning or a
+// progress line can land after the marker.
+const CARD_LINT_CHATTY = `process.stdout.write('beyond the card:' + String.fromCharCode(10));
+process.stdout.write('${'stories/beta.md'}: F2: no goal' + String.fromCharCode(10));
+process.stdout.write('the package manager took 1.2s' + String.fromCharCode(10));
+process.stdout.write('## Summary' + String.fromCharCode(10));
+process.exit(0);
+`;
+
+// A lint whose own spelling of the contract is wider than the narrowest
+// reading of it: a card path that holds a space, and a code of more than eight
+// characters. Both are the script's to choose.
+const CARD_LINT_WIDE = `process.stdout.write('beyond the card:' + String.fromCharCode(10));
+process.stdout.write('stories/beta two.md: DEPENDENCYCYCLE: blocked-by loops' + String.fromCharCode(10));
+process.exit(0);
+`;
+
+// A lint that writes the block and spells every line of it another way. The
+// harness reads none of them, and the count is what says so.
+const CARD_LINT_UNREADABLE = `process.stdout.write('beyond the card:' + String.fromCharCode(10));
+process.stdout.write('stories/beta.md - F2 - no goal' + String.fromCharCode(10));
+process.exit(0);
 `;
 
 // -- fixture -----------------------------------------------------------------
@@ -119,7 +187,7 @@ function seatFixture() {
   return { commandFor, calls };
 }
 
-function fixture(t, { beta = BETA_BROKEN } = {}) {
+function fixture(t, { beta = BETA_BROKEN, card = CARD_BLOCKED, lint = CARD_LINT } = {}) {
   const root = tempDir();
   const origin = initOriginRepo(join(root, 'origin'), {
     [CONFIG_PATH]: projectConfigJson({
@@ -128,8 +196,8 @@ function fixture(t, { beta = BETA_BROKEN } = {}) {
       lanes: { story: { suiteCommand: 'suite', lintCommand: 'cardlint' } },
       stack: null,
     }),
-    'scripts/cardlint.mjs': CARD_LINT,
-    [CARD_PATH]: CARD,
+    'scripts/cardlint.mjs': lint,
+    [CARD_PATH]: card,
     [SECOND_CARD]: beta,
     'src/base.mjs': 'export const base = 1;\n',
   });
@@ -210,6 +278,12 @@ function waitFound(paths, runId, match, label) {
   return waitFor(() => events(paths, runId).find(match), { label, attempts: 400, intervalMs: 100 });
 }
 
+/** What the card lint of the project said, as the run kept it. */
+/** The log of one read of the cards: the evidence a stamped record rests on. */
+function lintLog(paths, runId, entry = 1) {
+  return readFileSync(join(paths.runs, runId, 'commands', `card-lint-${entry}.log`), 'utf8');
+}
+
 // -- the route ---------------------------------------------------------------
 
 test('a retry meets the repair the branch carries, and the tree says so', async (t) => {
@@ -217,7 +291,7 @@ test('a retry meets the repair the branch carries, and the tree says so', async 
   const { runId, worktree, baseSha } = await fx.launch();
   const park = await waitParked(fx.paths, runId);
   assert.equal(park.reason, 'readiness-lint');
-  assert.ok(park.question.includes('carries no frontmatter'));
+  assert.ok(park.question.includes(`${SECOND_CARD}: F2: no goal`));
 
   // The operator repairs what the run cannot: the card lands on the branch.
   const repaired = fx.repair({ [SECOND_CARD]: BETA_CARD }, 'cards: repair the second card');
@@ -246,6 +320,15 @@ test('a retry meets the repair the branch carries, and the tree says so', async 
     (e) => e.event === 'stage-entered' && e.stage === 'spec-birth',
     'the stage after readiness',
   );
+  // The lint was asked about the launched card and the card it is blocked by,
+  // and about no other card in the directory. The read after the retry is the
+  // second read, and the first read's own output is still where it was: the
+  // park behind it names what that read said.
+  assert.ok(
+    lintLog(fx.paths, runId, 2).includes(`reporting 2 of 2 cards: ${CARD_PATH} ${SECOND_CARD}`),
+    lintLog(fx.paths, runId, 2),
+  );
+  assert.ok(lintLog(fx.paths, runId, 1).includes(`${SECOND_CARD}: F2: no goal`));
   // One park, one refresh: the stage did not come back, and the entries behind
   // it read the ledger and stopped.
   await waitFound(
@@ -319,6 +402,101 @@ test('an abandoned park refreshes nothing', async (t) => {
     { label: 'the run to close', attempts: 400, intervalMs: 100 },
   );
   assert.ok(!events(fx.paths, runId).some((e) => e.event === 'tree-refreshed'));
+});
+
+test('a card red outside the closure is reported once and the launch goes on', async (t) => {
+  // The launched card is blocked by nothing, so the closure is the card
+  // itself and the second card's red is beyond it. The lint says so and exits
+  // green: a card this story does not depend on cannot make this story wrong.
+  const fx = fixture(t, { card: CARD_OPEN });
+  const { runId } = await fx.launch();
+  const reported = await waitFound(
+    fx.paths,
+    runId,
+    (e) => e.event === 'readiness-lint-beyond',
+    'the record of the errors beyond the card',
+  );
+  assert.deepEqual(reported.cards, [CARD_PATH]);
+  assert.deepEqual(reported.errors, [`${SECOND_CARD}: F2: no goal`]);
+  assert.equal(reported.gist, '1 error(s) beyond the card');
+  assert.ok(lintLog(fx.paths, runId).includes(`reporting 1 of 2 cards: ${CARD_PATH}`));
+  // The card's own open decision holds the launch, and answering it runs
+  // readiness whole again. The directory is the same directory, so the report
+  // is not written a second time.
+  const open = await waitFound(
+    fx.paths,
+    runId,
+    (e) => e.event === 'park' && e.type === 'open-decisions',
+    'the open-decisions park',
+  );
+  assert.ok(open.seq > reported.seq);
+  fx.answer(runId, { answer: 'round half up' });
+  await waitSeatPark(fx.paths, runId, 1);
+  const held = events(fx.paths, runId);
+  assert.equal(held.filter((e) => e.event === 'readiness-lint-beyond').length, 1);
+  assert.ok(!held.some((e) => e.event === 'park' && e.type === 'stage-blocked'));
+  // Two reads of the cards, two logs. The record was stamped off the first
+  // read, and the evidence behind it is still the first read's own output.
+  assert.ok(lintLog(fx.paths, runId, 1).includes(`${SECOND_CARD}: F2: no goal`));
+  assert.ok(lintLog(fx.paths, runId, 2).includes('card lint: reporting 1 of 2 cards'));
+});
+
+test('a line after the block that is not an error is counted, not quoted as one', async (t) => {
+  // The block runs to the end of the output, so whatever the tool says last
+  // rides it. A record that quoted those lines as errors would report errors
+  // nobody wrote and name a count no card answers for.
+  const fx = fixture(t, { card: CARD_OPEN, lint: CARD_LINT_CHATTY });
+  const { runId } = await fx.launch();
+  const reported = await waitFound(
+    fx.paths,
+    runId,
+    (e) => e.event === 'readiness-lint-beyond',
+    'the record of the errors beyond the card',
+  );
+  assert.deepEqual(reported.errors, [`${SECOND_CARD}: F2: no goal`]);
+  // The two lines the harness cannot read are on the record as a count. A drop
+  // in silence is what would let a changed contract read as a clean directory.
+  assert.equal(reported.unreadable, 2);
+  assert.equal(reported.gist, '1 error(s) beyond the card, 2 line(s) unread');
+});
+
+test('an error naming a path with a space and a long code is read as an error', async (t) => {
+  // The path and the code are the script's own vocabulary, and the contract is
+  // the two colons. A narrower reading would drop a real error and report the
+  // directory clean.
+  const fx = fixture(t, { card: CARD_OPEN, lint: CARD_LINT_WIDE });
+  const { runId } = await fx.launch();
+  const reported = await waitFound(
+    fx.paths,
+    runId,
+    (e) => e.event === 'readiness-lint-beyond',
+    'the record of the errors beyond the card',
+  );
+  assert.deepEqual(reported.errors, ['stories/beta two.md: DEPENDENCYCYCLE: blocked-by loops']);
+  assert.equal(reported.unreadable, 0);
+  assert.equal(reported.gist, '1 error(s) beyond the card');
+});
+
+test('a block the harness reads no line of is still reported, as a count', async (t) => {
+  const fx = fixture(t, { card: CARD_OPEN, lint: CARD_LINT_UNREADABLE });
+  const { runId } = await fx.launch();
+  const reported = await waitFound(
+    fx.paths,
+    runId,
+    (e) => e.event === 'readiness-lint-beyond',
+    'the record of the lines beyond the card',
+  );
+  assert.deepEqual(reported.errors, []);
+  assert.equal(reported.unreadable, 1);
+  assert.equal(reported.gist, '0 error(s) beyond the card, 1 line(s) unread');
+  // The launch goes on: a line the harness cannot read is not a red on this
+  // story's own cards.
+  await waitFound(
+    fx.paths,
+    runId,
+    (e) => e.event === 'park' && e.type === 'open-decisions',
+    'the open-decisions park',
+  );
 });
 
 test('a park of another class buys no refresh', async (t) => {

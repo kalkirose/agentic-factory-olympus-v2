@@ -80,8 +80,8 @@ because every other lane still holds code to ship (ADR-0080).
 
 The decision parks keep their own affirmative options: `round` at
 `spec-gate-stalled`, which is the one park the spec gate raises (ADR-0020),
-`strengthen-again` at `second-zero-kill`, `accept-spec-indifferent` at
-`unkilled-gap-survivor`, `repair-again` and `fresh-pass` at `second-stall`,
+`approve` and `refuse` at `dependency-decision`, `repair-again` and
+`fresh-pass` at `second-stall`,
 `retry` at a provisioning gate over the substrate and `ack` at one over a
 harness defect (ADR-0068). The way out is the same `abandon` at all of them.
 
@@ -221,9 +221,9 @@ paid for all of it again.
 
 A close is cheap only while a run holds nothing. Before the first seat runs, a
 close costs a provisioning cycle. After the freeze, a run holds a validated
-spec, a suite proven red and killed against adversaries, one or more dev
-passes and a rendered verdict. Re-deriving that set costs the whole run. The
-machine cannot weigh that, because it knows neither what the artifacts are
+spec, a suite proven red against the tree before any implementation, one or
+more dev passes and a rendered verdict. Re-deriving that set costs the whole
+run. The machine cannot weigh that, because it knows neither what the artifacts are
 worth nor what a relaunch would cost. The owner knows both.
 
 So the failure stops the run and waits. The park frees the slot like every

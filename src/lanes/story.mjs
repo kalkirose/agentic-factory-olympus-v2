@@ -1,6 +1,5 @@
 // The story-lane pre-freeze chain: readiness (process) → spec birth (seat)
-// → spec gate (seat, no round cap) → suite authoring (seat) → adversary
-// (one wave per round by default, each in a disposable worktree) → freeze
+// → spec gate (seat, no round cap) → suite authoring (seat) → freeze
 // (process). The freeze record is the completion signal; the stages after
 // freeze land with their milestones and enter through
 // `storyLane({afterFreeze})`.
@@ -12,16 +11,15 @@
 //
 // Every handler re-derives its position from the run ledger and the git
 // state, so a daemon restart resumes mid-chain without memory. Deterministic
-// defects in a seat's work product (boundary breaches, wrong red classes,
-// uncovered survivors) take the contract-loop route: one corrective
-// invocation, then the seat-failure park — no condition the lane meets on its
-// own closes a run (ADR-0015).
+// defects in a seat's work product (boundary breaches, wrong red classes, an
+// unmapped surface) take the contract-loop route: one corrective invocation,
+// then the seat-failure park — no condition the lane meets on its own closes
+// a run (ADR-0015).
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { commandLogPath, runReportPath } from '../daemon/home.mjs';
 import { textIdentity } from '../ledger/acks.mjs';
-import { cloneDir } from '../isolation/clones.mjs';
-import { addDisposableWorktree, removeWorktree, workspaceRoot } from '../isolation/worktrees.mjs';
+import { storyRunsByKey } from '../telemetry/readers.mjs';
 import {
   abortMerge,
   changedFiles,
@@ -29,16 +27,19 @@ import {
   commitAll,
   headSha,
   mergeIntoTree,
-  restorePaths,
-  evidenceDiff,
   filesAt,
   filesMentioning,
+  resetHard,
   treeFiles,
 } from '../isolation/tree.mjs';
-import { editDenyRules } from '../seats/boundary.mjs';
-import { laneDiffPolicy, parseTouchedBlock } from '../seats/diffpolicy.mjs';
-import { noCriteriaMessage, parseIntentCard } from './card.mjs';
-import { SECURITY_DIMENSIONS } from './lenses.mjs';
+import { laneDiffPolicy, parseTouchedBlock, parseTouchedPaths } from '../seats/diffpolicy.mjs';
+import {
+  DEPENDENCIES_SECTION,
+  cardClosure,
+  noCriteriaMessage,
+  parseIntentCard,
+} from './card.mjs';
+import { pushCardPaths } from './cards.mjs';
 import { runCommand } from './exec.mjs';
 import { probeCredentials } from './probes.mjs';
 import {
@@ -57,6 +58,7 @@ import {
   surfaceMapLines,
 } from './surfacemap.mjs';
 import { recordBase, recordsStageHandler } from './records-stage.mjs';
+import { governingRecordLines } from './units.mjs';
 import { readInheritance } from './resume.mjs';
 import {
   SUPERSEDE_BRIEF_LINES,
@@ -87,6 +89,7 @@ import {
   lastSeatReportEvent,
   readJson,
   parkDirective,
+  refreshTree,
   withAbandonGuard,
   withTreeRefresh,
   seatWithChecks,
@@ -99,14 +102,6 @@ import {
   gist,
 } from './shared.mjs';
 
-// Waves per adversary round when the project declares no count. One wave
-// buys the kill/survive signal; every wave past the first buys sample size
-// for the kill rate, at a full seat plus a full suite run each. The count is
-// project config (`lanes.story.adversaryWaves`), and the launch pins the
-// config blob, so a raise takes effect at the next launch and never mid-run
-// (ADR-0006).
-const DEFAULT_ADVERSARY_WAVES = 1;
-
 export const PRE_FREEZE_STAGES = [
   'readiness',
   'spec-birth',
@@ -116,9 +111,16 @@ export const PRE_FREEZE_STAGES = [
   // them and the dev seat reads them as it reads the tests (ADR-0074).
   'records',
   'suite',
-  'adversary',
   'freeze',
 ];
+
+/**
+ * Stages this lane once ran, each mapped to the stage that now follows the one
+ * before it. A run launched on an older harness can be standing in one of
+ * them, and the resume guard refuses a stage its lane does not list, so the
+ * map is what keeps a stage removal from stranding those runs.
+ */
+export const RETIRED_STAGES = Object.freeze({ adversary: 'freeze' });
 
 /**
  * Builds the story lane. `afterFreeze` is the post-freeze continuation
@@ -138,6 +140,7 @@ export function storyLane({ afterFreeze, forgeFor = null }) {
   const postFreeze = afterFreeze.stages[0];
   return {
     stages: [...PRE_FREEZE_STAGES, ...afterFreeze.stages],
+    retired: RETIRED_STAGES,
     // The lane root carries both stage-entry guards: the abandon route the
     // human takes out of any park (ADR-0015), and, inside it, the tree refresh
     // a bought retry is owed (ADR-0055).
@@ -148,7 +151,6 @@ export function storyLane({ afterFreeze, forgeFor = null }) {
         'spec-gate': specGate,
         records: recordsStageHandler('story'),
         suite: suiteStage,
-        adversary,
         freeze: freezeHandler(postFreeze),
         ...afterFreeze.handlers,
       }),
@@ -162,9 +164,26 @@ export const SPEC_BIRTH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    outcome: { type: 'string', enum: ['spec-born', 'grounding-conflict'] },
+    outcome: { type: 'string', enum: ['spec-born', 'grounding-conflict', 'dependency-needed'] },
     summary: { type: 'string' },
     conflict: { type: 'string' },
+    // The packages the spec cannot be written without and the card does not
+    // name. Top-level, because the report contract nests objects one level and
+    // this is already a list of objects. `importer` is the workspace key the
+    // lockfile spells, so the root of a workspace has a spelling too.
+    dependencies: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          importer: { type: 'string' },
+          name: { type: 'string' },
+          reason: { type: 'string' },
+        },
+        required: ['importer', 'name', 'reason'],
+      },
+    },
   },
   required: ['outcome', 'summary'],
 };
@@ -250,9 +269,9 @@ const SUITE_REPORT_PROPERTIES = {
   summary: { type: 'string' },
 };
 
-// The five suite writes that answer a spec carry the surface map as well: the
-// author write, the adversary amendment, the strengthening round, the red-state
-// fix and the re-freeze amendment after the freeze (ADR-0072).
+// The suite writes that answer a spec carry the surface map as well: the
+// author write, the red-state fix and the re-freeze amendment after the
+// freeze (ADR-0072).
 const SUITE_PROPERTIES = { ...SUITE_REPORT_PROPERTIES, ...SURFACE_MAP_PROPERTIES };
 
 /**
@@ -275,58 +294,94 @@ export const SUITE_SCHEMA = {
   required: ['suiteFiles', 'reds', 'summary', ...SURFACE_MAP_REQUIRED],
 };
 
-export const SUITE_AMEND_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    ...SUITE_PROPERTIES,
-    killingTests: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          wave: { type: 'integer' },
-          test: { type: 'string' },
-        },
-        required: ['wave', 'test'],
-      },
-    },
-    dispositions: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          wave: { type: 'integer' },
-          disposition: { type: 'string', enum: ['spec-indifferent', 'unkilled-gap'] },
-          reason: { type: 'string' },
-        },
-        required: ['wave', 'disposition', 'reason'],
-      },
-    },
-  },
-  required: [
-    'suiteFiles',
-    'reds',
-    'summary',
-    'killingTests',
-    'dispositions',
-    ...SURFACE_MAP_REQUIRED,
-  ],
-};
-
-export const ADVERSARY_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    approach: { type: 'string' },
-    wrongness: { type: 'string' },
-  },
-  required: ['approach', 'wrongness'],
-};
-
 // -- readiness (process) -----------------------------------------------------
+
+/**
+ * What the card lint may say before the harness stops listening, and the line
+ * that opens the errors it found outside the cards it was asked about.
+ *
+ * The block rides the end of the output, so a default tail would cut it off
+ * exactly where a long report needs it, and the log behind the record is a
+ * green's, which is deleted unless it is kept.
+ */
+const LINT_OUTPUT_LIMIT = 65536;
+const BEYOND_MARKER = 'beyond the card:';
+
+/**
+ * The cards a launch is judged on, as the lint reads them: the launched card
+ * and every unshipped card it is blocked by, repo-relative, forward-slashed
+ * because they ride a command line.
+ *
+ * A shipped card is settled and so is everything behind it, and which keys
+ * shipped is run history, which the ledgers hold.
+ */
+function closureCards(ctx, worktree, cardPath) {
+  const shipped = new Set(
+    [...storyRunsByKey(ctx.paths, { project: ctx.project }).entries()]
+      .filter(([, runs]) => runs.shipped > 0)
+      .map(([key]) => key),
+  );
+  const closure = cardClosure(join(worktree, dirname(cardPath)), join(worktree, cardPath), {
+    shipped,
+  });
+  return closure.map((path) => relative(worktree, path).replaceAll('\\', '/'));
+}
+
+/**
+ * The shape one error of the block reads in, which is the contract the script
+ * writes it to: a path, then a short upper-case code, then what is wrong, each
+ * separated by a colon and a space.
+ *
+ * The path is whatever stands before the first such colon, and the code is as
+ * long as the script's own vocabulary makes it. Both belong to the script, so a
+ * narrower reading of either drops a real error and reports the directory
+ * clean.
+ */
+const BEYOND_LINE = /^.+?:\s+[A-Z][A-Z0-9]*:\s*\S/;
+
+/**
+ * How many times this run has run readiness, this run included. The stage is
+ * entered once and executed again on every park answer and every resume, so an
+ * entry alone would count one read where a run took several.
+ */
+function readinessReads(events) {
+  return events.filter(
+    (e) => (e.event === 'stage-entered' || e.event === 'resume') && e.stage === 'readiness',
+  ).length;
+}
+
+/**
+ * The errors the lint found beyond the cards it was asked about: the block it
+ * writes last, from its opening line to the end of the output.
+ *
+ * Read from the end, because the marker is a line a card could also carry and
+ * the script writes the block after everything else it has to say.
+ *
+ * The lines that read as one error are the record's errors. The harness reads a
+ * merged stream of the command's two pipes, so a warning, a progress line or a
+ * tool's own summary can land after the marker, and a record that quoted those
+ * as errors would report errors nobody wrote.
+ *
+ * Every other line of the block is counted. The harness cannot tell a warning
+ * from an error the two sides spell differently, and either reading of a
+ * discarded line has to be visible: a block whose lines all went unread is a
+ * contract that has drifted, and a drop in silence would report it as a clean
+ * directory.
+ *
+ * @returns {{errors: string[], unreadable: number}}
+ */
+function beyondTheCard(output) {
+  const lines = output.split(/\r?\n/).map((line) => line.trim());
+  const opened = lines.lastIndexOf(BEYOND_MARKER);
+  if (opened === -1) return { errors: [], unreadable: 0 };
+  const errors = [];
+  let unreadable = 0;
+  for (const line of lines.slice(opened + 1)) {
+    if (BEYOND_LINE.test(line)) errors.push(line);
+    else if (line.length > 0) unreadable += 1;
+  }
+  return { errors, unreadable };
+}
 
 /**
  * Readiness is the lane's admission gate, and it has two routes. A normal
@@ -368,12 +423,25 @@ function readinessHandler(postFreezeStage, forgeFor) {
     }
     const noCriteria = criteriaBlock(ctx, card, cardPath);
     if (noCriteria) return noCriteria;
+    const events = runEvents(ctx);
     if (story.lintCommand) {
-      const lint = await runCommand(config.commands[story.lintCommand], {
-        cwd: worktree,
-        env: runEnv(ctx, config),
-        log: commandLogPath(ctx.paths, ctx.runId, 'card-lint'),
-      });
+      const cards = closureCards(ctx, worktree, cardPath);
+      const lint = await runCommand(
+        [...config.commands[story.lintCommand], ...cards.flatMap((c) => ['--card', c])],
+        {
+          cwd: worktree,
+          env: runEnv(ctx, config),
+          // The block rides the end of the output and the log is the evidence
+          // behind the record, so neither may be thrown away: the default is a
+          // 4000-character tail, and a green's log is deleted.
+          outputLimit: LINT_OUTPUT_LIMIT,
+          keep: 'always',
+          // One log per read of the cards. Readiness runs whole on every park
+          // answer and on every resume, and the record a read stamps is only
+          // as good as the evidence that read left behind (ADR-0043).
+          log: commandLogPath(ctx.paths, ctx.runId, `card-lint-${readinessReads(events)}`),
+        },
+      );
       if (lint.code === null) {
         return commandError(
           ctx,
@@ -387,6 +455,25 @@ function readinessHandler(postFreezeStage, forgeFor) {
           output: lint.output,
         });
       }
+      const beyond = beyondTheCard(lint.output);
+      // A block whose every line went unread is still a report: the script found
+      // something beyond the cards, and the count is what says the two sides
+      // spell one line differently.
+      const found = beyond.errors.length + beyond.unreadable;
+      // One record per run. Readiness re-runs whole on every park answer and
+      // on every resume, and one directory read many times is one report.
+      if (found > 0 && !events.some((e) => e.event === 'readiness-lint-beyond')) {
+        ctx.store.append('readiness-lint-beyond', {
+          actor: ACTOR,
+          cards,
+          errors: beyond.errors,
+          unreadable: beyond.unreadable,
+          gist: gist(
+            `${beyond.errors.length} error(s) beyond the card` +
+              (beyond.unreadable > 0 ? `, ${beyond.unreadable} line(s) unread` : ''),
+          ),
+        });
+      }
     }
     // The questions the card leaves open, and never the foreseen amendments a
     // close-out sweep wrote onto it. A foreseen amendment states a consequence
@@ -394,7 +481,6 @@ function readinessHandler(postFreezeStage, forgeFor) {
     // human to settle: the build-time classifier consumes the note as evidence
     // and the launch proceeds (ADR-0052).
     if (card.openDecisions.length > 0) {
-      const events = runEvents(ctx);
       if (!answeredPark(events, 'open-decisions')?.answer) {
         return parkDirective('open-decisions', {
           question:
@@ -543,7 +629,6 @@ async function inheritFreeze(ctx, nextStage, forgeFor) {
     spec: join(runDir, 'spec.md'),
     record: join(runDir, 'freeze.json'),
     files: prior.record.suiteFiles?.length ?? 0,
-    killCount: prior.record.killCount ?? 0,
     // What stays behind. A finding is evidence about the tree it was found
     // on, and this run discards that tree, so no finding is carried forward
     // as its own. The prior ledger keeps them, open and readable, and the
@@ -629,11 +714,18 @@ async function advanceBase(ctx, { worktree, config, story, prior, base, from }) 
 // -- spec birth (seat) -------------------------------------------------------
 
 async function specBirth(ctx) {
-  const base = await laneBase(ctx);
+  let base = await laneBase(ctx);
   const noCriteria = criteriaBlock(ctx, base.card, base.cardPath);
   if (noCriteria) return noCriteria;
-  const events = runEvents(ctx);
+  let events = runEvents(ctx);
   if (events.some((e) => e.event === 'spec-born')) return { next: 'spec-gate' };
+  const decided = await dependencyDecision(ctx, base, events);
+  if (decided.directive) return decided.directive;
+  if (decided.amended) {
+    // The card is a different document now, and the seat is briefed from it.
+    base = await laneBase(ctx);
+    events = runEvents(ctx);
+  }
   const { report, fail } = await seatWithChecks(ctx, {
     seat: 'spec-birth',
     schema: SPEC_BIRTH_SCHEMA,
@@ -652,6 +744,9 @@ async function specBirth(ctx) {
       refs: [base.cardPath],
     });
   }
+  // Raised before any `spec-born` stamp, so the answer re-enters a stage that
+  // still has its seat to run.
+  if (report.outcome === 'dependency-needed') return dependencyPark(base, report.dependencies);
   ctx.store.append('spec-born', {
     actor: ACTOR,
     specPath: base.specPath,
@@ -662,14 +757,153 @@ async function specBirth(ctx) {
 
 /**
  * The birth work product: the file exists, and it holds the template. A
- * conflict is a refusal to author, so it is checked against nothing.
+ * conflict is a refusal to author, and so is an unnamed dependency, so
+ * neither is checked against a spec.
+ *
+ * A dependency the report does not name is the one thing the schema cannot
+ * hold: the contract carries no minimum length, and an empty list is a
+ * question nobody can answer.
  */
 async function birthChecks(base, report) {
   if (report.outcome === 'grounding-conflict') return [];
+  if (report.outcome === 'dependency-needed') {
+    if ((report.dependencies ?? []).length > 0) return [];
+    return [
+      'the report asks for a dependency and names none; list each package under dependencies ' +
+        'with its importer, its name and the reason the spec needs it.',
+    ];
+  }
   if (!existsSync(base.specPath) || readFileSync(base.specPath, 'utf8').trim().length === 0) {
     return [`the spec is missing or empty at ${base.specPath}; author it there.`];
   }
   return specLintDefects(base);
+}
+
+// -- a dependency the card does not name (the owner's call) ------------------
+
+/** The heading a card names its dependencies under, as the writer writes it. */
+const DEPENDENCIES_HEADING = '## Dependencies';
+
+const HEADING_LINE = /^(#{1,6})\s+(.*\S)\s*$/;
+
+/**
+ * The park a birth raises over a package the card does not name.
+ *
+ * The card is the whole authorization for a dependency, so the question is the
+ * owner's and the answer is written where the next reader of the card meets
+ * it. The list rides the record because the writer runs on the answer, long
+ * after the report that asked is gone.
+ */
+function dependencyPark(base, dependencies) {
+  const asked = dependencies ?? [];
+  return parkDirective('dependency-decision', {
+    question:
+      `The spec cannot be written without a package ${base.cardPath} does not name:\n` +
+      asked.map((d) => `- ${d.importer}: ${d.name} (${d.reason})`).join('\n') +
+      `\nAnswer "approve" to name it on the card and ship it from this story, or "refuse" to ` +
+      'end the run.',
+    options: ['approve', 'refuse'],
+    refs: [base.cardPath],
+    detail: { dependencies: asked },
+  });
+}
+
+/**
+ * The answer to that park, acted on before the seat runs again.
+ *
+ * `refuse` is the owner's word that this story gets no dependency, and there
+ * is nothing left for it to author. `approve` writes the package onto the card
+ * and pushes it, so the authorization outlives the run and the next reader of
+ * the card sees it; the tree then moves to the pushed head, because the
+ * amendment is a commit on the default branch and never one of this run's own
+ * against a path the lane denies it.
+ *
+ * @returns {Promise<{directive?: object, amended?: boolean}>} a directive that
+ *   ends the stage, or whether the card moved under it
+ */
+async function dependencyDecision(ctx, base, events) {
+  const asked = answeredPark(events, 'dependency-decision');
+  const option = asked?.answer?.option;
+  if (option !== 'approve' && option !== 'refuse') return {};
+  if (option === 'refuse') {
+    return { directive: { close: { state: 'failed', reason: 'dependency-refused' } } };
+  }
+  const parkSeq = asked.park.seq;
+  const written = events.some((e) => e.event === 'card-amended' && e.park === parkSeq);
+  if (!written) {
+    const dependencies = asked.park.detail?.dependencies ?? [];
+    const file = join(base.worktree, base.cardPath);
+    writeFileSync(file, cardWithDependencies(readFileSync(file, 'utf8'), dependencies));
+    const landed = await pushCardPaths({
+      ctx,
+      paths: [base.cardPath],
+      message: `cards: ${base.card?.key ?? ctx.runId} names the dependencies it ships`,
+      lintCards: [base.cardPath],
+    });
+    if (!landed.ok) {
+      // Nothing of the amendment stays on the run branch: the lane denies the
+      // card directory to the candidate diff, so a commit left here would ride
+      // into the pull request unjudged.
+      await resetHard(base.worktree, ctx.payload.baseSha);
+      return {
+        directive: blocked(
+          ctx,
+          landed.reason === 'push-lost' ? 'card-push-lost' : 'card-amend-refused',
+          `The dependency approved for ${base.cardPath} did not reach the default branch: ` +
+            `${landed.error}\nThe run tree is back at its launch base and carries none of it. ` +
+            'Answer "retry" to write and push it again.',
+          { card: base.cardPath, cause: landed.reason },
+        ),
+      };
+    }
+    ctx.store.append('card-amended', {
+      actor: ACTOR,
+      card: base.cardPath,
+      dependencies,
+      sha: landed.sha,
+      pushed: landed.pushed,
+      // The park the amendment answers, so a stage entered twice on one answer
+      // writes the card once.
+      park: parkSeq,
+    });
+  }
+  await refreshTree(ctx, { parkSeq });
+  return { amended: true };
+}
+
+/**
+ * The card with the approved packages named on it: one line each, under the
+ * dependencies heading, appended to the section the card already carries.
+ *
+ * The line is the plainest sentence the section takes, because a project's own
+ * card lint reads every unfenced line of a card and a writer that reaches for
+ * punctuation or for a word of this harness writes a card that lint refuses.
+ * A package the card already names is not written twice.
+ */
+function cardWithDependencies(text, dependencies) {
+  const named = new Set(
+    parseIntentCard(text).card.dependencies.map((d) => `${d.importer}: ${d.name}`),
+  );
+  const add = dependencies
+    .map((d) => `${d.importer}: ${d.name}`)
+    .filter((line) => !named.has(line))
+    .map((line) => `- ${line}`);
+  if (add.length === 0) return text;
+  const lines = text.split('\n');
+  const opened = lines.findIndex((line) => {
+    const heading = HEADING_LINE.exec(line.trimEnd());
+    return heading && DEPENDENCIES_SECTION.test(heading[2]);
+  });
+  if (opened === -1) {
+    return `${text.endsWith('\n') ? text : `${text}\n`}\n${DEPENDENCIES_HEADING}\n\n${add.join('\n')}\n`;
+  }
+  // The section runs to the next heading of any level, which is where the
+  // parser stops reading it; the blank line that closes it stays last.
+  let end = opened + 1;
+  while (end < lines.length && !HEADING_LINE.test(lines[end].trimEnd())) end++;
+  while (end > opened + 1 && lines[end - 1].trim().length === 0) end--;
+  lines.splice(end, 0, ...add);
+  return lines.join('\n');
 }
 
 /**
@@ -1060,7 +1294,7 @@ async function suiteStage(ctx) {
   const base = await laneBase(ctx);
   const events = runEvents(ctx);
   if (events.some((e) => e.event === 'suite-committed' && e.phase === 'author')) {
-    return { next: 'adversary' };
+    return { next: 'freeze' };
   }
   const { report, fail } = await suiteSeatWithChecks(ctx, base, {
     phase: 'author',
@@ -1071,7 +1305,7 @@ async function suiteStage(ctx) {
   if (fail) return fail;
   const sha = await commitAll(base.worktree, `suite: ${base.card.key}`);
   ctx.store.append('suite-committed', { actor: ACTOR, sha, phase: 'author', files: report.suiteFiles });
-  return { next: 'adversary' };
+  return { next: 'freeze' };
 }
 
 /**
@@ -1104,8 +1338,9 @@ async function suiteSeatWithChecks(ctx, base, { phase, schema, buildRole, checks
     };
   }
   // One stamp per suite write, on the write the checks passed. The counts are
-  // the reading: a map that doubles between the author write and the freeze was
-  // written by adversaries and not by the seat (ADR-0072).
+  // the reading: a map that grows between the author write and the freeze was
+  // widened by a corrective round and not by the seat's own first pass
+  // (ADR-0072).
   if (outcome.report) {
     ctx.store.append('surface-map', {
       actor: ACTOR,
@@ -1116,15 +1351,8 @@ async function suiteSeatWithChecks(ctx, base, { phase, schema, buildRole, checks
   return outcome;
 }
 
-/**
- * The deterministic defects of one suite write.
- *
- * `survivors` are the waves this write answers. The amendment write and the
- * strengthening write pass the round's survivors, so the map check can hold
- * every one of them to a tested surface item; the author write and the
- * red-state fix answer no survivor and pass none (ADR-0072).
- */
-async function suiteChecks(ctx, base, report, phase, { survivors = [] } = {}) {
+/** The deterministic defects of one suite write. */
+async function suiteChecks(ctx, base, report, phase) {
   const defects = [];
   if (report.suiteFiles.length === 0) defects.push('no suite files declared');
   for (const file of report.suiteFiles) {
@@ -1150,7 +1378,6 @@ async function suiteChecks(ctx, base, report, phase, { survivors = [] } = {}) {
     ...surfaceMapDefects(report, {
       worktree: base.worktree,
       previous: readJson(previousMapReport(runEvents(ctx))?.path)?.surfaceMap ?? null,
-      survivors,
     }),
   );
   // The project's own checks over the tree as the seat left it: nothing is
@@ -1158,358 +1385,6 @@ async function suiteChecks(ctx, base, report, phase, { survivors = [] } = {}) {
   // (ADR-0071).
   await runSuiteChecks(ctx, base.suiteChecks, phase, defects);
   return defects;
-}
-
-// -- adversary ---------------------------------------------------------------
-
-async function adversary(ctx) {
-  const base = await laneBase(ctx);
-  const perRound = base.adversaryWaves;
-  const clone = cloneDir(ctx.paths, ctx.project);
-  for (;;) {
-    const events = runEvents(ctx);
-    const round =
-      1 + events.filter((e) => e.event === 'suite-committed' && e.phase === 'strengthening').length;
-    const waves = events.filter(
-      (e) => e.event === 'adversary-wave' && e.phase === 'initial' && e.round === round,
-    );
-    // 1) Run the round's missing waves; every wave goes to verdict.
-    if (waves.length < perRound) {
-      const done = new Set(waves.map((e) => e.wave));
-      for (let wave = 1; wave <= perRound; wave++) {
-        if (done.has(wave)) continue;
-        const fail = await runWave(ctx, base, clone, { round, wave });
-        if (fail) return fail;
-      }
-      continue;
-    }
-    const survivors = waves
-      .filter((e) => e.result === 'survived')
-      .map((e) => e.wave)
-      .sort((a, b) => a - b);
-    const kills = perRound - survivors.length;
-    const lastWaveSeq = Math.max(...waves.map((e) => e.seq));
-    // 2) Zero kills: one automatic strengthening round, then every further
-    //    zero round escalates.
-    if (kills === 0) {
-      if (round === 1) {
-        const fail = await strengthen(ctx, base, clone, { round, survivors });
-        if (fail) return fail;
-        continue;
-      }
-      const park = answeredPark(events, 'second-zero-kill');
-      if (!park?.answer || park.answer.seq < lastWaveSeq) {
-        return parkDirective('second-zero-kill', {
-          question:
-            `Adversary round ${round} scored 0/${perRound} after a strengthening round. Survivors:\n` +
-            survivorLines(ctx, round, survivors) +
-            '\nPick an option.',
-          options: ['strengthen-again'],
-        });
-      }
-      if (park.answer.option === 'strengthen-again') {
-        const fail = await strengthen(ctx, base, clone, { round, survivors });
-        if (fail) return fail;
-        continue;
-      }
-      // `abandon` closed the run at the guard, and the record offers nothing
-      // else; an answer that is neither asks again rather than pick for the
-      // human.
-      return parkDirective('second-zero-kill', {
-        question: 'The answer picked no option. Pick one.',
-        options: ['strengthen-again'],
-      });
-    }
-    // 3) Full kill: nothing to amend.
-    if (survivors.length === 0) return { next: 'freeze' };
-    // 4) Survivors are demonstrated suite gaps: one targeted amendment round.
-    const amend = events.find(
-      (e) => e.event === 'suite-committed' && e.phase === 'amendment' && e.seq > lastWaveSeq,
-    );
-    if (!amend) {
-      const fail = await amendment(ctx, base, clone, { round, survivors });
-      if (fail) return fail;
-      continue;
-    }
-    const amendReport = readJson(lastSeatReportEvent(events, 'suite').path) ?? {};
-    const killingWaves = new Set((amendReport.killingTests ?? []).map((k) => k.wave));
-    // 5) Survivors-only re-run for the waves with killing tests.
-    const reruns = events.filter(
-      (e) => e.event === 'adversary-wave' && e.phase === 're-run' && e.round === round && e.seq > amend.seq,
-    );
-    const rerunDone = new Set(reruns.map((e) => e.wave));
-    let ranRerun = false;
-    for (const wave of survivors) {
-      if (!killingWaves.has(wave) || rerunDone.has(wave)) continue;
-      const fail = await rerunWave(ctx, base, clone, { round, wave, sha: amend.sha });
-      if (fail) return fail;
-      ranRerun = true;
-    }
-    if (ranRerun) continue;
-    // 6) Dispositions for every residual survivor.
-    const declared = new Map((amendReport.dispositions ?? []).map((d) => [d.wave, d]));
-    const stamped = events.filter((e) => e.event === 'survivor-disposition' && e.seq > amend.seq);
-    const stampedWaves = new Set(stamped.map((e) => e.wave));
-    let stampedNow = false;
-    for (const wave of survivors) {
-      if (stampedWaves.has(wave)) continue;
-      const rerun = reruns.find((e) => e.wave === wave);
-      if (rerun?.result === 'killed') continue;
-      let d;
-      if (killingWaves.has(wave) && rerun?.result === 'survived') {
-        d = { wave, disposition: 'unkilled-gap', reason: 'the killing test did not kill the survivor' };
-      } else if (declared.has(wave)) {
-        d = declared.get(wave);
-      } else {
-        // Unreachable when the amendment checks held; recorded as a gap.
-        d = { wave, disposition: 'unkilled-gap', reason: 'no killing test and no disposition' };
-      }
-      ctx.store.append('survivor-disposition', {
-        actor: ACTOR,
-        round,
-        wave: d.wave,
-        disposition: d.disposition,
-        reason: d.reason,
-      });
-      if (d.disposition === 'spec-indifferent') await dropWaveTree(ctx, clone, round, d.wave);
-      stampedNow = true;
-    }
-    if (stampedNow) continue;
-    // 7) Open gaps block the freeze and escalate; the human accepts or fails.
-    const latest = new Map();
-    for (const e of stamped) latest.set(e.wave, e);
-    const gaps = [...latest.values()].filter((e) => e.disposition === 'unkilled-gap');
-    if (gaps.length > 0) {
-      const gapSeq = Math.max(...gaps.map((e) => e.seq));
-      const park = answeredPark(events, 'unkilled-gap-survivor');
-      if (!park?.answer || park.answer.seq < gapSeq) {
-        return parkDirective('unkilled-gap-survivor', {
-          question:
-            `Unkilled suite gaps block the freeze (round ${round}):\n` +
-            gaps.map((g) => `- wave ${g.wave}: ${g.reason}`).join('\n') +
-            '\n' +
-            survivorLines(
-              ctx,
-              round,
-              gaps.map((g) => g.wave),
-            ) +
-            '\nPick an option.',
-          options: ['accept-spec-indifferent'],
-        });
-      }
-      if (park.answer.option === 'accept-spec-indifferent') {
-        for (const gap of gaps) {
-          ctx.store.append('survivor-disposition', {
-            actor: park.answer.actor,
-            round,
-            wave: gap.wave,
-            disposition: 'spec-indifferent',
-            reason: `unkilled gap accepted by ${park.answer.actor}`,
-            source: 'answer',
-          });
-          await dropWaveTree(ctx, clone, round, gap.wave);
-        }
-        continue;
-      }
-      // `abandon` closed the run at the guard; anything else asks again.
-      return parkDirective('unkilled-gap-survivor', {
-        question: 'The answer picked no option. Pick one.',
-        options: ['accept-spec-indifferent'],
-      });
-    }
-    return { next: 'freeze' };
-  }
-}
-
-async function runWave(ctx, base, clone, { round, wave }) {
-  const sha = await headSha(base.worktree);
-  const tag = `adversary-r${round}-w${wave}`;
-  const tree = waveTreePath(ctx, round, wave);
-  if (existsSync(tree)) await dropWaveTree(ctx, clone, round, wave); // stale half-run
-  await addDisposableWorktree(clone, ctx.paths, ctx.runId, tag, sha);
-  const result = await ctx.runSeat({
-    seat: 'adversary',
-    roleBlock: adversaryRole(base),
-    reportPath: runReportPath(ctx.paths, ctx.runId, tag),
-    schema: ADVERSARY_SCHEMA,
-    cwd: tree,
-    env: base.env,
-    denyTools: editDenyRules({ testPaths: base.testPaths, recordPaths: base.recordPaths }),
-  });
-  if (!result.ok) return seatFail(ctx, 'adversary', result);
-  // Restore the suite from the sha before evaluation — a tampered test file
-  // is structurally void, not detected.
-  await restorePaths(tree, sha, base.testPaths);
-  const run = await runCommand(base.suiteArgv, {
-    cwd: tree,
-    env: base.env,
-    log: commandLogPath(ctx.paths, ctx.runId, `adversary-r${round}-w${wave}`),
-  });
-  if (run.code === null) return commandFail(ctx, run);
-  const killed = run.code !== 0;
-  ctx.store.append('adversary-wave', {
-    actor: ACTOR,
-    round,
-    wave,
-    phase: 'initial',
-    result: killed ? 'killed' : 'survived',
-    sha,
-    wrongness: gist(result.report.wrongness),
-  });
-  if (killed) await dropWaveTree(ctx, clone, round, wave);
-  return null;
-}
-
-async function rerunWave(ctx, base, clone, { round, wave, sha }) {
-  const tree = waveTreePath(ctx, round, wave);
-  if (!existsSync(tree)) {
-    return blocked(
-      ctx,
-      'wave-tree-missing',
-      `The survivor tree of round ${round} wave ${wave} is gone; the killing test ` +
-        'has nothing to re-run against.',
-      { round, wave },
-    );
-  }
-  await restorePaths(tree, sha, base.testPaths);
-  const run = await runCommand(base.suiteArgv, {
-    cwd: tree,
-    env: base.env,
-    log: commandLogPath(ctx.paths, ctx.runId, `adversary-r${round}-w${wave}-rerun`),
-  });
-  if (run.code === null) return commandFail(ctx, run);
-  const killed = run.code !== 0;
-  ctx.store.append('adversary-wave', {
-    actor: ACTOR,
-    round,
-    wave,
-    phase: 're-run',
-    result: killed ? 'killed' : 'survived',
-    sha,
-  });
-  if (killed) await dropWaveTree(ctx, clone, round, wave);
-  return null;
-}
-
-async function amendment(ctx, base, clone, { round, survivors }) {
-  const evidence = await survivorEvidence(ctx, round, survivors);
-  const { report, fail } = await suiteSeatWithChecks(ctx, base, {
-    phase: 'amendment',
-    schema: SUITE_AMEND_SCHEMA,
-    buildRole: (brief) => amendmentRole(base, evidence, survivors, brief),
-    checks: async (r) => {
-      const defects = await suiteChecks(ctx, base, r, 'amendment', { survivors });
-      const covered = new Set([
-        ...(r.killingTests ?? []).map((k) => k.wave),
-        ...(r.dispositions ?? []).map((d) => d.wave),
-      ]);
-      for (const wave of survivors) {
-        if (!covered.has(wave)) {
-          defects.push(`survivor wave ${wave} has neither a killing test nor a disposition`);
-        }
-      }
-      return defects;
-    },
-  });
-  if (fail) return fail;
-  const sha = await commitAll(base.worktree, `suite amend r${round}: ${base.card.key}`);
-  ctx.store.append('suite-committed', { actor: ACTOR, sha, phase: 'amendment', files: report.suiteFiles });
-  return null;
-}
-
-async function strengthen(ctx, base, clone, { round, survivors }) {
-  const evidence = await survivorEvidence(ctx, round, survivors);
-  const { report, fail } = await suiteSeatWithChecks(ctx, base, {
-    phase: 'strengthening',
-    schema: SUITE_SCHEMA,
-    buildRole: (brief) => strengthenRole(base, evidence, survivors, brief),
-    checks: (r) => suiteChecks(ctx, base, r, 'strengthening', { survivors }),
-  });
-  if (fail) return fail;
-  const sha = await commitAll(base.worktree, `suite strengthen r${round}: ${base.card.key}`);
-  ctx.store.append('suite-committed', {
-    actor: ACTOR,
-    sha,
-    phase: 'strengthening',
-    files: report.suiteFiles,
-  });
-  for (const wave of survivors) await dropWaveTree(ctx, clone, round, wave);
-  return null;
-}
-
-/**
- * What a suite seat is shown about the adversary. Two sections.
- *
- * The first is this round's survivors, each with its report and the diff of the
- * tree it left. The second is every earlier round of this run, newest first,
- * with its approach and its wrongness and no diff: `strengthen` drops each
- * survivor tree when it ends a round, so the report is what is left, and the
- * added text stays small.
- *
- * The second section exists because a seat runs in fresh context. It cannot see
- * a pattern across rounds that nobody puts in front of it. Three rounds that
- * named a cookie value, then a bare header, then a second cookie name are one
- * instruction read together: enumerate the carriers. Read one at a time they
- * are three requests to add one test (ADR-0072).
- */
-async function survivorEvidence(ctx, round, survivors) {
-  const parts = [];
-  for (const wave of survivors) {
-    const report = readJson(runReportPath(ctx.paths, ctx.runId, `adversary-r${round}-w${wave}`)) ?? {};
-    const tree = waveTreePath(ctx, round, wave);
-    let diff = '';
-    if (existsSync(tree)) diff = await evidenceDiff(tree).catch(() => '');
-    parts.push(
-      [
-        `Survivor wave ${wave}:`,
-        `approach: ${report.approach ?? 'unknown'}`,
-        `wrongness: ${report.wrongness ?? 'unknown'}`,
-        'diff:',
-        diff,
-      ].join('\n'),
-    );
-  }
-  const earlier = earlierRoundEvidence(ctx, round);
-  if (earlier.length > 0) {
-    parts.push(['Every earlier adversary round of this run:', ...earlier].join('\n'));
-  }
-  return parts.join('\n\n');
-}
-
-/** Every wave of every round before this one, newest round first. */
-function earlierRoundEvidence(ctx, round) {
-  const waves = runEvents(ctx)
-    .filter((e) => e.event === 'adversary-wave' && e.phase === 'initial' && e.round < round)
-    .map((e) => ({ round: e.round, wave: e.wave }))
-    .sort((a, b) => b.round - a.round || a.wave - b.wave);
-  return waves.map(({ round: r, wave }) => {
-    const report = readJson(runReportPath(ctx.paths, ctx.runId, `adversary-r${r}-w${wave}`)) ?? {};
-    return (
-      `- round ${r}, wave ${wave}: approach: ${report.approach ?? 'unknown'}; ` +
-      `wrongness: ${report.wrongness ?? 'unknown'}`
-    );
-  });
-}
-
-function survivorLines(ctx, round, waves) {
-  return waves
-    .map((wave) => {
-      const report = readJson(runReportPath(ctx.paths, ctx.runId, `adversary-r${round}-w${wave}`));
-      return `- wave ${wave}: ${report?.wrongness ?? 'no report'}`;
-    })
-    .join('\n');
-}
-
-function waveTreePath(ctx, round, wave) {
-  return join(workspaceRoot(ctx.paths, ctx.runId), `adversary-r${round}-w${wave}`);
-}
-
-async function dropWaveTree(ctx, clone, round, wave) {
-  const tree = waveTreePath(ctx, round, wave);
-  if (!existsSync(tree)) return;
-  // The removal falls back to a direct delete of its own; a wave tree that
-  // survives that as well goes to the workspace release at close.
-  await removeWorktree(clone, tree).catch(() => {});
 }
 
 // -- freeze (process) --------------------------------------------------------
@@ -1548,22 +1423,6 @@ function freezeHandler(nextStage) {
     const events = runEvents(ctx);
     const sha = await headSha(base.worktree);
     const suiteFiles = await filesAt(base.worktree, sha, base.testPaths);
-    const initial = events.filter((e) => e.event === 'adversary-wave' && e.phase === 'initial');
-    const finalRound = initial.length > 0 ? Math.max(...initial.map((e) => e.round)) : 0;
-    const killCount = initial.filter((e) => e.round === finalRound && e.result === 'killed').length;
-    const amendmentKills = events.filter(
-      (e) => e.event === 'adversary-wave' && e.phase === 're-run' && e.result === 'killed',
-    ).length;
-    const latestDisposition = new Map();
-    for (const e of events) {
-      if (e.event === 'survivor-disposition') latestDisposition.set(`${e.round}:${e.wave}`, e);
-    }
-    const dispositions = [...latestDisposition.values()].map((e) => ({
-      round: e.round,
-      wave: e.wave,
-      disposition: e.disposition,
-      reason: e.reason,
-    }));
     const lastSuite = readJson(lastSeatReportEvent(events, 'suite')?.path) ?? {};
     const reds = lastSuite.reds ?? [];
     // The exclusions: test-path files the spec assigned to the implementing
@@ -1586,10 +1445,6 @@ function freezeHandler(nextStage) {
       suiteFiles,
       frozenExclusions: exclusions,
       ownerPinned: pinned,
-      waves: initial.map((e) => ({ round: e.round, wave: e.wave, result: e.result, sha: e.sha })),
-      killCount,
-      amendmentKills,
-      dispositions,
       // The surface map of the last suite write, off the same report the reds
       // come off. The freeze record is where the frozen set is fixed, so every
       // later reader takes the map off one record (ADR-0072).
@@ -1602,9 +1457,6 @@ function freezeHandler(nextStage) {
     ctx.store.append('freeze', {
       actor: ACTOR,
       sha,
-      killCount,
-      amendmentKills,
-      dispositions: dispositions.length,
       files: suiteFiles.length,
       exclusions: exclusions.length,
       ...(pinned.length > 0 && { pins: pinned.length }),
@@ -1627,7 +1479,11 @@ function birthRole(base, resolved, brief = null) {
     // where a test can live and what will run it. Without them a plan can
     // name a runner the suite seat is not allowed to reach.
     ...suiteFacts(base),
+    // The card is the only path this seat has. Nothing is implemented yet, so
+    // the whole active tree is what the spec is written against (ADR-0089).
+    ...governingRecordLines(base.worktree, [base.cardPath], base.recordPaths ?? []),
     'If the repository state conflicts with the card\'s intent, do not author around the conflict: set outcome "grounding-conflict" and describe the conflict.',
+    ...dependencyLines(),
     'Otherwise set outcome "spec-born".',
   ];
   if (resolved.length > 0) {
@@ -1639,6 +1495,29 @@ function birthRole(base, resolved, brief = null) {
   lines.push(...briefLines(brief));
   lines.push(`Intent card (${base.cardPath}):`, base.cardText);
   return lines.join('\n');
+}
+
+/**
+ * What the seat is told about the packages a story may add.
+ *
+ * The card is the whole authorization: a package it names ships from this
+ * story, and a package it does not name is one question to the owner, asked
+ * here and never worked around. The three rules beside it are the ones a spec
+ * gets wrong when it is written against a package that is not installed yet.
+ */
+function dependencyLines() {
+  return [
+    'If the spec cannot be written without a package the card does not name, author nothing: ' +
+      'set outcome "dependency-needed", list each package under dependencies with its importer ' +
+      'key, its name and the reason the spec needs it, and write no spec file.',
+    'A card with a `## Dependencies` section makes the spec list `<importer>/package.json` ' +
+      'under `touched-paths`, owned by dev; the root importer `.` writes `package.json`.',
+    'A dependency that needs a build script needs `allowBuilds` in the workspace file, which ' +
+      'stays denied on this lane; that change goes through the repair lane.',
+    'A criterion that needs a named dependency is tested through the surface it changes, never ' +
+      'by importing the package, because the suite is authored and type-checked before the ' +
+      'dependency is installed.',
+  ];
 }
 
 /**
@@ -1819,7 +1698,7 @@ function suiteFacts(base) {
   ];
 }
 
-function suiteReportLines(base, survivors = []) {
+function suiteReportLines(base) {
   return [
     `Write test files only under: ${base.testPaths.join(', ')}. Touch nothing else.`,
     `The suite runs with: ${base.suiteArgv.join(' ')}`,
@@ -1834,7 +1713,7 @@ function suiteReportLines(base, survivors = []) {
     // The surface map. Every pre-freeze suite write carries it, because each
     // one runs in fresh context and each one can close the hole it was shown
     // while it leaves the sibling of that hole open (ADR-0072).
-    ...surfaceMapLines({ survivors }),
+    ...surfaceMapLines(),
     ...suiteCheckLines(base.suiteChecks),
     ...noteLines(base),
   ];
@@ -1844,9 +1723,9 @@ function suiteReportLines(base, survivors = []) {
  * The spec-gate notes, carried to every suite invocation. A note is an
  * obligation, not a waiver: the gate found a claim it could not settle by
  * reading, so the suite settles it against running code. Every suite seat
- * gets them — author, amendment, strengthening, red-state fix — because each
- * one runs in fresh context and each one can delete the test that discharges
- * a note without ever knowing the obligation existed.
+ * gets them — author, red-state fix, re-freeze amendment — because each one
+ * runs in fresh context and each one can delete the test that discharges a
+ * note without ever knowing the obligation existed.
  */
 function noteLines(base) {
   const notes = base.gateNotes ?? [];
@@ -1863,34 +1742,21 @@ function suiteAuthorRole(base, brief) {
   return [
     `Author the acceptance suite for the spec at: ${base.specPath}`,
     ...suiteReportLines(base),
+    ...governingRecordLines(base.worktree, specTouchedPaths(base), base.recordPaths ?? []),
     ...briefLines(brief),
   ].join('\n');
 }
 
-function amendmentRole(base, evidence, survivors, brief) {
-  return [
-    'The adversary round left survivors: wrong implementations the suite did not kill.',
-    `The spec: ${base.specPath}`,
-    'For each survivor, do one of:',
-    '- add a killing test and list it under killingTests with the wave number;',
-    '- declare a disposition: "spec-indifferent" when the spec does not constrain the surviving behavior, "unkilled-gap" when the gap is real but you cannot encode a killing test.',
-    ...suiteReportLines(base, survivors),
-    'Survivor evidence:',
-    evidence,
-    ...briefLines(brief),
-  ].join('\n');
-}
-
-function strengthenRole(base, evidence, survivors, brief) {
-  return [
-    'The adversary round scored zero kills: every wrong implementation passed the suite.',
-    `Strengthen the suite against the spec at: ${base.specPath}`,
-    'Use every survivor below as evidence. A fresh adversary round follows.',
-    ...suiteReportLines(base, survivors),
-    'Survivor evidence:',
-    evidence,
-    ...briefLines(brief),
-  ].join('\n');
+/**
+ * The paths the born spec declared. A spec the run cannot read declares none,
+ * which leaves the seat the active tree and no neighbourhood.
+ */
+function specTouchedPaths(base) {
+  try {
+    return parseTouchedPaths(readFileSync(base.specPath, 'utf8'));
+  } catch {
+    return [];
+  }
 }
 
 function redStateFixRole(base, brief) {
@@ -1898,25 +1764,11 @@ function redStateFixRole(base, brief) {
     'The red-state check failed: the suite is green against the pre-implementation tree.',
     `Fix the suite so it asserts the behavior specified at: ${base.specPath}`,
     ...suiteReportLines(base),
+    // The same records the authoring seat was given. This seat rewrites the
+    // assertions that seat wrote, so it decides against the same tree
+    // (ADR-0089).
+    ...governingRecordLines(base.worktree, specTouchedPaths(base), base.recordPaths ?? []),
     ...briefLines(brief),
-  ].join('\n');
-}
-
-// The adversary brief. The security dimensions ride it because a wave is where
-// a missing assertion is cheapest to find: an implementation the suite cannot
-// tell from a right one on authorization or input trust is a gap the amendment
-// round closes, and the test that closes it is frozen against every candidate
-// after it (ADR-0038).
-function adversaryRole(base) {
-  return [
-    'You work in a disposable worktree; nothing you write ships.',
-    `Write a plausible wrong implementation against the spec at: ${base.specPath}`,
-    'Goal: the acceptance suite passes while the behavior violates the spec.',
-    'The dimensions below are wrong in ways a suite rarely asserts on, so weigh them',
-    'beside the behavior the spec names when you pick your wrongness:',
-    ...SECURITY_DIMENSIONS.map((dimension) => `- ${dimension}`),
-    'Do not edit or delete test files; the suite is restored before evaluation.',
-    'Report your approach and the deliberate wrongness.',
   ].join('\n');
 }
 
@@ -1930,9 +1782,9 @@ async function laneBase(ctx) {
   const cardPath = ctx.payload.card;
   const cardText = readFileSync(join(worktree, cardPath), 'utf8');
   const { card } = parseIntentCard(cardText);
-  // The record fields ride every base of this lane: the adversary is denied the
-  // record tree as it is denied the suite, and the records stage writes under
-  // the project's lifecycle and style rules (ADR-0074).
+  // The record fields ride every base of this lane: an implementation seat is
+  // denied the record tree as it is denied the suite, and the records stage
+  // writes under the project's lifecycle and style rules (ADR-0074).
   return recordBase({
     config,
     story,
@@ -1952,9 +1804,11 @@ async function laneBase(ctx) {
     componentsRoot: config.repo.componentsRoot ?? null,
     // The lane's diff policy. The spec lint judges the paths the spec plans
     // against the same tiers the candidate capture judges the diff against, so
-    // a spec cannot plan a path the capture would refuse.
+    // a spec cannot plan a path the capture would refuse. The dependency tier
+    // is the one the capture judges by content: the card carries the
+    // permission, so the lint refuses a spec that plans the file and requires
+    // the manifest of every importer the card names.
     tier: laneDiffPolicy(config, 'story'),
-    adversaryWaves: story.adversaryWaves ?? DEFAULT_ADVERSARY_WAVES,
     // The card decides a frozen-surface collision unless the project says
     // otherwise. `false` restores the old default, where every collision is an
     // owner question (ADR-0044).

@@ -15,8 +15,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import {
   CARD_PATH,
   PROJECT,
@@ -29,6 +29,7 @@ import {
   instanceEvents,
   originTree,
   pollFor,
+  runDir,
   runEvents,
   stalled,
   startDaemon,
@@ -81,7 +82,6 @@ const SCENARIO = {
   spec: SPEC,
   suiteFiles: { 'tests/feature.test.mjs': SUITE },
   suiteReds: [{ test: 'f doubles its input', class: 'feature-absence' }],
-  adversaryFiles: { 'src/feature.mjs': 'export const f = (x) => x + x + 1;\n' },
   // Right first time: the certification this run carries is earned in one
   // cycle, so a second render in the ledger can only be the re-verdict this
   // scenario says nothing takes.
@@ -350,6 +350,78 @@ test('a ship over a disjoint merge keeps the certification it earned', async (t)
   assert.equal(breach.tripwire, 'fast-path-escapes');
   assert.equal(breach.value, 2);
   assert.match(breach.answer, /gates\.fastPathShip to false/);
+
+  await stopDaemon(fx);
+});
+
+// One more part of the claim: a review finding is a statement about the tree
+// like any other, so it carries the ground it rests on and the check asks the
+// moved base about that ground. A run with a standing finding and a merge that
+// moves none of its ground keeps its certification; the unit tests hold the
+// refusal the other way round.
+const LENS_SCENARIO = {
+  ...SCENARIO,
+  // The finding is graded to block, so the verifier is asked and confirms it.
+  confirmFindings: true,
+  lensFinding: {
+    seat: 'fury-spec',
+    lens: 'spec',
+    severity: 'HIGH',
+    ground: ['src/feature.mjs'],
+    finding: 'the doubling is written as an expression the spec names as a constant',
+  },
+  // The repair round the finding buys. The suite stays green through it: what
+  // answers the finding is the round, and the lens does not raise it twice.
+  repairFiles: {
+    'src/feature.mjs': 'export const FACTOR = 2;\n\nexport function f(x) {\n  return x * FACTOR;\n}\n',
+  },
+};
+
+test('a review finding rides the record with its ground, and a merge past it carries', async (t) => {
+  const fx = buildFixture({
+    prefix: 'olympus-e2e-fastpath-lens-',
+    scenario: LENS_SCENARIO,
+    tree: TREE,
+  });
+  t.after(() => cleanup(fx));
+
+  const runId = await toFreeze(fx);
+  // The competing work: a document. It is inert ground, and no finding of this
+  // run rests on it.
+  pushToBranch(fx, 'docs/note.md', 'unrelated main work\n', 'docs: a note');
+
+  const fast = await pollFor(
+    'the fast-path record',
+    () => runEvents(fx, runId).find((e) => e.event === 'fast-path-ship'),
+    { attempts: 1800, abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  assert.equal(fast.taken, true, `the fast path refused: ${fast.refusal} (${fast.detail})`);
+
+  await pollFor(
+    'the run to close',
+    () => runEvents(fx, runId).find((e) => e.event === 'run-closed'),
+    { attempts: 1800, abort: () => stalled(fx, runId), diagnose: () => diagnostics(fx, runId) },
+  );
+  const events = runEvents(fx, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+
+  // The ledger: one lens finding, confirmed, with the ground the seat named.
+  const finding = events.find((e) => e.event === 'finding' && e.lens === 'spec');
+  assert.equal(finding.severity, 'HIGH');
+  assert.equal(finding.confirmed, true);
+  assert.deepEqual(finding.ground, ['src/feature.mjs']);
+
+  // The record the carry rested on: the same finding, with the same ground, in
+  // the file the fast path read it out of. The run archives at its close, so the
+  // record is read under the directory the archive left it in.
+  const record = JSON.parse(
+    readFileSync(join(runDir(fx, runId), basename(fast.certification.record)), 'utf8'),
+  );
+  const recorded = record.findings.filter((f) => f.lens === 'spec');
+  assert.equal(recorded.length, 1, JSON.stringify(record.findings));
+  assert.deepEqual(recorded[0].ground, ['src/feature.mjs']);
+  // The finding the ground was read from is the one the ledger stamped.
+  assert.equal(recorded[0].id, finding.id);
 
   await stopDaemon(fx);
 });

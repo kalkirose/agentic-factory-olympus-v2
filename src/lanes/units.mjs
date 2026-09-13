@@ -467,8 +467,8 @@ export function activeOf(worktree, records = []) {
 
 /**
  * The record id in a file name, by the leading digits after an `adr-` prefix.
- * ceq writes `adr-020-...md` and the harness writes `0026-...md`; both answer
- * the number the references carry.
+ * A project may write `adr-020-...md` where this repository writes
+ * `0026-...md`; both answer the number the references carry.
  */
 export function recordId(path) {
   const match = /^(?:adr[-_]?)?0*(\d+)/i.exec(basename(String(path).replaceAll('\\', '/')));
@@ -615,6 +615,68 @@ export function birthNeighbours(worktree, touchedPaths = [], recordPaths = []) {
     }
   }
   return capped([...direct, ...named, ...cited]);
+}
+
+/** The heading over the records a seat's own paths are governed by. */
+export const GOVERNING_RECORDS_LINE = 'Decision records that govern your paths (read these):';
+
+/** The heading over the rest of the active tree. */
+export const OTHER_RECORDS_LINE =
+  'Every other active record, by path (open one only when your work reaches its area):';
+
+/**
+ * The record tree as a brief states it: the records that govern the paths this
+ * seat works on, then every other active record by path, then what a record in
+ * neither list is.
+ *
+ * A record's status is a line of its text and not part of its name, so a seat
+ * handed a directory cannot tell an active record from a closed one without
+ * opening both. It opens the closed one, follows it to its replacement, and
+ * pays that on every seat. Naming the paths answers it: the first list is the
+ * work's own neighbourhood, which the seat reads before it starts, and the
+ * second is the tree's remainder, which it opens where its work arrives. A
+ * closed record is in neither list, so no brief names one (ADR-0089).
+ *
+ * `exclude` is for a seat whose brief already names records: the record it
+ * judges, or the neighbourhood it carries above this block. One path named
+ * twice reads as two duties.
+ * @returns {string[]}
+ */
+export function governingRecordLines(
+  worktree,
+  paths = [],
+  recordPaths = [],
+  { exclude = [] } = {},
+) {
+  const dir = (recordPaths ?? []).filter((entry) => !entry.startsWith('!')).join(', ');
+  if (dir.length === 0) return [];
+  const held = new Set(exclude.map((path) => String(path).replaceAll('\\', '/')));
+  const { neighbours, dropped } = birthNeighbours(worktree, paths, recordPaths);
+  const governing = neighbours.filter((file) => !held.has(file));
+  const rest = activeRecords(worktree, recordPaths).filter(
+    (file) => !held.has(file) && !governing.includes(file),
+  );
+  return [
+    ...(governing.length > 0
+      ? [
+          GOVERNING_RECORDS_LINE,
+          ...governing.map((file) => `- ${file}`),
+          // The cap decides the order of the reading, never what the brief
+          // names: a record under the cut is an active record, so it stands in
+          // the list below and this line says where it went.
+          ...(dropped > 0
+            ? [
+                `${dropped} further record(s) rank under this list by the same rule; ` +
+                  'this brief names each of them.',
+              ]
+            : []),
+        ]
+      : []),
+    ...(rest.length > 0 ? [OTHER_RECORDS_LINE, ...rest.map((file) => `- ${file}`)] : []),
+    `A record in ${dir} named in neither list is closed (its status line reads superseded or ` +
+      'retired) and is out of your scope. Do not open it. A record is written by a record seat; ' +
+      'the reconciliation stage owns every change to one.',
+  ];
 }
 
 /**

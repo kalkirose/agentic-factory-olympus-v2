@@ -31,6 +31,7 @@ import {
   recordReviewSchema,
 } from '../src/lanes/review.mjs';
 import {
+  FINDING_GROUND_DUTY,
   LENS_CRITERIA,
   RECORD_CRITERIA,
   RECORD_CRITERION_KEYS,
@@ -38,7 +39,9 @@ import {
 } from '../src/lanes/lenses.mjs';
 import { UNITS_BIN } from '../src/lanes/records.mjs';
 import {
+  GOVERNING_RECORDS_LINE,
   NEIGHBOUR_CAP,
+  OTHER_RECORDS_LINE,
   recordUnits,
 } from '../src/lanes/units.mjs';
 import { scaffoldHome, reviewDiffPath, runLedgerPath } from '../src/daemon/home.mjs';
@@ -334,11 +337,41 @@ const BASE = {
   lenses: ['spec', 'security'],
 };
 
+/**
+ * A tree the fixture findings rest on. Every ground entry is held to a path the
+ * reviewed tree really has, so the paths these reports name exist here, and a
+ * base over this tree is what a fixture finding is judged against.
+ */
+function groundTree(t, files = {}) {
+  const root = tempDir('olympus-reviewground-');
+  const worktree = join(root, 'tree');
+  const tree = {
+    'src/pay.mjs': 'export const pay = 1;\n',
+    'src/checkout.mjs': 'export const checkout = 1;\n',
+    'src/token.mjs': 'export const token = 1;\n',
+    'src/api/rates.mjs': 'export const rates = 1;\n',
+    'allowlists/price.json': '{}\n',
+    ...files,
+  };
+  for (const [path, text] of Object.entries(tree)) {
+    mkdirSync(dirname(join(worktree, path)), { recursive: true });
+    writeFileSync(join(worktree, path), text);
+  }
+  t.after(() => removeDir(root));
+  return worktree;
+}
+
+/** The lane base of a code review, over a tree the fixture grounds stand in. */
+function groundBase(t, overrides = {}) {
+  return { ...BASE, worktree: groundTree(t), ...overrides };
+}
+
 const REPORT = {
   findings: [
     {
       lens: 'security',
       severity: 'MEDIUM',
+      ground: ['src/pay.mjs'],
       finding: 'the token check reads a header it never validates',
       evidence: 'src/pay.mjs:41',
     },
@@ -425,7 +458,7 @@ test('a brief whose excerpt is the whole diff says so and names the same file', 
 test('a finding raised over a cut diff carries the word for it', async (t) => {
   const { ctx, paths } = runFixture(t, REPORT);
 
-  const outcome = await generalistReview(ctx, BASE, {
+  const outcome = await generalistReview(ctx, groundBase(t), {
     cycle: 1,
     diff: excerpted({ truncated: true }),
     priorConfirmed: [],
@@ -443,7 +476,7 @@ test('a finding raised over a cut diff carries the word for it', async (t) => {
 test('a finding raised over an excerpt of a whole diff carries nothing', async (t) => {
   const { ctx, paths } = runFixture(t, REPORT);
 
-  await generalistReview(ctx, BASE, { cycle: 1, diff: excerpted(), priorConfirmed: [] });
+  await generalistReview(ctx, groundBase(t), { cycle: 1, diff: excerpted(), priorConfirmed: [] });
 
   const findings = readEvents(runLedgerPath(paths, 'r1')).filter((e) => e.event === 'finding');
   assert.equal(findings.length, 1);
@@ -465,20 +498,22 @@ test("a cycle's diff file sits in the run directory, beside the record", () => {
 // reading is the run worktree. A match against any other form answers no
 // silently, which is the one thing the field exists to stop (ADR-0010).
 test('a finding carries the file the lens named, in the form a path entry is written', async (t) => {
-  const worktree = process.cwd();
+  const worktree = groundTree(t);
+  const ground = ['src/pay.mjs'];
   const report = {
     findings: [
-      { lens: 'spec', severity: 'MED', finding: 'a', evidence: 'e', file: './allowlists/price.json' },
+      { lens: 'spec', severity: 'MED', ground, finding: 'a', evidence: 'e', file: './allowlists/price.json' },
       {
         lens: 'spec',
         severity: 'MED',
+        ground,
         finding: 'b',
         evidence: 'e',
         file: join(worktree, 'allowlists', 'price.json'),
       },
-      { lens: 'spec', severity: 'MED', finding: 'c', evidence: 'e', file: 'allowlists\\price.json' },
-      { lens: 'spec', severity: 'MED', finding: 'd', evidence: 'e', file: 'src/pay.mjs' },
-      { lens: 'spec', severity: 'MED', finding: 'e', evidence: 'e' },
+      { lens: 'spec', severity: 'MED', ground, finding: 'c', evidence: 'e', file: 'allowlists\\price.json' },
+      { lens: 'spec', severity: 'MED', ground, finding: 'd', evidence: 'e', file: 'src/pay.mjs' },
+      { lens: 'spec', severity: 'MED', ground, finding: 'e', evidence: 'e' },
     ],
     summary: 'five',
   };
@@ -510,6 +545,268 @@ test('a finding carries the file the lens named, in the form a path entry is wri
   assert.ok(brief.includes('Put the repo-relative path of the one file a finding is about'), brief);
 });
 
+// -- the ground a finding rests on (ADR-0056) --------------------------------
+//
+// A moved base asks one question of each finding: did the branch touch what
+// this claim rests on. A finding that names no ground answers it for nothing,
+// and the certification it rides is earned again at the cost of the whole
+// spectrum. So the ground is a duty of the seat, held by the seat's own check
+// loop, and it is stamped in the form a path entry is written in.
+
+/** One code finding, with the ground and the grade overridable per case. */
+function groundFinding(ground, severity = 'MED') {
+  return {
+    findings: [
+      {
+        lens: 'security',
+        severity,
+        ground,
+        finding: 'the token check reads a header it never validates',
+        evidence: 'src/pay.mjs:41',
+      },
+    ],
+    summary: 'one finding',
+  };
+}
+
+test('a finding that names no ground is returned to the seat, and parks the round', async (t) => {
+  const fx = seatsFixture(t, () => groundFinding([]));
+
+  const outcome = await generalistReview(fx.ctx, BASE, {
+    cycle: 1,
+    diff: excerpted(),
+    priorConfirmed: [],
+  });
+
+  assert.ok(outcome.fail, 'a groundless report stood');
+  const events = readEvents(runLedgerPath(fx.paths, 'r1'));
+  const refused = events.filter((e) => e.event === 'seat-refused');
+  assert.equal(refused.length, 2);
+  assert.match(refused[0].defects[0], /finding #1 names no ground/);
+  // The second refusal is the park the lane already has for a work product the
+  // seat could not correct. No name of its own.
+  const failure = events.find((e) => e.event === 'seat-failure');
+  assert.equal(failure.reason, 'work-product-defect');
+  // The correction rode the second brief, so the seat was told what to fix.
+  assert.match(fx.ctx.briefs[1].roleBlock, /Correction brief/);
+  // Nothing was stamped: a groundless finding is a defect in the report and
+  // never a claim about the tree.
+  assert.deepEqual(events.filter((e) => e.event === 'finding'), []);
+});
+
+test('a ground entry this repository cannot read is returned to the seat', async (t) => {
+  const fx = seatsFixture(t, ({ roleBlock }) =>
+    roleBlock.includes('Correction brief')
+      ? groundFinding(['src/pay.mjs'])
+      : groundFinding(['../elsewhere/pay.mjs']),
+  );
+
+  const outcome = await generalistReview(fx.ctx, groundBase(t), {
+    cycle: 1,
+    diff: excerpted(),
+    priorConfirmed: [],
+  });
+
+  assert.equal(outcome.fail, undefined);
+  const refused = readEvents(runLedgerPath(fx.paths, 'r1')).filter(
+    (e) => e.event === 'seat-refused',
+  );
+  assert.equal(refused.length, 1);
+  assert.match(refused[0].defects[0], /ground this repository cannot read: \.\.\/elsewhere/);
+});
+
+test('ground the tree has nothing at is returned to the seat, and the whole-tree glob is not', async (t) => {
+  // A sentence about the subject and an invented path both canonicalise, and
+  // neither can ever be compared against a merge. The glob is the one ground a
+  // finding about no single file may name, and it is admitted as written.
+  const fx = seatsFixture(t, ({ roleBlock }) =>
+    roleBlock.includes('Correction brief')
+      ? groundFinding(['**'])
+      : groundFinding(['the whole repository', 'nope/missing.mjs']),
+  );
+
+  const outcome = await generalistReview(fx.ctx, groundBase(t), {
+    cycle: 1,
+    diff: excerpted(),
+    priorConfirmed: [],
+  });
+
+  assert.equal(outcome.fail, undefined);
+  const events = readEvents(runLedgerPath(fx.paths, 'r1'));
+  const refused = events.filter((e) => e.event === 'seat-refused');
+  assert.equal(refused.length, 1);
+  assert.match(
+    refused[0].defects[0],
+    /ground this tree has nothing at: the whole repository, nope\/missing\.mjs/,
+  );
+  const [finding] = events.filter((e) => e.event === 'finding');
+  assert.deepEqual(finding.ground, ['**']);
+});
+
+test('a finding carries its ground in the form a path entry is written', async (t) => {
+  const worktree = groundTree(t);
+  const fx = seatsFixture(t, () =>
+    groundFinding([
+      './src/pay.mjs',
+      'src\\pay.mjs',
+      join(worktree, 'src', 'checkout.mjs'),
+      'src/api/',
+    ]),
+  );
+
+  await generalistReview(
+    fx.ctx,
+    { ...BASE, worktree },
+    { cycle: 1, diff: excerpted(), priorConfirmed: [] },
+  );
+
+  const [finding] = readEvents(runLedgerPath(fx.paths, 'r1')).filter(
+    (e) => e.event === 'finding',
+  );
+  // Four spellings of three paths: the duplicates collapse, because a match
+  // against any other form answers no in silence.
+  assert.deepEqual(finding.ground, ['src/pay.mjs', 'src/checkout.mjs', 'src/api']);
+});
+
+test('the verifier ground replaces the seat ground on a confirmed finding', async (t) => {
+  const fx = seatsFixture(t, ({ seat }) =>
+    seat === 'fury-verifier'
+      ? {
+          results: [
+            {
+              id: 'new-1',
+              verdict: 'confirmed',
+              evidence: 'src/token.mjs:12 reads the header',
+              ground: ['src/token.mjs'],
+            },
+          ],
+          summary: 'one confirmed',
+        }
+      : groundFinding(['src/pay.mjs'], 'HIGH'),
+  );
+
+  const outcome = await generalistReview(fx.ctx, groundBase(t), {
+    cycle: 1,
+    diff: excerpted(),
+    priorConfirmed: [],
+  });
+
+  assert.equal(outcome.confirmed.length, 1);
+  // The verifier read the code and the review seat read a diff, so the ground
+  // the ladder carries is the word of the seat that proved the finding.
+  assert.deepEqual(outcome.confirmed[0].ground, ['src/token.mjs']);
+  const [finding] = readEvents(runLedgerPath(fx.paths, 'r1')).filter(
+    (e) => e.event === 'finding',
+  );
+  assert.deepEqual(finding.ground, ['src/token.mjs']);
+  // The duty is in the verifier's own brief, so the field is asked for.
+  const brief = fx.ctx.briefs.find((b) => b.seat === 'fury-verifier').roleBlock;
+  assert.ok(brief.includes('name the files your own evidence reads in "ground"'), brief);
+});
+
+test('a verifier that states no ground leaves the seat ground standing', async (t) => {
+  const fx = seatsFixture(t, ({ seat }) =>
+    seat === 'fury-verifier'
+      ? {
+          results: [{ id: 'new-1', verdict: 'confirmed', evidence: 'src/pay.mjs:41' }],
+          summary: 'one confirmed',
+        }
+      : groundFinding(['src/pay.mjs'], 'HIGH'),
+  );
+
+  const outcome = await generalistReview(fx.ctx, groundBase(t), {
+    cycle: 1,
+    diff: excerpted(),
+    priorConfirmed: [],
+  });
+
+  assert.deepEqual(outcome.confirmed[0].ground, ['src/pay.mjs']);
+});
+
+// The verifier's ground wins, so it is held to what the review seat's is held
+// to. A sentence about the subject answers the moved-base question for nothing,
+// and the ladder would carry a certification over ground the branch moved.
+test('verifier ground the tree has nothing at is dropped, and the seat ground stands', async (t) => {
+  const fx = seatsFixture(t, ({ seat }) =>
+    seat === 'fury-verifier'
+      ? {
+          results: [
+            {
+              id: 'new-1',
+              verdict: 'confirmed',
+              evidence: 'src/token.mjs:12 reads the header',
+              ground: ['the whole repository'],
+            },
+          ],
+          summary: 'one confirmed',
+        }
+      : groundFinding(['src/pay.mjs'], 'HIGH'),
+  );
+
+  const outcome = await generalistReview(fx.ctx, groundBase(t), {
+    cycle: 1,
+    diff: excerpted(),
+    priorConfirmed: [],
+  });
+
+  // The verdict on the finding still counts: the item is confirmed, and only
+  // the ground it named for it is dropped.
+  assert.equal(outcome.confirmed.length, 1);
+  assert.deepEqual(outcome.confirmed[0].ground, ['src/pay.mjs']);
+  const [finding] = readEvents(runLedgerPath(fx.paths, 'r1')).filter(
+    (e) => e.event === 'finding',
+  );
+  assert.deepEqual(finding.ground, ['src/pay.mjs']);
+});
+
+test('a mixed verifier ground keeps the entries the tree holds', async (t) => {
+  const fx = seatsFixture(t, ({ seat }) =>
+    seat === 'fury-verifier'
+      ? {
+          results: [
+            {
+              id: 'new-1',
+              verdict: 'confirmed',
+              evidence: 'src/token.mjs:12 reads the header',
+              ground: ['everything under src', 'src/token.mjs', 'src/api/', 'src/**'],
+            },
+          ],
+          summary: 'one confirmed',
+        }
+      : groundFinding(['src/pay.mjs'], 'HIGH'),
+  );
+
+  const outcome = await generalistReview(fx.ctx, groundBase(t), {
+    cycle: 1,
+    diff: excerpted(),
+    priorConfirmed: [],
+  });
+
+  // A path the tree stands at and a glob over it both survive; the sentence
+  // does not, and it takes nothing with it.
+  assert.deepEqual(outcome.confirmed[0].ground, ['src/token.mjs', 'src/api', 'src/**']);
+});
+
+test('every review brief states the ground duty in the same words', async (t) => {
+  const worktree = recordTree(t);
+  const panel = seatsFixture(t, () => ({ findings: [], summary: 'clean' }));
+  await furyRound(panel.ctx, BASE, { cycle: 1, diff: excerpted(), diffFiles: ['src/pay.mjs'] });
+  const record = seatsFixture(t, () => recordReport(worktree, RECORD_FILE));
+  await recordReviewRound(record.ctx, recordBase(worktree), { records: [RECORD_FILE], cycle: 1 });
+
+  const duty = FINDING_GROUND_DUTY.join('\n');
+  for (const { seat, roleBlock } of [...panel.ctx.briefs, ...record.ctx.briefs]) {
+    assert.ok(roleBlock.includes(duty), seat);
+  }
+  // The record brief says what a record finding's own ground is, beside it.
+  assert.ok(
+    record.ctx.briefs[0].roleBlock.includes(
+      `- "ground": ${RECORD_FILE}, and every file of the tree your evidence reads.`,
+    ),
+    record.ctx.briefs[0].roleBlock,
+  );
+});
+
 // -- the record review: one seat per record, and no diff ----------------------
 //
 // A decision record says how the product works. A sentence of it that the tree
@@ -530,6 +827,28 @@ const OTHER_RECORD = 'docs/adr/0002-surface.md';
 
 /** A lane base whose project declares a record tree. */
 const RECORD_BASE = { ...BASE, worktree: process.cwd(), recordPaths: ['docs/adr'] };
+
+/** The paths one block of a brief's record lines names, in order. */
+function blockPaths(brief, heading) {
+  const lines = brief.split('\n');
+  const start = lines.indexOf(heading);
+  if (start === -1) return [];
+  const paths = [];
+  for (const line of lines.slice(start + 1)) {
+    if (!line.startsWith('- ')) break;
+    paths.push(line.slice(2));
+  }
+  return paths;
+}
+
+/** The brief minus its record block: what the seat is told beside the paths. */
+function withoutRecordBlock(brief) {
+  const lines = brief.split('\n');
+  const start = lines.findIndex((l) => l === GOVERNING_RECORDS_LINE || l === OTHER_RECORDS_LINE);
+  if (start === -1) return brief;
+  const end = lines.findIndex((l, i) => i >= start && l.startsWith('A record in '));
+  return [...lines.slice(0, start), ...lines.slice(end + 1)].join('\n');
+}
 
 /** A verifier report answering each item with the verdict the map names. */
 function verdicts(map) {
@@ -623,6 +942,7 @@ function claimFinding(overrides = {}) {
     criterion: 'truth',
     severity: 'HIGH',
     file: RECORD_FILE,
+    ground: [RECORD_FILE, 'src/pay.mjs'],
     unit: 'U3',
     head: 'The helper doubles the price in src/pay.mjs.',
     line: 8,
@@ -631,6 +951,98 @@ function claimFinding(overrides = {}) {
     ...overrides,
   };
 }
+
+// The two record blocks a review seat carries (ADR-0089). A judgment seat reads
+// the diff against the decisions that govern it, and the paths are what let it
+// tell an active record from a closed one without opening either.
+
+/** A third active record, and a closed one, beside the fixture's pair. */
+const ELSEWHERE_RECORD = 'docs/adr/0007-ship.md';
+const CLOSED_RECORD = 'docs/adr/0008-price.md';
+const WIDER_TREE = {
+  [ELSEWHERE_RECORD]: [
+    '# ADR-0007: Ship on one branch',
+    '',
+    'Status: Accepted',
+    '',
+    '## Decision',
+    '',
+    'The ship reads src/ship.mjs.',
+    '',
+  ].join('\n'),
+  [CLOSED_RECORD]: [
+    '# ADR-0008: Round the price',
+    '',
+    'Status: Retired (2026-09-02): the rounding moved to the gateway.',
+    '',
+    '## Decision',
+    '',
+    'The rounding happens in src/pay.mjs.',
+    '',
+  ].join('\n'),
+};
+
+test('a lens brief names the records that govern the diff, and the rest by path', async (t) => {
+  const worktree = recordTree(t, WIDER_TREE);
+  const base = recordBase(worktree, { lenses: ['spec', 'security'], uiPaths: [] });
+  const fx = seatsFixture(t, () => ({ findings: [], summary: 'clean' }));
+
+  await furyRound(fx.ctx, base, {
+    cycle: 1,
+    diff: excerpted(),
+    diffFiles: ['src/pay.mjs'],
+  });
+
+  for (const { seat, roleBlock } of fx.ctx.briefs) {
+    // The two records whose text names the changed file, and no other.
+    assert.deepEqual(
+      blockPaths(roleBlock, GOVERNING_RECORDS_LINE),
+      [RECORD_FILE, OTHER_RECORD],
+      seat,
+    );
+    assert.deepEqual(blockPaths(roleBlock, OTHER_RECORDS_LINE), [ELSEWHERE_RECORD], seat);
+    // The closed record names the changed file too, and reaches no brief.
+    assert.ok(!roleBlock.includes(CLOSED_RECORD), seat);
+    assert.ok(roleBlock.includes('A record in docs/adr named in neither list is closed'), seat);
+  }
+});
+
+test('the generalist brief carries the same two blocks as the panel', async (t) => {
+  const worktree = recordTree(t, WIDER_TREE);
+  const base = recordBase(worktree, { lenses: ['spec', 'security'], uiPaths: [] });
+  const fx = seatsFixture(t, () => ({ findings: [], summary: 'clean' }));
+
+  await generalistReview(fx.ctx, base, {
+    cycle: 1,
+    diff: excerpted(),
+    diffFiles: ['src/pay.mjs', CLOSED_RECORD],
+    priorConfirmed: [],
+  });
+
+  const brief = fx.ctx.briefs[0].roleBlock;
+  assert.deepEqual(blockPaths(brief, GOVERNING_RECORDS_LINE), [RECORD_FILE, OTHER_RECORD]);
+  assert.deepEqual(blockPaths(brief, OTHER_RECORDS_LINE), [ELSEWHERE_RECORD]);
+  assert.ok(!brief.includes(CLOSED_RECORD), brief);
+});
+
+test('a record review brief lists the rest of the tree under its neighbourhood', async (t) => {
+  const worktree = recordTree(t, WIDER_TREE);
+  const fx = seatsFixture(t, () => recordReport(worktree, RECORD_FILE));
+
+  await recordReviewRound(fx.ctx, recordBase(worktree), {
+    records: [RECORD_FILE],
+    neighbours: { [RECORD_FILE]: { neighbours: [OTHER_RECORD], dropped: 0 } },
+    cycle: 1,
+  });
+
+  const brief = fx.ctx.briefs[0].roleBlock;
+  // The neighbourhood it already carries is its first list, so the second block
+  // is the remainder: the record under judgment and its neighbour are named once.
+  assert.ok(!brief.includes(GOVERNING_RECORDS_LINE), brief);
+  assert.deepEqual(blockPaths(brief, OTHER_RECORDS_LINE), [ELSEWHERE_RECORD]);
+  assert.ok(brief.indexOf('The neighbourhood.') < brief.indexOf(OTHER_RECORDS_LINE), brief);
+  assert.ok(!brief.includes(CLOSED_RECORD), brief);
+});
 
 test('a record review is one seat per record, and each seat holds one record', async (t) => {
   const more = {
@@ -745,12 +1157,16 @@ test('the record schema requires the unit a finding names, and asks for no readi
     'criterion',
     'severity',
     'file',
+    'ground',
     'unit',
     'head',
     'line',
     'summary',
     'evidence',
   ]);
+  // The ground is a list of strings and no more: the flat subset carries no
+  // `minItems`, so the seat's check loop is what holds the list non-empty.
+  assert.deepEqual(item.properties.ground, { type: 'array', items: { type: 'string' } });
   assert.deepEqual(item.properties.criterion.enum, [...RECORD_CRITERION_KEYS]);
   // The second place is in the shape and owed on one criterion, which no flat
   // schema can say: the check says it instead.
@@ -1078,6 +1494,7 @@ test('a MED finding on code is advisory, and reaches no verifier', async (t) => 
       {
         lens: 'operational',
         severity: 'MED',
+        ground: ['src/pay.mjs'],
         finding: 'no retry handling',
         evidence: 'src/pay.mjs:41',
         file: 'src/pay.mjs',
@@ -1086,7 +1503,7 @@ test('a MED finding on code is advisory, and reaches no verifier', async (t) => 
     summary: 'one on code',
   }));
 
-  const outcome = await generalistReview(fx.ctx, RECORD_BASE, {
+  const outcome = await generalistReview(fx.ctx, recordBase(recordTree(t)), {
     cycle: 1,
     diff: excerpted(),
     priorConfirmed: [],
@@ -1136,6 +1553,7 @@ test('the verifier is told the record, the unit head and the criterion', async (
             {
               lens: 'spec',
               severity: 'HIGH',
+              ground: [RECORD_FILE],
               finding: 'the record claims a doubling the helper does not apply',
               evidence: 'src/pay.mjs:1',
               file: RECORD_FILE,
@@ -1145,7 +1563,7 @@ test('the verifier is told the record, the unit head and the criterion', async (
         },
   );
 
-  await generalistReview(fx.ctx, { ...RECORD_BASE, recordPaths: ['docs/adr'] }, {
+  await generalistReview(fx.ctx, recordBase(recordTree(t)), {
     cycle: 1,
     diff: excerpted(),
     priorConfirmed: [],
@@ -1200,7 +1618,7 @@ test('a code lens brief on a mixed diff holds no record', async (t) => {
   const item = seat.schema.properties.findings.items;
   assert.deepEqual(item.properties.lens.enum, [...RECORD_BASE.lenses]);
   assert.ok(!('criterion' in item.properties));
-  assert.deepEqual(item.required, ['lens', 'severity', 'finding', 'evidence']);
+  assert.deepEqual(item.required, ['lens', 'severity', 'ground', 'finding', 'evidence']);
 });
 
 test('a mixed diff is the code panel plus one record seat per record', async (t) => {
@@ -1229,11 +1647,14 @@ test('a mixed diff is the code panel plus one record seat per record', async (t)
     seats.filter((s) => s.startsWith('record-review')).sort(),
     ['record-review:1', 'record-review:2'],
   );
-  // Every lens seat of the panel keeps the diff and holds no record.
+  // Every lens seat of the panel keeps the diff and judges no record. A record
+  // reaches it as a path to read against and nowhere else: not in the diff, not
+  // as a document to read whole, not as a unit list to answer.
   for (const { seat, roleBlock } of fx.ctx.briefs.filter((b) => b.seat.startsWith('fury-'))) {
     assert.ok(roleBlock.includes(DIFF_ONLY), seat);
-    assert.ok(!roleBlock.includes(RECORD_FILE), seat);
+    assert.ok(!withoutRecordBlock(roleBlock).includes(RECORD_FILE), seat);
     assert.ok(!roleBlock.includes('read whole'), seat);
+    assert.ok(!roleBlock.includes('The units of '), seat);
   }
 });
 

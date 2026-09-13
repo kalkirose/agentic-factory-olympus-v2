@@ -17,9 +17,36 @@ import {
   groundedLayers,
   priorStatus,
   targetedLayers,
+  SWEEP_REASONS,
+  assertSweepReason,
 } from '../src/lanes/spectrum.mjs';
+// The four conditions that arm the footprint are read off a project config and
+// the instance ledger, and they decide which plan this module returns, so they
+// are asserted beside it.
+import { certifiedFootprint } from '../src/lanes/verdict.mjs';
 import { confirmationTally } from '../src/lanes/parts.mjs';
-import { tempDir, removeDir } from './helpers.mjs';
+import { openInstanceStore } from '../src/telemetry/stores.mjs';
+import { tempDir, removeDir, initOriginRepo, commitTree, gitSync } from './helpers.mjs';
+
+/** One base certification of the test project, holding every layer green. */
+function certifyBase(paths, sha) {
+  const store = openInstanceStore(paths);
+  const line = store.append('base-certified', {
+    actor: 'daemon',
+    project: 'p',
+    runId: 'r0',
+    sha,
+    layers: FOOTPRINT.map((layer) => ({
+      name: layer.name,
+      status: 'green',
+      elapsedMs: 1000,
+      mode: 'run',
+      verdict: 'verdict-1.json',
+    })),
+  });
+  store.close();
+  return line;
+}
 
 const GREEN = ['node', '-e', 'process.exit(0)'];
 const RED = ['node', '-e', 'process.exit(1)'];
@@ -705,7 +732,10 @@ test('a pass runs its first cycle full and its later cycles targeted', () => {
   assert.deepEqual(cyclePlan(rendered, { cycle: 2, pass: 2, layers: CHAIN }), { sweep: 'full' });
   // A CI red names no Tier-1 layer of this tree, so it targets nothing.
   const ci = [...rendered, { event: 'verdict-rendered', cycle: 2, pass: 1, source: 'ci', verdict: 'red' }];
-  assert.deepEqual(cyclePlan(ci, { cycle: 3, pass: 1, layers: CHAIN }), { sweep: 'full' });
+  assert.deepEqual(cyclePlan(ci, { cycle: 3, pass: 1, layers: CHAIN }), {
+    sweep: 'full',
+    reason: 'ci-red',
+  });
 });
 
 test('a restart mid-cycle derives the same targeted set', () => {
@@ -1369,5 +1399,385 @@ test('a skipped layer neither runs nor carries, and the ledger says nothing of i
       .filter((e) => e.event === 'layer-result')
       .map((e) => e.layer),
     ['form'],
+  );
+});
+
+// -- the footprint of the run's own diff (the first cycle) --------------------
+//
+// The first cycle of a pass proved nothing of its own, so it asks what the
+// default branch already proved. Four conditions arm that question, and each one
+// that fails buys the whole spectrum under its own word.
+
+const FOOTPRINT = [
+  { name: 'install', command: 'green', ground: ['manifest.json'], setup: true },
+  { name: 'lint', command: 'green', ground: ['src'] },
+  { name: 'unit', command: 'green', ground: ['src', 'tests'], needs: ['lint'] },
+  { name: 'docs', command: 'green', ground: ['notes'] },
+];
+
+/** Every named layer certified green at one base, as the readers answer. */
+function certifiedAll(names = FOOTPRINT.map((l) => l.name)) {
+  return new Map(
+    names.map((name) => [name, { baseSha: 'base1', certifiedSeq: 7, status: 'green' }]),
+  );
+}
+
+function footprintPlan(changed, certified = certifiedAll(), layers = FOOTPRINT) {
+  return cyclePlan([], { cycle: 1, pass: 1, layers, footprint: { changed, certified } });
+}
+
+test('the first cycle runs the layers the diff reaches, their dependents and every setup layer', () => {
+  const plan = footprintPlan(['src/api/f.mjs']);
+  assert.equal(plan.sweep, 'footprint');
+  // lint reads src; unit needs lint; install runs by declaration; docs reads
+  // notes, which the diff never touched, so its certification answers.
+  assert.deepEqual([...plan.run].sort(), ['install', 'lint', 'unit']);
+});
+
+test('a setup layer runs on the footprint cycle and pulls no dependent in with it', () => {
+  // Nothing of this diff is any layer's ground but the setup layer's own, so the
+  // setup layer is the only thing that runs. A closure over `needs` here would
+  // buy the whole spectrum back on every cycle.
+  assert.deepEqual([...footprintPlan(['manifest.json']).run], ['install']);
+});
+
+test('a layer no certification answers for runs, and a layer above it still carries', () => {
+  const plan = footprintPlan(['notes/x.md'], certifiedAll(['install', 'lint', 'docs']));
+  // unit holds no certification, so it runs. lint holds one and the diff leaves
+  // its ground alone, so it carries under a layer that runs.
+  assert.deepEqual([...plan.run].sort(), ['docs', 'install', 'unit']);
+});
+
+test('the breadth ground belongs to every layer, so a shared input runs the spectrum', () => {
+  const plan = cyclePlan([], {
+    cycle: 1,
+    pass: 1,
+    layers: FOOTPRINT,
+    breadth: ['shared.lock'],
+    footprint: { changed: ['shared.lock'], certified: certifiedAll() },
+  });
+  assert.deepEqual([...plan.run].sort(), ['docs', 'install', 'lint', 'unit']);
+});
+
+test('a record path selects the record layers and no other on the footprint cycle', () => {
+  const plan = cyclePlan([], {
+    cycle: 1,
+    pass: 1,
+    layers: FOOTPRINT,
+    recordPaths: ['notes'],
+    recordLayers: ['docs'],
+    footprint: { changed: ['notes/0001-x.md'], certified: certifiedAll() },
+  });
+  // docs is the layer the project attributes its records to, and it is the only
+  // layer a record path reaches whatever any ground declares.
+  assert.deepEqual([...plan.run].sort(), ['docs', 'install']);
+});
+
+test('a change no layer claims buys the whole spectrum', () => {
+  // The project has not said which layer reads it, so no carry over it rests on
+  // anything. The ground the project states no suite reads is the exception: it
+  // leaves the diff before the attribution, because that list is the project
+  // saying these files reach no layer.
+  const plan = footprintPlan(['tools/release.mjs']);
+  assert.deepEqual(plan, { sweep: 'full', reason: 'unclaimed-ground' });
+  const stated = cyclePlan([], {
+    cycle: 1,
+    pass: 1,
+    layers: FOOTPRINT,
+    groundless: ['tools'],
+    footprint: { changed: ['tools/release.mjs'], certified: certifiedAll() },
+  });
+  assert.equal(stated.sweep, 'footprint');
+  assert.deepEqual([...stated.run], ['install']);
+});
+
+test('the frozen suite runs on the footprint cycle and pulls no dependent in with it', () => {
+  // The suite asserts the story, the run wrote it inside this pass, and the
+  // certification of the default branch was earned before it existed. A carry of
+  // it would be a carry of the one layer that answers the spec.
+  const plan = cyclePlan([], {
+    cycle: 1,
+    pass: 1,
+    layers: FOOTPRINT,
+    suite: 'docs',
+    footprint: { changed: ['manifest.json'], certified: certifiedAll() },
+  });
+  assert.equal(plan.sweep, 'footprint');
+  assert.deepEqual([...plan.run].sort(), ['docs', 'install']);
+});
+
+test('a CI red keeps the whole spectrum, whatever footprint the caller offers', () => {
+  // The red is stamped against the check's own name and maps to no Tier-1 layer,
+  // so no standing green is the one it contradicts and no footprint can be drawn
+  // around it.
+  const events = [
+    { event: 'verdict-rendered', cycle: 1, pass: 1, verdict: 'green' },
+    { event: 'verdict-rendered', cycle: 2, pass: 1, source: 'ci', verdict: 'red' },
+  ];
+  assert.deepEqual(
+    cyclePlan(events, {
+      cycle: 3,
+      pass: 1,
+      layers: FOOTPRINT,
+      footprint: { changed: ['src/api/f.mjs'], certified: certifiedAll() },
+    }),
+    { sweep: 'full', reason: 'ci-red' },
+  );
+});
+
+test('a refused footprint is the full sweep, and the sweep names the condition', () => {
+  for (const reason of [
+    'no-setup-layer',
+    'groundless-layer',
+    'no-base-certification',
+    'unreadable-diff',
+  ]) {
+    assert.deepEqual(cyclePlan([], { cycle: 1, pass: 1, layers: FOOTPRINT, footprint: { reason } }), {
+      sweep: 'full',
+      reason,
+    });
+  }
+  // A caller that offers nothing takes the sweep it always took, unnamed.
+  assert.deepEqual(cyclePlan([], { cycle: 1, pass: 1, layers: FOOTPRINT }), { sweep: 'full' });
+});
+
+test('a carried certification stamps a result that names the tree it was earned at', async (t) => {
+  const { ctx } = fixture(t);
+  const { results } = await runSpectrum(ctx, {
+    layers: FOOTPRINT,
+    commands: { green: GREEN },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'candidate',
+    run: new Set(['install', 'lint', 'unit']),
+    certified: certifiedAll(),
+  });
+  assert.deepEqual(
+    results.map((r) => [r.layer, r.status, r.mode]),
+    [
+      ['install', 'green', 'run'],
+      ['lint', 'green', 'run'],
+      ['unit', 'green', 'run'],
+      ['docs', 'green', 'carried'],
+    ],
+  );
+  const docs = results.find((r) => r.layer === 'docs');
+  assert.deepEqual([docs.carriedFrom, docs.baseSha, docs.certifiedSeq], ['base', 'base1', 7]);
+  const stamp = events(ctx).find((e) => e.event === 'layer-result' && e.layer === 'docs');
+  // The tree this cycle judged and the tree the green was earned at, apart.
+  assert.equal(stamp.sha, 'candidate');
+  assert.equal(stamp.baseSha, 'base1');
+  assert.equal(stamp.mode, 'carried');
+  // A carry spent no wall clock and held no machine, so it measures neither.
+  assert.equal(stamp.elapsedMs, undefined);
+  assert.equal(stamp.resources, undefined);
+  // And it ran nothing: the layer's own command never started.
+  assert.ok(!events(ctx).some((e) => e.event === 'layer-started' && e.layer === 'docs'));
+});
+
+test('a carried result stays carried when the daemon comes back inside the cycle', async (t) => {
+  const { ctx } = fixture(t);
+  const plan = {
+    layers: FOOTPRINT,
+    commands: { green: GREEN },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'candidate',
+    run: new Set(['install', 'lint', 'unit']),
+    certified: certifiedAll(),
+  };
+  const first = await runSpectrum(ctx, plan);
+  assert.equal(first.results.find((r) => r.layer === 'docs').mode, 'carried');
+  // The same cycle again, as a resume re-enters it. The stamp is the fact, and a
+  // carry re-read as a run would report a proof of this tree.
+  const again = await runSpectrum(ctx, plan);
+  const docs = again.results.find((r) => r.layer === 'docs');
+  assert.equal(docs.mode, 'carried');
+  assert.equal(docs.baseSha, 'base1');
+  assert.equal(
+    events(ctx).filter((e) => e.event === 'layer-result' && e.layer === 'docs').length,
+    1,
+    'the resume stamped the carry a second time',
+  );
+});
+
+test('a dependent of a red setup layer is not-runnable and carries no certification', async (t) => {
+  const { ctx } = fixture(t);
+  const { results } = await runSpectrum(ctx, {
+    layers: [
+      { name: 'install', command: 'red', ground: ['manifest.json'], setup: true },
+      { name: 'unit', command: 'green', ground: ['tests'], needs: ['install'] },
+    ],
+    commands: { green: GREEN, red: RED },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'candidate',
+    run: new Set(['install']),
+    certified: certifiedAll(['install', 'unit']),
+  });
+  // The certification says unit was green at the base. The setup layer this
+  // cycle ran says the tree under it is broken here, and a carried green would
+  // report a proof nobody holds and answer an open exhaustion record with it.
+  assert.deepEqual(
+    results.map((r) => [r.layer, r.status, r.mode, r.attributedTo]),
+    [
+      ['install', 'red', 'run', undefined],
+      ['unit', 'not-runnable', 'run', 'install'],
+    ],
+  );
+  const unit = events(ctx).find((e) => e.event === 'layer-result' && e.layer === 'unit');
+  assert.equal(unit.carriedFrom, undefined);
+});
+
+test('a later cycle takes the targeted set, and no base certification reaches it', () => {
+  const ledger = [
+    { event: 'implementation-committed', pass: 1 },
+    ...FOOTPRINT.map((l) => ({
+      event: 'layer-result',
+      cycle: 1,
+      layer: l.name,
+      status: l.name === 'unit' ? 'red' : 'green',
+    })),
+    { event: 'verdict-rendered', cycle: 1, pass: 1, verdict: 'red' },
+  ];
+  const plan = cyclePlan(ledger, {
+    cycle: 2,
+    pass: 1,
+    layers: FOOTPRINT,
+    footprint: { changed: [], certified: certifiedAll() },
+  });
+  assert.equal(plan.sweep, 'targeted');
+  assert.deepEqual([...plan.run], ['unit']);
+  assert.equal(plan.certified, undefined);
+});
+
+test('a layer the first cycle carried reads as green to the cycle behind it', () => {
+  const ledger = [
+    { event: 'implementation-committed', pass: 1 },
+    {
+      event: 'layer-result',
+      cycle: 1,
+      layer: 'docs',
+      status: 'green',
+      mode: 'carried',
+      carriedFrom: 'base',
+      baseSha: 'base1',
+    },
+    ...FOOTPRINT.filter((l) => l.name !== 'docs').map((l) => ({
+      event: 'layer-result',
+      cycle: 1,
+      layer: l.name,
+      status: 'green',
+    })),
+    { event: 'verdict-rendered', cycle: 1, pass: 1, verdict: 'green' },
+  ];
+  const prior = priorStatus(ledger, 2);
+  assert.equal(prior.get('docs').mode, 'carried');
+  // So the set behind it asks for nothing, the carried layer included.
+  assert.deepEqual([...targetedLayers(FOOTPRINT, prior)], []);
+});
+
+// -- the four conditions, over a project config ------------------------------
+//
+// The conditions are read off the config and the instance ledger, so they are
+// asserted here beside the plan they decide.
+
+function footprintBase(layers, { recordPaths = [] } = {}) {
+  return {
+    layers,
+    config: { gates: { tier1: layers } },
+    recordPaths,
+    worktree: process.cwd(),
+  };
+}
+
+test('a project that declares no setup layer takes the full sweep', async (t) => {
+  const { ctx } = fixture(t);
+  // Every layer states its ground and none is a setup layer, which is what a
+  // project config states before it opts into the footprint.
+  const layers = FOOTPRINT.map(({ setup, ...layer }) => layer);
+  assert.deepEqual(
+    await certifiedFootprint({ ...ctx, project: 'p', payload: { baseSha: 'base1' } },
+      footprintBase(layers), 'candidate'),
+    { reason: 'no-setup-layer' },
+  );
+});
+
+test('one Tier-1 layer with no ground takes the full sweep for the whole spectrum', async (t) => {
+  const { ctx } = fixture(t);
+  const layers = FOOTPRINT.map(({ ground, ...layer }) =>
+    layer.name === 'docs' ? layer : { ...layer, ground },
+  );
+  assert.deepEqual(
+    await certifiedFootprint({ ...ctx, project: 'p', payload: { baseSha: 'base1' } },
+      footprintBase(layers), 'candidate'),
+    { reason: 'groundless-layer' },
+  );
+});
+
+test('a project with a setup layer and no certification at all takes the full sweep', async (t) => {
+  const { ctx } = fixture(t);
+  // The config the first run after this ships reads: a setup layer declared,
+  // every layer grounded, and an instance ledger that holds no certification.
+  assert.deepEqual(
+    await certifiedFootprint({ ...ctx, project: 'p', payload: { baseSha: 'base1' } },
+      footprintBase(FOOTPRINT), 'candidate'),
+    { reason: 'no-base-certification' },
+  );
+});
+
+test('a diff the run cannot read takes the full sweep', async (t) => {
+  const { ctx } = fixture(t);
+  certifyBase(ctx.paths, 'base1');
+  // A tree that is no repository answers nothing about what the run changed.
+  const base = { ...footprintBase(FOOTPRINT), worktree: tempDir() };
+  t.after(() => removeDir(base.worktree));
+  assert.deepEqual(
+    await certifiedFootprint(
+      { ...ctx, project: 'p', payload: { baseSha: 'base1' } },
+      base,
+      'candidate',
+    ),
+    { reason: 'unreadable-diff' },
+  );
+});
+
+test('a certification of the base answers per layer, and the diff decides the rest', async (t) => {
+  const { ctx } = fixture(t);
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const tree = join(dir, 'work');
+  initOriginRepo(tree, { 'src/f.mjs': 'first\n', 'notes/n.md': 'first\n' });
+  const baseSha = gitSync(['rev-parse', 'HEAD'], tree).trim();
+  const candidate = commitTree(tree, { 'src/f.mjs': 'second\n' }, 'the work');
+  certifyBase(ctx.paths, baseSha);
+  const offer = await certifiedFootprint(
+    { ...ctx, project: 'p', payload: { baseSha } },
+    { ...footprintBase(FOOTPRINT), worktree: tree },
+    candidate,
+  );
+  assert.deepEqual(offer.changed, ['src/f.mjs']);
+  assert.deepEqual([...offer.certified.keys()].sort(), ['docs', 'install', 'lint', 'unit']);
+  assert.equal(offer.certified.get('docs').baseSha, baseSha);
+  // And the plan off that offer runs the diff's own layers and carries the rest.
+  const plan = cyclePlan([], {
+    cycle: 1,
+    pass: 1,
+    layers: FOOTPRINT,
+    footprint: offer,
+  });
+  assert.equal(plan.sweep, 'footprint');
+  assert.deepEqual([...plan.run].sort(), ['install', 'lint', 'unit']);
+});
+
+test('the sweep reasons are a closed vocabulary', () => {
+  // The reading that says whether the footprint is ever taken on a project is a
+  // count of these words, and a word nobody registered cannot be counted.
+  assert.equal(SWEEP_REASONS.size, 6);
+  for (const reason of SWEEP_REASONS) assert.equal(assertSweepReason(reason), reason);
+  assert.throws(() => assertSweepReason('no-footprint'), /unknown sweep reason/);
+  assert.throws(
+    () => cyclePlan([], { cycle: 1, pass: 1, layers: FOOTPRINT, footprint: { reason: 'because' } }),
+    /unknown sweep reason/,
   );
 });

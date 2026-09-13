@@ -4,6 +4,7 @@ import { appendFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Ledger, readEvents, tailEvents } from '../src/ledger/ledger.mjs';
 import {
+  CLOSE_RESOLVED_EVENTS,
   DEFECT_KINDS,
   GATE_INTEGRITY_KINDS,
   OBSERVED_DEFECT_KINDS,
@@ -19,6 +20,8 @@ import {
   assertReconcileCause,
   streamOf,
 } from '../src/ledger/registry.mjs';
+import { scaffoldHome } from '../src/daemon/home.mjs';
+import { openRunStore } from '../src/telemetry/stores.mjs';
 import { tempDir, removeDir } from './helpers.mjs';
 
 function runLedger(dir) {
@@ -178,6 +181,119 @@ test('the record stage stamps every fact it is asked for', (t) => {
   assert.ok(LOUD_EVENTS.has('reconcile-stall'));
   assert.equal(streamOf('reconcile-stall'), 'loud');
   assert.equal(stall.stream, 'loud');
+});
+
+test('the readiness, dependency and seat-bound facts are run-scoped, and carry their payload', (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const ledger = runLedger(dir);
+  // Each belongs to the run that raised it and to no other reader: the card
+  // errors one run read, the card one run amended, the bound one seat was
+  // given, and the commands that bound refused.
+  for (const event of [
+    'readiness-lint-beyond',
+    'card-amended',
+    'seat-bound',
+    'seat-command-refused',
+  ]) {
+    assert.ok(RUN_EVENTS.has(event), `${event} is not a run event`);
+    assert.ok(!INSTANCE_EVENTS.has(event), `${event} is an instance event too`);
+  }
+  ledger.append('readiness-lint-beyond', {
+    actor: 'daemon',
+    cards: ['cards/alpha-1.md'],
+    errors: ['cards/beta-2.md: F1: the card states no acceptance criterion'],
+    gist: '1 error beyond the card',
+  });
+  ledger.append('card-amended', {
+    actor: 'daemon',
+    card: 'cards/alpha-1.md',
+    dependencies: [{ importer: 'apps/storefront', name: 'a-package' }],
+    sha: 'aaa',
+    pushed: true,
+  });
+  ledger.append('seat-bound', {
+    actor: 'daemon',
+    seat: 'dev',
+    digest: 'bbb',
+    layers: ['unit', 'lint'],
+  });
+  ledger.append('seat-command-refused', {
+    actor: 'daemon',
+    seat: 'dev',
+    layer: 'acceptance',
+    command: 'pnpm exec run-suite acceptance',
+    reason: 'the diff touches none of its ground',
+  });
+  ledger.close();
+  const events = readEvents(join(dir, 'ledger.jsonl'));
+  assert.deepEqual(events.map((e) => e.event), [
+    'readiness-lint-beyond',
+    'card-amended',
+    'seat-bound',
+    'seat-command-refused',
+  ]);
+  const [beyond, amended, bound, refused] = events;
+  assert.deepEqual(beyond.cards, ['cards/alpha-1.md']);
+  assert.equal(beyond.errors.length, 1);
+  assert.deepEqual(amended.dependencies, [{ importer: 'apps/storefront', name: 'a-package' }]);
+  assert.equal(amended.pushed, true);
+  assert.deepEqual(bound.layers, ['unit', 'lint']);
+  assert.equal(refused.layer, 'acceptance');
+  assert.equal(refused.reason, 'the diff touches none of its ground');
+});
+
+test('card errors beyond the launched card ride the loud stream and need a gist', (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const paths = scaffoldHome(dir);
+  const store = openRunStore(paths, 'r1');
+  assert.throws(
+    () => store.append('readiness-lint-beyond', { actor: 'daemon', cards: [], errors: [] }),
+    /requires a one-line gist/,
+  );
+  const line = store.append('readiness-lint-beyond', {
+    actor: 'daemon',
+    cards: ['cards/alpha-1.md'],
+    errors: ['cards/beta-2.md: F1: the card states no acceptance criterion'],
+    gist: '1 error beyond the card',
+  });
+  store.close();
+  assert.ok(LOUD_EVENTS.has('readiness-lint-beyond'));
+  assert.equal(streamOf('readiness-lint-beyond'), 'loud');
+  assert.equal(line.stream, 'loud');
+  // The run that read the directory is the whole life of the report, so the
+  // close is a closer for it as well as the ownership table.
+  assert.ok(CLOSE_RESOLVED_EVENTS.has('readiness-lint-beyond'));
+});
+
+test('a base certification is instance-scoped and carries one row per layer', (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  // It states what stood green at the sha the branch became. The run that
+  // shipped archives; the runs that read it are launched after that.
+  assert.ok(INSTANCE_EVENTS.has('base-certified'));
+  assert.ok(!RUN_EVENTS.has('base-certified'));
+  assert.equal(streamOf('base-certified'), null);
+  const path = join(dir, 'i.jsonl');
+  const ledger = new Ledger(path, { allowedEvents: INSTANCE_EVENTS });
+  ledger.append('base-certified', {
+    actor: 'daemon',
+    project: 'p',
+    runId: 'r1',
+    sha: 'aaa',
+    layers: [
+      { name: 'unit', status: 'green', elapsedMs: 1200, mode: 'run', verdict: 'verdict-2.json' },
+      { name: 'lint', status: 'green', elapsedMs: 300, mode: 'carried', verdict: 'verdict-2.json' },
+    ],
+  });
+  ledger.close();
+  const [stamp] = readEvents(path);
+  assert.equal(stamp.sha, 'aaa');
+  assert.deepEqual(stamp.layers.map((l) => [l.name, l.mode, l.elapsedMs]), [
+    ['unit', 'run', 1200],
+    ['lint', 'carried', 300],
+  ]);
 });
 
 test('the fallback causes are closed, and one of them is retired', () => {

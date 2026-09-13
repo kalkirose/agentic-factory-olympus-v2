@@ -2,11 +2,14 @@
 // frontmatter (key, title, blocked-by, phase) plus markdown sections. The
 // harness reads only what readiness, the frontier and the spec lint need —
 // the key, the edges, the phase, the open decisions, the foreseen amendments,
-// and the acceptance criteria. Everything else is seat-facing prose.
+// the named dependencies, and the acceptance criteria. Everything else is
+// seat-facing prose.
 //
 // This is the harness's only card parser: readiness, the daemon's card sweep,
 // the frontier's graph source and the spec lint all read a card through
-// `parseIntentCard`, so a card reads the same everywhere it is read.
+// `parseIntentCard`, so a card reads the same everywhere it is read. It is
+// also the one computer of a card's closure, for the same reason.
+import { readFileSync, readdirSync } from 'node:fs';
 
 /** The acceptance section's heading: any level, matched without case. */
 const ACCEPTANCE_HEADING = /acceptance/i;
@@ -34,6 +37,20 @@ export const FORESEEN_MARKER = 'Foreseen amendment:';
 
 /** The heading pattern the foreseen section is read by. */
 export const FORESEEN_SECTION = /foreseen amendments/i;
+
+/**
+ * The heading a card names its dependencies under, and the shape of one line
+ * beneath it: `- <importer>: <name>`. The importer is the workspace key the
+ * lockfile spells (`.`, `apps/storefront`), so the root has a spelling; the
+ * name is the package, never a version, because the card states which package
+ * the story may add and the lockfile states which version it resolved to.
+ *
+ * The whole heading, and not the word in it. Every line of this section is read
+ * as one dependency and a line that is not one is an error, so a heading that
+ * merely holds the word would take a card's prose about its dependencies and
+ * refuse the card for it.
+ */
+export const DEPENDENCIES_SECTION = /^dependencies$/i;
 
 const EMPHASIS = /^[`*_]+/;
 
@@ -87,6 +104,8 @@ export function parseIntentCard(text) {
   if (!found) errors.push('card has no frontmatter block');
   const key = fields.key ?? null;
   if (found && !key) errors.push('frontmatter names no key');
+  const dependencies = cardDependencies(body);
+  errors.push(...dependencies.errors);
   const card = {
     key,
     title: fields.title ?? null,
@@ -98,9 +117,109 @@ export function parseIntentCard(text) {
     // the set the launch gate parks on and published on its own instead.
     openDecisions: sectionItems(body, /open decisions/i).filter((d) => !isForeseenNote(d)),
     foreseenAmendments: sectionItems(body, FORESEEN_SECTION),
+    // The packages this story may add, and the only packages it may add. A
+    // card that names none leaves the lockfile shut.
+    dependencies: dependencies.entries,
     acceptance: acceptanceCriteria(body),
   };
   return { card, errors };
+}
+
+/**
+ * The cards a launch is judged on: the launched card, then every card it is
+ * blocked by, transitively, that has not shipped. The walk stops at a shipped
+ * key, because a shipped card is settled and so is everything behind it.
+ *
+ * The shipped set is a parameter. Which keys shipped is run history, which the
+ * frontier owns; a closure computed in two places is two closures.
+ *
+ * A key that resolves to no card file adds no path. That edge is a card
+ * defect, and the readers that own it report it: the frontier admits no card
+ * with an unknown blocker, and a corpus-wide card lint reads the edge against
+ * the launched card, which every caller of this names.
+ *
+ * A returned path is spelled off `cardsDir` with a forward slash, so a path
+ * that rides a command line reads the same on every platform; the launched
+ * card keeps the spelling the caller passed.
+ *
+ * @param {string} cardsDir the directory the card files live in
+ * @param {string} cardPath the launched card, readable as it is passed
+ * @param {{shipped?: Set<string>}} [options] shipped card keys
+ * @returns {string[]} each card once, breadth-first over `blocked-by`
+ */
+export function cardClosure(cardsDir, cardPath, { shipped = new Set() } = {}) {
+  const launched = parseIntentCard(readFileSync(cardPath, 'utf8')).card;
+  const byKey = cardsByKey(cardsDir);
+  const closure = [cardPath];
+  const seen = new Set(launched.key === null ? [] : [launched.key]);
+  const queue = [...launched.blockedBy];
+  while (queue.length > 0) {
+    const key = queue.shift();
+    if (seen.has(key) || shipped.has(key)) continue;
+    seen.add(key);
+    const blocker = byKey.get(key);
+    if (!blocker) continue;
+    closure.push(blocker.path);
+    queue.push(...blocker.blockedBy);
+  }
+  return closure;
+}
+
+/**
+ * Every card in the directory by key, each file read once. A key two cards
+ * claim resolves to the first in name order: a duplicate key is a defect the
+ * frontier and the card lint both refuse, and the closure adds no second
+ * verdict on it.
+ */
+function cardsByKey(cardsDir) {
+  const dir = cardsDir.replace(/[\\/]+$/, '');
+  const byKey = new Map();
+  for (const name of readdirSync(dir).sort()) {
+    if (!name.endsWith('.md')) continue;
+    const path = `${dir}/${name}`;
+    const { card } = parseIntentCard(readFileSync(path, 'utf8'));
+    if (card.key === null || byKey.has(card.key)) continue;
+    byKey.set(card.key, { path, blockedBy: card.blockedBy });
+  }
+  return byKey;
+}
+
+/**
+ * The dependency lines of a card, and the lines that state nothing readable.
+ * A line the parser cannot read is an error and not an omission: the section
+ * is the story's whole permission to touch the lockfile, so a line it drops in
+ * silence is a package the capture would refuse later and further from the
+ * card.
+ * @returns {{entries: {importer: string, name: string}[], errors: string[]}}
+ */
+function cardDependencies(body) {
+  const entries = [];
+  const errors = [];
+  for (const item of sectionItems(body, DEPENDENCIES_SECTION)) {
+    const entry = dependencyOf(item);
+    if (entry) entries.push(entry);
+    else errors.push(`dependency line does not read "<importer>: <name>": ${item}`);
+  }
+  return { entries, errors };
+}
+
+/** One dependency line as `{importer, name}`, or null when it is not one. */
+function dependencyOf(item) {
+  const split = item.indexOf(':');
+  if (split === -1) return null;
+  const importer = unwrapped(item.slice(0, split));
+  const name = unwrapped(item.slice(split + 1));
+  if (importer.length === 0 || name.length === 0) return null;
+  // One package per line, and the name alone: a token with a space in it is a
+  // version range, a comment, or a second package, and the card means none of
+  // the three.
+  if (/\s/.test(importer) || /\s/.test(name)) return null;
+  return { importer, name };
+}
+
+/** A token without the markdown a writer wraps a path or a package name in. */
+function unwrapped(token) {
+  return token.trim().replace(/^[`*]+/, '').replace(/[`*]+$/, '');
 }
 
 /**

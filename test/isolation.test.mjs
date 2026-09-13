@@ -8,7 +8,6 @@ import { cloneDir, ensureBareClone, fetchClone, branchSha, readBlobFromBranch, r
 import { gitPlain } from '../src/isolation/git.mjs';
 import {
   addRunWorktree,
-  addDisposableWorktree,
   removeRunWorktrees,
   removeWorktree,
   listWorktrees,
@@ -141,16 +140,13 @@ test('run worktree: fresh run branch at launch, everything gone at release', asy
   assert.equal((await listWorktrees(clone)).length, 1); // the bare repo only
 });
 
-test('disposable worktrees pin a sha and die with the run root', async (t) => {
+test('a run worktree carries the branch head and dies with the run root', async (t) => {
   const { origin, paths } = fixture(t);
   const clone = await ensureBareClone(paths, 'alpha', origin, 'main');
-  const oldSha = await branchSha(clone, 'main');
   commitTree(origin, { 'src/app.txt': 'v2\n' }, 'app v2');
   await fetchClone(clone);
-  const disposable = await addDisposableWorktree(clone, paths, 'r2', 'adv-1', oldSha);
   const { path: tree } = await addRunWorktree(clone, paths, 'r2', 'main');
   // trim(): autocrlf checkouts may rewrite line endings; content is the point.
-  assert.equal(readFileSync(join(disposable, 'src/app.txt'), 'utf8').trim(), 'v1');
   assert.equal(readFileSync(join(tree, 'src/app.txt'), 'utf8').trim(), 'v2');
   await removeRunWorktrees(clone, paths, 'r2');
   assert.ok(!existsSync(workspaceRoot(paths, 'r2')));
@@ -299,15 +295,6 @@ test('a configured worktree root carries provision, release and the orphan sweep
   });
   assert.equal(ws.worktree, join(worktreeRoot, 'r20', 'tree'));
   assert.ok(existsSync(join(ws.worktree, 'compose.harness.yml')));
-  const disposable = await addDisposableWorktree(
-    cloneDir(paths, 'alpha'),
-    paths,
-    'r20',
-    'adv-1',
-    ws.baseSha,
-  );
-  assert.equal(disposable, join(worktreeRoot, 'r20', 'adv-1'));
-
   // The sweep reads the configured root, not the home.
   mkdirSync(join(worktreeRoot, 'dead-run'), { recursive: true });
   assert.deepEqual(isolation.orphanRunIds(new Set(['r20'])), ['dead-run']);

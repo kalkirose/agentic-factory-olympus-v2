@@ -48,14 +48,12 @@ test('the constitution rides as its own delimited block, between core and role b
   assert.ok(text.includes('No file is a deliverable unless the spec names it.'));
 });
 
-test('every seat set member takes the text; the adversary and the card sweep never do', () => {
+test('every seat set member takes the text; the card sweep never does', () => {
   for (const seat of Object.keys(SEATS)) {
     const carries = prompt(seat, POLICY).includes('No file is a deliverable unless the spec names it.');
     assert.equal(carries, CONSTITUTION_SEATS.has(seat), seat);
   }
-  assert.ok(!CONSTITUTION_SEATS.has('adversary'));
   assert.ok(!CONSTITUTION_SEATS.has('card-sweep'));
-  assert.ok(!prompt('adversary', POLICY).includes('constitution'));
   assert.ok(!prompt('card-sweep', POLICY).includes('constitution'));
 });
 
@@ -128,7 +126,7 @@ test('a slotted seat name takes the blocks of its seat', () => {
     prompt('record-review', POLICY),
   );
   assert.ok(prompt('reconcile-judge:2', POLICY).includes(AUTHORITY_ORDER));
-  assert.ok(!prompt('adversary:2', POLICY).includes('constitution'));
+  assert.ok(!prompt('card-sweep:2', POLICY).includes('constitution'));
 });
 
 // The seat is told the path and never the rules: a copy of a rule set inside a

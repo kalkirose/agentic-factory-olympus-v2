@@ -1,11 +1,11 @@
 // Scenario 2: a ticketed defect is repaired and shipped. The repair lane has
-// no spec birth, no adversary and no card sweep; the intake ticket the console
+// no spec birth and no card sweep; the intake ticket the console
 // hands over is the lane's spec, and the console binary is the only thing that
 // can hand it over. The run walks fix, verdict and ship against the same real
 // git remote and the same real gate commands as the story scenario.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   DENIED_GATES,
@@ -27,6 +27,7 @@ import {
   originSha,
   pollFor,
   rejectedControlFiles,
+  runDir,
   runEvents,
   seatCalls,
   stalled,
@@ -175,7 +176,12 @@ test('the repair lane ships a ticketed fix through the assembled binaries', asyn
   );
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   assert.equal(renders.length, 1);
-  assert.deepEqual([renders[0].verdict, renders[0].sweep], ['green', 'full']);
+  // Nothing has certified the tree this run branched from, so the first cycle
+  // runs every layer and names the condition that was not met.
+  assert.deepEqual(
+    [renders[0].verdict, renders[0].sweep, renders[0].reason],
+    ['green', 'full', 'no-base-certification'],
+  );
   assert.deepEqual(
     events.filter((e) => e.event === 'finding'),
     [],
@@ -200,6 +206,26 @@ test('the repair lane ships a ticketed fix through the assembled binaries', asyn
   assert.ok(
     seats[0].prompt.includes('Fix the defect described by the intake ticket'),
     'the fix seat was briefed as a story implementation',
+  );
+  // The repair lane has no frozen suite, so the bound rests on the ticket's own
+  // declared paths, the setup layers, and what those need. The hook widens it
+  // from the seat's live diff on the first command.
+  const bound = events.find((e) => e.event === 'seat-bound' && e.seat === 'dev');
+  assert.ok(bound, 'the fix seat carried no bound');
+  // The stamp is the bound and not the battery. This ticket declares no path:
+  // the setup layer is in by declaration and the suite layer under it is the
+  // prerequisite that makes it runnable. The lint layer is the verdict's.
+  assert.deepEqual(bound.layers, ['smoke', 'suite']);
+  const file = JSON.parse(readFileSync(join(runDir(fx, runId), 'seats', 'dev-1.bound.json'), 'utf8'));
+  assert.equal(file.suite, null);
+  // This ticket carries no block, so the spawn declares nothing and the brief
+  // opens on the setup layers alone.
+  assert.deepEqual(file.declared, []);
+  assert.ok(seats[0].prompt.includes('- smoke: '));
+  assert.ok(!seats[0].prompt.includes('- lint: '));
+  assert.ok(
+    !events.some((e) => e.event === 'seat-failure' && e.reason === 'bound-not-loaded'),
+    'the fix seat ran a command with no answer from its bound hook',
   );
 
   const merged = events.find((e) => e.event === 'merged');

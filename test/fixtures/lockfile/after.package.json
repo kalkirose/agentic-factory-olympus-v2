@@ -1,0 +1,10 @@
+{
+  "name": "@example/web",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "picomatch": "^4.0.2",
+    "react": "18.3.1",
+    "use-sync-external-store": "^1.2.2"
+  }
+}

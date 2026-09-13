@@ -388,8 +388,11 @@ test('the Fury verifier spends a round the same way triage does', async (t) => {
       {
         lens: 'security',
         severity: 'HIGH',
+        // The base of this fixture is this checkout, so the ground names a path
+        // it holds; the check refuses a path the reviewed tree does not have.
+        ground: ['src/lanes/verdict.mjs'],
         finding: 'the token check is skipped when the provider is absent',
-        evidence: 'src/pay.mjs:41',
+        evidence: 'src/lanes/verdict.mjs:41',
       },
     ],
     summary: 'one high',

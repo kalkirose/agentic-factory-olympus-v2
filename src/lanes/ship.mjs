@@ -61,10 +61,9 @@
 // re-derives its position from the run ledger, the git state, and the forge,
 // so a daemon restart resumes mid-ship without memory.
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import {
   ciEvidenceDir,
-  commandLogPath,
   repairTicketPath,
   reconcileTicketPath,
   runReportPath,
@@ -73,7 +72,6 @@ import { readEvents } from '../ledger/ledger.mjs';
 import { DEFAULT_PROJECT_CONFIG_PATH, recordPathIncludes } from '../config/project.mjs';
 import { assertDefectKind } from '../ledger/registry.mjs';
 import { budgetOpen, ciFlakes, deterministicRed, FLAKE_LIMIT } from '../ledger/cycles.mjs';
-import { instanceParkForms } from '../ledger/parks.mjs';
 import { openEscapesStore } from '../telemetry/stores.mjs';
 import { stageHeartbeat } from '../telemetry/heartbeat.mjs';
 import {
@@ -88,31 +86,21 @@ import { cloneDir, fetchClone, branchSha } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 import {
   headSha,
-  push,
   mergeIntoTree,
   concludeMerge,
   abortMerge,
-  changedFiles,
   changedAgainstBase,
-  changedInRange,
-  cherryPick,
-  commitAll,
   resetHard,
   restorePaths,
 } from '../isolation/tree.mjs';
 import { editDenyRules } from '../seats/boundary.mjs';
+import { parseTouchedPaths } from '../seats/diffpolicy.mjs';
 import { attemptOrder, noLogReason, PartialLogRefusal } from '../ship/forge.mjs';
 import { derivedLabels } from '../ship/labels.mjs';
 import { releaseShipToken, takeShipToken } from '../ship/token.mjs';
-import {
-  FORESEEN_HEADING,
-  FORESEEN_MARKER,
-  isForeseenNote,
-  parseIntentCard,
-} from './card.mjs';
-import { authorizedSupersedes, supersedeLines } from './supersede.mjs';
+import { parseIntentCard } from './card.mjs';
+import { cardSweep } from './cards.mjs';
 import { fastPathDecision } from './fastpath.mjs';
-import { runCommand } from './exec.mjs';
 import { probeCredentials, worldConfig } from './probes.mjs';
 import { MERGE_SUITE_SCHEMA } from './story.mjs';
 import { WRITE_SEAT, findingLine, remarkLine, runWindow } from './records.mjs';
@@ -127,7 +115,7 @@ import {
   unwrittenOf,
 } from './reconcile.mjs';
 import { recordBase, recordsCommitted } from './records-stage.mjs';
-import { activeOf, recordNeighbours } from './units.mjs';
+import { activeOf, governingRecordLines, recordNeighbours } from './units.mjs';
 import {
   DEV_SCHEMA,
   triageStep,
@@ -137,7 +125,9 @@ import {
   answerCount,
   passOpeningSha,
   sweepSkippedAfter,
+  verdictRecordFile,
 } from './verdict.mjs';
+import { priorStatus } from './spectrum.mjs';
 import {
   ACTOR,
   loadProjectConfig,
@@ -231,59 +221,6 @@ function namedDefect(events, pr) {
     .reverse()
     .find((e) => e.event === 'gate-integrity' && e.pr === pr && e.kind && !e.findingId)?.kind;
 }
-
-export const CARD_SWEEP_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    updatedCards: { type: 'array', items: { type: 'string' } },
-    invalidated: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          card: { type: 'string' },
-          reason: { type: 'string' },
-        },
-        required: ['card', 'reason'],
-      },
-    },
-    // The two routes a downstream collision takes (ADR-0052). A consequence the
-    // target card already mandates is a note the sweep writes onto that card; a
-    // choice the card leaves open is a question for the owner. Both are
-    // optional: a sweep that reports neither has found neither, and the
-    // build-time classifier still reads the card for itself.
-    foreseen: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          card: { type: 'string' },
-          clause: { type: 'string' },
-          file: { type: 'string' },
-          mandate: { type: 'string' },
-        },
-        required: ['card', 'clause', 'file', 'mandate'],
-      },
-    },
-    decisions: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          card: { type: 'string' },
-          question: { type: 'string' },
-        },
-        required: ['card', 'question'],
-      },
-    },
-    summary: { type: 'string' },
-  },
-  required: ['updatedCards', 'invalidated', 'summary'],
-};
 
 /**
  * Builds the ship continuation for `postFreeze({afterVerdict})` and
@@ -603,7 +540,15 @@ async function preVerdictUpdate(ctx, base) {
     toSha: out.toSha,
     ...(decision.code && { code: { answer: decision.code.answer, files: decision.code.files ?? [] } }),
     ...(decision.records && {
-      records: { answer: decision.records.answer, files: decision.records.files ?? [] },
+      records: {
+        answer: decision.records.answer,
+        // Why the records answer reads as it does. The two questions are
+        // answered apart, so a records answer can stand where the code answer
+        // fell, and a stamp that says `kept` without a reason cannot tell a
+        // carry the reconciliation earned from one it was handed.
+        ...(decision.records.reason && { reason: decision.records.reason }),
+        files: decision.records.files ?? [],
+      },
     }),
     ...(!certified && uncertified),
   });
@@ -2024,10 +1969,29 @@ async function resumeMergeFreshPass(ctx, base, pendingFresh) {
   return { next: 'verdict' };
 }
 
+/**
+ * The base a merge-born fresh pass runs on: the worktree, what the pass must
+ * restore, and what the capture judges the pass by.
+ *
+ * The capture is the whole reason the narrowing states so much. It reads the
+ * lane's diff policy off the config and the dependency grants off the card, and
+ * a base holding neither answers "no tier" and "no grant", which is every path
+ * admitted and no lockfile judged. The pass that opens here is a pass like any
+ * other, and it is judged like one (ADR-0067).
+ */
 function freshBase(base, resetSha) {
   return {
     worktree: base.worktree,
     testPaths: base.testPaths,
+    // The lane's own config, read by the capture for the diff policy and by the
+    // seat bound for the layer set.
+    config: base.config,
+    // The card, whose Dependencies section is the whole of the lockfile grant.
+    card: base.card,
+    // The cross-cutting gate allowlists. The capture tallies what a candidate
+    // touched, and a pass that reported none would leave the reading blind to
+    // this one (ADR-0010).
+    allowlistPaths: base.config?.gates?.allowlistPaths ?? [],
     // The record tree rides the carry beside the frozen suite. A merge-born pass
     // resets to the updated default branch, which never held this run's own
     // records, so without it the pass deletes the records the run was born with
@@ -2066,6 +2030,9 @@ function closeOutHandler({ forgeFor, pollMs, enqueueRepair }) {
     if (base.storyLane && !runEvents(ctx).some((e) => e.event === 'card-sweep')) {
       await cardSweep(ctx, base, merged);
     }
+    // What the branch is certified for now that this run has moved it. Every
+    // lane, because every lane that ships moves the branch.
+    baseCertified(ctx, merged);
     // The close judges no reconciliation: the judgment ran before the ship, and
     // the records it owed rode this merge or they did not. What is left here is
     // the ticket for the ones that did not, which names the merge commit and so
@@ -2109,6 +2076,57 @@ function closeOutHandler({ forgeFor, pollMs, enqueueRepair }) {
       },
     };
   };
+}
+
+/**
+ * What stood green at the sha the default branch became, written once per ship
+ * on the instance ledger.
+ *
+ * Instance-scoped because it is a statement about the branch and not about the
+ * run: the run that writes it archives, and the runs that read it are the ones
+ * launched after it. Two readers. A seat bound asks what one layer costs on the
+ * clock. A first verdict cycle asks whether a layer has already answered for the
+ * tree under it, and carries it where the run's own diff leaves its ground alone.
+ *
+ * The layers are every layer's standing result at the certified cycle, and not
+ * that cycle's own stamps alone: a cycle runs the layers its plan named and
+ * carries or skips the rest, so a layer an earlier cycle earned is certified on
+ * the record that earned it. `mode` says which of the two it was, and a carry
+ * carries no duration, because it spent none. The record travels as a file name:
+ * the run directory is renamed at the archive, and a stamped path is dead at the
+ * first read.
+ *
+ * A lane that rendered no green verdict certifies nothing. The records lane is
+ * that lane: it holds no code certification, and a stamp from it would claim one.
+ */
+function baseCertified(ctx, merged) {
+  if (typeof merged.mergeSha !== 'string') return;
+  const events = runEvents(ctx);
+  const render = [...events]
+    .reverse()
+    .find((e) => e.event === 'verdict-rendered' && e.verdict === 'green');
+  if (!render) return;
+  // Re-entrant close-out: the stamp is the marker. One per run, whatever brings
+  // the stage back.
+  const written = readEvents(ctx.paths.instanceLedger).some(
+    (e) => e.event === 'base-certified' && e.runId === ctx.runId,
+  );
+  if (written) return;
+  const layers = [...priorStatus(events, render.cycle + 1).values()].map((result) => ({
+    name: result.layer,
+    status: result.status,
+    elapsedMs: result.elapsedMs ?? null,
+    mode: result.mode === 'carried' ? 'carried' : 'run',
+    verdict: verdictRecordFile(result.cycle),
+  }));
+  if (layers.length === 0) return;
+  ctx.instanceStore?.append('base-certified', {
+    actor: ACTOR,
+    project: ctx.project,
+    runId: ctx.runId,
+    sha: merged.mergeSha,
+    layers,
+  });
 }
 
 // -- red-merge breach --------------------------------------------------------
@@ -2413,330 +2431,6 @@ async function watchMergeCommit(ctx, base, merged, pollMs) {
         reds.map((r) => `- ${r.name}`).join('\n'),
     });
   }
-}
-
-// -- the card sweep ----------------------------------------------------------
-
-async function cardSweep(ctx, base, merged) {
-  const clone = cloneDir(ctx.paths, ctx.project);
-  await fetchClone(clone);
-  await resetHard(base.worktree, merged.mergeSha);
-  const cardDir = dirname(base.cardPath);
-  // The supersedes this run executed on the card's authority. The card is their
-  // durable home — a run ledger archives with its run, and the next story reads
-  // the card — and this sweep is the one mechanism already allowed to write a
-  // card on the default branch (ADR-0044).
-  const supersedes = authorizedSupersedes(runEvents(ctx));
-  let brief = null;
-  let report = null;
-  let lint = null;
-  for (let attempt = 1; ; attempt++) {
-    const n = invocationCount(runEvents(ctx), 'card-sweep') + 1;
-    const result = await ctx.runSeat({
-      seat: 'card-sweep',
-      roleBlock: sweepRole(base, cardDir, brief, supersedes),
-      reportPath: runReportPath(ctx.paths, ctx.runId, `card-sweep-${n}`),
-      schema: CARD_SWEEP_SCHEMA,
-      cwd: base.worktree,
-      env: base.env,
-    });
-    if (!result.ok) {
-      // The story shipped; a sweep failure never un-ships it. Loud enough
-      // through the seat-failure stamp; the sweep records the miss.
-      ctx.store.append('card-sweep', { actor: ACTOR, ok: false, cause: 'seat-failure' });
-      return;
-    }
-    const checked = await sweepChecks(ctx, base, cardDir, result.report);
-    const defects = checked.defects;
-    lint = checked.lint;
-    if (defects.length === 0) {
-      report = result.report;
-      break;
-    }
-    if (attempt === 2) {
-      ctx.store.append('seat-failure', {
-        actor: ACTOR,
-        seat: 'card-sweep',
-        reason: 'work-product-defect',
-        defects,
-      });
-      ctx.store.append('card-sweep', {
-        actor: ACTOR,
-        ok: false,
-        cause: 'work-product-defect',
-        ...(lint && { lint }),
-      });
-      return;
-    }
-    brief = defects;
-  }
-  let pushed = false;
-  let sha = null;
-  let pushError = null;
-  let replay = null;
-  let attempts = 0;
-  if ((await changedFiles(base.worktree)).length > 0) {
-    sha = await commitAll(base.worktree, `cards: sweep ${base.storyKey ?? ctx.runId}`);
-    attempts = 1;
-    try {
-      // Cards are planning artifacts; the sweep lands them directly on the
-      // default branch.
-      await push(base.worktree, 'origin', `HEAD:${base.defaultBranch}`);
-      pushed = true;
-    } catch (error) {
-      pushError = error.message;
-      // One retry, and one only. A rejection here is almost always the branch
-      // moving under the push — a human landing a card edit while the sweep
-      // ran — and the sweep records that loss as a miss nobody notices
-      // (ADR-0063). The retry replays this sweep's own commit onto the head
-      // that beat it and proves the replayed result all over again.
-      attempts = 2;
-      const again = await replayCards(ctx, base, cardDir, sha);
-      replay = again.replay;
-      if (again.ok) {
-        pushed = true;
-        pushError = null;
-        sha = again.sha;
-      } else if (again.replay.cause) {
-        pushError = `${error.message}; the replay onto ${again.replay.onto} did not land: ${again.replay.cause}`;
-      }
-    }
-  }
-  // An invalidated card parks the card, never the run that shipped: the park
-  // lands in the instance ledger and blocks that card's launch, not this
-  // close.
-  const instanceParks = readEvents(ctx.paths.instanceLedger).filter(
-    (e) => e.event === 'park' && e.runId === ctx.runId,
-  );
-  const parked = new Set(
-    instanceParks.filter((e) => e.type === 'card-invalidated').map((e) => e.card),
-  );
-  for (const inv of report.invalidated) {
-    if (parked.has(inv.card)) continue;
-    ctx.instanceStore?.append('park', {
-      actor: ACTOR,
-      type: 'card-invalidated',
-      card: inv.card,
-      runId: ctx.runId,
-      // The repository the card belongs to. A card path is a project's own
-      // word, and the frontier that blocks on this park judges one project's
-      // cards (ADR-0008).
-      project: ctx.project,
-      question: `The ship of ${base.storyKey ?? ctx.runId} invalidated ${inv.card}: ${inv.reason}`,
-      // The one park with no run behind it, so the one park that offers no
-      // abandon: the answer unblocks the card, and there is nothing to close
-      // (ADR-0029).
-      answers: instanceParkForms({ text: 'what you did about the card' }),
-      gist: gist(`card-invalidated: ${inv.card} — ${inv.reason}`),
-    });
-  }
-  // A choice the card genuinely leaves open takes the same route, one park per
-  // question. It is asked here rather than planted on the card, because a
-  // question written into a card parks the next launch of that card before the
-  // machinery that settles collisions from card authority ever runs, and the
-  // owner is then asked once per ship for ever (ADR-0052). The park holds the
-  // card it names and never this close: the story shipped.
-  const asked = new Set(
-    instanceParks
-      .filter((e) => e.type === 'card-decision')
-      .map((e) => `${e.card}\n${e.decision}`),
-  );
-  for (const open of report.decisions ?? []) {
-    const key = `${open.card}\n${open.question}`;
-    if (asked.has(key)) continue;
-    asked.add(key);
-    ctx.instanceStore?.append('park', {
-      actor: ACTOR,
-      type: 'card-decision',
-      card: open.card,
-      decision: open.question,
-      runId: ctx.runId,
-      project: ctx.project,
-      question:
-        `The ship of ${base.storyKey ?? ctx.runId} left a decision open on ${open.card}: ` +
-        open.question,
-      answers: instanceParkForms({ text: 'the decision, resolved' }),
-      gist: gist(`card-decision on ${open.card}: ${open.question}`),
-    });
-  }
-  ctx.store.append('card-sweep', {
-    actor: ACTOR,
-    ok: true,
-    updated: report.updatedCards.length,
-    invalidated: report.invalidated.length,
-    // What the sweep classified: the notes it wrote onto cards, and the
-    // questions it put to the owner. Both counts record that the
-    // classification duty ran at all.
-    foreseen: (report.foreseen ?? []).length,
-    decisions: (report.decisions ?? []).length,
-    // What the project's own card lint said about the writes this sweep is
-    // pushing: green, or the reason there is no green to report (ADR-0054).
-    ...(lint && { lint }),
-    pushed,
-    ...(sha && { sha }),
-    // How many pushes the cards took. Two is the race absorbed, and the count
-    // is what says how contended the card directory is (ADR-0063).
-    ...(attempts > 0 && { pushAttempts: attempts }),
-    ...(replay && { replay }),
-    ...(pushError && { error: pushError }),
-  });
-}
-
-/**
- * The one retry a rejected card push is worth: refetch, replay this sweep's own
- * commit onto the head that beat it, prove the replayed result, push again.
- *
- * The replay is a three-way pick rather than a checkout of the sweep's file
- * versions, so a human edit to the same card conflicts instead of being taken
- * back in silence. Every check the first push stood behind runs again on the
- * result: the containment to the card directory, and the project's own card
- * lint. Neither is assumed to hold because it held before the branch moved.
- *
- * A second rejection records the miss exactly as the first one did. There is no
- * third attempt: a push that loses twice is a contended directory rather than a
- * race, and a loop against it would run for as long as somebody keeps writing.
- * @returns {Promise<{ok: boolean, sha?: string, replay: object}>}
- */
-async function replayCards(ctx, base, cardDir, sweepSha) {
-  const replay = { onto: null };
-  try {
-    const clone = cloneDir(ctx.paths, ctx.project);
-    await fetchClone(clone);
-    const head = await branchSha(clone, base.defaultBranch);
-    replay.onto = head;
-    await resetHard(base.worktree, head);
-    const picked = await cherryPick(base.worktree, sweepSha);
-    if (!picked.ok) return { ok: false, replay: { ...replay, ok: false, cause: picked.cause } };
-    const changed = await changedInRange(base.worktree, head, picked.sha);
-    const outside = changed.filter((file) => !underAny(file, [cardDir]));
-    if (outside.length > 0) {
-      return {
-        ok: false,
-        replay: {
-          ...replay,
-          ok: false,
-          cause: `the replayed result reaches outside ${cardDir}: ${outside.join(', ')}`,
-        },
-      };
-    }
-    const defects = [];
-    const lint = await cardLint(ctx, base, changed, defects, '-replay');
-    if (defects.length > 0) {
-      return { ok: false, replay: { ...replay, ok: false, lint, cause: defects[0] } };
-    }
-    await push(base.worktree, 'origin', `HEAD:${base.defaultBranch}`);
-    return { ok: true, sha: picked.sha, replay: { ...replay, ok: true, lint, files: changed.length } };
-  } catch (error) {
-    return { ok: false, replay: { ...replay, ok: false, cause: error.message } };
-  }
-}
-
-/**
- * The sweep's self-check on its own work product: what the seat wrote, and
- * where. It returns the defects that re-brief the attempt, and what the
- * project's card lint said (ADR-0054).
- */
-async function sweepChecks(ctx, base, cardDir, report) {
-  const defects = [];
-  const changed = await changedFiles(base.worktree);
-  for (const file of changed) {
-    if (!underAny(file, [cardDir])) defects.push(`change outside the card directory: ${file}`);
-  }
-  for (const card of report.updatedCards) {
-    if (!underAny(card, [cardDir])) defects.push(`updated card outside the card directory: ${card}`);
-  }
-  for (const inv of report.invalidated) {
-    if (!underAny(inv.card, [cardDir])) {
-      defects.push(`invalidated card outside the card directory: ${inv.card}`);
-    }
-  }
-  // A foreseen amendment is a note ON a card, so the note has to be there. The
-  // report is the sweep's claim and the card is the durable record: the next
-  // launch reads the card to see there is nothing to ask, and the build-time
-  // classifier reads it as evidence. A claim with no note on the card is a
-  // work-product defect, and the attempt is re-briefed (ADR-0052).
-  for (const note of report.foreseen ?? []) {
-    if (!underAny(note.card, [cardDir])) {
-      defects.push(`foreseen amendment on a card outside the card directory: ${note.card}`);
-    } else if (!noteWritten(base.worktree, note)) {
-      defects.push(
-        `the foreseen amendment for ${note.file} is not on ${note.card}: write it there under a ` +
-          `"${FORESEEN_HEADING}" heading, as one line that opens with "${FORESEEN_MARKER}" and ` +
-          'names the file.',
-      );
-    }
-  }
-  for (const open of report.decisions ?? []) {
-    if (!underAny(open.card, [cardDir])) {
-      defects.push(`open decision on a card outside the card directory: ${open.card}`);
-    }
-  }
-  return { defects, lint: await cardLint(ctx, base, changed, defects) };
-}
-
-/**
- * The project's own card lint, run over what the sweep wrote, before any of it
- * is pushed.
- *
- * The sweep is the one writer in the harness that lands text on the default
- * branch without a request behind it, so it is the one writer whose output no
- * gate reads. The command is the project's, named in its own config, and it is
- * the same command the launch gate runs over the same files: an automated
- * writer passes every mechanical check that binds the equivalent human path,
- * because a card the project's check refuses parks every launch behind it
- * (ADR-0054).
- *
- * A red is a work-product defect. It fails this attempt and re-briefs the seat
- * on the two-attempt loop the sweep already has, so nothing red is pushed. A
- * command that could not run at all fails the attempt the same way: it is not
- * a red, but it is not a green either, and a push behind it is a push of cards
- * no check read. The stamp keeps the two apart, so a reader can tell a refused
- * card from a host that could not answer. A sweep that wrote nothing is not a
- * writer, and the lint of the tree as it was merged is not this sweep's answer
- * to give.
- */
-async function cardLint(ctx, base, changed, defects, label = '') {
-  const name = base.config.lanes?.story?.lintCommand;
-  if (!name) return 'undeclared';
-  if (changed.length === 0) return 'unwritten';
-  const n = invocationCount(runEvents(ctx), 'card-sweep');
-  const run = await runCommand(base.config.commands[name], {
-    cwd: base.worktree,
-    env: base.env,
-    // The label keeps the replay's own lint file beside the first one rather
-    // than on top of it: two reads of two trees are two records (ADR-0043).
-    log: commandLogPath(ctx.paths, ctx.runId, `card-sweep-lint-${n}${label}`),
-  });
-  if (run.code === null) {
-    defects.push(
-      'the card lint of this project could not run, so nothing read the cards you wrote; ' +
-        `the sweep pushes no card the lint did not pass:\n${run.error ?? run.output}`,
-    );
-    return 'unrun';
-  }
-  if (run.code === 0) return 'green';
-  defects.push(
-    'the card lint of this project is red on what you wrote; repair the cards you edited ' +
-      `until it passes:\n${run.output}`,
-  );
-  return 'red';
-}
-
-/**
- * Whether the card really carries the note the report claims for it: a line
- * under the foreseen heading, opening with the marker, naming the file whose
- * clause the amendment is foreseen for.
- */
-function noteWritten(worktree, note) {
-  let text;
-  try {
-    text = readFileSync(join(worktree, note.card), 'utf8');
-  } catch {
-    return false;
-  }
-  return parseIntentCard(text).card.foreseenAmendments.some(
-    (item) => isForeseenNote(item) && item.includes(note.file),
-  );
 }
 
 // -- the reconciliation ticket (ADR-0075) ------------------------------------
@@ -3095,14 +2789,14 @@ function conflictRole(base, conflicts, brief) {
     ...conflicts.map((f) => `- ${f}`),
     `The spec of this run: ${base.specRef}`,
     'Change conflicted files only. Do not edit test files. Do not commit; the orchestrator concludes the merge.',
+    ...recordLines(base),
     ...briefLines(brief),
   ].join('\n');
 }
 
 /**
- * The record writer's conflict brief. It states the one rule the merge cannot
- * break: an accepted record is never edited, so a conflict on one is resolved by
- * keeping both sides' facts and never by dropping either (ADR-0073).
+ * The suite seat's conflict brief: the conflicted test files, the one place it
+ * may write, and what the resolved tests become.
  */
 function testConflictRole(base, conflicts, brief) {
   return [
@@ -3113,71 +2807,30 @@ function testConflictRole(base, conflicts, brief) {
     `Write test files only under: ${base.testPaths.join(', ')}. Touch nothing else.`,
     'In the report, list the resolved files as suite files; expected reds stay empty.',
     'Do not commit; the orchestrator concludes the merge.',
-    ...briefLines(brief),
-  ].join('\n');
-}
-
-function sweepRole(base, cardDir, brief, supersedes = []) {
-  return [
-    `The story ${base.storyKey ?? ''} shipped; sweep the intent cards.`,
-    `The shipped spec: ${base.specRef}`,
-    `The cards live under: ${cardDir}. Edit card files in place; touch nothing outside that directory.`,
-    'Update Blocked-by edges, sources, and open decisions so every card matches the repository as shipped.',
-    "When the shipped work invalidates a card's goal or scope boundary, do not rewrite the card: list it under invalidated with the reason.",
-    'List every card you edited under updatedCards.',
-    ...(base.config.lanes?.story?.lintCommand
-      ? [
-          "The project's own card lint runs over everything you write, before any of it is " +
-            'pushed. A card it refuses fails this attempt, so keep every card you edit inside ' +
-            'the conventions the lint enforces.',
-        ]
-      : []),
-    ...foreseenLines(cardDir),
-    ...(supersedes.length > 0
-      ? [
-          'This run amended frozen tests on this card\'s own authority. Record each one on this ' +
-            `story's card (${base.cardPath}) under a "## Supersedes" heading, creating the heading ` +
-            'when the card has none. One line each: the test file, the assertion that changed, and ' +
-            'the card line the authorization rested on. Record them; do not re-judge them.',
-          ...supersedeLines(supersedes),
-        ]
-      : []),
+    ...recordLines(base),
     ...briefLines(brief),
   ].join('\n');
 }
 
 /**
- * The classification duty (ADR-0052). This ship froze tests, and a later card's
- * work can collide with them. Every such collision is one of two things, and
- * they take different routes.
+ * The active records that govern the paths this run declared.
  *
- * A consequence the target card's own acceptance criteria already mandate is
- * not a question. It becomes a note on that card: the next launch reads it and
- * proceeds, and the machinery that settles collisions from card authority
- * consumes it as evidence at build time. Writing it as an open decision instead
- * parks that launch before the machinery ever runs, and asks the owner, once
- * per ship, what the card already answered.
- *
- * A choice the card genuinely leaves open is a question, and it is put to the
- * owner here, at close-out, while the context is fresh. It holds the card it
- * names and no run.
+ * The constitution tells every seat that its brief names them, so a brief
+ * without the block sends the seat to list the record tree and open whatever it
+ * finds there, closed records included. The merge round spawns two seats, and
+ * both read the area they are resolving (ADR-0089).
  */
-function foreseenLines(cardDir) {
-  return [
-    `This ship froze tests. Where the work of a later card under ${cardDir} would collide with ` +
-      'them, classify the collision before you write anything, and take the route the class asks for.',
-    `Mandated by the target card: the card's own acceptance criteria mandate a behavior whose ` +
-      `implementation necessarily changes what the frozen clause asserts. Write a note on that ` +
-      `card under a "## ${FORESEEN_HEADING}" heading, creating the heading when the card has ` +
-      `none. One line, opening with "${FORESEEN_MARKER}", naming the clause the tests pin, the ` +
-      `file it lives in, and the card line that mandates the change. Report it under foreseen ` +
-      `with the card, the clause, the file and the mandate. It is a note, not a question: never ` +
-      `write it as an open decision, and never rewrite the frozen tests here.`,
-    'Left open by the target card: the card states no such mandate and a human has to choose. ' +
-      'Report it under decisions with the card and the question. The owner is asked at this ' +
-      'close-out and the question holds that card alone. Do not write it onto the card.',
-    'Report foreseen and decisions on every sweep, empty when you found neither.',
-  ];
+function recordLines(base) {
+  return governingRecordLines(base.worktree, declaredPaths(base), base.recordPaths ?? []);
+}
+
+/** The paths the run's spec or ticket declared. Source nothing can read declares none. */
+function declaredPaths(base) {
+  try {
+    return parseTouchedPaths(readFileSync(base.specRef, 'utf8'));
+  } catch {
+    return [];
+  }
 }
 
 async function incomingBrief(base, mainSha) {
@@ -3204,9 +2857,10 @@ async function shipBase(ctx, forgeFor) {
   const cardPath = typeof ctx.payload.card === 'string' ? ctx.payload.card : null;
   let storyKey = null;
   let cardTitle = null;
+  let card = null;
   if (cardPath) {
     try {
-      const { card } = parseIntentCard(readFileSync(join(worktree, cardPath), 'utf8'));
+      card = parseIntentCard(readFileSync(join(worktree, cardPath), 'utf8')).card;
       storyKey = card.key ?? null;
       cardTitle = card.title ?? null;
     } catch {
@@ -3254,6 +2908,9 @@ async function shipBase(ctx, forgeFor) {
     env: runEnv(ctx, config, { rangeFrom }),
     constitution: readConstitution(worktree, config),
     cardPath,
+    // The card as parsed. It is the whole of the dependency permission, so the
+    // capture of a pass this lane opens reads its grants from here (ADR-0067).
+    card,
     storyKey,
     cardTitle,
     specRef,

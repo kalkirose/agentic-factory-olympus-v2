@@ -801,13 +801,47 @@ test('a project that names no suite files never fast-paths', () => {
   assert.equal(fastPathVerdict(inputs({ testPaths: [] })).refusal, 'no-suite-ground');
 });
 
-test('a certification carrying a review-lens finding is not carried', () => {
-  // A lens declares no inputs and reads the whole repository around the diff,
-  // so no claim in this project can say the branch left its ground alone.
-  const out = fastPathVerdict(inputs({ lensFindings: ['architecture/F-1'] }));
+test('a certification carrying a groundless review finding is not carried', () => {
+  // A finding that names no ground answers the question for nothing, so no
+  // claim in this project can say the branch left its ground alone. Every
+  // record written before a finding carried its ground reads this way.
+  const out = fastPathVerdict(inputs({ lensFindings: [{ id: 'architecture/F-1', ground: [] }] }));
   assert.equal(out.refusal, 'lens-ground');
   assert.match(out.detail, /architecture\/F-1/);
 });
+
+test('a review finding stands where the branch moved none of its ground', () => {
+  // The incoming change is a document the project declares inert, and the
+  // finding rests on the payment module. The two cannot interact, so the
+  // certification the finding rides is carried.
+  const out = fastPathVerdict(
+    inputs({ lensFindings: [{ id: 'operational/F-1', ground: ['src/api/pay.mjs'] }] }),
+  );
+  assert.equal(out.taken, true, out.detail);
+});
+
+test('the one whole-tree ground refuses whatever the branch moved', () => {
+  // The legal ground for a finding about no single file, and the reading that
+  // makes it legal: every incoming file is under it, so the certification it
+  // rides stands only while nothing at all moves.
+  const out = fastPathVerdict(inputs({ lensFindings: [{ id: 'spec/F-1', ground: ['**'] }] }));
+  assert.equal(out.refusal, 'lens-ground');
+  assert.match(out.detail, /docs\/note\.md/);
+  assert.match(out.detail, /spec\/F-1/);
+});
+
+test('a review finding whose ground the branch moved refuses, naming the file and the finding', () => {
+  const out = fastPathVerdict(
+    inputs({
+      lensFindings: [{ id: 'operational/F-1', ground: ['src/api'] }],
+      mainChanged: { files: ['src/api/other.mjs'], unclassifiable: [] },
+    }),
+  );
+  assert.equal(out.refusal, 'lens-ground');
+  assert.match(out.detail, /src\/api\/other\.mjs/);
+  assert.match(out.detail, /operational\/F-1/);
+});
+
 
 test('main-side ground no claim reaches takes the full re-verdict', () => {
   const out = fastPathVerdict(
@@ -881,6 +915,79 @@ test('a moved base outside both grounds carries both certifications', () => {
   assert.equal(out.taken, true, out.detail);
   assert.equal(out.code.answer, 'kept');
   assert.equal(out.records.answer, 'kept');
+  // The records answer says why it stands, so a reader of a half-carry can
+  // tell a reconciliation that was carried from one that was never asked.
+  assert.equal(out.records.reason, 'no-record-moved');
+});
+
+test('a ground hit is the code\'s refusal alone, and the records answer on their own evidence', () => {
+  // A finding is a reading of the code. The reconciliation never rested on
+  // it, so copying this refusal onto the records answer would send the run to
+  // the record round for a fact about the code.
+  const out = fastPathVerdict(
+    inputs({
+      records: NEIGHBOURHOOD,
+      lensFindings: [{ id: 'operational/F-1', ground: ['src/api'] }],
+      mainChanged: { files: ['src/api/other.mjs'], unclassifiable: [] },
+    }),
+  );
+  assert.equal(out.taken, false);
+  assert.equal(out.refusal, 'lens-ground');
+  assert.equal(out.code.answer, 'rejudge');
+  assert.equal(out.records.answer, 'kept');
+  assert.equal(out.records.reason, 'no-record-moved');
+
+  // And the records answer is the records' own: a neighbour of the run moving
+  // beside the ground hit re-runs the reconciliation as well.
+  const both = fastPathVerdict(
+    inputs({
+      records: NEIGHBOURHOOD,
+      lensFindings: [{ id: 'operational/F-1', ground: ['src/api'] }],
+      mainChanged: { files: ['src/api/other.mjs', 'docs/adr/adr-021-y.md'], unclassifiable: [] },
+    }),
+  );
+  assert.equal(both.code.answer, 'rejudge');
+  assert.equal(both.records.answer, 'rerun');
+  assert.equal(both.records.reason, 'neighbourhood');
+});
+
+test('a record the run itself wrote reaches the records answer of a ground hit', () => {
+  // The `own` list rides the answer computed beside a code refusal, exactly as
+  // it rides the answer computed for a clean base. Without it a merge that
+  // moved a record this run wrote would read `kept`.
+  const out = fastPathVerdict(
+    inputs({
+      records: NEIGHBOURHOOD,
+      lensFindings: [{ id: 'operational/F-1', ground: ['src/api'] }],
+      storyChanged: ['src/api/f.mjs', 'docs/adr/adr-030-mine.md'],
+      mainChanged: {
+        files: ['src/api/other.mjs', 'docs/adr/adr-030-mine.md'],
+        unclassifiable: [],
+      },
+    }),
+  );
+  assert.equal(out.records.answer, 'rerun');
+  assert.equal(out.records.reason, 'own-record');
+});
+
+test('every refusal but the two one-sided ones is copied onto both answers', () => {
+  // The rule and its two exceptions in one reading. A refusal is a
+  // certification this check could not carry, and it says the same thing to
+  // every certification in scope unless it belongs to one of them.
+  const both = [
+    ['diff-changed', { storyDiffAfter: 'diff --git a/src/api/f.mjs\n+moved\n' }],
+    ['no-breadth-ground', { breadth: [] }],
+    ['no-suite-ground', { testPaths: [] }],
+    ['undeclared-suite', { prior: new Map([['unit', result([part('api')])]]) }],
+    ['self-declared-ground', { storyChanged: ['.olympus/gates/unit.mjs'] }],
+  ];
+  for (const [refused, over] of both) {
+    const out = fastPathVerdict(inputs({ records: NEIGHBOURHOOD, ...over }));
+    assert.equal(out.refusal, refused);
+    assert.equal(out.code.answer, 'rejudge', refused);
+    assert.equal(out.records.answer, 'rerun', refused);
+    assert.equal(out.records.reason, refused);
+  }
 });
 
 test('a records lane is judged on its records alone', () => {
@@ -909,6 +1016,37 @@ test('a records lane is judged on its records alone', () => {
   assert.equal(conflicted.records.answer, 'rerun');
   assert.equal(conflicted.records.reason, 'own-record');
   assert.equal(conflicted.refusal, 'records-rerun');
+});
+
+test('a reconciliation the lane cannot show leaves the code question to the code', () => {
+  // A records fact says nothing about the code. Copying it onto the code
+  // answer sends the run back to the verdict for something the verdict never
+  // decided, which is the same class as a code refusal copied onto the
+  // records answer.
+  const settled = {
+    answer: 'rerun',
+    reason: 'no-certification',
+    detail: 'no green reconciliation stands for this tree',
+    files: [],
+  };
+  const out = fastPathVerdict(inputs({ records: NEIGHBOURHOOD, recordsSettled: settled }));
+  assert.equal(out.taken, false);
+  assert.equal(out.refusal, 'no-certification');
+  assert.equal(out.code.answer, 'kept');
+  assert.deepEqual(out.records, settled);
+
+  // The settled answer survives a code refusal beside it: each side keeps the
+  // reason that is its own.
+  const refused = fastPathVerdict(
+    inputs({
+      records: NEIGHBOURHOOD,
+      recordsSettled: settled,
+      mainChanged: changed('src/api/other.mjs'),
+    }),
+  );
+  assert.equal(refused.refusal, 'ground-intersects');
+  assert.equal(refused.code.answer, 'rejudge');
+  assert.equal(refused.records.reason, 'no-certification');
 });
 
 test('a lane that certifies nothing carries nothing', () => {
@@ -1225,4 +1363,64 @@ test('the digest moves when a declaration moves and at no other time', () => {
   // And a layer's name is part of the line: the same entry under another layer
   // is another claim.
   assert.notEqual(declarationDigest({ ...base, ground: ['lint src/api'] }), declarationDigest(base));
+});
+
+// -- a layer that carried the branch's own certification ---------------------
+
+/** The standing result of a layer that carried a base certification. */
+const carriedResult = (baseSha = 'b'.repeat(40)) => ({
+  event: 'layer-result',
+  status: 'green',
+  mode: 'carried',
+  carriedFrom: 'base',
+  baseSha,
+  certifiedSeq: 12,
+});
+
+test('a carried layer is a standing green, and the config ground is what it rests on', () => {
+  const out = fastPathVerdict(
+    inputs({
+      layers: [{ name: 'unit', command: 'unit', ground: ['src/api'] }],
+      prior: new Map([['unit', carriedResult()]]),
+    }),
+  );
+  assert.equal(out.taken, true, `the fast path refused: ${out.refusal} (${out.detail})`);
+  // The layer ran nothing here, so it names no suite of its own, and the claim
+  // it rests on is the project's config ground for it.
+  assert.deepEqual(out.declaration.suites, []);
+  assert.deepEqual(out.declaration.ground, { declared: 0, config: 1 });
+  // And the tree the green was earned at is named per layer, because one
+  // certification now rests on more than one sha.
+  assert.deepEqual(out.declaration.carried, [{ layer: 'unit', sha: 'b'.repeat(40) }]);
+  assert.equal(out.declaration.sha, CERTIFICATION.sha);
+});
+
+test('a carried layer with no config ground refuses, because nothing declares it', () => {
+  // Its own command declared nothing here and the project declares nothing for
+  // it, so no claim in this project says the branch left its ground alone.
+  const out = fastPathVerdict(
+    inputs({
+      layers: [layer('unit')],
+      prior: new Map([['unit', carriedResult()]]),
+    }),
+  );
+  assert.equal(out.taken, false);
+  assert.equal(out.refusal, 'undeclared-suite');
+});
+
+test('a carried layer whose ground the branch moved refuses on that ground', () => {
+  const out = fastPathVerdict(
+    inputs({
+      layers: [{ name: 'unit', command: 'unit', ground: ['src/api'] }],
+      prior: new Map([['unit', carriedResult()]]),
+      mainChanged: { files: ['src/api/other.mjs'], unclassifiable: [] },
+    }),
+  );
+  assert.equal(out.taken, false);
+  assert.equal(out.refusal, 'ground-intersects');
+});
+
+test('a layer the run itself ran names no carried tree', () => {
+  const out = fastPathVerdict(inputs());
+  assert.equal(out.declaration.carried, undefined);
 });

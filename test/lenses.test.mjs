@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   ALL_LENSES,
   DEFAULT_LENSES,
+  FINDING_GROUND_DUTY,
   LENS_CRITERIA,
   RECORD_CRITERIA,
   RECORD_CRITERION_KEYS,
@@ -42,10 +43,10 @@ test('a declared panel replaces the default, in vocabulary order', () => {
   ]);
 });
 
-// The panel judges the candidate diff and the adversary probes the suite, so
-// the two surfaces state the same dimensions or one of them stops covering
-// what the other assumes it does.
-test('the security criteria and the adversary dimensions come from one list', () => {
+// The panel judges the candidate diff and every suite write maps the story's
+// surface, so the two surfaces state the same dimensions or one of them stops
+// covering what the other assumes it does.
+test('the security criteria and the surface-map dimensions come from one list', () => {
   for (const dimension of SECURITY_DIMENSIONS) {
     assert.ok(LENS_CRITERIA.security.includes(dimension), dimension);
   }
@@ -131,4 +132,26 @@ test('the third criterion is the form the project gate cannot read', () => {
   // It rides every brief and every schema, because the keys are one list.
   const lines = recordCriteriaLines();
   assert.equal(lines[lines.length - 1], `- ${RECORD_CRITERIA.form}`);
+});
+
+// The ground duty is one definition with three readers: the panel's lens
+// seats, the generalist and the record review. A finding whose ground nothing
+// declares costs the next moved base a whole re-certification, so the rule is
+// stated to every seat that raises one, in the same words.
+test('the ground duty names what a ground is and what it is not', () => {
+  const text = FINDING_GROUND_DUTY.join('\n');
+  assert.ok(text.includes('"ground"'), text);
+  assert.ok(text.includes('repo-relative paths or directories'), text);
+  // A package name is not a file of the repository, so the duty names the two
+  // files that are.
+  assert.ok(text.includes('manifest that declares'), text);
+  assert.ok(text.includes('file that imports it'), text);
+  assert.ok(text.includes('names no ground is refused'), text);
+  // A finding about no single file has one legal ground, and the duty names it.
+  // Without it the seat either writes a sentence, which is not a path, or
+  // leaves the field empty, which is the refusal.
+  assert.ok(text.includes('"**", the one whole-tree ground'), text);
+  // And the entries are held to what the tree has, so a path nothing stands at
+  // is not a ground either.
+  assert.ok(text.includes('a path this tree holds, or a glob'), text);
 });

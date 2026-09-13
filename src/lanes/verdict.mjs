@@ -46,13 +46,16 @@ import {
   changedInRange,
   resetHard,
 } from '../isolation/tree.mjs';
+import { MAX_DIFF_BYTES, git } from '../isolation/git.mjs';
 import { editDenyRules } from '../seats/boundary.mjs';
+import { boundLayerNames } from '../seats/bound.mjs';
 import {
   DROP_NOTE,
   RECAPTURE_NOTE,
   SWEEP_NOTE,
   captureGist,
   classifyTakeBacks,
+  dependencyWrites,
   diffPolicyViolations,
   dropLine,
   laneDiffPolicy,
@@ -84,7 +87,15 @@ import {
   probeOfferLines,
   withReplayRounds,
 } from './replay.mjs';
-import { runSpectrum, rerunLayers, persistentReds, cyclePlan } from './spectrum.mjs';
+import {
+  runSpectrum,
+  rerunLayers,
+  persistentReds,
+  cyclePlan,
+  priorStatus,
+} from './spectrum.mjs';
+import { certifiedAtAll, newestBaseCertification } from '../ledger/readers.mjs';
+import { cloneDir } from '../isolation/clones.mjs';
 import {
   credentialHostIn,
   readTransient,
@@ -104,7 +115,7 @@ import {
 } from './waiting.mjs';
 import { askProbe } from './probes.mjs';
 import { configuredGroups } from './schedule.mjs';
-import { PARTS_ENV, partPlan, carryTally, confirmationTally } from './parts.mjs';
+import { partPlan, carryTally, confirmationTally, layerGround, PARTS_ENV } from './parts.mjs';
 import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview, recordFields } from './review.mjs';
 import { panelLenses } from './lenses.mjs';
@@ -122,6 +133,7 @@ import {
 } from './records-stage.mjs';
 import { freezeAnchor } from './resume.mjs';
 import { parseIntentCard } from './card.mjs';
+import { lockfileGrant } from './lockfile.mjs';
 import {
   SUPERSEDE_BRIEF_LINES,
   SUPERSEDE_CLAIM_PROPERTIES,
@@ -132,6 +144,7 @@ import {
   supersedeRuling,
 } from './supersede.mjs';
 import { SUITE_SCHEMA, SPEC_AMEND_SCHEMA, specLintDefects } from './story.mjs';
+import { governingRecordLines } from './units.mjs';
 import {
   runSuiteChecks,
   storySuiteChecks,
@@ -214,9 +227,9 @@ export function postFreeze({ afterVerdict }) {
 }
 
 /**
- * The repair lane: fix (seat) → verdict → continuation. No spec birth and no
- * adversary — the intake ticket is the spec; deterministic gates run in
- * full; judgment collapses to the generalist review seat.
+ * The repair lane: fix (seat) → verdict → continuation. No spec birth — the
+ * intake ticket is the spec; deterministic gates run in full; judgment
+ * collapses to the generalist review seat.
  * @param {{afterVerdict: {stages: string[], handlers: object}}} opts
  */
 export function repairLane({ afterVerdict }) {
@@ -253,9 +266,31 @@ export const DEV_SCHEMA = {
   additionalProperties: false,
   properties: {
     summary: { type: 'string' },
+    // What the frozen suite said when the seat last ran it. The seat's bound
+    // holds the suite whatever its diff, so this is the one layer it always
+    // answers for, and a seat that hands over a tree it knows is red is
+    // handing the verdict a cycle it will spend and then refuse.
+    suiteState: { type: 'string', enum: ['green', 'red'] },
   },
-  required: ['summary'],
+  required: ['summary', 'suiteState'],
 };
+
+/**
+ * The dev report shape for one lane. A seat with a frozen suite states what the
+ * suite said; the repair lane has no frozen suite, so it takes a shape with no
+ * field for one at all, because a mandatory field with nothing behind it is a
+ * field the seat fills by invention.
+ * @param {'story'|'repair'} mode
+ */
+export function devSchema(mode) {
+  if (mode === 'story') return DEV_SCHEMA;
+  const { suiteState, ...properties } = DEV_SCHEMA.properties;
+  return {
+    ...DEV_SCHEMA,
+    properties,
+    required: DEV_SCHEMA.required.filter((key) => key !== 'suiteState'),
+  };
+}
 
 export const TRIAGE_SCHEMA = {
   type: 'object',
@@ -330,7 +365,8 @@ function implementationHandler(mode) {
     // suite is restored from its sha before the tree is committed or judged.
     const { fail, dropped, allowlists } = await devSeatWithCapture(ctx, base, mode, {
       seat: 'dev',
-      buildRole: (brief) => (mode === 'story' ? devRole(base, brief) : fixRole(base, brief)),
+      buildRole: (brief, bound) =>
+        mode === 'story' ? devRole(base, brief, bound) : fixRole(base, brief, bound),
       suiteSha: base.suiteSha,
     });
     if (fail) return fail;
@@ -630,20 +666,44 @@ async function runCycle(ctx, base, mode, { cycle }) {
     impl?.baseSha && impl?.sha
       ? await changedInRange(base.worktree, impl.baseSha, impl.sha).catch(() => null)
       : null;
-  const plan = cyclePlan(startEvents, {
+  const planArgs = {
     cycle,
     pass,
     layers: base.layers,
     ...(changed && { changed }),
+    breadth: base.config?.gates?.breadthGround ?? [],
+    // Ground the project states no suite of it reads. It leaves the footprint
+    // before anything is attributed, exactly as it leaves a part plan
+    // (ADR-0059).
+    groundless: base.config?.gates?.groundlessPaths ?? [],
     recordPaths: base.recordPaths,
     recordLayers: base.recordLayers,
-  });
+    // The frozen suite, by layer name. It never carries on the footprint cycle:
+    // this run wrote the suite inside this pass, and the base certification was
+    // stamped before the suite existed, so a green held there answers a
+    // different question than the one this cycle asks.
+    suite: suiteLayer(base.layers, base.config, mode),
+  };
+  let plan = cyclePlan(startEvents, planArgs);
+  // The footprint replaces one branch of the plan and no other, so it is derived
+  // where that branch is taken and nowhere else: the ledger read and the diffs
+  // behind it buy nothing on a cycle that is already narrowed, and the condition
+  // stays in the planner rather than being restated here.
+  //
+  // A full sweep that already names its reason is the planner's own decision and
+  // not the absence of one, so the footprint behind it would be derived and
+  // thrown away.
+  if (plan.sweep === 'full' && plan.reason === undefined) {
+    const footprint = await certifiedFootprint(ctx, base, sha);
+    plan = cyclePlan(startEvents, { ...planArgs, footprint });
+  }
   const parts = await partTargets(base, startEvents, { plan, sha });
   let spectrum = await runSpectrum(ctx, {
     ...gates,
     run: plan.run,
     skip: plan.skip,
     prior: plan.prior,
+    certified: plan.certified,
     parts,
   });
   if (spectrum.error) return { directive: gateCommandError(ctx, spectrum.error) };
@@ -734,12 +794,13 @@ async function runCycle(ctx, base, mode, { cycle }) {
     const round =
       mode === 'story'
         ? await furyRound(ctx, base, { cycle, diff, diffFiles })
-        : await generalistReview(ctx, base, { cycle, diff, priorConfirmed: [] });
+        : await generalistReview(ctx, base, { cycle, diff, diffFiles, priorConfirmed: [] });
     if (round.fail) return { directive: round.fail };
     reviewOpen = round.confirmed;
   } else if (repaired) {
     const diff = await readDiff(impl.baseSha, impl.sha);
-    const round = await generalistReview(ctx, base, { cycle, diff, priorConfirmed });
+    const diffFiles = await readFiles(impl.baseSha, impl.sha);
+    const round = await generalistReview(ctx, base, { cycle, diff, diffFiles, priorConfirmed });
     if (round.fail) return { directive: round.fail };
     reviewOpen = [
       ...priorConfirmed.filter((f) => !round.resolved.includes(f.id)),
@@ -752,7 +813,8 @@ async function runCycle(ctx, base, mode, { cycle }) {
     // assertion that changed is a judgment. So the panel reads that amendment's
     // own diff — one seat, only where nobody was asked (ADR-0044).
     const diff = await readDiff(cardRuled.baseSha, cardRuled.sha);
-    const round = await generalistReview(ctx, base, { cycle, diff, priorConfirmed });
+    const diffFiles = await readFiles(cardRuled.baseSha, cardRuled.sha);
+    const round = await generalistReview(ctx, base, { cycle, diff, diffFiles, priorConfirmed });
     if (round.fail) return { directive: round.fail };
     reviewOpen = [
       ...priorConfirmed.filter((f) => !round.resolved.includes(f.id)),
@@ -813,7 +875,13 @@ async function runCycle(ctx, base, mode, { cycle }) {
   // parts carried; the share is what a tripwire can watch, and a carry that
   // decays with nothing red is the one failure of this mechanism that nothing
   // else detects (ADR-0058). Absent for a cycle that recorded no part.
-  const tally = carryTally(spectrum.results);
+  //
+  // A footprint cycle carries whole layers and no part of one. It holds no part
+  // table for what it carried, so the part share would read near nought on the
+  // cycle that carried the most work of any, which is the opposite of what the
+  // number means. The sweep is on the record; a reader takes the carry from the
+  // layers there, and nothing states a share this cycle cannot measure.
+  const tally = plan.sweep === 'footprint' ? null : carryTally(spectrum.results);
   // What the confirmation sweep executed of the layers it narrowed, and what it
   // stood on instead. A sweep that re-ran every part of every layer it touched
   // reports its whole part count as `ran` and nought as `kept`, which is the
@@ -826,6 +894,10 @@ async function runCycle(ctx, base, mode, { cycle }) {
     sha,
     ...(suiteSha && { suiteSha }),
     sweep: plan.sweep,
+    // Why the sweep is the whole spectrum, where it is. A first cycle scopes
+    // itself to the footprint of its own diff whenever it can, so a full one is
+    // a condition that was not met, and the record names which.
+    ...(plan.reason && { reason: plan.reason }),
     ...(tally ?? {}),
     ...(confirmation && { confirmation: true }),
     ...(swept && { confirmationParts: swept }),
@@ -864,7 +936,7 @@ async function runCycle(ctx, base, mode, { cycle }) {
     ...(deferred.length > 0 && { deferred }),
     verdict,
   };
-  const recordPath = join(ctx.paths.runs, ctx.runId, `verdict-${cycle}.json`);
+  const recordPath = join(ctx.paths.runs, ctx.runId, verdictRecordFile(cycle));
   writeFileSync(recordPath, JSON.stringify(record, null, 2) + '\n');
   ctx.store.append('verdict-rendered', {
     actor: ACTOR,
@@ -873,6 +945,7 @@ async function runCycle(ctx, base, mode, { cycle }) {
     sha,
     ...(suiteSha && { suiteSha }),
     sweep: plan.sweep,
+    ...(plan.reason && { reason: plan.reason }),
     // The share rides the event as well as the record, because the reading is
     // taken from the ledgers and a metric that had to open a record file per
     // cycle would be reading somebody else's lifecycle (ADR-0058).
@@ -955,6 +1028,86 @@ export async function partTargets(base, events, { plan, sha }) {
     );
   }
   return targets.size > 0 ? targets : null;
+}
+
+/**
+ * What the default branch has already answered for the tree this run started
+ * from, for the first cycle of a pass: the run's own diff against that base, and
+ * the layers a certification of it holds green. Or the one word that says why
+ * there is no such answer, and the cycle runs every layer.
+ *
+ * Four conditions, and each one that fails buys the whole spectrum.
+ *
+ * A project that declares no setup layer has not told the harness which layers
+ * produce the tree the others read. Carrying under that silence leaves a run
+ * with no installed modules and a green it did not earn, so the silence is the
+ * refusal.
+ *
+ * A Tier-1 layer with no ground in the config has claimed nothing, and a carry
+ * is a claim about ground. One such layer refuses for the whole spectrum rather
+ * than for itself: the sweep is one decision about one cycle.
+ *
+ * A project with no certification at all is the ordinary state of one that has
+ * never shipped under this, and of the first run after the harness gains it. The
+ * base itself needs no certification of its own: the close-out stamps the merge
+ * commit, and the default branch moves past it for a card sweep or a config
+ * merge, so the per-layer question is asked of the ancestry and answered by a
+ * diff that touches the layer's ground or does not.
+ *
+ * A diff git cannot answer says nothing about what the run changed.
+ *
+ * The diff is read in the run's own worktree, which holds the base commit it
+ * branched from. The ancestry question behind a certification at an older sha is
+ * read in the project's bare clone, where the default branch lives.
+ */
+export async function certifiedFootprint(ctx, base, sha) {
+  const layers = base.layers ?? [];
+  if (!layers.some((layer) => layer.setup === true)) return { reason: 'no-setup-layer' };
+  const breadth = base.config?.gates?.breadthGround ?? [];
+  const ground = new Map();
+  for (const layer of layers) {
+    const declared = layerGround(layer, null, breadth, base.recordPaths);
+    if (!declared.sources.config) return { reason: 'groundless-layer' };
+    ground.set(layer.name, declared.entries);
+  }
+  const baseSha = typeof ctx.payload?.baseSha === 'string' ? ctx.payload.baseSha : null;
+  if (!baseSha || !newestBaseCertification(ctx.paths, ctx.project)) {
+    return { reason: 'no-base-certification' };
+  }
+  const changed = await changedInRange(base.worktree, baseSha, sha).catch(() => null);
+  if (changed === null) return { reason: 'unreadable-diff' };
+  // One call for the whole spectrum. The ancestry question behind a
+  // certification at an older sha is one diff per ancestor, and a reader asked
+  // layer by layer would buy that diff once per layer.
+  const certified = await certifiedAtAll(
+    ctx.paths,
+    ctx.project,
+    baseSha,
+    layers.map((layer) => ({ name: layer.name, ground: ground.get(layer.name) })),
+    cloneDir(ctx.paths, ctx.project),
+  );
+  return { changed, certified };
+}
+
+/**
+ * The Tier-1 layer that runs the frozen suite, by name, or null where the lane
+ * has none. The config names the suite by the command behind it, and two
+ * readers need the layer: the cycle plan, which never carries it, and the seat
+ * bound, which always holds it.
+ */
+function suiteLayer(layers, config, mode) {
+  if (mode !== 'story') return null;
+  const command = config?.lanes?.story?.suiteCommand;
+  return (layers ?? []).find((layer) => layer.command === command)?.name ?? null;
+}
+
+/**
+ * The file one cycle's verdict record is written under, inside the run
+ * directory. A name and never a path: the run archives, and a reader outside it
+ * resolves the name through the home's own layout.
+ */
+export function verdictRecordFile(cycle) {
+  return `verdict-${cycle}.json`;
 }
 
 /**
@@ -2349,7 +2502,7 @@ async function repairRound(ctx, base, mode, { pass, round, open, record, cap = R
   const { recaptured } = recordedTakeBacks(runEvents(ctx));
   const result = await runDevSeat(ctx, base, mode, {
     seat: 'repair-dev',
-    buildRole: (brief) => repairRole(base, open, record, brief, recaptured),
+    buildRole: (brief, bound) => repairRole(base, open, record, brief, recaptured, bound),
   });
   if (result.fail) return result;
   ctx.store.append('repair-round', {
@@ -2401,8 +2554,10 @@ export async function freshPass(ctx, base, mode, { newPass, trigger, open, last 
   const withStall = (brief) => (brief ? [stall, ...(Array.isArray(brief) ? brief : [brief])] : stall);
   const result = await runDevSeat(ctx, base, mode, {
     seat: 'dev',
-    buildRole: (brief) =>
-      mode === 'story' ? devRole(base, withStall(brief)) : fixRole(base, withStall(brief)),
+    buildRole: (brief, bound) =>
+      mode === 'story'
+        ? devRole(base, withStall(brief), bound)
+        : fixRole(base, withStall(brief), bound),
     pass: newPass,
     phase: 'fresh',
   });
@@ -2585,9 +2740,11 @@ function ruledSuiteFiles(answer, frozen) {
  * commit. Two things can stand in the way, and they are not the same thing.
  *
  * - A **violation** is a change the lane's diff policy refuses (ADR-0017):
- *   a denied path, an undeclared declarable path, a forbidden path shape. It
+ *   a denied path, an undeclared declarable path, a forbidden path shape, or
+ *   a dependency path holding more than the dependency the card names. It
  *   is a work-product defect the seat answers in one corrective invocation,
- *   and the capture stops until it does.
+ *   and the capture stops until it does. The first three are answered from
+ *   the path; the fourth is answered from the file, against the card.
  * - A **take-back** is a write to a path the lane froze — today, a story-lane
  *   seat that reached a test path past its tool deny. The revert stays
  *   unconditional, because the frozen suite is the thing being judged
@@ -2691,7 +2848,10 @@ async function captureDefects(ctx, base, mode, { seat, capture }) {
   // produces, and the commit record has to say so.
   for (const path of dropped) if (!capture.dropped.includes(path)) capture.dropped.push(path);
   const kept = changed.filter((f) => !frozenWrites.includes(f) && !recordWrites.includes(f));
-  const violations = diffPolicyViolations(kept, tier, declaresPath(base, mode, tier));
+  const violations = [
+    ...diffPolicyViolations(kept, tier, declaresPath(base, mode, tier)),
+    ...(await grantViolations(base, tier, kept)),
+  ];
   // The two classes of take-back part here, and only in the record: the quiet
   // class is reverted, committed around and stated downstream exactly like the
   // loud one. Both carry the closed word for the defect, so a surface that
@@ -2733,6 +2893,92 @@ async function captureDefects(ctx, base, mode, { seat, capture }) {
     ...dropped.map(dropLine),
     ...recordWrites.map(recordDropLine),
   ];
+}
+
+/**
+ * The refusals the content tier raises: one per changed dependency path the
+ * card's grants do not cover.
+ *
+ * The grant runs on every pass and not on the first alone. A dependency path
+ * is one file, every pass rewrites it whole, and a pass that quietly widened
+ * what the last one installed would ship on a judgment made about different
+ * bytes.
+ *
+ * `before` is the file at the run's freeze sha, never the pass's own head:
+ * from pass two onward the head holds the previous pass's install, and a grant
+ * read against that would admit whatever the run had already accumulated. The
+ * freeze is the last tree no dev seat wrote.
+ *
+ * A card that names no dependency is refused before the file is read. The
+ * permission is the card's to give, so the absence of one is the answer, and
+ * the answer costs no read of a file that can be a megabyte.
+ */
+async function grantViolations(base, tier, kept) {
+  const writes = dependencyWrites(kept, tier);
+  if (writes.length === 0) return [];
+  const grants = base.card?.dependencies ?? [];
+  const violations = [];
+  for (const { path, pattern } of writes) {
+    if (grants.length === 0) {
+      violations.push({
+        path,
+        rule: 'dependency-grant',
+        pattern,
+        reason: 'The card names no dependency, and this path changes for a named one alone.',
+      });
+      continue;
+    }
+    const grant = lockfileGrant(
+      await fileAtSha(base.worktree, base.resetSha, path),
+      readWorktreeFile(base.worktree, path),
+      grants,
+    );
+    if (grant.ok) continue;
+    violations.push({ path, rule: 'dependency-grant', pattern, reason: grant.reason });
+  }
+  return violations;
+}
+
+/**
+ * One file as a sha held it, or the empty string where the sha held none. A
+ * dependency lockfile can reach a megabyte, so the read states its own
+ * ceiling rather than taking the child-process default of one.
+ *
+ * Only git's own words for a path the tree does not hold answer with the empty
+ * string. Every other failure throws: an unreachable sha, a broken object store
+ * and a read past the ceiling are facts about the repository, and a grant that
+ * read them as "the base held no lockfile" would judge the whole file as new and
+ * refuse a capture over a file that never moved. The throw carries git's own
+ * words, so the cause reaches the record instead of a refusal nobody can answer.
+ */
+export async function fileAtSha(worktree, sha, path) {
+  if (typeof sha !== 'string' || sha.length === 0) return '';
+  try {
+    return await git(['show', `${sha}:${path.replaceAll('\\', '/')}`], {
+      cwd: worktree,
+      maxBuffer: MAX_DIFF_BYTES,
+    });
+  } catch (error) {
+    if (ABSENT_AT_SHA.test(String(error?.message ?? error))) return '';
+    throw error;
+  }
+}
+
+/**
+ * git's wording for a path the named tree does not hold. The first two are what
+ * `git show <sha>:<path>` answers for a path the commit never had and for one
+ * the working tree holds but the commit does not; the third is the prefix every
+ * path complaint of that command carries.
+ */
+const ABSENT_AT_SHA = /does not exist in |exists on disk, but not in |fatal: path /;
+
+/** One worktree file, or the empty string where the seat removed it. */
+function readWorktreeFile(worktree, path) {
+  try {
+    return readFileSync(join(worktree, path), 'utf8');
+  } catch {
+    return '';
+  }
 }
 
 /**
@@ -2788,6 +3034,10 @@ function declaresPath(base, mode, tier) {
  */
 async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
   const capture = { dropped: [], allowlists: [] };
+  // One derivation for the two facts that must agree: the file the hook
+  // enforces and the list the brief states. A brief that named a layer the hook
+  // refuses would put the seat in a fight it cannot win.
+  const bound = await seatBound(ctx, base, mode);
   // The record tree is denied in both lanes: no seat that writes code writes a
   // decision record, and the repair lane is where most records are owed
   // (ADR-0074). The test paths are the story lane's freeze alone — the repair
@@ -2801,97 +3051,177 @@ async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
   const outcome = await seatWithChecks(ctx, {
     seat,
     label: null,
-    schema: DEV_SCHEMA,
+    schema: devSchema(mode),
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
     ...(denyTools.length > 0 && { denyTools }),
-    buildRole,
-    checks: () => captureDefects(ctx, base, mode, { seat, capture }),
+    ...(bound && { settings: bound }),
+    buildRole: (brief) => buildRole(brief, bound),
+    checks: async (report) => [
+      ...(await captureDefects(ctx, base, mode, { seat, capture })),
+      ...suiteStateDefects(mode, report),
+    ],
   });
   return { ...outcome, dropped: capture.dropped, allowlists: capture.allowlists };
+}
+
+/**
+ * A tree the seat itself calls red against the frozen suite, refused.
+ *
+ * The verdict would find the same red one cycle later and spend the whole
+ * spectrum doing it. A seat that knows the suite is red has not finished the
+ * work it was given, and that is a defect of the work product like any other.
+ */
+function suiteStateDefects(mode, report) {
+  if (mode !== 'story' || report?.suiteState !== 'red') return [];
+  return [
+    'your report states the frozen suite is red; the suite defines done, and a tree ' +
+      'that does not satisfy it is not implemented. Finish the work, run the suite, and ' +
+      'report green.',
+  ];
 }
 
 // -- role blocks -------------------------------------------------------------
 
 /**
- * The Tier-1 gate commands, as facts. A dev seat used to be told to run "the
- * gate commands from the project config" without being told what they are,
- * and the fix seat was told nothing at all. Both seats are judged by these
- * commands, so both are given them. The list is a tool the seat may reach
- * for, not an instruction to double-check its work: this module's header
- * bans verification scaffolding, and that ban settles the wording.
+ * The gate commands this seat may run, as facts. A dev seat used to be told to
+ * run "the gate commands from the project config" without being told what they
+ * are, and the fix seat was told nothing at all.
+ *
+ * The list is the seat's bound and not the whole battery: one stage judges a
+ * tree, and it is the verdict. A seat proves its own work, so it is given the
+ * layers the work it was asked for reaches, and the hook refuses the rest at
+ * the tool call. The list is a tool the seat may reach for, not an instruction
+ * to double-check its work: this module's header bans verification
+ * scaffolding, and that ban settles the wording.
+ *
+ * The bound here is the one the declared paths select, which is all a bound can
+ * be before the seat has written anything. The hook recomputes it from the
+ * seat's live diff on every call, so a seat whose work grows into another
+ * layer's ground may run that layer too.
  */
-function gateCommandLines(base) {
+function gateCommandLines(base, bound) {
+  const inBound = bound ? boundLayerNames(bound) : null;
+  const layers = inBound === null ? base.layers : base.layers.filter((l) => inBound.has(l.name));
   return [
-    'The Tier-1 gate commands this work is judged by:',
-    ...base.layers.map((l) => `- ${l.name}: ${(base.commands[l.command] ?? []).join(' ')}`),
-    ...affectedPartsLines(base),
+    layers.length > 0
+      ? 'The Tier-1 gate commands your work is bounded to:'
+      : "No Tier-1 gate command is yours yet: the work as declared reaches no layer's ground.",
+    ...layers.map((l) => `- ${l.name}: ${(base.commands[l.command] ?? []).join(' ')}`),
+    ...(inBound === null ? [] : [BOUND_LINE]),
+    ...partsLines(base, layers),
   ];
 }
 
 /**
- * The one line that rides item 1 (ADR-0046). A seat that reaches for a gate
- * command reaches for the whole battery, and on the reference project the
- * acceptance layer alone is forty minutes of it. The cycle that judges the
- * seat already narrows that layer to the parts a diff can reach, so a seat
- * spending the same clock is told the same mapping and left to use it.
+ * What the bound is worth to a seat that meets it. A refusal arrives as the
+ * tool's own error, which reads like a defect in the environment unless the
+ * seat was told beforehand whose job the layer is.
  *
- * Told, never required. The verdict runs the full set whatever the seat did,
- * so this is a saving the seat may take and never a check it owes — the ban
- * on verification scaffolding in this module settles the wording.
+ * The prerequisite sentence is here because the list holds layers the seat's own
+ * ground never reached: a layer the bound admits brings what it needs with it,
+ * and a seat that read the list as "the layers my diff touches" would not know
+ * it may install at all. The time sentence follows it, because the list is the
+ * bound and the hook holds one reading the bound does not: a layer the certified
+ * base timed at or over the cap is refused, prerequisite or not, and a seat that
+ * met that refusal on a listed layer would read it as a defect.
  */
-function affectedPartsLines(base) {
-  if (base.config?.gates?.partTargeting === false) return [];
+const BOUND_LINE =
+  'A command that runs a layer outside this list is refused before it starts, and the ' +
+  'refusal names the layer. A refused layer is not yours to run and not a defect to ' +
+  'work around: the verdict stage runs every layer of the project at the sha it ships. ' +
+  'A layer enters your bound when your own work reaches what it reads, and so does ' +
+  'every layer it needs, which is how the list holds what makes the others runnable. ' +
+  'A layer of the list that took too long on the certified base is refused all the ' +
+  'same, and the refusal states the time; only a setup layer and your own suite are ' +
+  'never refused on it.';
+
+/**
+ * The one narrowing a bounded seat may take inside its bound (ADR-0046). The
+ * frozen suite is in the bound on every story spawn and is the heaviest layer
+ * of most projects, so a seat told nothing runs it whole every time.
+ *
+ * Told, never required: the verdict runs the whole layer whatever the seat did,
+ * so this is a saving the seat may take and never a check it owes. The ban on
+ * verification scaffolding in this module's header settles the wording.
+ */
+function partsLines(base, layers) {
+  if (layers.length === 0 || base.config?.gates?.partTargeting === false) return [];
   return [
-    'A layer command that names its parts takes ' +
-      `${PARTS_ENV}=<comma-separated part names> and runs those parts alone. ` +
-      'Check your own work with the parts your diff can reach: a part is affected ' +
-      'unless your diff falls entirely outside its input set — its own test sources ' +
-      'and the source trees it exercises, as that command declares them. A path no ' +
-      'part claims (a lockfile, a shared package, a migration, a config file) reaches ' +
-      'every part, so narrow nothing when you have touched one. The verdict proves every ' +
-      'part of every layer at the sha it ships.',
+    `A layer above that names its parts takes ${PARTS_ENV}=<comma-separated part names> and ` +
+      'runs those parts alone, so you may hold a bound layer to the parts your own diff ' +
+      'reaches. The verdict proves every part of every layer at the sha it ships.',
   ];
 }
 
-function devRole(base, brief = null) {
+/**
+ * The dependencies the card gave this story, by importer and package.
+ *
+ * The capture holds the lockfile to exactly these, and the seat never sees the
+ * card: a seat that installed a second package to get the first one working
+ * would have its whole capture refused without knowing which name cost it the
+ * pass. A card that names none gives no line, and the path tier then shuts the
+ * file on its own.
+ */
+function dependencyLines(base) {
+  const named = base.card?.dependencies ?? [];
+  if (named.length === 0) return [];
+  return [
+    'The dependencies this story ships, as its card names them:',
+    ...named.map((d) => `- ${d.importer}: ${d.name}`),
+    'The dependency lockfile changes for these and for nothing else. A package the card ' +
+      'does not name is refused at the capture, whatever the work needs it for.',
+  ];
+}
+
+function devRole(base, brief = null, bound = null) {
   return [
     `Implement the story spec at: ${base.specRef}`,
     'The frozen acceptance suite defines done. Do not edit or delete test files.',
     `Test paths (read-only): ${base.testPaths.join(', ')}`,
-    ...recordPathLines(base),
-    ...gateCommandLines(base),
+    ...recordLines(base),
+    ...dependencyLines(base),
+    ...gateCommandLines(base, bound),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
   ].join('\n');
 }
 
-function fixRole(base, brief = null) {
+function fixRole(base, brief = null, bound = null) {
   return [
     `Fix the defect described by the intake ticket at: ${base.specRef}`,
     'The ticket is the spec. Stay inside its scope.',
     'Add a regression test when the defect class demands one.',
-    ...recordPathLines(base),
-    ...gateCommandLines(base),
+    ...recordLines(base),
+    // The repair lane has no card, so no package is pre-approved and no
+    // package is gated by content either: the ticket's own scope is the whole
+    // of the permission.
+    REPAIR_DEPENDENCY_LINE,
+    ...gateCommandLines(base, bound),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
   ].join('\n');
 }
 
+/** What this lane says about a dependency, since no card speaks for the work. */
+const REPAIR_DEPENDENCY_LINE =
+  'This lane names no dependency tier: nothing pre-approves a package here, and the ' +
+  'capture judges the dependency lockfile by the ticket paths like any other file.';
+
 /**
- * The record tree, as a seat that writes code is told about it: read-only, in
- * every lane. A record is written by a record seat and by nothing else, and the
- * capture takes a write to one back whatever the brief says, so the seat is
- * told rather than left to discover it (ADR-0074).
+ * The record tree, as a seat that writes code is told about it: the records its
+ * own declared paths are governed by, the rest of the active tree by path, and
+ * the read-only rule. A record is written by a record seat and by nothing else,
+ * and the capture takes a write to one back whatever the brief says, so the
+ * seat is told rather than left to discover it (ADR-0074, ADR-0089).
+ *
+ * The paths are the ones the run declared: the spec's in the story lane, the
+ * ticket's in the repair lane, which is the same list the seat's bound rests
+ * on.
  */
-function recordPathLines(base) {
-  const entries = (base.recordPaths ?? []).filter((entry) => !entry.startsWith('!'));
-  if (entries.length === 0) return [];
-  return [
-    `Decision records (read-only): ${entries.join(', ')}. A record is written by a record ` +
-      'seat; the reconciliation stage owns every change to one.',
-  ];
+function recordLines(base) {
+  return governingRecordLines(base.worktree, declaredTouchedPaths(base), base.recordPaths ?? []);
 }
 
 /**
@@ -2911,20 +3241,22 @@ const STRUCTURAL_NOTE =
   'Answer it by changing the shape, not by patching around it. Everything else in this brief ' +
   'still holds: the spec, the test files, and every finding it lists.';
 
-function repairRole(base, open, record, brief = null, recaptured = []) {
+function repairRole(base, open, record, brief = null, recaptured = [], bound = null) {
   const structural = open.filter((f) => f.approach === true);
   const rest = open.filter((f) => f.approach !== true);
   return [
     'Repair the candidate tree in place. Fix every open finding below; change nothing else.',
     `The spec: ${base.specRef}`,
     'Do not edit or delete test files.',
+    ...recordLines(base),
+    ...dependencyLines(base),
     ...(structural.length > 0
       ? [STRUCTURAL_HEADING, ...structural.map((f) => `- ${findingLine(f)}`), STRUCTURAL_NOTE]
       : []),
     ...(rest.length > 0 ? ['Open findings:', ...rest.map((f) => `- ${findingLine(f)}`)] : []),
     'Tier-1 verdict:',
     ...(record?.spectrum ?? []).map((r) => `- ${r.layer}: ${r.status}${layerNote(r)}`),
-    ...gateCommandLines(base),
+    ...gateCommandLines(base, bound),
     ...takenBackLines(record?.dropped, recaptured),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
@@ -3178,7 +3510,15 @@ function stallBrief(open) {
 function layerNote(r) {
   if (r.credentialAbsent?.length) return ` (credential absent: ${r.credentialAbsent.join(', ')})`;
   if (r.attributedTo) return ` (attributed to ${r.attributedTo})`;
-  if (r.mode === 'carried') return ' (carried from an earlier cycle, not re-run)';
+  // Two carries reach a seat, and they stand on different trees: a green an
+  // earlier cycle of this run earned, and one the default branch's own
+  // certification holds. A seat reading the second was told a cycle of its run
+  // proved something no cycle of its run ran.
+  if (r.mode === 'carried') {
+    return r.carriedFrom === 'base'
+      ? ' (carried from the default branch, not re-run)'
+      : ' (carried from an earlier cycle, not re-run)';
+  }
   // A layer that ran, of which some parts did not. The count is on the line
   // because the alternative is a green that reads as a whole layer's proof
   // when it is a proof of part of one (ADR-0046).
@@ -3259,6 +3599,68 @@ export function passOpeningSha(events, fallback = null) {
     }
   }
   return fallback;
+}
+
+/**
+ * The cap a bounded seat runs a layer under. It is a constant and not a config
+ * key: a budget with no measurement behind it refuses on a guess, and the
+ * measurement the harness has is the certified base's own per-layer duration.
+ * Five minutes is the reading that separates a layer a seat may sensibly run
+ * from one that is the verdict's whole cycle.
+ */
+const SEAT_LAYER_CAP_MS = 300_000;
+
+/**
+ * The bound one implementation seat runs inside, or null when the run holds no
+ * base commit to compute a footprint against.
+ *
+ * The file carries only what cannot change inside one spawn. The seat's diff
+ * grows while it works, so the hook recomputes the layer set on every call; the
+ * durations come from the newest base certification of this project, because a
+ * layer takes about as long as it took last time and the sha it took that long
+ * at says nothing about the number. No certification yet is no time bound.
+ *
+ * It reads the ledger and the config rather than the base it is handed. A
+ * merge-born fresh pass narrows its own base down to what a dev seat needs, and
+ * a bound that rested on the wider one would be absent on exactly the pass that
+ * spawns a seat over a tree that just moved.
+ */
+async function seatBound(ctx, base, mode) {
+  const baseSha = passOpeningSha(runEvents(ctx), ctx.payload.baseSha ?? null);
+  if (typeof baseSha !== 'string' || baseSha.length === 0) return null;
+  const config = base.config ?? (await loadProjectConfig(ctx));
+  const elapsedMs = {};
+  for (const row of newestBaseCertification(ctx.paths, ctx.project)?.layers ?? []) {
+    if (typeof row.elapsedMs === 'number') elapsedMs[row.name] = row.elapsedMs;
+  }
+  return {
+    worktree: base.worktree,
+    baseSha,
+    layers: base.layers.map((layer) => ({
+      name: layer.name,
+      argv: base.commands[layer.command] ?? [],
+      ground: layer.ground ?? [],
+      needs: layer.needs ?? [],
+      setup: layer.setup === true,
+    })),
+    suite: suiteLayer(base.layers, config, mode),
+    declared: declaredTouchedPaths(base),
+    elapsedMs: Object.keys(elapsedMs).length > 0 ? elapsedMs : null,
+    capMs: SEAT_LAYER_CAP_MS,
+  };
+}
+
+/**
+ * The paths the spec or the ticket declared. A ticket with no fenced block
+ * declares none, and the bound it opens with is then the setup layers alone;
+ * the seat's own first commands widen it.
+ */
+function declaredTouchedPaths(base) {
+  try {
+    return parseTouchedPaths(readFileSync(base.specRef, 'utf8'));
+  } catch {
+    return [];
+  }
 }
 
 async function verdictBase(ctx, mode) {
@@ -3526,6 +3928,11 @@ function findingFromEvent(e) {
     ...(e.lens && { lens: e.lens }),
     ...(e.severity && { severity: e.severity }),
     ...(e.file && { file: e.file }),
+    // The ground travels with the finding because the fast path asks it of
+    // every moved base, and every reading of a finding after cycle one is
+    // rebuilt here. A finding that lost its ground on the way back out of the
+    // ledger is a finding no merge can be compared against (ADR-0056).
+    ...(e.ground?.length > 0 && { ground: e.ground }),
     // The record word and the criterion travel with the finding, because the
     // ladder reads them: they select the seat that repairs a record, and they
     // are what the corrective brief and the residual ticket state (ADR-0007).

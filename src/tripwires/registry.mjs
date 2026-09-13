@@ -48,12 +48,16 @@ export const TRIPWIRE_METRICS = {
     defaultWindow: 10,
     defaultTriggers: ['fast-path-ship', 'merged'],
   },
-  // Adversary kill rate at freeze: kills over initial waves, summed across
-  // the last N freeze records. The band is a floor set from the baseline.
+  // Retired. The stage it read is gone, so no reading exists and the watcher
+  // evaluates nothing named here. The name stays because a run pins the
+  // project config at launch: a pinned blob written before the retirement
+  // still carries an entry on this metric, and config validation refuses a
+  // metric this table does not name.
   'kill-rate': {
     unit: 'freezes',
     defaultWindow: 5,
     defaultTriggers: ['freeze'],
+    retired: true,
   },
   // Confirmed findings for one review lens across the runs holding the last
   // N verdicts. A zero-yield lens over the window is a cut candidate.
@@ -300,13 +304,19 @@ export function withTripwireDefaults(entry) {
     ...entry,
     ...(metric.defaultWindow !== null && { window: entry.window ?? metric.defaultWindow }),
     triggerEvents: entry.triggerEvents ?? metric.defaultTriggers,
+    ...(metric.retired === true && { retired: true }),
   };
+}
+
+/** Whether a registry entry names a metric no reading exists for any more. */
+export function isRetiredTripwire(entry) {
+  return TRIPWIRE_METRICS[entry?.metric]?.retired === true;
 }
 
 /**
  * The standing tripwires with design-given numbers, seedable at project
- * config seeding. Kill-rate and lens-yield bands are self-baselined — their
- * entries land by PR after the baseline proposal, so they are not here.
+ * config seeding. The lens-yield band is self-baselined — its entry lands by
+ * PR after the baseline proposal, so it is not here.
  */
 export function standingTripwires() {
   return [
