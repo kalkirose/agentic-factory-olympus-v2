@@ -10,7 +10,7 @@ import {
   renameSync,
   writeFileSync,
 } from 'node:fs';
-import { join, basename, isAbsolute } from 'node:path';
+import { join, basename, dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   openEscapesStore,
@@ -47,14 +47,16 @@ import {
   readBranchFiles,
 } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
-import { parseProjectConfig } from '../config/project.mjs';
+import { parseProjectConfig, reconcileMode } from '../config/project.mjs';
 import { diffPolicyViolations, laneDiffPolicy, parseTouchedBlock } from '../seats/diffpolicy.mjs';
 import { parseIntentCard } from '../lanes/card.mjs';
 import { credentialRefusal, probeCredentials } from '../lanes/probes.mjs';
 import {
   TICKETED_LANES,
   codeTicketRefusal,
+  mixedTicketRefusal,
   recordLaneRefusal,
+  sweptRecordsRefusal,
   ticketPathClass,
 } from '../lanes/records-stage.mjs';
 import { readInheritance, closeState } from '../lanes/resume.mjs';
@@ -624,7 +626,7 @@ export class Daemon {
       if (lane === 'story') await this.refuseUnreadableCard(project, entry, payload.card);
       if (TICKETED_LANES.includes(lane) && typeof payload.ticket === 'string') {
         await this.refuseForbiddenTicket(project, entry, payload.ticket);
-        await this.refuseWrongLaneTicket(project, entry, lane, payload.ticket);
+        await this.refuseWrongLaneTicket(project, entry, lane, payload.ticket, payload);
       }
       // The two files the door judges the project itself on, read together:
       // one clone lock, one fetch, two blobs. The launch reads no file twice.
@@ -668,6 +670,11 @@ export class Daemon {
           // the config read, the worktree, the stack. Measurement only, on the
           // one stamp that is already about the launch (ADR-0049).
           ...(ws.setup && { setup: ws.setup }),
+          // A run the owner launched from the drift set. The path says so, so
+          // nothing is asked of the console and nothing can be claimed that the
+          // home does not hold. It pairs the run with the ship whose judge
+          // wrote the ticket, which is the eval's question (ADR-0090).
+          ...(this.driftLaunch(payload.ticket) && { driftTicket: payload.ticket }),
           ...payload,
         });
       } catch (error) {
@@ -681,6 +688,16 @@ export class Daemon {
     } finally {
       this.provisioning.delete(runId);
     }
+  }
+
+  /**
+   * Whether a ticket path is one of the drift set: a file directly under the
+   * home's drift directory. The directory is the whole test, because the drift
+   * set is a place and not a flag (ADR-0090).
+   */
+  driftLaunch(ticket) {
+    if (typeof ticket !== 'string' || ticket.length === 0) return false;
+    return resolve(dirname(ticket)) === resolve(this.paths.driftTickets);
   }
 
   /**
@@ -888,14 +905,32 @@ export class Daemon {
    * holds no dev seat and no code verdict. A ticket with no block is accepted
    * on either, as a ticket with no block always was; the lane's own stage reads
    * the ticket again from the tree the run holds.
+   *
+   * Two more refusals stand where the project reads its records after the merge
+   * (ADR-0090). A records launch the frontier asked for is refused: every
+   * ticket that mode writes is drift the owner applies, and the sweep launching
+   * one would put the stage back as a run of its own. The same ticket from the
+   * console runs, and that run reconciles in full. And a repair ticket that
+   * names records beside code is refused: no reconcile writer runs in that
+   * mode, and the dev seat is denied the record paths, so a run of it would
+   * carry the records nowhere.
    */
-  async refuseWrongLaneTicket(project, entry, lane, ticket) {
+  async refuseWrongLaneTicket(project, entry, lane, ticket, payload = {}) {
     const text = await this.readTicketText(project, entry, ticket);
     const config = await this.readLaunchConfig(project, entry);
-    const { klass, code } = ticketPathClass(text, config?.repo?.recordPaths ?? []);
+    const { klass, code, records } = ticketPathClass(text, config?.repo?.recordPaths ?? []);
     if (lane === 'repair' && klass === 'records') throw new Error(recordLaneRefusal(ticket));
     if (lane === 'records' && (klass === 'mixed' || klass === 'code')) {
       throw new Error(codeTicketRefusal(ticket, code));
+    }
+    if (reconcileMode(config) !== 'advisory') return;
+    // The frontier names the run it answers for; the console names none. That
+    // field is what tells an owner launch from a swept one at this door.
+    if (lane === 'records' && typeof payload.reconcilesRunId === 'string') {
+      throw new Error(sweptRecordsRefusal(ticket));
+    }
+    if (lane === 'repair' && klass === 'mixed') {
+      throw new Error(mixedTicketRefusal(ticket, records));
     }
   }
 

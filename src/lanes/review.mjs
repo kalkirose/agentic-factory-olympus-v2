@@ -1,7 +1,7 @@
 // The judgment review machinery: the Fury round (the panel's lenses over the
 // seats that carry them, interface conditional on UI diffs, fully parallel),
 // the generalist review seat (the same lenses on one seat, diff-scoped —
-// repair cycles and the repair lane), the record review (one seat per record),
+// repair cycles and the repair lane), the record review (one seat over the set),
 // and the verifier. Confirm-to-block on a code round: a lane finding never
 // blocks alone; the verifier confirms or refutes each item against the code, and
 // only confirmed items enter the verdict.
@@ -310,17 +310,20 @@ export async function generalistReview(ctx, base, { cycle, diff, diffFiles, prio
 }
 
 /**
- * The record review: one seat per record file, all of them in parallel.
+ * The record review: one seat over every record the cycle holds.
  *
- * Review seats only read, so parallel is safe, and one record per seat is what
- * makes "read it whole" a real duty: the seat holds one document, the harness's
- * enumeration of its sentences as addresses, and the neighbourhood it may not
- * contradict. The record is one screen under the standard's word cap.
+ * One seat and not one per record. The seat reads the set whole, so it answers
+ * the `consistent` criterion across the records it is given rather than across
+ * a list it was told about, and one review of three records costs one dispatch
+ * instead of three. Each record is still a document the seat reads whole: the
+ * brief carries every record's own sentences as addresses and its own
+ * neighbourhood, and the record is one screen under the standard's word cap
+ * (ADR-0090).
  *
- * A seat that cannot deliver leaves its record unread for this cycle and parks
- * nothing. A reviewer's failure is about the reviewer, and the record it was
- * given is still a record: it rides the render as `unreviewed`, the next cycle
- * dispatches it, and the cap bounds the whole thing (ADR-0080).
+ * A seat that cannot deliver leaves every record of the cycle unread and parks
+ * nothing. A reviewer's failure is about the reviewer, and the records it was
+ * given are still records: they ride the render as `unreviewed`, the next cycle
+ * dispatches them, and the cap bounds the whole thing (ADR-0080).
  *
  * `units`, `neighbours` and `moved` are keyed by record path. The stage holds
  * them: it enumerated each record to judge the write, and it matched the units
@@ -346,40 +349,36 @@ export async function recordReviewRound(
   },
 ) {
   const list = records ?? [];
-  // The stamp this cycle's seats resume behind. A report the ledger holds for a
-  // seat's own label after it is this cycle's answer (ADR-0079).
+  if (list.length === 0) {
+    return settleFindings(ctx, base, { cycle, collected: [], priorConfirmed, verify: false, read: new Set(), moved });
+  }
+  // The stamp this cycle's seat resumes behind. A report the ledger holds for
+  // the seat's own label after it is this cycle's answer (ADR-0079).
   const since =
     runEvents(ctx).find((e) => e.event === 'reconcile-review-set' && e.cycle === cycle)?.seq ?? 0;
-  const outcomes = await Promise.all(
-    list.map((record, i) =>
-      recordReviewSeat(ctx, base, {
-        record,
-        slot: i + 1,
-        cycle,
-        since,
-        units: unitsOf(base, units, record),
-        neighbours: neighboursOf(base, neighbours, record),
-        moved: byRecord(moved, record)?.moved ?? [],
-        spec,
-      }),
-    ),
-  );
-  const collected = [];
-  const unreviewed = [];
-  for (const outcome of outcomes) {
-    if (outcome.unreviewed) {
-      unreviewed.push(outcome.record);
-      continue;
-    }
-    collected.push(
-      ...outcome.report.findings.map((f) => ({
+  const outcome = await recordReviewSeat(ctx, base, {
+    records: list,
+    cycle,
+    since,
+    // One entry per record: the record, the addresses of its sentences, the
+    // neighbourhood it may not contradict, and what the last round moved in
+    // it. The brief states each of them under the record it belongs to.
+    held: list.map((record) => ({
+      record,
+      units: unitsOf(base, units, record),
+      neighbours: neighboursOf(base, neighbours, record),
+      moved: byRecord(moved, record)?.moved ?? [],
+    })),
+    spec,
+  });
+  const collected = outcome.unreviewed
+    ? []
+    : outcome.report.findings.map((f) => ({
         ...f,
         source: outcome.seat,
         lens: RECORD_LENS,
         record: true,
-      })),
-    );
-  }
+      }));
   const settled = await settleFindings(ctx, base, {
     cycle,
     collected,
@@ -388,56 +387,59 @@ export async function recordReviewRound(
     // confirmed every item it was ever given on this lane, and the guard it gave
     // costs less as the writer's own dispute (ADR-0080).
     verify: false,
-    read: new Set(outcomes.filter((o) => !o.unreviewed).map((o) => o.record)),
+    read: new Set(outcome.unreviewed ? [] : list),
     // Where the write of the round before this one renumbered a unit, from the
     // number the prior finding carries to the number this cycle's seat used.
     moved,
   });
-  return settled.fail ? settled : { ...settled, unreviewed };
+  return settled.fail ? settled : { ...settled, unreviewed: outcome.unreviewed ? list : [] };
 }
 
 /**
- * One record, one seat, one check loop. The slot keeps the seat's own budget.
+ * One cycle's records, one seat, one check loop.
+ *
+ * The seat carries the slot suffix every record seat carries, at slot one. The
+ * suffix is the seat identity's own shape: the budget, the cost line and the
+ * failure record are keyed on the whole name, and every reader of a record seat
+ * splits the name at the colon (ADR-0090).
  *
  * The seat resumes by report: a report the ledger holds for this seat's label
  * after this cycle's dispatch stamp is this cycle's answer, and the checks run
- * over it again rather than a fresh seat over the same record. A stop inside
- * the fan-out used to cost every seat of the cycle (ADR-0079).
+ * over it again rather than a fresh seat over the same records (ADR-0079).
  *
- * The stamp lands as the seat settles, for the same reason: a stamp that waited
- * for the whole fan-out is a stamp a stop takes with it. A seat that failed
- * stamps `record-unreviewed` and the round goes on.
+ * The stamps land as the seat settles, one per record either way. The cycle's
+ * derivation counts them against the set it dispatched, so a stop before the
+ * seat answered re-enters the review and a stop after it does not.
+ * @returns {Promise<{seat: string, records: string[], unreviewed?: boolean,
+ *   report?: object, cost?: number}>}
  */
-async function recordReviewSeat(
-  ctx,
-  base,
-  { record, slot, cycle, since = 0, units, neighbours, moved, spec },
-) {
-  const seat = `${REVIEW_SEAT}:${slot}`;
+async function recordReviewSeat(ctx, base, { records, cycle, since = 0, held, spec }) {
+  const seat = `${REVIEW_SEAT}:1`;
   // A seat this cycle already gave up on. Its budget is spent, and a fresh
-  // spawn on a resume would buy a second dispatch nobody asked for; the record
-  // stays open for the next cycle either way (ADR-0080).
+  // spawn on a resume would buy a second dispatch nobody asked for; the records
+  // stay open for the next cycle either way (ADR-0080).
   if (runEvents(ctx).some((e) => e.event === 'record-unreviewed' && e.seat === seat && e.cycle === cycle)) {
-    return { seat, record, unreviewed: true };
+    return { seat, records, unreviewed: true };
   }
   const outcome = await seatWithChecks(ctx, {
     seat,
-    label: `${REVIEW_SEAT}-${slot}-c${cycle}`,
+    label: `${REVIEW_SEAT}-1-c${cycle}`,
     resumeByReport: since,
     schema: recordReviewSchema(),
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
     styleFiles: base.styleFiles ?? [],
-    buildRole: (brief) => recordReviewRole(base, { record, units, neighbours, moved, spec }, brief),
-    checks: (report) => recordSeatDefects(base, record, report),
+    buildRole: (brief) => recordReviewRole(base, { held, spec }, brief),
+    checks: (report) => recordSeatDefects(base, records, report),
   });
   if (outcome.fail) {
-    stampUnreviewed(ctx, cycle, { seat, record, reason: reasonOf(ctx, seat, since) });
-    return { seat, record, unreviewed: true };
+    const reason = reasonOf(ctx, seat, since);
+    for (const record of records) stampUnreviewed(ctx, cycle, { seat, record, reason });
+    return { seat, records, unreviewed: true };
   }
-  stampReviewed(ctx, cycle, { seat, record, cost: outcome.cost });
-  return { seat, record, units, neighbours, report: outcome.report, cost: outcome.cost };
+  for (const record of records) stampReviewed(ctx, cycle, { seat, record, cost: outcome.cost });
+  return { seat, records, report: outcome.report, cost: outcome.cost };
 }
 
 /** Why one review dispatch ended, from the seat's own failure stamp. */
@@ -449,26 +451,51 @@ function reasonOf(ctx, seat, since) {
 }
 
 /**
- * What one record review report is refused for: the two refusals a record
+ * What one record review report is refused for: the three refusals a record
  * finding carries with it, and nothing else.
  *
- * Both name a finding no writer can act on, and the seat that raised one
+ * Each names a finding no writer can act on, and the seat that raised one
  * corrects it in one short answer. Every other reading of the report is the
  * gate's or nobody's (ADR-0080).
  *
  * The findings are brought to the repository's own path form first, because a
- * seat writes the path it was reading.
+ * seat writes the path it was reading. A seat that reads several records has to
+ * say which one a finding is about: the default that filled the field held only
+ * while a seat read one record, and a finding on the wrong record reaches the
+ * writer that cannot answer it (ADR-0090).
  */
-function recordSeatDefects(base, record, report) {
+function recordSeatDefects(base, records, report) {
+  const read = Array.isArray(records) ? records : [records];
+  const only = read.length === 1 ? read[0] : null;
   const findings = (report.findings ?? []).map((f) => ({
     ...f,
-    file: repoRelative(f.file, base.worktree) ?? record,
+    file: repoRelative(f.file, base.worktree) ?? only ?? f.file,
     ...(f.file2 && { file2: repoRelative(f.file2, base.worktree) ?? f.file2 }),
   }));
   return [
+    ...recordNamed(read, findings),
     ...groundDefects(base, findings),
     ...findingRefusals(base, findings).map((r) => r.defect),
   ];
+}
+
+/**
+ * The refusal for a finding that does not name one of the records this seat was
+ * given. The round keys its findings by record: the render lists the record a
+ * finding is open on, the split reads it, and the corrective round dispatches
+ * the writer on it. A finding about something else answers none of those.
+ */
+function recordNamed(records, findings) {
+  const held = new Set(records);
+  const defects = [];
+  for (const [index, finding] of findings.entries()) {
+    if (typeof finding.file === 'string' && held.has(finding.file)) continue;
+    defects.push(
+      `finding ${findingLabel(finding, index)} names no record of this review in "file". Put the ` +
+        `repo-relative path of the one record it is about there: ${records.join(', ')}.`,
+    );
+  }
+  return defects;
 }
 
 /**
@@ -582,7 +609,7 @@ function findingLabel(finding, index) {
 /**
  * The findings a review seat may not raise, with the reason it reads.
  *
- * A `consistent` finding says two records decide one unbuilt part two ways, so
+ * A `consistent` finding says two records decide one point two ways, so
  * a `consistent` finding that names one record states half a claim and the
  * verifier has nothing to read. A closed record is out of every seat's scope
  * under the supersede lifecycle: it states what was known then, and a finding
@@ -640,15 +667,15 @@ function lifecycleOf(base) {
  * One record a seat read, with what the dispatch cost.
  *
  * The cycle derivation counts these against the set the cycle dispatched, so a
- * stop inside the fan-out resumes at the seats that had not answered. The cost
- * is the dispatch's own, because the ledger's per-seat total cannot say which
- * slot spent it.
+ * ledger that holds one per record is a cycle whose review is over. The cost
+ * rides every record of the dispatch, because one seat spent it over the whole
+ * set and no split of it would be a fact.
  *
- * One stamp per seat per cycle. A restart that re-runs the round finds its own
- * stamp and leaves it, as the finding stamp does.
+ * One stamp per record per cycle. A restart that re-runs the round finds its
+ * own stamps and leaves them, as the finding stamp does.
  */
 function stampReviewed(ctx, cycle, { seat, record, cost }) {
-  if (reviewStamped(ctx, seat, cycle)) return;
+  if (reviewStamped(ctx, record, cycle)) return;
   ctx.store.append('record-reviewed', {
     actor: ACTOR,
     seat,
@@ -663,7 +690,7 @@ function stampReviewed(ctx, cycle, { seat, record, cost }) {
  * `unreviewed` and the next cycle dispatches it again (ADR-0080).
  */
 function stampUnreviewed(ctx, cycle, { seat, record, reason }) {
-  if (reviewStamped(ctx, seat, cycle)) return;
+  if (reviewStamped(ctx, record, cycle)) return;
   ctx.store.append('record-unreviewed', {
     actor: ACTOR,
     seat,
@@ -674,12 +701,16 @@ function stampUnreviewed(ctx, cycle, { seat, record, reason }) {
   });
 }
 
-/** Whether this seat already answered for this cycle, either way. */
-function reviewStamped(ctx, seat, cycle) {
+/**
+ * Whether this record already has an answer for this cycle, either way. The
+ * record and not the seat: one seat answers for the whole set, so a guard on
+ * the seat name would stamp the first record and drop the rest.
+ */
+function reviewStamped(ctx, record, cycle) {
   return runEvents(ctx).some(
     (e) =>
       (e.event === 'record-reviewed' || e.event === 'record-unreviewed') &&
-      e.seat === seat &&
+      e.record === record &&
       e.cycle === cycle,
   );
 }
@@ -1184,7 +1215,9 @@ function furyRole(lenses, base, diff, files = [], supersedes = [], brief = null)
     'Put the repo-relative path of the one file a finding is about in "file"; leave it out for a finding about no single file.',
     ...FINDING_GROUND_DUTY,
     ...(lenses.includes('spec') ? supersedeDutyLines(base, supersedes) : []),
-    ...governingRecordLines(base.worktree, files, base.recordPaths ?? []),
+    ...governingRecordLines(base.worktree, files, base.recordPaths ?? [], {
+      reconcile: base.reconcile,
+    }),
     ...diffLines(diff),
     ...briefLines(brief),
   ].join('\n');
@@ -1201,7 +1234,9 @@ function generalistRole(base, diff, files = [], supersedes = [], brief = null) {
     'Put the repo-relative path of the one file a finding is about in "file"; leave it out for a finding about no single file.',
     ...FINDING_GROUND_DUTY,
     ...(base.lenses.includes('spec') ? supersedeDutyLines(base, supersedes) : []),
-    ...governingRecordLines(base.worktree, files, base.recordPaths ?? []),
+    ...governingRecordLines(base.worktree, files, base.recordPaths ?? [], {
+      reconcile: base.reconcile,
+    }),
     ...diffLines(diff),
     ...briefLines(brief),
   ].join('\n');
@@ -1216,40 +1251,59 @@ function generalistRole(base, diff, files = [], supersedes = [], brief = null) {
 const JUDGE_SCOPE = 'Judge the diff only. Do not fix anything; do not widen into unchanged code.';
 
 /**
- * The whole brief of one record review seat: one record, the addresses of its
- * sentences, the criteria, the neighbourhood, and no diff.
+ * The whole brief of one record review seat: the records of the cycle, the
+ * addresses of each one's sentences, the criteria, each one's neighbourhood,
+ * and no diff.
  *
  * No diff, on the evidence of a live reconciliation: a seat whose brief ends
  * with the diff starts at the hunks and samples the rest of the document. The
- * record is the work here, and the standard's word cap makes it one screen.
+ * records are the work here, and the standard's word cap makes each one a
+ * screen.
  *
  * The unit list is an address book and no longer a duty. A seat that filed a
  * kind, a verdict and a path for every sentence answered a reading nobody could
  * check, and the check behind it refused true sentences (ADR-0080). What the
  * list buys is a finding that names one sentence.
  *
- * The moved units are named because they are the sentences this round wrote,
- * and a seat that knows which sentence moved reads the rest as well.
+ * The moved units are named because they are the sentences the last round
+ * wrote, and a seat that knows which sentence moved reads the rest as well.
  */
-function recordReviewRole(base, { record, units, neighbours, moved, spec }, brief) {
+function recordReviewRole(base, { held, spec }, brief) {
+  const records = held.map((entry) => entry.record);
+  const near = [...new Set(held.flatMap((entry) => entry.neighbours?.neighbours ?? []))];
+  const one = records.length === 1;
   return [
-    `Review one decision record: ${record}`,
-    'Read it whole, from the working tree. Read the code it describes before you write a finding.',
-    'You are given no diff. The record is the work, and every sentence of it is yours.',
+    ...(one
+      ? [
+          `Review one decision record: ${records[0]}`,
+          'Read it whole, from the working tree. Read the code it describes before you write a',
+          'finding.',
+          'You are given no diff. The record is the work, and every sentence of it is yours.',
+        ]
+      : [
+          `Review these ${records.length} decision records:`,
+          ...records.map((record) => `- ${record}`),
+          'Read each one whole, from the working tree. Read the code it describes before you write',
+          'a finding.',
+          'You are given no diff. The records are the work, and every sentence of them is yours.',
+        ]),
     ...recordSpecLines(base, spec),
     '',
-    'The criteria this record is held to:',
+    one ? 'The criteria this record is held to:' : 'The criteria every one of these records is held to:',
     ...recordCriteriaLines(),
-    ...unitListLines(record, units),
-    ...movedLines(moved, units),
-    ...neighbourhoodLines(neighbours),
-    // The neighbourhood above is this seat's first list, so the rest of the tree
-    // is what it has not been given: the record it judges and its neighbours are
-    // named once (ADR-0089).
+    ...held.flatMap((entry) => [
+      ...unitListLines(entry.record, entry.units),
+      ...movedLines(entry.moved, entry.units),
+      ...neighbourhoodLines(entry.record, entry.neighbours, one),
+    ]),
+    // The neighbourhoods above are this seat's first lists, so the rest of the
+    // tree is what it has not been given: the records it judges and their
+    // neighbours are named once (ADR-0089).
     ...governingRecordLines(base.worktree, [], base.recordPaths ?? [], {
-      exclude: [record, ...(neighbours?.neighbours ?? [])],
+      exclude: [...records, ...near],
+      reconcile: base.reconcile,
     }),
-    ...recordFindingLines(record),
+    ...recordFindingLines(records),
     ...CONSTITUTION_DUTY,
     ...briefLines(brief),
   ].join('\n');
@@ -1292,33 +1346,42 @@ function movedLines(moved, units) {
 }
 
 /**
- * The neighbourhood, by path, and what the cap left out.
+ * One record's neighbourhood, by path, and what the cap left out.
  *
  * The `consistent` criterion is answerable only against a list, and the list is
  * capped: a seat that reads twelve records and is told eight more exist knows
- * what its answer covers (ADR-0073).
+ * what its answer covers (ADR-0073). The record is named on the heading,
+ * because a seat that reads several holds several of these lists.
  */
-function neighbourhoodLines(neighbours) {
+function neighbourhoodLines(record, neighbours, one = false) {
   const list = neighbours.neighbours ?? [];
   if (list.length === 0) {
-    return ['', 'Neighbourhood: no active record cites this record, and it cites none.'];
+    return [
+      '',
+      one
+        ? 'Neighbourhood: no active record cites this record, and it cites none.'
+        : `Neighbourhood: no active record cites ${record}, and it cites none.`,
+    ];
   }
   return [
     '',
-    'The neighbourhood. Read each one whole. An open part of this record may not contradict an',
-    'open part of any of them:',
+    one
+      ? 'The neighbourhood. Read each one whole. The decision in this record may not'
+      : `The neighbourhood of ${record}. Read each one whole. The decision in it may not`,
+    'contradict the decision in any of them:',
     ...list.map((path) => `- ${path}`),
     ...(neighbours.dropped > 0
       ? [
-          `${neighbours.dropped} more active records cite this one or are cited by it. The`,
+          `${neighbours.dropped} more active records cite ${one ? 'this one' : record} or are ` +
+            'cited by it. The',
           `neighbourhood is capped at ${NEIGHBOUR_CAP} by rank, and those are outside the cap.`,
         ]
       : []),
   ];
 }
 
-/** What a finding on this record carries, and what it may not be about. */
-function recordFindingLines(record) {
+/** What a finding on these records carries, and what it may not be about. */
+function recordFindingLines(records) {
   return [
     '',
     'Every finding carries:',
@@ -1326,12 +1389,15 @@ function recordFindingLines(record) {
     '- "criterion": the one criterion above it fails.',
     '- "severity": "HIGH", "MED" or "LOW". HIGH means the record and the tree disagree on what the',
     '  product does, and a confirmed HIGH blocks. MED and LOW are remarks: recorded, handed to the',
-    '  writer when this record is written for a HIGH, and never a round on their own. Grade what',
+    '  writer when that record is written for a HIGH, and never a round on their own. Grade what',
     '  the finding is worth.',
-    `- "file": ${record}. "unit", "head" and "line": the unit it is about, as the list above`,
-    '  states them.',
+    `- "file": the one record it is about, from this list: ${records.join(', ')}. A finding that`,
+    '  names anything else is refused. "unit", "head" and "line": the unit it is about, as that',
+    "  record's list above states them.",
     '- "summary": what is wrong. "evidence": the file and line of the tree that answers it.',
-    `- "ground": ${record}, and every file of the tree your evidence reads.`,
+    records.length === 1
+      ? `- "ground": ${records[0]}, and every file of the tree your evidence reads.`
+      : '- "ground": the record it is about, and every file of the tree your evidence reads.',
     '- On "consistent" alone: "file2", "unit2" and "head2", the unit of the other record this one',
     '  contradicts. A "consistent" finding that names one record is refused.',
     ...FINDING_GROUND_DUTY,

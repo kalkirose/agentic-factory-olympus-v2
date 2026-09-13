@@ -246,9 +246,16 @@ test('the brief states the record stage as the harness now stamps it', async (t)
   // The fallback shapes: every cause counts, and the discard is gone.
   assert.match(prompt, /`reconciliation-written` with `ok: false` and a `cause`/);
   assert.ok(!prompt.includes('record-layer-red'));
-  // Eight metrics, with the two record-stage bands named.
-  assert.match(prompt, /Eight tripwire metrics read the same ledgers/);
-  assert.ok(!prompt.includes('Six tripwire metrics'));
+  // The two modes the stage runs in, and the words the judge owes on
+  // (ADR-0090).
+  assert.match(prompt, /by the project's `gates.reconcile`/);
+  assert.ok(prompt.includes('round. In `advisory` it runs the record layers over the born set, stamps'), prompt);
+  assert.ok(prompt.includes('`reconciliation-judged` with `advisory: true`'), prompt);
+  assert.match(prompt, /a drift ticket the owner launches/);
+  assert.match(prompt, /carries `causes`, one word per record/);
+  // Nine metrics, with the record-stage bands named.
+  assert.match(prompt, /Nine tripwire metrics read the same ledgers/);
+  assert.ok(!prompt.includes('Eight tripwire metrics'));
   for (const metric of [
     'parks-window',
     'gate-rounds-window',
@@ -258,12 +265,13 @@ test('the brief states the record stage as the harness now stamps it', async (t)
     'reconcile-fallbacks-window',
     'record-cycles',
     'record-write-time',
+    'record-owed-window',
   ]) {
     assert.ok(prompt.includes('`' + metric + '`'), metric);
   }
   // The measures the center derives, by name, so the eval reads them
   // rather than re-deriving them.
-  assert.match(prompt, /The command center derives twelve measures/);
+  assert.match(prompt, /The command center derives fourteen measures/);
   for (const measure of [
     'record cycles',
     'the cost of a shipped record',
@@ -275,6 +283,8 @@ test('the brief states the record stage as the harness now stamps it', async (t)
     'recheck yield',
     'record-diff gate time',
     'write wall clock',
+    'the record seats per ship',
+    'the drift held',
     'tree series',
   ]) {
     assert.ok(prompt.includes(measure), measure);

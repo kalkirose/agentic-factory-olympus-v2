@@ -11,6 +11,7 @@ import { Daemon } from '../src/daemon/daemon.mjs';
 import {
   scaffoldHome,
   archivedRunLedgerPath,
+  driftTicketPath,
   repairTicketPath,
   reconcileTicketPath,
   runLedgerPath,
@@ -467,7 +468,7 @@ const BASE_SEATS = {
     report: { updatedCards: ['stories/alpha.md'], invalidated: [], summary: 'swept' },
   }),
   'reconcile-judge': () => ({
-    report: { owed: false, records: [], reason: 'no decision-record tree' },
+    report: { owed: false, records: [], causes: [], reason: 'no decision-record tree' },
   }),
   learning: () => ({ report: { artifacts: ['/w/lessons/alpha-1.md'], summary: 'a lesson' } }),
 };
@@ -547,7 +548,7 @@ function shipFixture(
   };
   // The launch door asks the same forge the ship step asks: a credential with a
   // declared CI surface is proven before a slot is taken (ADR-0068).
-  const daemon = new Daemon(join(root, 'home'), { lanes, forgeFor: () => forge, waitSleep: NO_WAIT });
+  let daemon = new Daemon(join(root, 'home'), { lanes, forgeFor: () => forge, waitSleep: NO_WAIT });
   const fixture = seatFixture({ ...BASE_SEATS, ...seats });
   t.after(async () => {
     await daemon.stop();
@@ -557,10 +558,19 @@ function shipFixture(
     root,
     origin,
     paths,
-    daemon,
+    get daemon() {
+      return daemon;
+    },
     forge,
     enqueued,
     calls: fixture.calls,
+    /** A stop, and a new daemon over the same ledgers: the restart recipe. */
+    async restart() {
+      await daemon.stop();
+      daemon = new Daemon(join(root, 'home'), { lanes, forgeFor: () => forge, waitSleep: NO_WAIT });
+      await daemon.start();
+      daemon.engine.seatDefaults = () => ({ commandFor: fixture.commandFor });
+    },
     async launch(payload = {}) {
       await daemon.start();
       daemon.engine.seatDefaults = () => ({ commandFor: fixture.commandFor });
@@ -753,7 +763,8 @@ const judgeOwed = () => ({
   report: {
     owed: true,
     records: [ADR_FILE],
-    reason: 'the diff implements the doubling decision',
+    causes: ['contradicts'],
+    reason: 'the diff contradicts the doubling decision',
   },
 });
 
@@ -821,6 +832,147 @@ function reconcileSeats(write = writeClean, review = reviewClean) {
 function reconcileFixture(t, { seats, config = {} } = {}) {
   return shipFixture(t, { files: { [ADR_FILE]: ADR_TEXT }, seats, config });
 }
+
+// -- the judge after the merge (ADR-0090) ------------------------------------
+//
+// Where `gates.reconcile` is `advisory` the stage stands out of the ship path
+// and the judge reads the merge commit in the close-out. What it owes is a
+// drift ticket the owner launches, and the sweep launches none of them.
+
+const ADVISORY_GATES = {
+  gates: {
+    tier1: [{ name: 'unit', command: 'suite' }],
+    reconcile: 'advisory',
+  },
+};
+
+/** The judge that reads the merge: owed on the record, with its ground. */
+const driftOwed = () => ({
+  report: {
+    owed: true,
+    records: [ADR_FILE],
+    causes: ['contradicts'],
+    reason: 'the merged change moves past what the record decides',
+  },
+});
+
+test('an advisory ship spends no record seat before the merge, and judges after it', async (t) => {
+  const fx = shipFixture(t, {
+    files: { [ADR_FILE]: ADR_TEXT },
+    config: ADVISORY_GATES,
+    seats: { 'reconcile-judge': driftOwed },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+
+  // The stage handed the run on and spawned nothing.
+  const skipped = events.find((e) => e.event === 'reconcile-skipped');
+  assert.equal(skipped.mode, 'advisory');
+  assert.ok(!events.some((e) => e.event === 'reconcile-rendered'));
+  assert.ok(!fx.calls.some((c) => c.seat === 'reconcile-write'));
+  // One judge seat, and it ran after the merge: its stamp stands past the
+  // merged stamp and it read the merge commit against its first parent.
+  const judges = fx.calls.filter((c) => c.seat === 'reconcile-judge');
+  assert.equal(judges.length, 1);
+  const merged = events.find((e) => e.event === 'merged');
+  assert.ok(judges[0].prompt.includes(`git diff ${merged.mergeSha}^1 ${merged.mergeSha}`), judges[0].prompt);
+  const judged = events.filter((e) => e.event === 'reconciliation-judged');
+  assert.equal(judged[0].advisory, true);
+  assert.ok(judged[0].seq > merged.seq);
+  assert.deepEqual(judged[0].causes, ['contradicts']);
+
+  // The ticket is drift, in the drift set, and the ticketed stamp carries the
+  // word too: a project that flips back to `full` launches none of them.
+  const ticketed = judged.at(-1);
+  assert.equal(ticketed.ticket, driftTicketPath(fx.paths, runId));
+  assert.equal(ticketed.advisory, true);
+  const ticket = readFileSync(ticketed.ticket, "utf8");
+  assert.ok(ticket.includes(`- ${ADR_FILE} (contradicts)`), ticket);
+  assert.ok(ticket.includes(merged.mergeSha), ticket);
+  // The rules of the ticket ask for a decision that stands, and for no status.
+  assert.ok(ticket.includes("State no implementation status and no divergence"), ticket);
+  assert.ok(!ticket.includes("not implement"), ticket);
+  assert.ok(!existsSync(reconcileTicketPath(fx.paths, runId)));
+  // The sweep launches nothing from it, armed or not.
+  assert.deepEqual(owedReconciliations(fx.paths, 'proj'), []);
+});
+
+test('an advisory ship whose judge owes nothing writes no ticket', async (t) => {
+  const fx = shipFixture(t, {
+    files: { [ADR_FILE]: ADR_TEXT },
+    config: ADVISORY_GATES,
+    seats: {
+      'reconcile-judge': () => ({
+        report: { owed: false, records: [], causes: [], reason: 'the merge contradicts none' },
+      }),
+    },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const judged = events.filter((e) => e.event === 'reconciliation-judged');
+  assert.equal(judged.length, 1);
+  assert.equal(judged[0].owed, false);
+  assert.equal(judged[0].advisory, true);
+  assert.ok(!existsSync(driftTicketPath(fx.paths, runId)));
+});
+
+test('a judge after the merge that cannot answer stamps the cause and the run closes', async (t) => {
+  const fx = shipFixture(t, {
+    files: { [ADR_FILE]: ADR_TEXT },
+    config: ADVISORY_GATES,
+    seats: { 'reconcile-judge': () => ({ exitCode: 3 }) },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const judged = events.find((e) => e.event === 'reconciliation-judged');
+  assert.equal(judged.ok, false);
+  assert.equal(judged.advisory, true);
+  assert.equal(typeof judged.cause, 'string');
+  // A record blocks no run, and one the harness could not judge blocks none
+  // either: no park, and no ticket.
+  assert.deepEqual(events.filter((e) => e.event === 'park'), []);
+  assert.ok(!existsSync(driftTicketPath(fx.paths, runId)));
+});
+
+test('a restart inside an advisory close-out spawns no second judge', async (t) => {
+  const fx = shipFixture(t, {
+    files: { [ADR_FILE]: ADR_TEXT },
+    config: ADVISORY_GATES,
+    seats: { 'reconcile-judge': driftOwed },
+  });
+  fx.forge.state.autoChecks = () => [running()];
+  const runId = await fx.launch();
+  const opened = await waitEvent(fx.paths, runId, (e) => e.event === 'pr-opened', 'pr-opened');
+  fx.forge.setChecks(opened.sha, [green()]);
+  await waitEvent(
+    fx.paths,
+    runId,
+    (e) => e.event === 'reconciliation-judged' && e.advisory === true,
+    'the judge after the merge',
+  );
+  await fx.restart();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The stamp is the guard: the judge is derived from the ledger and never
+  // remembered (ADR-0090).
+  assert.equal(
+    events.filter((e) => e.event === 'reconciliation-judged' && e.advisory === true && e.ticket === undefined).length,
+    1,
+  );
+  assert.equal(fx.calls.filter((c) => c.seat === 'reconcile-judge').length, 1);
+});
 
 // The close-out's ticket and the branch ticket carry the remarks under one
 // heading. A record that ships with a remark names it where the next ticket is

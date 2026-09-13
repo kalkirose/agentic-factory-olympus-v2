@@ -4,7 +4,7 @@
 // frontier.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, repairTicketPath, reconcileTicketPath } from '../src/daemon/home.mjs';
@@ -122,6 +122,30 @@ test('the owed set is judged owed, shipped, unlaunched, and of this project', (t
   );
 });
 
+// Two stamps stand out of the owed set, and both say the same thing: this
+// ticket waits for a person (ADR-0090).
+test('the owed set holds no drift: an advisory stamp, and a ticket that moved', (t) => {
+  const dir = tempDir();
+  t.after(() => removeDir(dir));
+  const paths = scaffoldHome(dir);
+  seedStoryRun(paths, { runId: 'r1', judged: owedJudgment(paths, 'r1') });
+  // The judge that read the merge. Its ticket is drift the owner applies, so
+  // the sweep launches none of it, whatever word the project holds today.
+  seedStoryRun(paths, {
+    runId: 'r2',
+    judged: { ...owedJudgment(paths, 'r2'), advisory: true },
+  });
+  // A ticket the owner moved into the drift set by hand. The stamped path has
+  // nothing at it, and reading the file is what makes the move the whole of
+  // the action.
+  seedStoryRun(paths, { runId: 'r3', judged: owedJudgment(paths, 'r3') });
+  rmSync(reconcileTicketPath(paths, 'r3'));
+  assert.deepEqual(
+    owedReconciliations(paths, 'alpha').map((o) => o.runId),
+    ['r1'],
+  );
+});
+
 test('the sweep launches repairs, then reconciliations, then the story frontier', async (t) => {
   const root = tempDir();
   const launched = [];
@@ -234,4 +258,54 @@ test('a lane set without the records lane skips the pass; one with it runs the p
   await waitFor(() => withLane.launched.length === 1, { ...WAIT, label: 'the reconciliation' });
   assert.deepEqual(withLane.launched, ['records:r1']);
   assert.deepEqual(owedReconciliations(withLane.paths, 'alpha'), []);
+});
+
+// The sweep launches nothing from a project that reads its records after the
+// merge. Every ticket that mode writes is drift the owner applies, and a sweep
+// that launched one would put the stage back as a run of its own (ADR-0090).
+test('the reconciliation pass stands down where the judge runs after the merge', async (t) => {
+  const root = tempDir();
+  const origin = initOriginRepo(join(root, 'origin'), {
+    'compose.harness.yml': 'services: {}\n',
+    [CONFIG_PATH]: projectConfigJson({ gates: { tier1: [], reconcile: 'advisory' } }),
+  });
+  const paths = scaffoldHome(join(root, 'home'));
+  writeFileSync(
+    paths.instanceConfig,
+    JSON.stringify({ version: 1, projects: { alpha: { repoUrl: origin, slotCap: 1 } } }) + '\n',
+  );
+  const launched = [];
+  const stub = {
+    stages: ['work'],
+    handlers: {
+      work: async (ctx) => {
+        launched.push(`${ctx.lane}:${ctx.payload.reconcilesRunId}`);
+        return { close: { state: 'shipped' } };
+      },
+    },
+  };
+  const daemon = new Daemon(join(root, 'home'), {
+    waitSleep: NO_WAIT,
+    lanes: { story: stub, repair: stub, records: stub },
+    composeRunner: fakeComposeRunner(),
+  });
+  t.after(async () => {
+    await daemon.stop();
+    removeDir(root);
+  });
+  await daemon.start();
+  seedStoryRun(paths, { runId: 'r1', judged: owedJudgment(paths, 'r1') });
+  daemon.frontier.setArmed('alpha', true, 'human');
+  assert.equal(await daemon.frontier.reconciliationPass('alpha'), 0);
+  assert.deepEqual(launched, []);
+  // The ticket stays where it is, and nothing is stamped rejected: the pass
+  // decided, and it decided on the word.
+  assert.deepEqual(
+    owedReconciliations(paths, 'alpha').map((o) => o.runId),
+    ['r1'],
+  );
+  assert.ok(
+    !readEvents(paths.instanceLedger).some((e) => e.event === 'launch-rejected'),
+    'the pass stamped a rejection',
+  );
 });

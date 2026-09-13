@@ -19,6 +19,7 @@
 // the stamp itself when activity returns (or on pause: a paused factory is
 // idle by decision, not starved).
 import { readEvents } from '../ledger/ledger.mjs';
+import { reconcileMode } from '../config/project.mjs';
 import { storyRunsByKey } from '../telemetry/readers.mjs';
 import { openCardParks } from '../telemetry/queue.mjs';
 import { readGraphSource } from './source.mjs';
@@ -219,6 +220,13 @@ export class FrontierLauncher {
   async reconciliationPass(project) {
     const d = this.daemon;
     if (!d.engine.lanes.has(RECONCILIATION_LANE) || !this.isArmed(project)) return 0;
+    // A project that reads its records after the merge launches none of them
+    // from here. Every ticket that mode writes is drift the owner applies, and
+    // a sweep that launched one would take the stage the word removed and put
+    // it back as a run of its own (ADR-0090). The word is read from the default
+    // branch, as every launch decision is; a read that fails leaves the pass to
+    // the launch door, which refuses what this would have launched.
+    if (await this.readsAfterMerge(project)) return 0;
     const owed = owedReconciliations(d.paths, project);
     let waiting = 0;
     for (let i = 0; i < owed.length; i++) {
@@ -238,6 +246,26 @@ export class FrontierLauncher {
       }
     }
     return waiting;
+  }
+
+  /**
+   * Whether this project's record judge runs after the merge. It is the project
+   * config's own word, read from the default branch through the daemon's launch
+   * reader, so the sweep and the launch door read one file (ADR-0090).
+   *
+   * A read that fails answers no. The pass then launches, and the launch door
+   * refuses it with the reason, which is the same refusal stamped in the same
+   * ledger: nothing here decides quietly on a config it could not read.
+   */
+  async readsAfterMerge(project) {
+    const d = this.daemon;
+    const entry = d.config.projects[project];
+    if (!entry) return false;
+    try {
+      return reconcileMode(await d.readLaunchConfig(project, entry)) === 'advisory';
+    } catch {
+      return false;
+    }
   }
 
   /**

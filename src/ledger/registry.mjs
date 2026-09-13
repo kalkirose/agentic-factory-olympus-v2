@@ -101,6 +101,11 @@ export function assertProbeRefusal(refusal) {
 
 export const RUN_EVENTS = new Set([
   // run lifecycle
+  // The launch payload of one run. A records-lane launch that answers a shipped
+  // run's owed judgment carries `reconcilesRunId`; one launched from a drift
+  // ticket carries `driftTicket`, the path the ticket stands at. The two name
+  // the two ways record work reaches that lane, and the eval pairs a drift
+  // launch with the ship that wrote the ticket through the second (ADR-0090).
   'run-launched',
   // The project config this run judges against, replaced while the run is
   // open: the blob it now reads, the blob it read before, the operator and the
@@ -586,6 +591,16 @@ export const RUN_EVENTS = new Set([
   // birth seat is working: a decision the card and the spec stated is born, and
   // a decision that only the diff shows is late (ADR-0074). A run whose records
   // were all born stamps an empty `late`, which is the answer and not a gap.
+  //
+  // `causes` says why each owed record is owed, one word per record in the
+  // order `records` names them: `contradicts` where the diff moves past what an
+  // active record decides, `undecided` where the diff makes a decision a reader
+  // of the code cannot recover. `records` stays a list of paths, because six
+  // readers take it as strings; the causes ride beside it (ADR-0090).
+  //
+  // `advisory: true` marks the judge that ran after the merge, in the close-out,
+  // and the ticketed line beside it. The owed set skips both, so a project that
+  // reads its records after the merge auto-launches nothing from them.
   'reconciliation-judged',
   // What the reconciliation seat did with an owed judgment: the records it
   // rewrote, the records it left alone with the reason for each, and the sha
@@ -629,10 +644,10 @@ export const RUN_EVENTS = new Set([
   // The set one cycle reviewed: the `cycle`, the `records` in dispatch order,
   // the `skipped` the active filter dropped, and the `kept` this cycle did not
   // read again, each with the cycle whose review it stands on. It is the write
-  // set's rule on the review side: one seat per record, named by its index, and
-  // one `record-reviewed` or `record-unreviewed` stamp per seat per cycle. A
-  // cycle re-entered after the tree closed a record reviews the set it stamped
-  // (ADR-0078). A cycle after
+  // set's rule on the review side: one seat over the list, and one
+  // `record-reviewed` or `record-unreviewed` stamp per record per cycle
+  // (ADR-0090). A cycle re-entered after the tree closed a record reviews the
+  // set it stamped (ADR-0078). A cycle after
   // the first reads the records the last round changed and the records an open
   // finding names; a fresh seat over an unchanged green record raises findings
   // on unchanged sentences and spends the cap (ADR-0079).
@@ -697,6 +712,16 @@ export const RUN_EVENTS = new Set([
   // found nothing is the evidence that the rule is not too narrow, and the
   // yield reads every other word as work the recheck did.
   'reconcile-recheck',
+  // The stage handed the run on without judging it: the `mode` the project
+  // named and the `layers` the stage stood over, each with its status. Under
+  // `gates.reconcile: advisory` the judge runs after the merge instead, so the
+  // stage in front of the ship token spawns no seat and blocks nothing. The
+  // layers are the record layers over a born set, which is the one place the
+  // form of a born record is read before it merges (ADR-0090).
+  //
+  // It is the stage's resume boundary in that mode: a ledger that holds it has
+  // run the layers, and a restart inside the stage runs them once.
+  'reconcile-skipped',
   // The close-out learning artifact a project asks for in its config: `ok`
   // with the artifact paths the seat reported, or ok:false with the reason
   // (ADR-0031). Quiet either way — the story shipped, and nothing here can
@@ -1176,6 +1201,28 @@ export const RECONCILE_CAUSES = new Set([
 /** The cause, or a throw naming it. The only way one reaches a stamp. */
 export function assertReconcileCause(cause) {
   if (!RECONCILE_CAUSES.has(cause)) throw new Error(`unknown reconcile cause: ${cause}`);
+  return cause;
+}
+
+/**
+ * Why one record is owed a rewrite. Closed, and closed for the reason the
+ * fallback causes beside it are: the judge stamps one of these per owed record
+ * and a tripwire counts them, so a word one judge spells its own way is a count
+ * of nothing (ADR-0090).
+ *
+ * `contradicts` is a diff that moves past what an active record decides.
+ * `undecided` is a diff that makes a decision whose reason and rejected options
+ * a reader of the code cannot recover. A diff that builds what an active record
+ * already decides owes nothing, and takes neither word.
+ *
+ * The two are the whole criterion. A judge that owes on a third ground is a
+ * judge reading the criterion loosely, and the registry is where that stops.
+ */
+export const JUDGE_CAUSES = new Set(['contradicts', 'undecided']);
+
+/** The cause, or a throw naming it. The only way one reaches a judge stamp. */
+export function assertJudgeCause(cause) {
+  if (!JUDGE_CAUSES.has(cause)) throw new Error(`unknown judge cause: ${cause}`);
   return cause;
 }
 

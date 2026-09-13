@@ -3221,7 +3221,9 @@ const REPAIR_DEPENDENCY_LINE =
  * on.
  */
 function recordLines(base) {
-  return governingRecordLines(base.worktree, declaredTouchedPaths(base), base.recordPaths ?? []);
+  return governingRecordLines(base.worktree, declaredTouchedPaths(base), base.recordPaths ?? [], {
+    reconcile: base.reconcile,
+  });
 }
 
 /**

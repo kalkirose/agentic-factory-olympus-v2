@@ -71,11 +71,11 @@ with no gate and `recordLifecycle: supersede` gets no pairing check at all,
 which is right: the harness enforces no project rule it does not run.
 
 **Three criteria.** `RECORD_CRITERIA` in `src/lanes/lenses.mjs` holds `truth`,
-`consistent` and `form`. `truth` states that every present-tense claim is true
-against the tree, that a part not built is stated as not built, that a
-divergence is named in the record, and that every name the record cites means
-what the record says it means. `form` is a defect of the standard the gate
-cannot read, by rule number.
+`consistent` and `form`. `truth` states that every name the record cites means
+what the record says it means, that every present-tense claim it makes about the
+code is true against the tree, and that the record states no implementation
+status (ADR-0090). `form` is a defect of the standard the gate cannot read, by
+rule number.
 
 **A record does not cite the standard.** It cites the records it relies on. The
 line is a rule of the project's template and one line of every record brief, and
@@ -103,10 +103,11 @@ on every lane that reads a record. A second round asks a second writer the same
 question about a document one writer already answered. `gates.reconcileRounds`
 keeps its meaning for a project that names a number.
 
-**Nothing blocks a run on a record.** A write dispatch that fails stamps
-`record-written {failed: true, reason}` and the round goes on to the next
-record. A review seat that fails stamps `record-unreviewed` and its record rides
-the render under `unreviewed`, open for the next cycle. A red layer that names
+**Nothing blocks a run on a record.** A write round that fails stamps
+`record-written {failed: true, reason}` for every record it held, and the next
+round dispatches them by name. A review seat that fails stamps
+`record-unreviewed` for every record it held, and they ride the render under
+`unreviewed`, open for the next cycle. A red layer that names
 no active record dispatches nothing and stalls at once. A record conflict at a
 merge drops the run's own change to that file, which takes the default branch's
 version. A birth that spends its ladder on the story and repair lanes stamps
@@ -131,9 +132,9 @@ record after the request opened writes the body again and stamps
 stamps. A forge that refuses the edit blocks nothing: the stamp carries the
 reason, and the close names every record either way.
 
-**The resume reads one stamp.** `record-written` lands right after each commit
-and for each failed dispatch, and `writtenAlready` reads it and the round's
-commit subject and nothing else. A failed entry is stepped over with its entry
+**The resume reads one stamp.** `record-written` lands right after the round's
+commit, one per record, and `writtenAlready` reads those stamps and the commit
+body and nothing else (ADR-0090). A failed entry is stepped over with its entry
 copied, so a stop inside a round never re-dispatches a record the round already
 spent. `record-reviewed` and `record-unreviewed` are the review's boundary.
 
@@ -197,7 +198,6 @@ records request's merge waits on what it says.
 - Delete the review seat too and trust the gate. Twenty-two confirmed findings
   across two runs were sentences the tree contradicts, and no gate reads a
   sentence.
-- One review seat over a whole batch. One seat over four records sampled them.
 
 ## Fallback path
 
@@ -209,7 +209,7 @@ reversal cost is one flag and one park type.
 
 ## References
 
-- ADR-0007, ADR-0026, ADR-0038, ADR-0074, ADR-0075, ADR-0076
+- ADR-0007, ADR-0026, ADR-0038, ADR-0074, ADR-0075, ADR-0076, ADR-0090
 - Superseded by this record: ADR-0073, ADR-0077, ADR-0078, ADR-0079
 - `src/lanes/records.mjs`
 - `src/lanes/records-stage.mjs`

@@ -142,6 +142,7 @@ closures it cannot judge. The reversal cost is one function and one stamp.
 ## References
 
 - ADR-0026, ADR-0073, ADR-0074, ADR-0075, ADR-0077, ADR-0078
+- Superseded on a dispatch per record with its own budget by: ADR-0090
 - `src/lanes/records.mjs`
 - `src/lanes/records-stage.mjs`
 - `src/lanes/reconcile.mjs`

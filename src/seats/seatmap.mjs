@@ -82,12 +82,11 @@ export const SEATS = Object.freeze({
   eval: seat({ model: CERTIFICATION_MODEL, effort: CERTIFICATION_EFFORT, instanceScoped: true }),
 });
 
-// A stage that dispatches one seat per record runs the same seat several times,
-// and each dispatch owns its attempt budget, its cost line and its failure
-// record. So a dispatch carries a slot suffix, `<seat>:<n>` from 1, and that
-// whole name is the seat identity in the ledger. The map is keyed by the base
-// name, because model, effort and tool policy are the seat's and not the
-// slot's (ADR-0073).
+// A stage may dispatch several slots of one seat, and each dispatch owns its
+// attempt budget, its cost line and its failure record. So a dispatch carries a
+// slot suffix, `<seat>:<n>` from 1, and that whole name is the seat identity in
+// the ledger. The map is keyed by the base name, because model, effort and tool
+// policy are the seat's and not the slot's (ADR-0073).
 const SLOT = /^[1-9][0-9]*$/;
 
 /** The seat a name belongs to: everything before the slot suffix. */

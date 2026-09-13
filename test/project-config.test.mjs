@@ -4,9 +4,14 @@ import {
   DEFAULT_CONSTITUTION_PATH,
   DEFAULT_DIFF_EXCLUSIONS,
   DEFAULT_EXCERPT_CHARS,
+  DEFAULT_DRIFT_HELD,
+  DEFAULT_RECONCILE_MODE,
   DEFAULT_RECONCILE_ROUNDS,
   DEFAULT_RECORD_LIFECYCLE,
+  RECONCILE_MODES,
   RECORD_LIFECYCLES,
+  driftHeld,
+  reconcileMode,
   validateProjectConfig,
   withProjectDefaults,
   parseProjectConfig,
@@ -173,6 +178,52 @@ test('gates.reconcileRounds is an optional positive integer', () => {
     const bad = valid();
     bad.gates.reconcileRounds = value;
     assert.deepEqual(errorPaths(bad), ['gates.reconcileRounds'], String(value));
+  }
+});
+
+// Where the record judge runs. One config line moves the whole stage off the
+// ship path and one moves it back, and a word nobody validates would read as
+// the mode the project asked to leave (ADR-0090).
+test('gates.reconcile takes full or advisory, and refuses any other word naming both', () => {
+  assert.deepEqual([...RECONCILE_MODES], ['full', 'advisory']);
+  assert.equal(DEFAULT_RECONCILE_MODE, 'full');
+  // A project that names no word reads as `full`, and every reader asks here.
+  assert.equal(reconcileMode(valid()), 'full');
+  for (const word of RECONCILE_MODES) {
+    const config = valid();
+    config.gates.reconcile = word;
+    assert.deepEqual(validateProjectConfig(config), []);
+    assert.equal(reconcileMode(config), word);
+  }
+  const later = valid();
+  later.gates.reconcile = 'later';
+  const errors = validateProjectConfig(later);
+  assert.deepEqual(
+    errors.map((e) => e.path),
+    ['gates.reconcile'],
+  );
+  // The refusal names both words, so the fix is in the message.
+  assert.ok(errors[0].message.includes('full'), errors[0].message);
+  assert.ok(errors[0].message.includes('advisory'), errors[0].message);
+  // And a refused word never reads as the default.
+  assert.equal(reconcileMode(later), 'full');
+});
+
+// How many drift tickets may stand unlaunched. It is the one alarm the
+// advisory mode has, and a project may name it in either mode: the word flips
+// in one pull request, and a number that had to land with it would make the
+// flip two (ADR-0090).
+test('gates.driftHeld is an optional positive integer', () => {
+  assert.equal(DEFAULT_DRIFT_HELD, 10);
+  assert.equal(driftHeld(valid()), 10);
+  const declared = valid();
+  declared.gates.driftHeld = 3;
+  assert.deepEqual(validateProjectConfig(declared), []);
+  assert.equal(driftHeld(declared), 3);
+  for (const value of [0, -1, 2.5, '5']) {
+    const bad = valid();
+    bad.gates.driftHeld = value;
+    assert.deepEqual(errorPaths(bad), ['gates.driftHeld'], String(value));
   }
 });
 

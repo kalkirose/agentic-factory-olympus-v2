@@ -42,11 +42,11 @@ records and their neighbourhood. `pre-verdict-update` stamps both answers after
 the fast path decides. The update returns `{next: 'ship'}`, `{next: 'verdict'}`
 or `{next: 'reconcile', rerun: true}`. A record re-run spends the update cap.
 
-**The write.** One `reconcile-write:<n>` per record, in sequence, each with its
-own reset, commit and budget. `record-written` stamps each one right after its
-commit, and the resume reads that stamp and the commit subject and nothing else.
+**The write.** One `reconcile-write` seat over the owed set, with its own reset
+and its own commit. `record-written` stamps each record right after that commit,
+and the resume reads those stamps and the commit body and nothing else.
 `reconciliation-written` carries one entry per record: the seat, the cost, the
-attempts.
+attempts (ADR-0090).
 
 **The recheck.** After a repair round past a green render, a fresh judge reads
 the delta alone and says whether it implicates a record this run has not already
@@ -62,8 +62,9 @@ stamp (ADR-0080). `reconcile-stall` is loud.
 
 ## Consequences
 
-A record cycle costs one review seat per record and no verifier. The write is
-sequential, and `record-write-time` says when that stops paying.
+A record cycle costs one review seat and no verifier. One writer holds the whole
+set, and `record-write-time` says when the set is too wide for one context
+(ADR-0090).
 `reconcile-rendered.open` mixes finding ids and layer names, so a reader filters
 by the finding index.
 
@@ -96,6 +97,7 @@ config value.
 ## References
 
 - ADR-0007, ADR-0026, ADR-0033, ADR-0056, ADR-0074, ADR-0080
+- Superseded on one seat per record by: ADR-0090
 - `src/lanes/reconcile.mjs`
 - `src/lanes/ship.mjs`
 - `src/lanes/fastpath.mjs`

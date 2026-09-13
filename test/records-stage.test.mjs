@@ -925,6 +925,71 @@ test('a ticket that names code is refused on the records lane', async (t) => {
   assert.match(error.message, /repair lane/);
 });
 
+// -- the door under advisory (ADR-0090) --------------------------------------
+//
+// Where the project reads its records after the merge, the owner launches the
+// records lane and nothing else does, and a ticket that names records beside
+// code is split before it launches: no reconcile writer runs in that mode, and
+// the dev seat is denied the record paths.
+
+/** The project config of a project whose record judge runs after the merge. */
+const ADVISORY_CONFIG = {
+  gates: { tier1: [{ name: 'unit', command: 'suite' }], reconcile: 'advisory' },
+};
+
+test('a swept records launch is refused under advisory, and the console one runs', async (t) => {
+  const fx = laneFixture(t, {
+    config: ADVISORY_CONFIG,
+    seats: {
+      'record-author': () => ({ files: { [RECORD_PATH]: RECORD_TEXT }, report: bornReport() }),
+    },
+    files: { 'tickets/records.md': ticketText([RECORD_PATH]) },
+  });
+  // The frontier names the run it answers for. The console names none.
+  const error = await fx.refused({
+    lane: 'records',
+    ticket: 'tickets/records.md',
+    reconcilesRunId: 'proj-old-1',
+  });
+  assert.match(error.message, /gates.reconcile is advisory/);
+  assert.match(error.message, /the sweep launches none of them/);
+  assert.equal(fx.calls.length, 0);
+  // The same ticket from the console runs, and its stage reconciles in full.
+  const { runId } = await fx.launch({ lane: 'records', ticket: 'tickets/records.md' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.find((e) => e.event === 'records-committed').decided, true);
+});
+
+test('a mixed ticket is refused under advisory, with the word in the reason', async (t) => {
+  const fx = laneFixture(t, {
+    config: ADVISORY_CONFIG,
+    seats: {},
+    files: { 'tickets/mixed.md': ticketText([RECORD_PATH, 'src/base.mjs']) },
+  });
+  const error = await fx.refused({ lane: 'repair', ticket: 'tickets/mixed.md' });
+  assert.match(error.message, /gates.reconcile is advisory/);
+  assert.match(error.message, /Split it into a code ticket/);
+  assert.match(error.message, new RegExp(RECORD_PATH.replace(/\//g, String.raw`\/`)));
+  assert.equal(fx.calls.length, 0);
+  // The same ticket runs where the stage judges before the ship: the birth
+  // seat writes the records and the dev seat follows.
+  const full = laneFixture(t, {
+    seats: {
+      'record-author': () => ({ files: { [RECORD_PATH]: RECORD_TEXT }, report: bornReport() }),
+      dev: () => ({ files: { 'src/base.mjs': 'export const base = 2;\n' }, report: { summary: 'ok' } }),
+    },
+    files: { 'tickets/mixed.md': ticketText([RECORD_PATH, 'src/base.mjs']) },
+  });
+  const { runId } = await full.launch({ lane: 'repair', ticket: 'tickets/mixed.md' });
+  const events = await waitClosed(full.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.deepEqual(
+    full.calls.map((c) => c.seat),
+    ['record-author', 'dev'],
+  );
+});
+
 // -- the repair lane ---------------------------------------------------------
 
 test('a mixed ticket writes its records first, then runs the dev seat frozen', async (t) => {

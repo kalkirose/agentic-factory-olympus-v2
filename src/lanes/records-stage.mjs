@@ -23,7 +23,7 @@
 // commit, behind the same checks; the commit stamp is the end of the stage.
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { recordPathIncludes } from '../config/project.mjs';
+import { recordPathIncludes, reconcileMode } from '../config/project.mjs';
 import { carryPaths, changedFiles, commitAll, headSha, resetHard } from '../isolation/tree.mjs';
 import { parseTouchedPaths } from '../seats/diffpolicy.mjs';
 import { parseIntentCard } from './card.mjs';
@@ -81,6 +81,38 @@ export function codeTicketRefusal(ticket, paths) {
     `the ticket ${ticket} names paths outside the decision-record tree: ${paths.join(', ')}. ` +
     'The records lane holds no dev seat and no code verdict. Launch a ticket that names code ' +
     'on the repair lane.'
+  );
+}
+
+/**
+ * The refusal a swept records launch takes where the project reads its records
+ * after the merge. The owner launches this lane there, and nothing else does
+ * (ADR-0090).
+ */
+export function sweptRecordsRefusal(ticket) {
+  return (
+    `the ticket ${ticket} was launched by the frontier, and gates.reconcile is advisory. ` +
+    'In that mode every record ticket is drift the owner applies: the sweep launches none of ' +
+    'them. Launch this ticket from the console to apply it.'
+  );
+}
+
+/**
+ * The refusal a ticket that names records beside code takes where the project
+ * reads its records after the merge.
+ *
+ * It is a narrowing of the repair lane, and it is named as one. Under `full`
+ * such a ticket runs the birth seat and then the dev seat. In this mode no
+ * reconcile writer runs and the dev seat is denied the record paths, so the
+ * records would ride nowhere; the ticket is split before it launches
+ * (ADR-0090).
+ */
+export function mixedTicketRefusal(ticket, records) {
+  return (
+    `the ticket ${ticket} names decision records beside code: ${records.join(', ')}, and ` +
+    'gates.reconcile is advisory. No reconcile writer runs in that mode, and no seat that ' +
+    'writes code writes a record. Split it into a code ticket for the repair lane and a ' +
+    'record ticket for the records lane.'
   );
 }
 
@@ -247,10 +279,16 @@ export function recordsLane({ afterRecords, forgeFor = null }) {
 }
 
 /**
- * The records lane's admission gate. It asks the two questions the lane can be
- * refused on: the ticket this lane's stage writes from, and the credentials
+ * The records lane's admission gate. It asks the questions the lane can be
+ * refused on: the ticket this lane's stage writes from, who asked for the run
+ * where the project reads its records after the merge, and the credentials
  * every launch is admitted behind (ADR-0027). The credential read is the story
  * lane's own, so both lanes admit on one answer.
+ *
+ * The launch door asks the lane questions too, from the config on the default
+ * branch, before a slot exists. This reader asks them again from the config the
+ * run pinned and the tree the run holds, which is what the stage behind it
+ * works from (ADR-0067).
  */
 function recordsReadiness(forgeFor) {
   return async function readiness(ctx) {
@@ -272,6 +310,15 @@ function recordsReadiness(forgeFor) {
     const { klass, code } = ticketPathClass(readFileSync(ticket, 'utf8'), config.repo.recordPaths);
     if (klass === 'mixed' || klass === 'code') {
       return blocked(ctx, 'lane-mismatch', codeTicketRefusal(ticket, code), { files: code });
+    }
+    // The frontier names the run it answers for; the console names none. Where
+    // the project reads its records after the merge, only the owner launches
+    // this lane (ADR-0090).
+    if (
+      reconcileMode(config) === 'advisory' &&
+      typeof ctx.payload.reconcilesRunId === 'string'
+    ) {
+      return blocked(ctx, 'lane-mismatch', sweptRecordsRefusal(ticket));
     }
     const probed = await probeCredentials(ctx, config, {
       phase: 'launch',
@@ -562,7 +609,13 @@ function touchedPaths(text, worktree, recordPaths) {
   return recordFiles(worktree, recordPaths).filter((file) => text.includes(file));
 }
 
-/** The record fields of a lane base, filled from the project config. */
+/**
+ * The record fields of a lane base, filled from the project config.
+ *
+ * `reconcile` is where this project's record judge runs. Every base that builds
+ * a brief goes through here, so the sentence a brief closes its record block
+ * with says what is true of the run that reads it (ADR-0090).
+ */
 export function recordBase(base) {
   const repo = base.config?.repo ?? {};
   return {
@@ -570,6 +623,7 @@ export function recordBase(base) {
     recordPaths: base.recordPaths ?? repo.recordPaths ?? [],
     recordLifecycle: base.recordLifecycle ?? repo.recordLifecycle,
     styleFiles: base.styleFiles ?? repo.styleFiles ?? [],
+    reconcile: base.reconcile ?? reconcileMode(base.config),
   };
 }
 

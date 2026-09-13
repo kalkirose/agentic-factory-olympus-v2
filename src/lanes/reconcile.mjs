@@ -22,10 +22,22 @@
 // pushes and merges, with the standing findings and the unwritten and unreviewed
 // records named in the request body and on the close stamp (ADR-0080).
 // `reconcile-stall` is loud: nothing stops, and somebody reads why.
+//
+// Where the project's `gates.reconcile` says `advisory`, the stage runs the
+// record layers over a born set, stamps `reconcile-skipped` and hands the run
+// on. It spawns no judge, no writer and no reviewer, and it blocks nothing: the
+// judge runs after the merge in the close-out, and what it finds is a drift
+// ticket the owner launches (ADR-0090). The records lane runs `full` in either
+// mode, because its diff is the records and its birth is the judgment.
 import { join } from 'node:path';
 import { runReportPath } from '../daemon/home.mjs';
-import { RECORD_CAP, SEAT_FAILURE, assertReconcileCause } from '../ledger/registry.mjs';
-import { DEFAULT_RECONCILE_ROUNDS } from '../config/project.mjs';
+import {
+  RECORD_CAP,
+  SEAT_FAILURE,
+  assertJudgeCause,
+  assertReconcileCause,
+} from '../ledger/registry.mjs';
+import { DEFAULT_RECONCILE_ROUNDS, reconcileMode } from '../config/project.mjs';
 import { cloneDir, fetchClone } from '../isolation/clones.mjs';
 import { git } from '../isolation/git.mjs';
 import {
@@ -54,6 +66,7 @@ import { RECONCILE_STAGE, recordBase, recordsCommitted } from './records-stage.m
 import {
   activeOf,
   activeRecords,
+  birthNeighbours,
   governingRecordLines,
   matchUnits,
   readText,
@@ -97,18 +110,61 @@ export { RECONCILE_STAGE };
  */
 const NEXT_STAGE = 'update';
 
-const RECONCILE_JUDGE_SCHEMA = {
+/**
+ * The judge's report: whether the diff owes a record rewrite, the records it
+ * owes, and one cause per record.
+ *
+ * `causes` is a list beside `records` and not a field inside it. Six readers
+ * take `records` as a list of paths, so the paths stay a list of paths and the
+ * causes ride alongside, one word per record in the same order (ADR-0090).
+ *
+ * Three seats answer in it: the stage's judge, the recheck a repair round owes
+ * and the close-out judge that reads a merge. One question, one shape.
+ */
+export const RECONCILE_JUDGE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
     owed: { type: 'boolean' },
     records: { type: 'array', items: { type: 'string' } },
+    causes: { type: 'array', items: { type: 'string' } },
     reason: { type: 'string' },
   },
-  required: ['owed', 'records', 'reason'],
+  required: ['owed', 'records', 'causes', 'reason'],
 };
 
 const RECHECK_JUDGE_SCHEMA = RECONCILE_JUDGE_SCHEMA;
+
+/**
+ * What makes a record owed, stated once and read by every judge of the record
+ * work: the stage's own, the recheck behind a repair round, and the close-out
+ * judge that reads the merge under `advisory`.
+ *
+ * Owed is a contradiction or an undecided decision, and nothing else. A diff
+ * that builds what an active record already decides owes no rewrite: the record
+ * states the decision, and the decision did not change when the code landed. A
+ * judge that also owed on "implements" owed on every diff, because a record
+ * that named its unbuilt parts was made stale by the run that built them
+ * (ADR-0090).
+ *
+ * The cause rides every owed record, so a judge that has drifted back to owing
+ * on everything is readable: the words say which of the two grounds it used,
+ * and the `record-owed-window` metric counts the runs that owed at all.
+ */
+export const OWED_CRITERION = [
+  'owed=true for a record only where one of two things is true of the diff:',
+  '- contradicts: the diff moves past what an active record decides. The',
+  '  record says one thing and the code does another.',
+  '- undecided: the diff makes a decision whose reason and rejected options a',
+  '  reader of the code cannot recover. No active record holds that decision.',
+  'A diff that builds exactly what an active record decides owes nothing: the',
+  'decision is the record, and code landing changes no record. A record states',
+  'no implementation status, so "the record says this part is not built and the',
+  'diff built it" is not a ground and owes nothing.',
+  'List every owed record path in records. In causes, put one word per record,',
+  'in the same order: "contradicts" or "undecided". State the reason for the',
+  'whole judgment in one or two sentences.',
+];
 
 /**
  * The stage handler, for every lane that names the stage. It derives its step,
@@ -124,6 +180,10 @@ export function reconcileHandler({ next = NEXT_STAGE } = {}) {
   return async function reconcile(ctx) {
     const base = await reconcileBase(ctx);
     if (base.fail) return base.fail;
+    // The word first, from the run's pinned config blob, as every stage reads
+    // its config. Under `advisory` the stage judges nothing here and the run
+    // goes on; the close-out holds the judge (ADR-0090).
+    if (skipsJudgment(base)) return advisoryStep(ctx, base, next);
     for (;;) {
       if (ctx.stopped()) return null;
       const events = runEvents(ctx);
@@ -133,6 +193,75 @@ export function reconcileHandler({ next = NEXT_STAGE } = {}) {
       if (directive) return directive;
     }
   };
+}
+
+/**
+ * Whether this run's stage stands out of the ship path.
+ *
+ * The records lane never does, in either mode. Its diff is the records, its
+ * birth is the judgment, and a lane that skipped its own work would ship a
+ * record tree no review read (ADR-0090).
+ * @param {{reconcile?: string, mode?: string}} base the lane base
+ */
+export function skipsJudgment(base) {
+  return base?.reconcile === 'advisory' && base?.mode !== 'records';
+}
+
+/**
+ * The stage under `advisory`: the record layers over the born set, one stamp,
+ * and the run goes on.
+ *
+ * The layers run because this stage is the one place the project's form gate
+ * reads a born record before it merges. They run over the born set alone: a run
+ * in this mode rewrites no record, so there is nothing else of the record tree
+ * this run changed. A red layer rides the request body and the drift ticket and
+ * blocks nothing, which is what the word buys.
+ *
+ * The stamp is the resume boundary. A stop inside the layers leaves no stamp,
+ * and the re-entry runs the cycle the spectrum already holds results for.
+ */
+async function advisoryStep(ctx, base, next) {
+  const events = runEvents(ctx);
+  if (events.some((e) => e.event === 'reconcile-skipped')) return { next };
+  const born = recordsCommitted(events);
+  const paths = born?.decided === true ? (born.paths ?? []) : [];
+  let layers = [];
+  if (paths.length > 0) {
+    const spectrum = await runRecordLayers(ctx, base, {
+      cycle: nextCycle(events),
+      sha: await headSha(base.worktree),
+      changed: paths,
+    });
+    if (spectrum.error) {
+      return commandError(
+        ctx,
+        'gate-command',
+        `A Tier-1 record layer could not run: ${spectrum.error}\nRepair the command, then answer.`,
+      );
+    }
+    layers = (spectrum.results ?? []).map((r) => ({ layer: r.layer, status: r.status }));
+  }
+  const red = layers.filter((layer) => layer.status === 'red').map((layer) => layer.layer);
+  ctx.store.append('reconcile-skipped', {
+    actor: ACTOR,
+    mode: 'advisory',
+    layers,
+    ...(red.length > 0 && { gist: gist(`the record layers are red and the run goes on: ${red.join(', ')}`) }),
+  });
+  return { next };
+}
+
+/**
+ * The record layers one skipped stage left red, by name. The request body names
+ * them: where the judge runs after the merge, that layer run is the whole of
+ * what the harness read about these records before the request opened, and a
+ * red it blocked nothing on is a red the request has to carry (ADR-0090).
+ * @param {object[]} events the run's ledger, in order
+ * @returns {string[]}
+ */
+export function skippedReds(events) {
+  const skipped = sinceFreshPass(events, (e) => e.event === 'reconcile-skipped');
+  return (skipped?.layers ?? []).filter((l) => l.status === 'red').map((l) => l.layer);
 }
 
 /** One step of the stage. A directive ends the stage; null derives again. */
@@ -429,12 +558,30 @@ async function judgeStep(ctx, base) {
     });
     return null;
   }
+  // A judgment whose causes do not answer for its records is no judgment. It is
+  // stamped as one the seat could not make, and the stage buys the cycle over
+  // the born set behind it, exactly as it does for a seat that died: the ledger
+  // never carries an owed record whose ground nobody can read (ADR-0090).
+  const causes = judgeCauses(result.report);
+  if (causes === null) {
+    ctx.store.append('reconciliation-judged', {
+      actor: ACTOR,
+      ok: false,
+      owed: false,
+      cause: UNCAUSED_JUDGMENT,
+      born,
+      late: [],
+      gist: gist(UNCAUSED_JUDGMENT),
+    });
+    return null;
+  }
   const bornPaths = new Set(born);
   ctx.store.append('reconciliation-judged', {
     actor: ACTOR,
     ok: true,
     owed: true,
     records,
+    causes,
     reason,
     born,
     late: records.filter((record) => !bornPaths.has(record)),
@@ -443,21 +590,45 @@ async function judgeStep(ctx, base) {
   return null;
 }
 
+/**
+ * The causes of one judgment, one word per owed record, or null where the
+ * report does not answer for every record it owes.
+ *
+ * Every word goes through the registry, which is the one place the vocabulary
+ * lives. A judge that invented a third ground is a judge reading the criterion
+ * loosely, and the count the alarm reads would be a count of nothing (ADR-0090).
+ */
+function judgeCauses(report) {
+  const records = report?.records ?? [];
+  const causes = report?.causes ?? [];
+  if (causes.length !== records.length) return null;
+  try {
+    return causes.map((cause) => assertJudgeCause(cause));
+  } catch {
+    return null;
+  }
+}
+
+/** What a judgment that named no ground for its records is stamped with. */
+const UNCAUSED_JUDGMENT =
+  'the judge owed records and named no cause for them: every owed record carries one word, ' +
+  'contradicts or undecided';
+
 function judgeRole(base) {
   const born = recordEntriesOf(base.born);
   // The active tree by path, minus the records the brief names below. A judge
   // told to find the tree itself read closed records, and a closed record is a
   // decision nobody owes an answer for (ADR-0089).
-  const tree = governingRecordLines(base.worktree, [], base.recordPaths ?? [], { exclude: born });
+  const tree = governingRecordLines(base.worktree, [], base.recordPaths ?? [], {
+    exclude: born,
+    reconcile: base.reconcile,
+  });
   return [
-    'Judge whether the diff of this run implements or contradicts any decision',
-    'record (ADR). You judge only; change nothing.',
+    'Judge whether the diff of this run contradicts any decision record (ADR),',
+    'or decides something no record holds. You judge only; change nothing.',
     `The diff is this branch against ${base.defaultBranch}. Read it with:`,
     `git diff ${base.defaultBranch}...HEAD`,
-    'owed=true when the diff implements a recorded decision, contradicts one,',
-    'or deviates from one. Implementation counts even when the diff never',
-    'touches the record files themselves. List every affected record path in',
-    'records, and state the reason in one or two sentences.',
+    ...OWED_CRITERION,
     ...(tree.length > 0
       ? tree
       : ['The project declares no decision-record tree: owed=false with that as the reason.']),
@@ -484,16 +655,15 @@ const BORN_JUDGMENT =
 // -- the write ---------------------------------------------------------------
 
 /**
- * The judged records, written one seat at a time, in sequence, in the one run
- * worktree (ADR-0075).
+ * The judged records, written by one seat over the whole set, in the one run
+ * worktree (ADR-0090).
  *
- * Each dispatch has its own seat identity, its own hard reset and its own
- * commit, so a seat sees its own files and no peer's, and N writers in one run
- * keep N budgets, N cost lines and N failure records. The commit is the durable
- * half and the `record-written` stamp behind it is the recorded half: a stop
- * between the two re-dispatches that one record over its own commit, which is
- * the same dispatch again, and every record the ledger already answered is
- * stepped over (ADR-0080).
+ * One seat and not one per record. Two or three records in one writer's context
+ * is a gain: the writer sees the set and cannot write two that decide one point
+ * differently. The commit is the durable half and the `record-written` stamps
+ * behind it are the recorded half, one per record: a stop between the two
+ * re-reads the commit body and stamps from it, and the seat is dispatched again
+ * never.
  */
 async function writeStep(ctx, base, next) {
   const judged = judgment(runEvents(ctx));
@@ -509,35 +679,55 @@ async function writeStep(ctx, base, next) {
   const outcome = await writeRound(ctx, roundBase(base, set), {
     records,
     since: judged.seq,
-    buildRole: (record, brief) =>
-      writeRole(
-        base,
-        { ...judged, records: [record], neighbours: recordNeighbours(base.worktree, record, base.recordPaths) },
-        brief,
-      ),
+    buildRole: (given, brief) =>
+      writeRole(base, { ...judged, records: given, neighbours: setNeighbours(base, given) }, brief),
   });
   if (outcome.stopped) return null;
   await stampWritten(ctx, base, { entries: outcome.entries, reports: outcome.reports });
-  // The story and repair lanes ship code beside their records, and a dispatch
-  // that delivered nothing is the one thing a later round cannot answer: the
-  // record is owed and no seat wrote it. Their own ending takes it, which is a
-  // merge with the record ticketed (ADR-0080). The records lane has no code, so
-  // it carries the record on the render as unwritten and the cycle goes on.
-  if (base.mode !== 'records' && outcome.entries.some((entry) => entry.failed === true)) {
+  // The story and repair lanes ship code beside their records, and a seat that
+  // delivered nothing is the one thing a later round cannot answer: the records
+  // are owed and no report says a word about them. Their own ending takes it,
+  // which is a merge with the records ticketed (ADR-0080). The records lane has
+  // no code, so it carries them on the render as unwritten and the cycle goes
+  // on. A seat that answered and left a record out is a different fact: the
+  // render carries that record and the next round dispatches it.
+  //
+  // The test reads the entries and not the round's own return, because a stop
+  // between the failure stamps and this line resumes here, and the stamps are
+  // what the resume holds.
+  if (base.mode !== 'records' && outcome.entries.some(seatFailedEntry)) {
     return fallbackStep(ctx, base, { cause: SEAT_FAILURE, next });
   }
   return null;
 }
 
+/** A record whose round delivered no report at all, as against one it left out. */
+function seatFailedEntry(entry) {
+  return entry?.failed === true && entry.reason !== UNREPORTED;
+}
+
+/**
+ * The neighbourhood one write set shares: every active record that cites one of
+ * the set or is cited by one, minus the set itself.
+ *
+ * The set is given to one seat, so it is given one neighbourhood. A record of
+ * the set that ranks into another's neighbourhood is dropped: the seat already
+ * holds it, and a path named twice reads as two duties (ADR-0089).
+ */
+function setNeighbours(base, records) {
+  const held = new Set(records.map((record) => String(record).replaceAll('\\', '/')));
+  const near = birthNeighbours(base.worktree, records, base.recordPaths ?? []);
+  return { neighbours: near.neighbours.filter((file) => !held.has(file)), dropped: near.dropped };
+}
+
 /**
  * The set one write round dispatches over, and the tree it opened on.
  *
- * The first entry of a round filters the list it was given and stamps what it
- * dispatches and what it dropped. Every later entry reads that stamp. A seat
- * name is the index in this list, so a list read from the tree would shrink
- * between two entries of one round, and every record behind the one a seat
- * closed would answer to a name another record's commit already holds
- * (ADR-0078).
+ * The round filters the list it was given and stamps what it dispatches and
+ * what it dropped, once. A re-entry reads that stamp rather than the tree: the
+ * round's own seat closes records as it writes them, so a list derived again
+ * from the tree would be a different list, and the round would answer for a set
+ * nobody dispatched it over (ADR-0078).
  * `advisory` is the remarks each dispatched record holds, by id. It is stamped
  * with the set because the brief is rebuilt from this stamp on a resume: a
  * round that re-derived the remarks from the ledger after its own write would
@@ -596,105 +786,155 @@ function roundBase(base, set) {
 }
 
 /**
- * One pass of per-record writers. Returns the per-record ledger entries and the
- * reports behind them.
+ * One write round: one seat over the whole set, one commit, one stamp per
+ * record. Returns the per-record ledger entries and the report behind them.
  *
- * A dispatch that fails ends itself and nothing else. The tree goes back to its
- * last commit, the entry carries the reason, and the round goes on to the next
- * record. No dispatch of this round parks a run: a record nobody wrote rides the
- * render as unwritten, and the run's ending names it (ADR-0080).
+ * A seat that fails ends the round and nothing else. The tree goes back to its
+ * last commit and every record of the set carries the reason. No round of this
+ * stage parks a run: a record nobody wrote rides the render as unwritten, and
+ * the run's ending names it (ADR-0080).
+ *
+ * The set is what the seat is given and the set is what it answers for. A
+ * record the report names in neither `rewritten` nor `unchanged` is unwritten,
+ * with the round's own word for it: the seat had the record, said nothing about
+ * it, and the next round dispatches it by name (ADR-0090).
+ * @returns {Promise<{entries: object[], reports: object[], stopped?: boolean}>}
  */
 async function writeRound(ctx, base, { records, since, buildRole, answered = false }) {
-  const entries = [];
-  const reports = [];
-  // What this round has already committed, by the message each dispatch signs
-  // its commit with. The commit is the durable half of a write and the stamp
-  // behind it is the recorded half, so a stop between the two is read off the
-  // tree and never repeated (ADR-0075).
+  const seat = `${WRITE_SEAT}:1`;
+  // What this round has already committed, read off the commit the seat's write
+  // rides. The commit is the durable half of a write and the stamps behind it
+  // are the recorded half, so a stop between the two is read off the tree and
+  // never repeated (ADR-0090).
   const committed = await roundCommits(base, ctx.runId, since);
-  for (let i = 0; i < records.length; i++) {
-    const record = records[i];
-    const seat = `${WRITE_SEAT}:${i + 1}`;
-    const done = await writtenAlready(ctx, runEvents(ctx), {
-      seat,
-      record,
-      since,
-      committed,
-      base,
-    });
-    if (done) {
-      entries.push(done.entry);
-      reports.push(done.report);
-      continue;
-    }
-    // A seat that died mid-edit leaves whatever it had written, and the next
-    // dispatch must be the same dispatch as the first (ADR-0070). The tree's own
-    // last commit is that dispatch's tree: the peer before it committed, and a
-    // stop after this record's own commit leaves it at the head.
+  const done = await writtenAlready(ctx, runEvents(ctx), { seat, records, since, committed });
+  if (done) return { entries: done.entries, reports: done.reports };
+  // A seat that died mid-edit leaves whatever it had written, and the next
+  // dispatch must be the same dispatch as the first (ADR-0070). The tree's own
+  // last commit is that dispatch's tree.
+  await resetHard(base.worktree, await headSha(base.worktree));
+  const spawnedAt = lastSeq(runEvents(ctx));
+  const outcome = await seatWithChecks(ctx, {
+    seat,
+    schema: reconcileWriteSchema({ answered }),
+    cwd: base.worktree,
+    env: base.env,
+    constitution: base.constitution,
+    styleFiles: base.styleFiles,
+    // What ended the last write dispatch of this pass, where a round before
+    // this one spent its budget. The seat that reads it is a fresh dispatch
+    // with a budget of its own (ADR-0079).
+    brief: refusedDefects(runEvents(ctx)),
+    buildRole: (brief) => buildRole(records, brief),
+    checks: (report) => writeChecks(ctx, { ...base, seat }, records, report),
+  });
+  if (outcome.fail) {
+    // A seat that delivered nothing and one whose work product could not stand
+    // are the same fact here: this round wrote no record (ADR-0080).
+    const failure = seatFailureAfter(runEvents(ctx), seat, spawnedAt);
     await resetHard(base.worktree, await headSha(base.worktree));
-    const spawnedAt = lastSeq(runEvents(ctx));
-    const outcome = await seatWithChecks(ctx, {
-      seat,
-      schema: reconcileWriteSchema({ answered }),
-      cwd: base.worktree,
-      env: base.env,
-      constitution: base.constitution,
-      styleFiles: base.styleFiles,
-      // What ended this record's last dispatch, where a round before this one
-      // spent its budget on it. The seat that reads it is a fresh dispatch with
-      // a budget of its own (ADR-0079).
-      brief: refusedDefects(runEvents(ctx), record),
-      buildRole: (brief) => buildRole(record, brief),
-      checks: (report) => writeChecks(ctx, { ...base, seat }, [record], report),
-    });
-    if (outcome.fail) {
-      // Every failed dispatch takes one road. The tree goes back to its last
-      // commit, the entry carries the reason, and the round goes on to the next
-      // record. A dispatch that delivered nothing and one whose work product
-      // could not stand are the same fact here: this record has no write
-      // (ADR-0080).
-      const failure = seatFailureAfter(runEvents(ctx), seat, spawnedAt);
-      await resetHard(base.worktree, await headSha(base.worktree));
-      const entry = {
-        record,
-        seat,
-        failed: true,
-        reason: failure?.reason ?? 'seat-failure',
-        attempts: attemptsOf(runEvents(ctx), seat, spawnedAt),
-        ...(Array.isArray(failure?.defects) && { defects: failure.defects }),
-      };
-      stampWrite(ctx, entry);
-      entries.push(entry);
-      continue;
-    }
-    // A stop between the seat's report and its commit leaves the write for the
-    // restart. The tree is one worktree and the daemon that comes back holds it,
-    // so a commit from a stopped run would race the run's own resume.
-    if (ctx.stopped()) return { stopped: true };
-    const before = await headSha(base.worktree);
-    const changed = await changedFiles(base.worktree);
-    const sha =
-      changed.length > 0
-        ? await commitAll(base.worktree, commitMessage(ctx, seat, record, since))
-        : before;
-    const entry = {
+    const attempts = attemptsOf(runEvents(ctx), seat, spawnedAt);
+    const entries = records.map((record) => ({
       record,
       seat,
-      ...(typeof outcome.cost === 'number' && { cost: outcome.cost }),
-      attempts: attemptsOf(runEvents(ctx), seat, spawnedAt),
-      ...(sha !== before && { sha }),
-      ...((outcome.report.dropped ?? []).length > 0 && { dropped: outcome.report.dropped }),
-    };
-    stampWrite(ctx, entry);
-    entries.push(entry);
-    reports.push(outcome.report);
+      failed: true,
+      reason: failure?.reason ?? 'seat-failure',
+      attempts,
+      ...(Array.isArray(failure?.defects) && { defects: failure.defects }),
+    }));
+    for (const entry of entries) stampWrite(ctx, entry);
+    return { entries, reports: [] };
   }
-  return { entries, reports };
+  // A stop between the seat's report and its commit leaves the write for the
+  // restart. The tree is one worktree and the daemon that comes back holds it,
+  // so a commit from a stopped run would race the run's own resume.
+  if (ctx.stopped()) return { stopped: true };
+  const before = await headSha(base.worktree);
+  const changed = await changedFiles(base.worktree);
+  // A record the round closed is answered: the tree says so, and the seat is
+  // told to list such a record in neither report list (ADR-0078). The read is
+  // taken before the commit, over the set the round was dispatched on, and
+  // every record of that set stood active when the round opened.
+  const closed = new Set(activeOf(base.worktree, records).skipped.map((entry) => entry.record));
+  const wrote = writtenOf(records, outcome.report, closed);
+  const sha =
+    changed.length > 0
+      ? await commitAll(base.worktree, commitMessage(ctx, seat, wrote, since))
+      : before;
+  const entries = roundEntries(records, outcome.report, {
+    seat,
+    closed,
+    attempts: attemptsOf(runEvents(ctx), seat, spawnedAt),
+    ...(sha !== before && { sha }),
+    ...(typeof outcome.cost === 'number' && { cost: outcome.cost }),
+  });
+  for (const entry of entries) stampWrite(ctx, entry);
+  return { entries, reports: [outcome.report] };
+}
+
+/** The mark a record no answer of the round covers carries. */
+const UNREPORTED = 'unreported';
+
+/**
+ * The records one round answers for: the ones the seat rewrote, the ones it
+ * read and left alone with the reason, and the ones it closed.
+ *
+ * The three are the three legal answers. A record the round superseded is
+ * listed in neither report list by rule, because its status line is a fact of
+ * the tree and not a rewrite (ADR-0078).
+ *
+ * The dropped list counts with the rewritten one. `writeChecks` moves a rewrite
+ * the tree does not hold onto it, and that is a note and never a refusal
+ * (ADR-0080): the seat read the record and said so, and a round that read a
+ * record and changed no line of it has answered for it.
+ *
+ * What is left is a record the report says nothing about. The seat held it and
+ * did not answer, so the render carries it and the next round dispatches it by
+ * name (ADR-0090).
+ */
+function writtenOf(records, report, closed = new Set()) {
+  const named = new Set([
+    ...(report.rewritten ?? []),
+    ...(report.dropped ?? []),
+    ...(report.unchanged ?? []).map((u) => u.record),
+  ]);
+  return records.filter((record) => named.has(record) || closed.has(record));
 }
 
 /**
- * One write, stamped right after its commit. It is what a resume reads, beside
- * the commit subject, and nothing else reads it (ADR-0080).
+ * One entry per record of the set: what the round did with it, or the word that
+ * says it did nothing. The cost rides every entry of the round, because one
+ * dispatch spent it over the whole set and no split of it would be a fact.
+ */
+function roundEntries(records, report, { seat, attempts, sha, cost, closed = new Set() }) {
+  const named = new Set(writtenOf(records, report, closed));
+  const dropped = report.dropped ?? [];
+  return records.map((record) =>
+    named.has(record)
+      ? {
+          record,
+          seat,
+          ...(typeof cost === 'number' && { cost }),
+          attempts,
+          ...(sha && { sha }),
+          ...(dropped.includes(record) && { dropped: [record] }),
+        }
+      : {
+          record,
+          seat,
+          failed: true,
+          reason: UNREPORTED,
+          ...(typeof cost === 'number' && { cost }),
+          attempts,
+          ...(dropped.includes(record) && { dropped: [record] }),
+        },
+  );
+}
+
+/**
+ * One record's write, stamped right after the round's commit. One per record,
+ * whatever the round dispatched: it is what a resume reads beside the commit
+ * body, and it is what the centre and the close read (ADR-0080, ADR-0090).
  */
 function stampWrite(ctx, entry) {
   ctx.store.append('record-written', {
@@ -707,75 +947,98 @@ function stampWrite(ctx, entry) {
 }
 
 /**
- * The message one dispatch signs its commit with: the run, the seat identity,
- * the record and the ledger position the round opened at. It is what a resume
- * reads to tell a write this round already made from one it still owes.
+ * The message one round signs its commit with: the run, the seat identity and
+ * the ledger position the round opened at on the subject, and the records the
+ * round wrote in the body, one path per line.
  *
- * The record rides it because the seat name alone is an index. A round that
- * holds no dispatch stamp derives its list from the tree, and a record another
- * seat closed shifts every index behind it. The record in the subject is what
- * keeps such a resume from counting one record's commit for another's
- * (ADR-0078).
+ * The body carries the set because the subject is one line and a round writes
+ * several records. It is what a resume reads to tell a write this round already
+ * made from one it still owes, so the paths are the round's own answer and not
+ * a list read from the tree (ADR-0090).
  */
-function commitMessage(ctx, seat, record, since) {
-  return `reconcile: ${ctx.runId} ${seat} ${record} @${since}`;
+function commitMessage(ctx, seat, records, since) {
+  return [`reconcile: ${ctx.runId} ${seat} @${since}`, '', ...records].join('\n');
 }
 
-/** The records this round has already committed a write for. */
+/**
+ * The records this round has already committed a write for, read from the body
+ * of its own commit.
+ *
+ * A commit whose body names no record answers for no record, and the round
+ * dispatches its set again over the tree that commit left. That is the same
+ * dispatch as the first, which is what a resume of a half-made write owes
+ * (ADR-0070).
+ */
 async function roundCommits(base, runId, since) {
-  const log = await git(['log', '--format=%s', '-n', '200'], { cwd: base.worktree }).catch(
-    () => '',
-  );
+  const log = await git(['log', '--format=%s%n%b%x1e', '-n', '200'], {
+    cwd: base.worktree,
+  }).catch(() => '');
   const mark = `reconcile: ${runId} `;
   const tail = ` @${since}`;
   const records = new Set();
-  for (const line of log.split('\n').map((entry) => entry.trim())) {
-    if (!line.startsWith(mark) || !line.endsWith(tail)) continue;
-    const named = line.slice(mark.length, line.length - tail.length).split(' ');
-    // A subject a pin before this rule wrote names the seat alone. It answers
-    // for no record, so the round re-dispatches that record rather than taking
-    // the commit for one it never made.
-    if (named.length === 2) records.add(named[1]);
+  for (const commit of log.split('\x1e')) {
+    const lines = commit
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (lines.length === 0) continue;
+    const [subject, ...body] = lines;
+    if (!subject.startsWith(mark) || !subject.endsWith(tail)) continue;
+    for (const path of body) records.add(path);
   }
   return records;
 }
 
 /**
- * The write of one record this round already made, or null.
+ * The write this round already made, or null.
  *
- * Two facts say so and either one is enough, and both are read by record. The
- * `record-written` stamp of this seat naming this record is the whole record of
- * a finished dispatch, whether it wrote or failed. The round's commit naming the
- * record is the other, and it covers the stop that fell between the commit and
- * the stamp: the tree holds the write, so the dispatch is never made again
- * (ADR-0070, ADR-0080).
+ * Two facts say so and either one is enough. The `record-written` stamps of
+ * this round are the whole record of a finished write, whether it wrote or
+ * failed. The round's commit body is the other, and it covers the stop that
+ * fell between the commit and the stamps: the tree holds the write, so the seat
+ * is dispatched again never, and the stamps are written here from the body
+ * (ADR-0070, ADR-0090).
  *
- * Neither reads the seat name alone. A round with no dispatch stamp derives its
- * list from the tree, where a record a seat closed is gone, and a seat name
- * would then answer for a record its dispatch never touched (ADR-0078).
+ * The two are merged rather than read in turn, because the stamps land one per
+ * record and a stop can fall between any two of them. A record the stamps
+ * answer for takes its stamp; every other record of the set takes the body.
+ * @returns {Promise<{entries: object[], reports: object[]}|null>}
  */
-async function writtenAlready(ctx, events, { seat, record, since, committed }) {
-  const stamp = events.find(
-    (e) => e.event === 'record-written' && e.seat === seat && e.record === record && e.seq > since,
-  );
-  if (stamp) {
-    const { event: _event, seq: _seq, ts: _ts, actor: _actor, gist: _gist, ...entry } = stamp;
-    // A dispatch that failed left no report, and a report file the run can no
-    // longer read is the same fact. Either way the round's readers get a report
-    // that says the dispatch answered nothing, because a resume that hands them
-    // a hole reads it as one (ADR-0080).
-    if (entry.failed === true) return { entry, report: emptyReport() };
-    return { entry, report: readJson(lastSeatReportEvent(events, seat)?.path) ?? emptyReport() };
+async function writtenAlready(ctx, events, { seat, records, since, committed }) {
+  const stamped = new Map();
+  for (const e of events) {
+    if (e.event !== 'record-written' || e.seat !== seat || e.seq <= since) continue;
+    const { event: _event, seq: _seq, ts: _ts, actor: _actor, gist: _gist, ...entry } = e;
+    stamped.set(e.record, entry);
   }
-  if (!committed.has(record)) return null;
-  // The commit is there and the stamp is not: the stop fell between the two.
-  // The write stands in the tree, so the dispatch is never made again, and the
-  // stamp is written from the report the seat left behind.
-  const report = readJson(lastSeatReportEvent(events, seat)?.path);
-  if (!report) return null;
-  const entry = { record, seat, attempts: attemptsOf(events, seat, since) };
-  stampWrite(ctx, entry);
-  return { entry, report };
+  if (stamped.size === 0 && committed.size === 0) return null;
+  // A round that failed left no report, and a report file the run can no longer
+  // read is the same fact. Either way the readers behind this get a report that
+  // says the round answered nothing, because a resume that hands them a hole
+  // reads it as one (ADR-0080). A round that committed and left no readable
+  // report is answered by its own commit body, which names what it wrote.
+  const held = readJson(lastSeatReportEvent(events, seat)?.path);
+  const report =
+    held ??
+    (committed.size > 0
+      ? { rewritten: [...committed], unchanged: [], answered: [] }
+      : emptyReport());
+  const attempts = attemptsOf(events, seat, since);
+  const entries = [];
+  for (const record of records) {
+    const entry = stamped.get(record);
+    if (entry) {
+      entries.push(entry);
+      continue;
+    }
+    const written = committed.has(record) || writtenOf([record], report).length > 0;
+    const fresh = written
+      ? { record, seat, attempts }
+      : { record, seat, failed: true, reason: UNREPORTED, attempts };
+    stampWrite(ctx, fresh);
+    entries.push(fresh);
+  }
+  return { entries, reports: entries.some((e) => e.failed !== true) ? [report] : [] };
 }
 
 /**
@@ -788,19 +1051,22 @@ function emptyReport() {
 }
 
 /**
- * The defects that ended this record's last dispatch, or null.
+ * The defects that ended the last write dispatch of this pass, or null.
  *
- * A round that spends its budget on a record leaves the reason on its entry.
- * The round that dispatches the record again reads it there, so the seat starts
- * from what refused its predecessor rather than from nothing (ADR-0079).
+ * A round that spends its budget leaves the reason on its entries. The round
+ * that dispatches again reads it there, so the seat starts from what refused
+ * its predecessor rather than from nothing (ADR-0079). One seat writes the
+ * whole set, so one list of defects ended it and every entry of that round
+ * carries it (ADR-0090).
  */
-function refusedDefects(events, record) {
+function refusedDefects(events) {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
     if (e.event !== 'reconciliation-written') continue;
-    const entry = (e.records ?? []).find((r) => r.record === record);
-    if (!entry) continue;
-    return entry.failed === true && Array.isArray(entry.defects) ? entry.defects : null;
+    const entry = (e.records ?? []).find(
+      (r) => r.failed === true && Array.isArray(r.defects) && r.defects.length > 0,
+    );
+    return entry ? entry.defects : null;
   }
   return null;
 }
@@ -1021,9 +1287,10 @@ async function runRecordLayers(ctx, base, { cycle, sha, changed }) {
 /**
  * The set one cycle reviews, stamped once and read on every entry.
  *
- * One seat runs per record and its name is the index in this list, so a list
- * the tree shrinks between two entries of one cycle would rename the seats and
- * lose the answers behind the record it dropped (ADR-0078).
+ * One seat reads the whole list, and the list is what the cycle's derivation
+ * counts its per-record stamps against. A list the tree shrinks between two
+ * entries of one cycle would leave the derivation waiting on a record no seat
+ * was ever given (ADR-0078).
  *
  * The kept records ride the answer beside the dispatched ones. The render names
  * both, because the set a cycle stood over is the reading, and a reader of the
@@ -1222,8 +1489,8 @@ async function showAt(worktree, sha, file) {
 // -- the correction ----------------------------------------------------------
 
 /**
- * One corrective round: a writer per record, briefed with the findings its
- * review raised against the tree, under the record cap.
+ * One corrective round: one writer over the records that owe an answer, briefed
+ * with every open finding and every red layer, under the record cap.
  *
  * It stamps `reconcile-round` and never `repair-round`. The two caps never read
  * each other's rounds, and nothing here reaches the verdict: a corrective record
@@ -1258,30 +1525,30 @@ async function correctStep(ctx, base, next) {
   // buys nothing (ADR-0078).
   if (set.records.length === 0) return stallStep(ctx, base, next, { rounds: 0, empty: true });
   const records = set.records;
-  // The remarks this round hands over, rebuilt from the set it stamped. A
-  // remark rides the brief of the record it is about and nothing else.
+  // The remarks this round hands over, rebuilt from the set it stamped. One
+  // writer holds the whole set, so it holds every remark the set carries.
   const remarks = advisoryIndex(events);
-  const remarksFor = (record) =>
-    (set.advisory.find((entry) => entry.record === record)?.ids ?? [])
+  const remarksFor = (given) => {
+    const held = new Set(given);
+    return set.advisory
+      .filter((entry) => held.has(entry.record))
+      .flatMap((entry) => entry.ids)
       .map((id) => remarks.get(id))
       .filter(Boolean);
+  };
   const outcome = await writeRound(ctx, roundBase(base, set), {
     records,
     since: rendered.seq,
     // A corrective invocation lists the ids it answered; the first write of a
     // run answers no finding and is asked for no such list.
     answered: true,
-    buildRole: (record, brief) =>
+    buildRole: (given, brief) =>
       correctiveRole(
         base,
+        { ...judged, records: given, neighbours: setNeighbours(base, given) },
         {
-          ...judged,
-          records: [record],
-          neighbours: recordNeighbours(base.worktree, record, base.recordPaths),
-        },
-        {
-          findings: open.filter((f) => f.file === record || f.file2 === record),
-          advisory: remarksFor(record),
+          findings: open.filter((f) => given.includes(f.file) || given.includes(f.file2)),
+          advisory: remarksFor(given),
           brief: layerBrief(layers, brief),
         },
       ),
@@ -1532,6 +1799,7 @@ async function recheckStep(ctx, base) {
     ok: true,
     owed: true,
     records: owed,
+    causes: owed.map((record) => judge.causes.get(record)),
     reason: judge.reason ?? 'a repair round moved the code this reconciliation read',
     born: [],
     late: owed,
@@ -1541,8 +1809,16 @@ async function recheckStep(ctx, base) {
   return null;
 }
 
-/** The judge over the delta alone: does it implicate a record not already owed. */
+/**
+ * The judge over the delta alone: does it implicate a record not already owed.
+ *
+ * A report whose causes do not answer for its records owes nothing. The recheck
+ * then stamps `kept`, which is what it stamps for a judge that could not answer
+ * at all: neither is a record this stage can name a ground for (ADR-0090).
+ * @returns {Promise<{records: string[], causes: Map<string, string>, reason: string}>}
+ */
 async function recheckJudge(ctx, base, { delta, touched }) {
+  const none = (reason) => ({ records: [], causes: new Map(), reason });
   const result = await ctx.runSeat({
     seat: 'reconcile-judge',
     roleBlock: recheckRole(base, { delta, touched }),
@@ -1553,8 +1829,12 @@ async function recheckJudge(ctx, base, { delta, touched }) {
     constitution: base.constitution,
     styleFiles: base.styleFiles,
   });
-  if (!result.ok) return { records: [], reason: 'the recheck judge could not answer' };
-  return { records: result.report.owed ? result.report.records : [], reason: result.report.reason };
+  if (!result.ok) return none('the recheck judge could not answer');
+  if (!result.report.owed) return none(result.report.reason);
+  const causes = judgeCauses(result.report);
+  if (causes === null) return none(UNCAUSED_JUDGMENT);
+  const records = result.report.records;
+  return { records, causes: new Map(records.map((r, i) => [r, causes[i]])), reason: result.report.reason };
 }
 
 function recheckRole(base, { delta, touched }) {
@@ -1567,9 +1847,9 @@ function recheckRole(base, { delta, touched }) {
     ...(touched.length > 0
       ? ['The files it touched:', ...touched.slice(0, 40).map((file) => `- ${file}`)]
       : []),
-    'owed=true when this change implements, contradicts or deviates from a decision',
-    'record that is not already answered by this run. List those record paths in',
-    'records. Where it implicates no further record, answer owed=false with the reason.',
+    ...OWED_CRITERION,
+    'Judge only records this run has not already answered. Where the change',
+    'implicates no further record, answer owed=false with the reason.',
   ].join('\n');
 }
 
@@ -1685,8 +1965,8 @@ export function unreviewedOf(events) {
 
 /**
  * What the stage reads: the tree, the record tree and its lifecycle, the seat
- * environment, the Tier-1 layers the record diff selects, and the range the
- * record scope opens at.
+ * environment, the Tier-1 layers the record diff selects, the range the record
+ * scope opens at, and where this project's judge runs.
  */
 async function reconcileBase(ctx) {
   const config = await loadProjectConfig(ctx);
@@ -1708,6 +1988,9 @@ async function reconcileBase(ctx) {
     testPaths: config.repo.testPaths ?? [],
     allowlistPaths: config.gates?.allowlistPaths ?? [],
     cap: config.gates?.reconcileRounds ?? DEFAULT_RECONCILE_ROUNDS,
+    // Where this project's judge runs. Every brief and every step of the stage
+    // reads it from here, so no two of them can read one config two ways.
+    reconcile: reconcileMode(config),
     born: recordsCommitted(events)?.paths ?? [],
     specRef: cardPath ? join(ctx.paths.runs, ctx.runId, 'spec.md') : specPath(worktree, ticket),
     constitution: readConstitution(worktree, config),

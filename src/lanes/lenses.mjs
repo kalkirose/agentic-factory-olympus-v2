@@ -43,15 +43,16 @@ export const RECORD_LENS = 'record';
  */
 export const RECORD_CRITERIA = Object.freeze({
   truth:
-    'truth: every present-tense claim in the record is true against the tree as it stands: what ' +
-    'the code does, where it lives, what it is called. A part the tree does not hold is stated ' +
-    'as not built. A divergence between the tree and the decision is named in the record. Every ' +
-    'name the record cites means what the record says it means. A claim the tree contradicts ' +
-    'fails, whether the sentence changed in this diff or not.',
+    'truth: every name the record cites means what the record says it means, and every ' +
+    'present-tense claim it makes about the code is true against the tree as it stands: what ' +
+    'the code does, where it lives, what it is called. A claim the tree contradicts fails, ' +
+    'whether the sentence changed in this diff or not. The record states no implementation ' +
+    'status: a decision the tree does not hold yet is still the decision, and the record says ' +
+    'nothing about that either way.',
   consistent:
-    'consistent: an open part of this record does not contradict an open part of any active ' +
-    'record in its neighbourhood. The tree settles what is built and settles nothing about ' +
-    'what is not, so two active records can decide one unbuilt part two ways.',
+    'consistent: the decision this record states does not contradict the decision of any active ' +
+    'record in its neighbourhood. Two active records that decide one point two ways are a ' +
+    'finding whichever of them the tree happens to hold.',
   form:
     'form: a defect of the project standard the form gate cannot read, by rule number. The gate ' +
     'reads the form it can read, at every render; this criterion is what is left.',
@@ -61,15 +62,14 @@ export const RECORD_CRITERIA = Object.freeze({
 export const RECORD_CRITERION_KEYS = Object.freeze(Object.keys(RECORD_CRITERIA));
 
 /**
- * The rule the seven criteria serve, stated above them wherever they are
- * stated.
+ * The rule the criteria serve, stated above them wherever they are stated.
  *
  * A seat that is given a list of criteria and no rule behind them grades each
- * sentence against the nearest key and stops. The rule is what tells it that a
- * sentence about work nobody has done yet is legal, and that the same sentence
- * written as present fact is not: a record either describes the tree as it
- * stands, or says the part is not built. There is no third kind of claim, and a
- * record that holds one conflicts with the code.
+ * sentence against the nearest key and stops. The rule is what tells it what a
+ * record is: a decision and the reasoning behind it, and nothing about the
+ * state of the tree. A record that reported how much of its decision was built
+ * went stale the day the code landed, and every run that landed code owed a
+ * rewrite of it (ADR-0090).
  *
  * The last sentence names the sentences that claim nothing. A record states why
  * it decided, what it rejected and what would reverse it, and none of those is
@@ -77,9 +77,10 @@ export const RECORD_CRITERION_KEYS = Object.freeze(Object.keys(RECORD_CRITERIA))
  * it.
  */
 export const RECORD_RULE =
-  'A record never conflicts with the code. Everything it states is either true of the tree now, ' +
-  'or marked as not yet built. There is no third kind of claim. A sentence that states why, or ' +
-  'what was rejected, or what would trigger a reversal, is rationale and is neither.';
+  'A record states a decision. It states no implementation status and no divergence from the ' +
+  'tree: the decision is the whole content, and the code landing changes no record. What it ' +
+  'does say about the code is true of the tree as it stands. A sentence that states why, or ' +
+  'what was rejected, or what would trigger a reversal, is rationale and claims nothing.';
 
 /** The criteria as a brief states them: the rule, then one line per criterion. */
 export function recordCriteriaLines() {

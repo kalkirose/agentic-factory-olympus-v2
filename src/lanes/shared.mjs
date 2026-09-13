@@ -663,8 +663,8 @@ export function commandFail(ctx, run) {
  * stamped report, whatever failed.
  *
  * The seat is the whole seat name, slot suffix and all. A stage that dispatches
- * one seat per record holds one budget per slot, so a peer slot that spawns
- * after the answer spends nothing of this slot's (ADR-0073).
+ * several slots of one seat holds one budget per slot, so a peer slot that
+ * spawns after the answer spends nothing of this slot's (ADR-0073).
  */
 export function boughtRetry(events, seat) {
   const asked = lastRecoveryPark(events);
@@ -881,7 +881,7 @@ export function secondRecordOf(finding) {
 /**
  * The second place of a finding as a brief states it, or the empty string.
  *
- * A `consistent` finding is the claim that two records decide one unbuilt part
+ * A `consistent` finding is the claim that two records decide one point
  * two ways, so a line that names one record states half the claim (ADR-0073).
  * Three briefs carry a finding line — the record writer's corrective brief, the
  * code seat's, and the verifier's item list — and one clause is what makes the

@@ -134,15 +134,25 @@ function reconcileJudge() {
   const judged = scenario.reconcileJudge;
   if (!judged) {
     return {
-      report: { owed: false, records: [], reason: 'no decision-record tree in this fixture' },
+      report: {
+        owed: false,
+        records: [],
+        causes: [],
+        reason: 'no decision-record tree in this fixture',
+      },
     };
   }
   // The recheck asks about the delta alone, and this fixture's repairs never
   // implicate a further record.
   if (prompt.includes('A repair round changed this run')) {
-    return { report: { owed: false, records: [], reason: 'the delta implicates no record' } };
+    return {
+      report: { owed: false, records: [], causes: [], reason: 'the delta implicates no record' },
+    };
   }
-  return { report: judged };
+  // Every owed record carries its ground, and the scenario may state it.
+  const causes =
+    judged.causes ?? (judged.records ?? []).map(() => judged.cause ?? 'contradicts');
+  return { report: { ...judged, causes } };
 }
 
 /** The birth: the records the scenario decides, or a work that decides none. */
@@ -230,9 +240,7 @@ function correctiveCalls(record) {
 /** How many times this run has reviewed one record, this read included. */
 function reviewCalls(record) {
   return priorCalls(
-    (call) =>
-      call.seat === 'record-review' &&
-      call.prompt.includes(`Review one decision record: ${record}`),
+    (call) => call.seat === 'record-review' && call.prompt.includes(`The units of ${record},`),
   ).length;
 }
 
@@ -245,47 +253,66 @@ function reviewCalls(record) {
  * nothing of it (ADR-0080).
  */
 function recordWrite() {
-  const record = match(/^- (\S+\.md)$/m)?.[1];
-  if (!record) throw new Error('the write brief names no record');
+  const records = briefRecords();
+  if (records.length === 0) throw new Error('the write brief names no record');
   const corrective = prompt.includes('Findings:');
   const answered = () => [...prompt.matchAll(/^- \[(F\d+)\]/gm)].map((m) => ({ id: m[1] }));
-  // A scenario about a dispatch that delivers nothing: the seat writes no
-  // record at all, and the round goes on without it.
-  const refusals = (scenario.recordRefusals ?? {})[record] ?? 0;
-  if (corrective && correctiveCalls(record) <= refusals) {
-    return {
-      report: {
-        rewritten: [],
-        unchanged: [],
-        answered: answered(),
-        summary: 'the round could not answer the finding',
-      },
-    };
-  }
-  const supersede = (scenario.reconcileSupersedes ?? {})[record];
-  if (supersede) return supersedeWrite(record, supersede, answered);
-  // A corrective dispatch answers the finding in the record, which is what
-  // moves the text the next cycle reads.
-  const text = corrective
-    ? `${readFileSync(join(process.cwd(), record), 'utf8')}\n${ANSWERED}\n`
-    : (scenario.reconcileWrites ?? {})[record];
-  if (text) {
+  const rewritten = [];
+  const unchanged = [];
+  for (const record of records) {
+    // A scenario about a record the round could not answer: the seat writes
+    // nothing for it and names it in neither list, so the render carries it as
+    // unwritten and the next round dispatches it by name (ADR-0090).
+    const refusals = (scenario.recordRefusals ?? {})[record] ?? 0;
+    if (corrective && refusals > 0 && correctiveCalls(record) <= refusals) continue;
+    const supersede = (scenario.reconcileSupersedes ?? {})[record];
+    if (supersede) {
+      rewritten.push(...supersedeWrite(record, supersede));
+      continue;
+    }
+    // A corrective dispatch answers the finding in the record, which is what
+    // moves the text the next cycle reads.
+    const text = corrective
+      ? `${readFileSync(join(process.cwd(), record), 'utf8')}\n${ANSWERED}\n`
+      : (scenario.reconcileWrites ?? {})[record];
+    if (!text) {
+      unchanged.push({ record, reason: 'the record already states the tree' });
+      continue;
+    }
     const full = join(process.cwd(), record);
     mkdirSync(dirname(full), { recursive: true });
     writeFileSync(full, text);
+    rewritten.push(record);
   }
   return {
     report: {
-      rewritten: text ? [record] : [],
-      unchanged: text ? [] : [{ record, reason: 'the record already states the tree' }],
+      rewritten,
+      unchanged,
       ...(corrective && { answered: answered() }),
-      summary: `${record}, as the tree stands`,
+      summary: `${records.join(', ')}, as the tree stands`,
     },
   };
 }
 
-/** The supersession one write makes: the old record closed, the new one added. */
-function supersedeWrite(record, { closed, added, text }, answered) {
+/** The records one write brief was dispatched over, off its own list. */
+function briefRecords() {
+  const block = /^Records to reconcile:\n((?:- \S+\n)+)/m.exec(prompt);
+  return block
+    ? block[1]
+        .trim()
+        .split('\n')
+        .map((line) => line.slice(2))
+    : [];
+}
+
+/**
+ * The supersession one write makes: the old record keeps its body and takes
+ * its status line, and the record that replaces it is added. The closed record
+ * is listed in neither report list, because a status line is a fact of the
+ * tree and not a rewrite (ADR-0078).
+ * @returns {string[]} the records the write added
+ */
+function supersedeWrite(record, { closed, added, text }) {
   for (const [path, content] of [
     [record, closed],
     [added, text],
@@ -294,14 +321,7 @@ function supersedeWrite(record, { closed, added, text }, answered) {
     mkdirSync(dirname(full), { recursive: true });
     writeFileSync(full, content);
   }
-  return {
-    report: {
-      rewritten: [added],
-      unchanged: [],
-      ...(prompt.includes('Findings:') && { answered: answered() }),
-      summary: `${record} is superseded by ${added}`,
-    },
-  };
+  return [added];
 }
 
 /**
@@ -312,37 +332,54 @@ function supersedeWrite(record, { closed, added, text }, answered) {
  * of that record and on no later one, so a corrective round can close it.
  */
 function recordReview() {
-  const record = match(/^Review one decision record: (.+)$/m)?.[1]?.trim();
-  if (!record) throw new Error('the review brief names no record');
-  const units = [...prompt.matchAll(/^- (U\d+) \(line \d+(?:, (\w+))?\): (.+)$/gm)].map(
+  const records = reviewRecords();
+  if (records.length === 0) throw new Error('the review brief names no record');
+  const findings = [];
+  for (const record of records) {
+    const raised = (scenario.recordFindings ?? {})[record];
+    if (!raised || reviewCalls(record) > (raised.reads ?? 1)) continue;
+    const units = unitsOf(record);
+    const target = units.find((u) => u.kind === undefined) ?? units[units.length - 1];
+    if (!target) continue;
+    findings.push({
+      id: `r${findings.length + 1}`,
+      criterion: 'truth',
+      severity: 'HIGH',
+      file: record,
+      ground: [record],
+      unit: target.id,
+      head: target.head,
+      line: 1,
+      summary: raised.summary,
+      evidence: record,
+    });
+  }
+  return { report: { findings, summary: 'the records, read whole' } };
+}
+
+/** The records one review brief holds: one seat reads the set (ADR-0090). */
+function reviewRecords() {
+  const one = /^Review one decision record: (.+)$/m.exec(prompt);
+  if (one) return [one[1].trim()];
+  const many = /^Review these \d+ decision records:\n((?:- \S+\n)+)/m.exec(prompt);
+  return many
+    ? many[1]
+        .trim()
+        .split('\n')
+        .map((line) => line.slice(2))
+    : [];
+}
+
+/** The unit list of one record, off a brief that may carry several. */
+function unitsOf(record) {
+  const start = prompt.indexOf(`The units of ${record},`);
+  if (start === -1) return [];
+  const rest = prompt.slice(start);
+  const end = rest.indexOf('\nRead the same list yourself:');
+  const block = end === -1 ? rest : rest.slice(0, end);
+  return [...block.matchAll(/^- (U\d+) \(line \d+(?:, (\w+))?\): (.+)$/gm)].map(
     ([, id, kind, head]) => ({ id, kind, head }),
   );
-  const raised = (scenario.recordFindings ?? {})[record];
-  const target =
-    raised && reviewCalls(record) <= (raised.reads ?? 1)
-      ? (units.find((u) => u.kind === undefined) ?? units[units.length - 1])
-      : null;
-  return {
-    report: {
-      findings: target
-        ? [
-            {
-              id: 'r1',
-              criterion: 'truth',
-              severity: 'HIGH',
-              file: record,
-              ground: [record],
-              unit: target.id,
-              head: target.head,
-              line: 1,
-              summary: raised.summary,
-              evidence: record,
-            },
-          ]
-        : [],
-      summary: 'the record, read whole',
-    },
-  };
 }
 
 /**

@@ -285,13 +285,30 @@ export const TRIPWIRE_METRICS = {
     defaultTriggers: ['reconcile-rendered'],
   },
   // The mean wall clock of the record write, in minutes, over the last N stage
-  // runs that wrote anything. The writers run one record at a time by the
-  // owner's decision (ADR-0075); this is the reading that says when the
-  // decision stops paying, and its answer is the review of it.
+  // runs that wrote anything. One writer holds the whole owed set (ADR-0090);
+  // this is the reading that says when that set is too wide for one context.
   'record-write-time': {
     unit: 'reconciliations',
     defaultWindow: 5,
     defaultTriggers: ['reconciliation-written'],
+  },
+  // The share of the last N shipped runs whose judge owed a record rewrite,
+  // over the ships whose judge ran in front of the ship token.
+  //
+  // The criterion the judge reads is a judgment: a diff contradicts an active
+  // record, or it decides something no record holds. A judge that reads it
+  // loosely owes on every diff again, which is the cost this whole shape was
+  // built to remove, and nothing in a single run says that has happened
+  // (ADR-0090). The share over a window does.
+  //
+  // A ship whose judge ran after the merge is not in the window. That judge
+  // answers a different question at a different moment and its owed set is
+  // drift the owner holds, so counting it would mix two readings into one
+  // number.
+  'record-owed-window': {
+    unit: 'ships',
+    defaultWindow: 20,
+    defaultTriggers: ['reconciliation-judged', 'merged'],
   },
 };
 
@@ -529,9 +546,24 @@ export function standingTripwires() {
       window: 5,
       breach: { op: '>', value: 20 },
       answer:
-        'review whether the record writers should run in parallel in ' +
-        'disposable worktrees: the sequential write is the owner\'s decision ' +
-        'and this window is what it costs',
+        'read the write against the set it was given: one writer holds the ' +
+        'whole set, and a mean above this band says the set is too wide for ' +
+        'one context',
+    },
+    // Half the ships owing a record rewrite is the reading that says the
+    // criterion has drifted. The judge owes on a contradiction or an undecided
+    // decision, and most diffs are neither: they build what a record already
+    // decides. A share above this band is a judge owing on "implements" again,
+    // and the answer is the brief that states the criterion.
+    {
+      id: 'record-owed',
+      metric: 'record-owed-window',
+      window: 20,
+      breach: { op: '>', value: 0.5 },
+      answer:
+        'read the causes on the judgments of the window: a judge that owes on ' +
+        'most ships has stopped reading the criterion, and the brief that ' +
+        'states it is the answer',
     },
   ];
 }
@@ -551,12 +583,12 @@ const FAST_PATH_METRICS = ['fast-path-escapes', 'fast-path-takes'];
 // exactly the projects nobody is watching (ADR-0061, ADR-0062).
 const LEVER_METRICS = ['gate-acks-window', 'run-reconfigures-window'];
 
-// The four readings of the record rule. They are armed on every project for
+// The five readings of the record rule. They are armed on every project for
 // the reason the lever counters are: the rule is on every project, it needs no
 // config line to run, and a counter that had to be opted into would be absent
 // from exactly the projects nobody is watching (ADR-0007, ADR-0026).
 //
-// The two record-stage bands are here and in no project config, and that is the
+// The record-stage bands are here and in no project config, and that is the
 // whole of the decision. A config entry naming a metric the daemon does not
 // implement yet refuses every launch of that project, so a band that landed
 // ahead of its harness would take the project dark; and a band a project has to
@@ -566,6 +598,7 @@ const RECORD_METRICS = [
   'reconcile-fallbacks-window',
   'record-cycles',
   'record-write-time',
+  'record-owed-window',
 ];
 
 /**

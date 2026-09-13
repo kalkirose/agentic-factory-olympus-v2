@@ -495,15 +495,17 @@ test('a birth that supersedes one record with two ships on one attempt', async (
   assert.deepEqual(born.paths.slice().sort(), [RECORD, ...HEIRS].sort());
   assert.equal(born.decided, true);
 
-  // One review seat per active record, and none for the record the write
-  // closed.
+  // One review seat over the active records, and the record the write closed
+  // takes no place in the set (ADR-0090).
   const dispatched = events.filter((e) => e.event === 'reconcile-review-set');
   assert.equal(dispatched.length, 1);
   assert.deepEqual(dispatched[0].records.slice().sort(), HEIRS.slice().sort());
   const reviews = seatCalls(fx).filter((c) => c.seat === 'record-review');
-  assert.equal(reviews.length, 2);
-  for (const call of reviews) {
-    assert.ok(!call.prompt.includes(`Review one decision record: ${RECORD}`), call.prompt);
+  assert.equal(reviews.length, 1);
+  assert.equal(reviews[0].named, 'record-review:1');
+  assert.ok(!reviews[0].prompt.includes(`The units of ${RECORD},`), reviews[0].prompt);
+  for (const heir of HEIRS) {
+    assert.ok(reviews[0].prompt.includes(`The units of ${heir},`), heir);
   }
 
   const rendered = events.filter((e) => e.event === 'reconcile-rendered');

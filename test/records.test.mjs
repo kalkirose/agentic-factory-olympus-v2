@@ -151,14 +151,16 @@ test('the harness holds no reader of a record token, verb or path', () => {
 test('the record criteria are three, and the rule stands above them', () => {
   assert.deepEqual(RECORD_CRITERION_KEYS, ['truth', 'consistent', 'form']);
   assert.equal(Object.keys(RECORD_CRITERIA).length, 3);
-  // `open`, `divergence` and `reference` are readings of the truth of a record,
-  // and the truth criterion states all three (ADR-0080).
-  assert.match(RECORD_CRITERIA.truth, /not built/);
-  assert.match(RECORD_CRITERIA.truth, /divergence/);
+  // The truth criterion is about what the record says of the code, and it asks
+  // for no implementation status: a criterion that did would owe a rewrite on
+  // every run that built a decision (ADR-0090).
   assert.match(RECORD_CRITERIA.truth, /means what the record says/);
+  assert.match(RECORD_CRITERIA.truth, /states no implementation status/);
+  assert.doesNotMatch(RECORD_CRITERIA.truth, /divergence/);
   // `form` is what the project gate cannot read, by rule number.
   assert.match(RECORD_CRITERIA.form, /rule number/);
-  assert.match(RECORD_RULE, /never conflicts with the code/);
+  assert.match(RECORD_RULE, /A record states a decision/);
+  assert.match(RECORD_RULE, /no implementation status and no divergence/);
 });
 
 // -- the two readings of what a seat left --------------------------------------
@@ -292,9 +294,12 @@ test('every brief carries the writing directions as prose, and no report table',
     writeRole(base, JUDGED, null),
     correctiveRole(base, JUDGED, { findings: [], advisory: [], brief: null }),
   ]) {
-    assert.match(text, /Check every present-tense sentence against the tree/);
+    assert.match(text, /Check every present-tense sentence about the code against the tree/);
     assert.match(text, /cite the path in the record/);
-    assert.match(text, /Name every divergence/);
+    // The status and divergence duties are gone from every brief (ADR-0090).
+    assert.match(text, /State no implementation status and no divergence from the tree/);
+    assert.doesNotMatch(text, /Name every divergence/);
+    assert.doesNotMatch(text, /not yet implemented/);
     assert.match(text, /Read every active record that cites the one you supersede/);
     assert.match(text, /A record does not cite the standard/);
     // The tables and the enumeration step leave with the checks (ADR-0080).
