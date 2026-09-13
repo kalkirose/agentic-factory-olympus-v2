@@ -331,7 +331,7 @@ function closureCards(ctx, worktree, cardPath) {
  * The shape one error of the block reads in: a path, a short upper-case code,
  * and what is wrong, each separated by a colon.
  */
-const BEYOND_LINE = /^[^\s:]+:\s*[A-Z][A-Z0-9]*:\s*\S/;
+const BEYOND_LINE = /^[^\s:]+:\s*[A-Z][A-Z0-9]{0,7}:\s*\S/;
 
 /**
  * The errors the lint found beyond the cards it was asked about: the block it

@@ -189,7 +189,6 @@ export async function pushCardPaths({ ctx, paths, message, lintCards = [] }) {
         pushed: false,
         attempts: 0,
         reason: lint === 'red' ? 'lint-red' : 'push-lost',
-        lint,
         error: defects[0],
       };
     }
