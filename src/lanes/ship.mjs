@@ -421,6 +421,14 @@ function codeTree(events) {
 /**
  * Whether the ledger PROVES the tree the run holds may open a request: both
  * certifications the lane owes, each green at its own sha.
+ *
+ * On a story or a repair run every record certification read here is green or a
+ * fallback. The records stage stands before this gate on those lanes and closes
+ * one of two ways, a green render or the fallback write at the cap, and
+ * `reconcileCertification` reads the fallback as the stage's answer (ADR-0080).
+ * So a run that walked the stages never arrives holding a red reconciliation
+ * beside a green verdict. The one null this gate refuses is a records-lane run
+ * with no render at all, and the update stage refuses that one loud.
  * @param {object[]} events the run's ledger, in order
  * @param {object} base the lane base
  */

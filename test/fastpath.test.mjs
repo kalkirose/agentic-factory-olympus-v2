@@ -970,8 +970,8 @@ test('a record the run itself wrote reaches the records answer of a ground hit',
   assert.equal(out.records.reason, 'own-record');
 });
 
-test('every refusal but the two one-sided ones is copied onto both answers', () => {
-  // The rule and its two exceptions in one reading. A refusal is a
+test('every refusal but the one-sided one is copied onto both answers', () => {
+  // The rule and its one exception in one reading. A refusal is a
   // certification this check could not carry, and it says the same thing to
   // every certification in scope unless it belongs to one of them.
   const both = [
@@ -1016,37 +1016,6 @@ test('a records lane is judged on its records alone', () => {
   assert.equal(conflicted.records.answer, 'rerun');
   assert.equal(conflicted.records.reason, 'own-record');
   assert.equal(conflicted.refusal, 'records-rerun');
-});
-
-test('a reconciliation the lane cannot show leaves the code question to the code', () => {
-  // A records fact says nothing about the code. Copying it onto the code
-  // answer sends the run back to the verdict for something the verdict never
-  // decided, which is the same class as a code refusal copied onto the
-  // records answer.
-  const settled = {
-    answer: 'rerun',
-    reason: 'no-certification',
-    detail: 'no green reconciliation stands for this tree',
-    files: [],
-  };
-  const out = fastPathVerdict(inputs({ records: NEIGHBOURHOOD, recordsSettled: settled }));
-  assert.equal(out.taken, false);
-  assert.equal(out.refusal, 'no-certification');
-  assert.equal(out.code.answer, 'kept');
-  assert.deepEqual(out.records, settled);
-
-  // The settled answer survives a code refusal beside it: each side keeps the
-  // reason that is its own.
-  const refused = fastPathVerdict(
-    inputs({
-      records: NEIGHBOURHOOD,
-      recordsSettled: settled,
-      mainChanged: changed('src/api/other.mjs'),
-    }),
-  );
-  assert.equal(refused.refusal, 'ground-intersects');
-  assert.equal(refused.code.answer, 'rejudge');
-  assert.equal(refused.records.reason, 'no-certification');
 });
 
 test('a lane that certifies nothing carries nothing', () => {
@@ -1124,14 +1093,6 @@ test('no-certification is refused for a certification the lane has and for no ot
   assert.equal(unshown.refusal, 'no-certification');
   assert.equal(unshown.code.answer, 'rejudge');
   assert.equal(unshown.records, null);
-  // A records lane whose reconciliation is not green. The code certification
-  // it does not hold is asked about nowhere.
-  const red = await fastPathDecision(base, [], shas, {
-    certification: { code: null, records: { ok: false, sha: 'bbb' } },
-  });
-  assert.equal(red.refusal, 'no-certification');
-  assert.equal(red.records.answer, 'rerun');
-  assert.equal(red.code, null);
 });
 
 // -- a spectrum of forty layers, most of them silent --------------------------
