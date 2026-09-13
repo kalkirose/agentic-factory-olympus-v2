@@ -310,6 +310,11 @@ export function lastRendered(events) {
  * decision that the records ride with the open findings ticketed, and it is the
  * one way records leave a run with findings open (ADR-0075). The gate reads it
  * as the answer it is, and the ticket carries what is still wrong.
+ *
+ * That reading is what lets the update stage keep a code proof over records the
+ * cap closed. This stage answers every pass it judged, green or fallen back, so
+ * the stages behind it meet a certification either way and never a red
+ * reconciliation beside a standing verdict (ADR-0086).
  * @param {object[]} events the run's ledger, in order
  */
 export function reconcileCertification(events) {

@@ -872,3 +872,12 @@ never carries a project's specifics.
   ADR-0033, ADR-0038, ADR-0039, ADR-0046, ADR-0048, ADR-0051, ADR-0056,
   ADR-0058, ADR-0060, ADR-0064, ADR-0066, ADR-0072 and ADR-0074 are rewritten
   around them.
+- 2026-09-13: the update stage meets one records state per lane. The split of
+  the two update answers named two refusals that belong to one side, and one of
+  them answered a state the stage order cannot produce: the record stage stands
+  before the update stage on every lane that holds a code proof, and it closes
+  with a green render or with the fallback write at the cap the gate reads as
+  certified. `fastPathDecision` holds no settled records answer and no branch
+  behind one, the admission gate and the certification reader each state the
+  reading where it is read, and ADR-0086 names the one refusal that belongs to
+  one side.

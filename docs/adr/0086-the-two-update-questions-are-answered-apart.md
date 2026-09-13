@@ -13,13 +13,12 @@ question re-opened and back to the reconciliation where the record question did
 
 The two questions were asked apart and answered together. One helper copied every
 refusal onto both answers, on the reasoning that a refusal is a fact about the
-tree and a tree is one thing. Most refusals are exactly that. Two are not.
+tree and a tree is one thing. Most refusals are exactly that. One is not.
 
 So a refusal that belonged to one certification sent the run back through the
-other. A review finding on the code side bought a whole record cycle. A records
-fact bought a code re-judgment. Each of those is a stage, a fan-out of seats and
-a place for the base to move again while the run pays for a question nobody
-asked.
+other: a review finding on the code side bought a whole record cycle. That is a
+stage, a fan-out of seats and a place for the base to move again while the run
+pays for a question nobody asked.
 
 ## Decision
 
@@ -27,11 +26,13 @@ asked.
 certifications rest on. Where it belongs to one, the other answer is computed on
 its own evidence.**
 
-- **Two refusals belong to one side.** A review finding whose ground the incoming
+- **One refusal belongs to one side.** A review finding whose ground the incoming
   diff reached is a fact about the code certification, since a review reads code
-  and the record certification rests on the record tree. A missing certification
-  on the records side is a fact about the records, and it says nothing about
-  whether the code still stands.
+  and the record certification rests on the record tree. The records side brings
+  no refusal of its own here: on every lane that holds a code proof the record
+  stage stands before the update stage and closes certified, with a green render
+  or with the fallback write at the cap the gate reads as the stage's answer, so
+  the records side has no missing certification to lose.
 - **The other side is then settled, not copied.** The records answer comes from
   the run's own records and the records their neighbourhoods name, computed at the
   merge, and the code answer comes from the rest of the ladder. Both were already
@@ -64,11 +65,11 @@ The two answers can disagree, which is a shape no reader of the stamp met before
 The reason field on each half is what makes the disagreement readable, and the
 taken flag stays honest about what the path actually saved.
 
-One of the two split refusals is defensive: the records-side missing
-certification is unreachable from the ship's own path, because a lane with no
-record certification leaves the fast path earlier. It stays in the split because
-the alternative is a branch that reads as live and behaves differently from the
-one beside it.
+The split holds one refusal, and the code holds no branch for a records proof the
+stage cannot meet. A lane whose update stage stood before its record stage would
+bring a red reconciliation to the admission gate, which refuses the whole fast
+path for a certification that is not green, so the ending there is a full
+re-certification and never a wrong carry.
 
 ## Rejected options
 
@@ -94,7 +95,7 @@ answers.
 
 ## References
 
-- ADR-0026, ADR-0033, ADR-0056, ADR-0075, ADR-0085
+- ADR-0026, ADR-0033, ADR-0056, ADR-0075, ADR-0080, ADR-0085
 - `src/lanes/fastpath.mjs`
 - `src/lanes/ship.mjs`
 - `src/lanes/reconcile.mjs`
