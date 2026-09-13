@@ -129,6 +129,15 @@ function runHook(boundPath, { command, tool = 'Bash', cwd = '' }) {
   });
 }
 
+/** The REPL's own call shape: source in `code`, and no command string at all. */
+function replHook(boundPath, input) {
+  return spawnSync(process.execPath, [HOOK, boundPath], {
+    input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'REPL', tool_input: input }),
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+}
+
 function refusals(boundPath) {
   return readFileSync(`${boundPath}.refusals.jsonl`, 'utf8')
     .split('\n')
@@ -226,16 +235,95 @@ test('a bound that names no layer passes every command, and reads no tree', (t) 
   assert.match(result.stdout, /^olympus-bound [0-9a-f]{64}\n$/);
 });
 
-test('a tool input that carries no command names no layer', (t) => {
+test('a tool input that carries neither a command nor code names no layer', (t) => {
   const { boundPath } = fixture(t, { committed: API_EDIT });
-  const call = { hook_event_name: 'PreToolUse', tool_name: 'REPL', tool_input: { code: '1 + 1' } };
-  const result = spawnSync(process.execPath, [HOOK, boundPath], {
-    input: JSON.stringify(call),
-    encoding: 'utf8',
-    windowsHide: true,
-  });
+  const result = replHook(boundPath, { file_path: 'notes.md' });
   assert.equal(result.status, 0);
   assert.match(result.stdout, /^olympus-bound [0-9a-f]{64}\n$/);
+});
+
+test('the code a REPL call runs is read like a command line', (t) => {
+  const { boundPath } = fixture(t, { committed: API_EDIT });
+  assert.equal(replHook(boundPath, { code: '1 + 1' }).status, 0);
+  const result = replHook(boundPath, { code: "execSync('pnpm run test:storefront')" });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /^storefront-e2e is outside your bound:/);
+});
+
+// The same invocation, spelled the three ways a seat writes it. The layer's
+// argv names a script path, which is where the spellings differ.
+const SUITE_ARGV = ['pnpm', 'exec', 'tsx', 'scripts/run-suite.ts', 'storefront-e2e'];
+
+function suiteFixture(t) {
+  return fixture(t, {
+    committed: API_EDIT,
+    bound: {
+      layers: LAYERS.map((l) => (l.name === 'storefront-e2e' ? { ...l, argv: SUITE_ARGV } : l)),
+    },
+  });
+}
+
+test('a path separator and a quoted path do not carry a layer past the hook', (t) => {
+  const { boundPath } = suiteFixture(t);
+  for (const tool of ['Bash', 'PowerShell']) {
+    for (const command of [
+      'pnpm exec tsx scripts/run-suite.ts storefront-e2e',
+      'pnpm exec tsx scripts\\run-suite.ts storefront-e2e',
+      'pnpm exec tsx "scripts/run-suite.ts" storefront-e2e',
+      "pnpm exec tsx 'scripts/run-suite.ts' storefront-e2e",
+    ]) {
+      const result = runHook(boundPath, { command, tool });
+      assert.equal(result.status, 2, `${tool}: ${command}`);
+      assert.match(result.stderr, /^storefront-e2e is outside your bound:/, command);
+    }
+  }
+});
+
+test('a prerequisite of a bound layer is in the bound', (t) => {
+  // The diff reaches `backend-unit` alone. `contracts-build` is upstream of it
+  // and its own ground never moved, so without the prerequisite closure the
+  // seat could not build what the layer it may run reads.
+  const { boundPath } = fixture(t, { committed: API_EDIT });
+  const result = runHook(boundPath, { command: 'pnpm --filter contracts build' });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^olympus-bound [0-9a-f]{64}\n$/);
+});
+
+// A spectrum shaped like a real project's: one layer installs the workspace,
+// every other layer needs it, and none of them declares `setup`.
+const NO_SETUP_LAYERS = [
+  {
+    name: 'lockfile',
+    argv: ['node', 'scripts/install-frozen.mjs'],
+    ground: ['**/package.json'],
+    needs: [],
+    setup: false,
+  },
+  {
+    name: 'typecheck',
+    argv: ['pnpm', 'run', 'typecheck'],
+    ground: ['src/**'],
+    needs: ['lockfile'],
+    setup: false,
+  },
+  {
+    name: 'acceptance',
+    argv: ['pnpm', 'run', 'acceptance'],
+    ground: ['tests/acceptance/**'],
+    needs: ['lockfile'],
+    setup: false,
+  },
+];
+
+test('the install a project declares as an ordinary layer is in the bound', (t) => {
+  const { boundPath } = fixture(t, {
+    committed: { 'src/service.ts': 'export const service = 1;\n' },
+    bound: { layers: NO_SETUP_LAYERS, elapsedMs: null },
+  });
+  // Nothing under the install layer's ground moved and nothing declares setup,
+  // so the seat reaches it as the prerequisite of the two layers it may run.
+  assert.equal(runHook(boundPath, { command: 'node scripts/install-frozen.mjs' }).status, 0);
+  assert.equal(runHook(boundPath, { command: 'pnpm run typecheck' }).status, 0);
 });
 
 test('every refusal appends one line beside the bound file', (t) => {

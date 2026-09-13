@@ -1339,7 +1339,7 @@ test('a prompt that fits rides the command line unchanged, and writes no file', 
 
 // -- the seat bound ----------------------------------------------------------
 
-// A bound with two layers: one the declared diff reaches and one it does not.
+// A bound with three layers: two the declared diff reaches and one it does not.
 // The runner writes it and enforces nothing; the hook the settings file loads
 // is what refuses a command, and this file proves the wiring around it.
 const BOUND = {
@@ -1348,6 +1348,7 @@ const BOUND = {
   layers: [
     { name: 'lint', argv: ['npm', 'run', 'lint'], ground: ['src'], needs: [], setup: false },
     { name: 'suite', argv: ['npm', 'test'], ground: ['src', 'tests'], needs: [], setup: false },
+    { name: 'e2e', argv: ['npm', 'run', 'e2e'], ground: ['e2e'], needs: [], setup: false },
   ],
   suite: 'suite',
   declared: ['src/feature.mjs'],
@@ -1446,7 +1447,15 @@ test('a bounded seat is spawned on its own settings file, and the bound is stamp
   assert.equal(bound.seat, 'dev');
   assert.equal(bound.suite, 'suite');
   assert.equal(bound.baseSha, 'base-sha');
+  // Every layer of the project rides the file, because the hook needs the
+  // ground of the ones it refuses too.
+  assert.deepEqual(
+    bound.layers.map((l) => l.name),
+    ['lint', 'suite', 'e2e'],
+  );
   const stamp = readEvents(runLedgerPath(paths, 'r1')).find((e) => e.event === 'seat-bound');
+  // The stamp is the bound at the spawn and not the battery: it is the whole
+  // record of what this seat was allowed to run.
   assert.deepEqual(stamp.layers, ['lint', 'suite']);
   assert.equal(
     stamp.digest,
@@ -1482,6 +1491,53 @@ test('a seat whose bound never loaded fails on the stream, not on the write', as
   assert.ok(!events.some((e) => e.event === 'seat-report'));
   // One child. A settings file the CLI ignored is ignored again on a retry.
   assert.equal(events.filter((e) => e.event === 'seat-spawned').length, 1);
+});
+
+test('a hook answer that states no exit code is no denial', async (t) => {
+  const { paths, store } = setup(t, 'nocode');
+  const reportPath = runReportPath(paths, 'nocode', 'dev-1');
+  const { settingsPath, boundPath } = boundFiles(paths, 'nocode');
+  const result = await runSeat(store, {
+    sleep: NO_WAIT,
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    settings: { bound: BOUND, settingsPath, boundPath },
+    commandFor: () =>
+      claudeFixtureCommand({
+        report: { verdict: 'pass' },
+        reportPath,
+        lines: [
+          initLine(DEFAULT_MODEL),
+          {
+            type: 'assistant',
+            message: {
+              content: [
+                { type: 'tool_use', id: 'toolu-1', name: 'Bash', input: { command: 'npm test' } },
+              ],
+            },
+          },
+          // Some host hook answered the same event and said nothing about a
+          // code. Read as a denial it would excuse the missing marker, and a
+          // seat that ran a command with no bound over it would report clean.
+          {
+            type: 'system',
+            subtype: 'hook_response',
+            hook_id: 'h-host',
+            stdout: '',
+            outcome: 'success',
+          },
+          {
+            type: 'user',
+            message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu-1' }] },
+          },
+          { type: 'result', subtype: 'success', total_cost_usd: 0.01 },
+        ],
+      }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'bound-not-loaded');
 });
 
 test('the hook answer beside the first command proves the bound loaded', async (t) => {
@@ -1628,6 +1684,89 @@ test('every command the hook refused is stamped when the seat ends', async (t) =
   const report = events.find((e) => e.event === 'seat-report');
   assert.equal(report.refusals, 2);
   assert.ok(refusals[1].seq < report.seq);
+});
+
+test('a refusal a lost dispatch left behind is stamped at the next start, once', async (t) => {
+  const { paths, store } = setup(t, 'lost');
+  const first = boundFiles(paths, 'lost', 'dev', 1);
+  // What the hook wrote for a dispatch the daemon stopped before it could read
+  // the file. The lines are the hook's own shape.
+  mkdirSync(dirname(first.boundPath), { recursive: true });
+  writeFileSync(
+    `${first.boundPath}.refusals.jsonl`,
+    [
+      JSON.stringify({
+        seat: 'dev',
+        layer: 'e2e',
+        command: 'npm run e2e',
+        reason: 'the diff does not touch its ground',
+        at: '2020-01-01T00:00:00.000Z',
+      }),
+      JSON.stringify({
+        seat: 'dev',
+        layer: 'lint',
+        command: 'npm run lint',
+        reason: 'it took 400000 ms on the certified base',
+        at: '2020-01-01T00:01:00.000Z',
+      }),
+      '',
+    ].join('\n'),
+  );
+  const dispatch = async (n) => {
+    const reportPath = runReportPath(paths, 'lost', `dev-${n}`);
+    const { settingsPath, boundPath } = boundFiles(paths, 'lost', 'dev', n);
+    const result = await runSeat(store, {
+      sleep: NO_WAIT,
+      seat: 'dev',
+      roleBlock: 'ROLE',
+      reportPath,
+      schema: SCHEMA,
+      settings: { bound: BOUND, settingsPath, boundPath },
+      commandFor: () =>
+        refusingCommand({
+          report: { verdict: 'pass' },
+          reportPath,
+          boundPath,
+          refusals: [
+            {
+              seat: 'dev',
+              layer: 'e2e',
+              command: 'npm run e2e',
+              reason: 'the diff does not touch its ground',
+              at: `2020-01-0${n + 1}T00:00:00.000Z`,
+            },
+          ],
+        }),
+    });
+    assert.equal(result.ok, true);
+    return readEvents(runLedgerPath(paths, 'lost'));
+  };
+  const events = await dispatch(2);
+  const refusals = events.filter((e) => e.event === 'seat-command-refused');
+  assert.deepEqual(
+    refusals.map((e) => e.at),
+    ['2020-01-01T00:00:00.000Z', '2020-01-01T00:01:00.000Z', '2020-01-03T00:00:00.000Z'],
+  );
+  // The lost lines stand in front of this dispatch's own bound, which is the
+  // order they happened in.
+  const bound = events.find((e) => e.event === 'seat-bound');
+  assert.ok(refusals[0].seq < bound.seq);
+  assert.ok(refusals[2].seq > bound.seq);
+  // The count on the report is this dispatch's own fight with its bound, so a
+  // sweep of an older file never inflates it.
+  assert.equal(events.find((e) => e.event === 'seat-report').refusals, 1);
+  // A third start sweeps the same files and stamps nothing twice: the instant
+  // and the command are what the hook knew about the call.
+  const again = await dispatch(3);
+  assert.deepEqual(
+    again.filter((e) => e.event === 'seat-command-refused').map((e) => e.at),
+    [
+      '2020-01-01T00:00:00.000Z',
+      '2020-01-01T00:01:00.000Z',
+      '2020-01-03T00:00:00.000Z',
+      '2020-01-04T00:00:00.000Z',
+    ],
+  );
 });
 
 test('a seat with no bound spawns exactly as it did before one existed', async (t) => {

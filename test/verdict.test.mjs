@@ -10,7 +10,7 @@ import { basename, dirname, join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
 import {
-  boundLayerNames,
+  fileAtSha,
   findingIndex,
   findingLine,
   interruptedStep,
@@ -18,6 +18,7 @@ import {
   repairLane,
   repairRounds,
 } from '../src/lanes/verdict.mjs';
+import { boundLayerNames } from '../src/seats/bound.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
 import { Ledger, readEvents } from '../src/ledger/ledger.mjs';
 import { INSTANCE_EVENTS } from '../src/ledger/registry.mjs';
@@ -35,6 +36,7 @@ import {
   removeDir,
   waitFor,
   NO_WAIT,
+  gitSync,
   initOriginRepo,
   projectConfigJson,
   FIXTURE_ACCEPTANCE,
@@ -873,7 +875,7 @@ function partTriageSeat() {
 }
 
 /** One scenario: two seeded part reds, repaired one at a time. */
-function partsScenario(t, { partTargeting, flakeRerun } = {}) {
+function partsScenario(t, { partTargeting, flakeRerun, originFiles } = {}) {
   const root = tempDir('olympus-parts-lane-');
   t.after(() => removeDir(root));
   const logFile = join(root, 'parts.log');
@@ -905,6 +907,7 @@ function partsScenario(t, { partTargeting, flakeRerun } = {}) {
     commands: { suite: SUITE_CMD, acceptance: partsGate(logFile) },
     ...(partTargeting !== undefined && { partTargeting }),
     ...(flakeRerun !== undefined && { flakeRerun }),
+    ...(originFiles !== undefined && { originFiles }),
   });
   return {
     fx,
@@ -1126,7 +1129,7 @@ test('gates.flakeRerun "whole" sends the re-run back over the layer', async (t) 
 });
 
 test('the dev and repair briefs list the bound and name the verdict as the rest', async (t) => {
-  const { fx } = partsScenario(t);
+  const { fx } = partsScenario(t, { originFiles: { [FIXTURE_CARD_PATH]: DEP_CARD } });
   const { runId } = await fx.launch();
   await waitClosed(fx.paths, runId);
   for (const seat of ['dev', 'repair-dev']) {
@@ -1136,14 +1139,39 @@ test('the dev and repair briefs list the bound and name the verdict as the rest'
     assert.deepEqual(boundLayersOf(prompt), ['unit'], seat);
     assert.match(prompt, /A refused layer is not yours to run and not a defect to work around/, seat);
     assert.match(prompt, /the verdict stage runs every layer of the project at the sha it ships/, seat);
-    assert.match(prompt, /A layer enters your bound when your own work reaches what it reads\./, seat);
+    assert.match(prompt, /A layer enters your bound when your own work reaches what it reads/, seat);
+    // A layer the bound admits brings its own prerequisites, and the seat is
+    // told so: the list holds layers its diff never reached.
+    assert.match(prompt, /and so does every layer it needs/, seat);
+    // The narrowing the seat may take inside the bound, which is the frozen
+    // suite on every story spawn and the heaviest layer it holds.
+    assert.match(
+      prompt,
+      new RegExp(`A layer above that names its parts takes ${PARTS_ENV}=<comma-separated part names>`),
+      seat,
+    );
+    assert.match(prompt, /The verdict proves every part of every layer at the sha it ships/, seat);
+    // The packages the card gave this story, since the seat never sees the card
+    // and the capture holds the lockfile to exactly these.
+    assert.match(prompt, /The dependencies this story ships, as its card names them:\n- \.: tiny-invariant/, seat);
+    assert.match(prompt, /A package the card does not name is refused at the capture/, seat);
   }
+});
+
+test('a brief names no dependency where the card names none, and the part line follows the config', async (t) => {
+  const { fx } = partsScenario(t, { partTargeting: false });
+  const { runId } = await fx.launch();
+  await waitClosed(fx.paths, runId);
+  const prompt = fx.calls.find((c) => c.seat === 'dev').prompt;
+  assert.ok(!prompt.includes('The dependencies this story ships'), prompt);
+  // A project that runs no layer in parts is told nothing about narrowing one.
+  assert.ok(!prompt.includes(PARTS_ENV), prompt);
 });
 
 // The bound at the spawn is what the declared paths select. The hook recomputes
 // it from the seat's live diff, so these are the layers the brief names and the
 // floor the seat starts from.
-test('the bound at a spawn is the declared footprint, the setup layers and the suite', () => {
+test('the bound at a spawn is the declared footprint, its prerequisites, the setup layers and the suite', () => {
   const layers = [
     { name: 'unit', ground: ['tests'] },
     { name: 'lint', ground: ['src'] },
@@ -1164,6 +1192,26 @@ test('the bound at a spawn is the declared footprint, the setup layers and the s
   // A layer that declares no ground is reached by nothing, which is the same
   // reading the verdict's own footprint takes.
   assert.deepEqual([...boundLayerNames({ layers: [{ name: 'wide' }], declared: ['src/a'], suite: null })], []);
+  // What a bound layer needs is in the bound with it, transitively and whatever
+  // its own ground says. A project that declares no setup layer states the
+  // install as an ordinary prerequisite, and a seat refused it could not run a
+  // single layer it was given.
+  const chained = [
+    { name: 'lockfile', ground: ['**/package.json'] },
+    { name: 'contracts', ground: ['packages/**'], needs: ['lockfile'] },
+    { name: 'api', ground: ['apps/api/**'], needs: ['contracts'] },
+    { name: 'web', ground: ['apps/web/**'], needs: ['contracts'] },
+  ];
+  assert.deepEqual(
+    [...boundLayerNames({ layers: chained, declared: ['apps/api/handler.ts'], suite: null })].sort(),
+    ['api', 'contracts', 'lockfile'],
+  );
+  // The closure walks `needs` upward only. A prerequisite carries no dependent
+  // of its own into the bound, or one file would buy the whole spectrum.
+  assert.deepEqual(
+    [...boundLayerNames({ layers: chained, declared: ['apps/api/handler.ts'], suite: 'web' })].sort(),
+    ['api', 'contracts', 'lockfile', 'web'],
+  );
 });
 
 test('a dev seat that reports the frozen suite red is refused', async (t) => {
@@ -1198,11 +1246,18 @@ test('an implementation seat is spawned inside a bound the ledger names', async 
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   const stamp = events.find((e) => e.event === 'seat-bound' && e.seat === 'dev');
-  // Every Tier-1 layer of the project is in the file the hook reads; which of
-  // them the seat may run is the hook's answer, not the file's.
-  assert.deepEqual(stamp.layers, ['unit', 'lint', 'build']);
+  // The stamp is the bound at the spawn: it is the whole record of what this
+  // seat was allowed to run. No layer of this project declares ground, so the
+  // bound is the frozen suite alone.
+  assert.deepEqual(stamp.layers, ['unit']);
   const bound = JSON.parse(
     readFileSync(join(fx.paths.archivedRuns, runId, 'seats', 'dev-1.bound.json'), 'utf8'),
+  );
+  // Every Tier-1 layer of the project is in the file the hook reads, because
+  // the hook needs the ground and the `needs` of the ones it refuses too.
+  assert.deepEqual(
+    bound.layers.map((l) => l.name),
+    ['unit', 'lint', 'build'],
   );
   assert.equal(bound.seat, 'dev');
   // The suite layer is named by its command, so a project may call it anything.
@@ -3481,6 +3536,10 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
   // command is what widens it.
   assert.ok(dev.prompt.includes('No Tier-1 gate command is yours yet'));
   assert.ok(!dev.prompt.includes('- unit: '));
+  // No card speaks for this work, so nothing is pre-approved and nothing is
+  // gated by content either: the brief says which it is.
+  assert.ok(dev.prompt.includes('This lane names no dependency tier'), dev.prompt);
+  assert.ok(!dev.prompt.includes('The dependencies this story ships'), dev.prompt);
   // The record tree is denied in this lane too; the test paths are not, because
   // this seat writes the regression test (ADR-0074).
   assert.deepEqual(dev.denyTools, [
@@ -4577,6 +4636,27 @@ test('a card that names no dependency shuts the lockfile', async (t) => {
   assert.equal(fx.calls.filter((c) => c.seat === 'dev').length, 2);
 });
 
+test('a read at a sha answers empty for an absent path and throws for every other failure', async (t) => {
+  const root = tempDir('olympus-file-at-sha-');
+  t.after(() => removeDir(root));
+  const repo = join(root, 'repo');
+  initOriginRepo(repo, { 'pnpm-lock.yaml': LOCK_BEFORE });
+  const sha = gitSync(['rev-parse', 'HEAD'], repo).trim();
+  assert.equal(await fileAtSha(repo, sha, 'pnpm-lock.yaml'), LOCK_BEFORE);
+  // The one absence this read answers for: git's own words for a path the tree
+  // does not hold.
+  assert.equal(await fileAtSha(repo, sha, 'apps/web/pnpm-lock.yaml'), '');
+  // A sha the repository cannot reach is a fact about the repository. Read as
+  // an absent file it would make the whole lockfile new and refuse a capture
+  // over a file that never moved.
+  await assert.rejects(
+    () => fileAtSha(repo, 'not-a-commit', 'pnpm-lock.yaml'),
+    /invalid object name/,
+  );
+  // A run that never froze has no sha to read, which is no failure at all.
+  assert.equal(await fileAtSha(repo, '', 'pnpm-lock.yaml'), '');
+});
+
 test('an unchanged lockfile is no question, and a lane without the tier reads none', async (t) => {
   const seats = {
     dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }),
@@ -5294,6 +5374,68 @@ test('the first cycle runs the footprint of the run own diff and carries the res
   assert.equal(stamp.mode, 'carried');
   assert.equal(stamp.elapsedMs, undefined);
   assert.ok(!events.some((e) => e.event === 'layer-started' && e.layer === 'docs-lint'));
+});
+
+// The same project with the frozen suite's layer grounded away from the run's
+// own work, and another layer claiming what the run touched. The certification
+// holds the suite layer green at the base, so a footprint that judged it by
+// ground alone would carry it.
+const SUITE_AWAY_GATES = FOOTPRINT_GATES.map((layer) => {
+  if (layer.name === 'unit') return { ...layer, ground: ['vendor'] };
+  if (layer.name === 'suite-form') return { ...layer, ground: ['src', 'tests'] };
+  return layer;
+});
+
+test('the frozen suite runs on the footprint cycle, whatever its ground says', async (t) => {
+  const fx = verdictFixture(t, {
+    gates: SUITE_AWAY_GATES,
+    seats: { dev: () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'implemented' } }), ...furyClean() },
+    seedExtra: (ctx) => certifyLaunchBase(ctx),
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const record = readRecord(fx.paths, runId, 1);
+  assert.equal(record.sweep, 'footprint');
+  // The suite this run froze is the question the cycle exists to answer. The
+  // base certification predates the suite, so its green answers another one.
+  assert.deepEqual(
+    record.spectrum.map((r) => `${r.layer}:${r.mode}`),
+    ['install:run', 'unit:run', 'suite-form:run', 'docs-lint:carried'],
+  );
+});
+
+test('a footprint cycle states no part share, and names the tree its carries came from', async (t) => {
+  const fx = verdictFixture(t, {
+    gates: FOOTPRINT_GATES,
+    seats: {
+      dev: () => ({ files: { 'src/feature.mjs': BAD_FEATURE }, report: { summary: 'implemented' } }),
+      'verdict-triage': triageSeat(() => ({ class: 'code-defect' })),
+      ...furyClean(),
+      'repair-dev': () => ({ files: { 'src/feature.mjs': GOOD_FEATURE }, report: { summary: 'fixed' } }),
+      'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+    },
+    seedExtra: (ctx) => certifyLaunchBase(ctx),
+  });
+  const { runId } = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const first = events.filter((e) => e.event === 'verdict-rendered')[0];
+  assert.equal(first.sweep, 'footprint');
+  // The share counts parts, and a layer carried whole holds no part table. A
+  // number near nought on the cycle that carried the most work of any is the
+  // opposite of what the reading means, so the cycle states none.
+  assert.equal(first.carryShare, undefined);
+  assert.equal(first.partsRun, undefined);
+  assert.equal(first.partsCarried, undefined);
+  assert.equal(readRecord(fx.paths, runId, 1).carryShare, undefined);
+  // The repair seat reads a green no cycle of its run ran. The line names the
+  // tree that earned it, which is not a cycle of this run.
+  const repair = fx.calls.find((c) => c.seat === 'repair-dev');
+  assert.ok(
+    repair.prompt.includes('- docs-lint: green (carried from the default branch, not re-run)'),
+    repair.prompt,
+  );
 });
 
 test('a project with no setup layer keeps the full sweep, and the record says why', async (t) => {

@@ -208,11 +208,14 @@ test('the repair lane ships a ticketed fix through the assembled binaries', asyn
     'the fix seat was briefed as a story implementation',
   );
   // The repair lane has no frozen suite, so the bound rests on the ticket's own
-  // declared paths and the setup layers alone. The hook widens it from the
-  // seat's live diff on the first command.
+  // declared paths, the setup layers, and what those need. The hook widens it
+  // from the seat's live diff on the first command.
   const bound = events.find((e) => e.event === 'seat-bound' && e.seat === 'dev');
   assert.ok(bound, 'the fix seat carried no bound');
-  assert.deepEqual(bound.layers, ['lint', 'suite', 'smoke']);
+  // The stamp is the bound and not the battery. This ticket declares no path:
+  // the setup layer is in by declaration and the suite layer under it is the
+  // prerequisite that makes it runnable. The lint layer is the verdict's.
+  assert.deepEqual(bound.layers, ['smoke', 'suite']);
   const file = JSON.parse(readFileSync(join(runDir(fx, runId), 'seats', 'dev-1.bound.json'), 'utf8'));
   assert.equal(file.suite, null);
   // This ticket carries no block, so the spawn declares nothing and the brief
