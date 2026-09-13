@@ -78,16 +78,27 @@ function unquote(token) {
  * the colon. A package name is quoted when YAML needs it (`'@scope/name'`) and
  * bare when it does not, so the quotes are syntax and never part of the name a
  * card writes.
+ *
+ * `mapping` says the line declares a key at all. A line that carries no colon
+ * is not a mapping line, and reading its whole text as a key would let any
+ * sentence stand where a package name belongs.
  */
 function keyOf(line) {
   const t = line.trimStart();
   if (t.startsWith("'") || t.startsWith('"')) {
     const end = t.indexOf(t[0], 1);
-    if (end > 0) return { key: t.slice(1, end), rest: t.slice(end + 1).replace(/^:\s*/, '') };
+    if (end > 0) {
+      const after = t.slice(end + 1);
+      return {
+        key: t.slice(1, end),
+        rest: after.replace(/^:\s*/, '').trim(),
+        mapping: after.startsWith(':'),
+      };
+    }
   }
   const colon = t.indexOf(':');
-  if (colon < 0) return { key: t.trimEnd(), rest: '' };
-  return { key: t.slice(0, colon), rest: t.slice(colon + 1).trim() };
+  if (colon < 0) return { key: t.trimEnd(), rest: '', mapping: false };
+  return { key: t.slice(0, colon), rest: t.slice(colon + 1).trim(), mapping: true };
 }
 
 function indentOf(line) {
@@ -134,35 +145,50 @@ export function readLockfile(text) {
  * by its group and name together. A package that moves between `dependencies`
  * and `devDependencies` moves which installs carry it, so the group is part of
  * the entry's identity and not a detail of where it is written.
+ *
+ * Every non-blank line is attributed to one of four shapes, and the first line
+ * that fits none is `stray`. The block is the one block exempt from the byte
+ * comparison, so a line this reader passed over would be a line the grant never
+ * judged: a dependency written in flow style on its group's own line, a line at
+ * an indentation pnpm does not use, a field under no entry. The attribution is
+ * the whole of the guard over this block, which is why a shape it does not know
+ * is a refusal rather than a line to skip.
+ *
+ * A key that carries a value is a shape it does not know, with one exception:
+ * pnpm writes an importer that declares nothing as `{}`, and an importer with no
+ * entries carries no dependency.
  */
 function readImporters(block) {
   const importers = new Map();
-  if (!block) return importers;
+  if (!block) return { importers, stray: null };
   let importer = null;
   let group = null;
   let entry = null;
-  for (let i = 0; i < block.lines.length; i++) {
+  // The block's own key line sits at column 0 and declares no importer.
+  for (let i = 1; i < block.lines.length; i++) {
     const raw = block.lines[i];
     if (!raw.trim()) continue;
+    const line = block.line + i;
     const indent = indentOf(raw);
-    if (indent === KEY_INDENT) {
-      const { key } = keyOf(raw);
-      importer = { key, line: block.line + i, entries: new Map() };
+    const { key, rest, mapping } = keyOf(raw);
+    if (indent === KEY_INDENT && mapping && (rest === '' || rest === '{}')) {
+      importer = { key, line, entries: new Map() };
       importers.set(key, importer);
       group = null;
       entry = null;
-    } else if (indent === GROUP_INDENT && importer) {
-      group = keyOf(raw).key;
+    } else if (indent === GROUP_INDENT && importer && mapping && rest === '') {
+      group = key;
       entry = null;
-    } else if (indent === ENTRY_INDENT && importer && group !== null) {
-      const { key } = keyOf(raw);
-      entry = { group, name: key, line: block.line + i, lines: [raw] };
+    } else if (indent === ENTRY_INDENT && group !== null && mapping && rest === '') {
+      entry = { group, name: key, line, lines: [raw] };
       importer.entries.set(`${group}\n${key}`, entry);
-    } else if (indent >= FIELD_INDENT && entry) {
+    } else if (indent === FIELD_INDENT && entry && mapping) {
       entry.lines.push(raw);
+    } else {
+      return { importers, stray: { line, text: raw.trim() } };
     }
   }
-  return importers;
+  return { importers, stray: null };
 }
 
 /**
@@ -261,19 +287,54 @@ export function lockfileGrant(before, after, grants) {
     );
   }
 
-  const afterImporters = readImporters(a.blocks.get('importers'));
-  const beforeImporters = readImporters(b.blocks.get('importers'));
+  const { importers: afterImporters, stray: afterStray } = readImporters(a.blocks.get('importers'));
+  const { importers: beforeImporters, stray: beforeStray } = readImporters(
+    b.blocks.get('importers'),
+  );
   const importersLine = a.blocks.get('importers')?.line ?? 1;
+  // A line in neither shape is refused before anything is compared. The grant's
+  // statement about this block is "exactly these entries were added", and a line
+  // it cannot place is a line that statement does not cover.
+  for (const [side, stray, anchor] of [
+    ['the worktree', afterStray, afterStray?.line],
+    ['the base', beforeStray, importersLine],
+  ]) {
+    if (!stray) continue;
+    return refuse(
+      'importers',
+      anchor,
+      `importers: ${side} writes "${stray.text}", and the grant reads an importer key, a ` +
+        'dependency group, an entry and an entry field alone.',
+    );
+  }
   for (const key of unionKeys(afterImporters, beforeImporters)) {
     const here = afterImporters.get(key);
     const there = beforeImporters.get(key);
-    const anchor = here?.line ?? importersLine;
+    // An importer key is a workspace package. A story ships the dependency the
+    // card names; which packages the workspace holds is the workspace manifest's
+    // statement, and that file is denied to the lane outright.
+    if (!there && !named.some((g) => g.importer === key)) {
+      return refuse(
+        'importers',
+        here.line,
+        `importers: the worktree holds the importer ${key}, the base does not, and the card ` +
+          'names no dependency on it.',
+      );
+    }
+    if (!here) {
+      return refuse(
+        'importers',
+        importersLine,
+        `importers: the base holds the importer ${key} and the worktree does not, and a story ` +
+          'removes no workspace package.',
+      );
+    }
     for (const [entryKey, entry] of there?.entries ?? []) {
-      const now = here?.entries.get(entryKey);
+      const now = here.entries.get(entryKey);
       if (!now) {
         return refuse(
           'importers',
-          anchor,
+          here.line,
           `importers: ${key} no longer holds ${entry.name} under ${entry.group}, and a story removes no dependency.`,
         );
       }
@@ -285,7 +346,7 @@ export function lockfileGrant(before, after, grants) {
         );
       }
     }
-    for (const [entryKey, entry] of here?.entries ?? []) {
+    for (const [entryKey, entry] of here.entries) {
       if (there?.entries.has(entryKey)) continue;
       if (!named.some((g) => g.importer === key && g.name === entry.name)) {
         return refuse(

@@ -9,22 +9,25 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const FIXTURES = join(ROOT, 'test/fixtures/lockfile');
 
 /**
- * One real `pnpm add` of a package on one workspace importer, captured in a
- * throwaway worktree of a monorepo and read back here byte for byte. Every
- * rule the grant states is a rule about what pnpm actually wrote, so the
- * admitting cases run against these bytes and the refusing cases run against
- * one edit of them.
+ * One real dependency install on one workspace importer, captured in a throwaway
+ * generic workspace and read back here byte for byte. Every rule the grant
+ * states is a rule about what pnpm actually wrote, so the admitting cases run
+ * against these bytes and the refusing cases run against one edit of them.
+ * `test/fixtures/lockfile/README.md` states how the pair was made.
  */
 const BEFORE = readFileSync(join(FIXTURES, 'before.pnpm-lock.yaml'), 'utf8');
 const AFTER = readFileSync(join(FIXTURES, 'after.pnpm-lock.yaml'), 'utf8');
 
 /** The importer that gained the package, and the package the card would name. */
-const IMPORTER = 'apps/storefront';
-const ADDED = 'tiny-invariant';
+const IMPORTER = 'apps/web';
+const ADDED = 'react';
 const GRANT = [{ importer: IMPORTER, name: ADDED }];
 
 /** The three lines the install wrote into the importer. */
-const ADDED_ENTRY = '      tiny-invariant:\n        specifier: ^1.3.3\n        version: 1.3.3\n';
+const ADDED_ENTRY = '      react:\n        specifier: 18.3.1\n        version: 18.3.1\n';
+
+/** Where the `packages` block starts, which is where a new importer is inserted before. */
+const AFTER_IMPORTERS = '\npackages:\n';
 
 /**
  * One edit of a fixture, at an anchor the fixture holds exactly once. The
@@ -89,7 +92,7 @@ test('the reader names every top-level block and the lockfile version', () => {
       'snapshots',
     ],
   );
-  assert.equal(blocks.get('importers').line, 16);
+  assert.equal(blocks.get('importers').line, 12);
   assert.equal(blocks.get('importers').lines[0], 'importers:');
 });
 
@@ -116,14 +119,20 @@ test('a real install of the package the card names is admitted', () => {
 });
 
 test('a version line may move in an importer the card never named', () => {
-  // The install rewrote a peer suffix in another importer. That is pnpm's own
-  // output on any install, and the grant holds no version line anywhere.
+  // The install rewrote a peer suffix in apps/api, which gained nothing. That is
+  // pnpm's own output on any install, and the grant holds no version line
+  // anywhere.
+  assert.match(BEFORE, /apps\/api:\n {4}dependencies:\n {6}use-sync-external-store:/);
   assert.notEqual(BEFORE, NO_ADD);
   assert.equal(lockfileGrant(BEFORE, NO_ADD, []).ok, true);
 });
 
 test('a snapshots rewrite alone is admitted', () => {
-  const rewritten = edit(BEFORE, '  fdir@6.1.1(picomatch@4.0.5):', '  fdir@6.1.1:');
+  const rewritten = edit(
+    BEFORE,
+    '  use-sync-external-store@1.7.0(react@18.2.0):',
+    '  use-sync-external-store@1.7.0:',
+  );
   assert.equal(lockfileGrant(BEFORE, rewritten, []).ok, true);
 });
 
@@ -159,7 +168,7 @@ test('a moved settings value is refused naming settings', () => {
 });
 
 test('a moved override is refused naming overrides', () => {
-  const moved = edit(AFTER, '  nanoid@<3.3.17: ^3.3.17', '  nanoid@<3.3.17: ^3.3.18');
+  const moved = edit(AFTER, '  nanoid@<3.3.8: ^3.3.8', '  nanoid@<3.3.8: ^3.3.9');
   const answer = lockfileGrant(BEFORE, moved, GRANT);
   assert.equal(answer.ok, false);
   assert.equal(answer.block, 'overrides');
@@ -168,8 +177,8 @@ test('a moved override is refused naming overrides', () => {
 test('a moved package-extensions checksum is refused naming its block', () => {
   const moved = edit(
     AFTER,
-    'packageExtensionsChecksum: sha256-8DngXtv',
-    'packageExtensionsChecksum: sha256-0DngXtv',
+    'packageExtensionsChecksum: sha256-JdNGbJ',
+    'packageExtensionsChecksum: sha256-0dNGbJ',
   );
   const answer = lockfileGrant(BEFORE, moved, GRANT);
   assert.equal(answer.ok, false);
@@ -177,7 +186,11 @@ test('a moved package-extensions checksum is refused naming its block', () => {
 });
 
 test('a top-level block the base does not hold is refused naming it', () => {
-  const added = edit(AFTER, '\nimporters:\n', '\ncatalogs:\n  default:\n    zod: ^4.2.0\n\nimporters:\n');
+  const added = edit(
+    AFTER,
+    '\nimporters:\n',
+    '\ncatalogs:\n  default:\n    zod: ^4.2.0\n\nimporters:\n',
+  );
   const answer = lockfileGrant(BEFORE, added, GRANT);
   assert.equal(answer.ok, false);
   assert.equal(answer.block, 'catalogs');
@@ -187,8 +200,11 @@ test('an added package no grant names is refused naming the importer', () => {
   const answer = lockfileGrant(BEFORE, AFTER, []);
   assert.equal(answer.ok, false);
   assert.equal(answer.block, 'importers');
-  assert.equal(answer.reason, `importers: ${IMPORTER} gained ${ADDED}, which the card does not name.`);
-  assert.equal(answer.line, 183);
+  assert.equal(
+    answer.reason,
+    `importers: ${IMPORTER} gained ${ADDED}, which the card does not name.`,
+  );
+  assert.equal(answer.line, 31);
 });
 
 test('a grant on another importer does not admit the package', () => {
@@ -221,17 +237,17 @@ test('a removed entry is refused naming the importer and the package', () => {
 test('a moved specifier on an entry that stays is refused', () => {
   const moved = edit(
     AFTER,
-    "      '@sentry/sveltekit':\n        specifier: 10.63.0\n",
-    "      '@sentry/sveltekit':\n        specifier: 10.64.0\n",
+    "      '@sindresorhus/merge-streams':\n        specifier: ^4.0.0\n",
+    "      '@sindresorhus/merge-streams':\n        specifier: ^4.1.0\n",
   );
   const answer = lockfileGrant(BEFORE, moved, GRANT);
   assert.equal(answer.ok, false);
   assert.equal(answer.block, 'importers');
-  assert.match(answer.reason, /entry for @sentry\/sveltekit moved/);
+  assert.match(answer.reason, /entry for @sindresorhus\/merge-streams moved/);
 });
 
 test('an added entry with no specifier is refused', () => {
-  const bare = edit(AFTER, '        specifier: ^1.3.3\n', '');
+  const bare = edit(AFTER, '        specifier: 18.3.1\n', '');
   const answer = lockfileGrant(BEFORE, bare, GRANT);
   assert.equal(answer.ok, false);
   assert.equal(answer.block, 'importers');
@@ -241,17 +257,21 @@ test('an added entry with no specifier is refused', () => {
 test('a moved resolution on a package the base holds is refused naming packages', () => {
   const moved = edit(
     AFTER,
-    "  '@acemir/cssom@0.9.31':\n    resolution: {integrity: sha512-ZnR3GSaH",
-    "  '@acemir/cssom@0.9.31':\n    resolution: {integrity: sha512-0nR3GSaH",
+    "  '@sindresorhus/merge-streams@4.0.0':\n    resolution: {integrity: sha512-tlqY",
+    "  '@sindresorhus/merge-streams@4.0.0':\n    resolution: {integrity: sha512-0lqY",
   );
   const answer = lockfileGrant(BEFORE, moved, GRANT);
   assert.equal(answer.ok, false);
   assert.equal(answer.block, 'packages');
-  assert.match(answer.reason, /@acemir\/cssom@0\.9\.31 moved its resolution/);
+  assert.match(answer.reason, /@sindresorhus\/merge-streams@4\.0\.0 moved its resolution/);
 });
 
 test('a package that moves to another dependency group is refused', () => {
-  const moved = edit(SMALL, '    devDependencies:\n      typescript:', '    dependencies:\n      typescript:');
+  const moved = edit(
+    SMALL,
+    '    devDependencies:\n      typescript:',
+    '    dependencies:\n      typescript:',
+  );
   const answer = lockfileGrant(SMALL, moved, []);
   assert.equal(answer.ok, false);
   assert.equal(answer.block, 'importers');
@@ -268,9 +288,133 @@ test('a grant names a package the way a card writes it, without the quotes', () 
   assert.equal(answer.ok, true);
 });
 
-test('an importer with no entries carries no dependency and is admitted', () => {
-  // A workspace package that declares nothing adds one line to the file and no
-  // dependency to the tree. The entries are what the grant holds.
+// -- the attribution of every line of the importers block --------------------
+
+test('a dependency group written in flow style is refused naming the line', () => {
+  // The whole group sits on one line, so the packages inside it are in no entry
+  // the grant compares. The block is exempt from the byte comparison, so a line
+  // the reader could not place has to be the refusal.
+  const hidden = edit(
+    AFTER,
+    '  apps/api:\n    dependencies:\n',
+    '  apps/api:\n    optionalDependencies: {left-pad: {specifier: ^1.3.0, version: 1.3.0}}\n' +
+      '    dependencies:\n',
+  );
+  const answer = lockfileGrant(BEFORE, hidden, GRANT);
+  assert.equal(answer.ok, false);
+  assert.equal(answer.block, 'importers');
+  assert.match(answer.reason, /writes "optionalDependencies: \{left-pad/);
+  assert.equal(answer.line, 21);
+});
+
+test('an entry written in flow style is refused naming the line', () => {
+  const hidden = edit(
+    AFTER,
+    '      picomatch:\n',
+    '      left-pad: {specifier: ^1.3.0, version: 1.3.0}\n      picomatch:\n',
+  );
+  const answer = lockfileGrant(BEFORE, hidden, GRANT);
+  assert.equal(answer.ok, false);
+  assert.equal(answer.block, 'importers');
+  assert.match(answer.reason, /writes "left-pad: \{specifier/);
+});
+
+test('an entry at an indentation pnpm does not write is refused naming the line', () => {
+  const odd = edit(
+    AFTER,
+    '      picomatch:\n',
+    '     left-pad:\n        specifier: ^1.3.0\n        version: 1.3.0\n      picomatch:\n',
+  );
+  const answer = lockfileGrant(BEFORE, odd, GRANT);
+  assert.equal(answer.ok, false);
+  assert.equal(answer.block, 'importers');
+  assert.match(answer.reason, /writes "left-pad:"/);
+});
+
+test('a field deeper than an entry field is refused naming the line', () => {
+  const deep = edit(AFTER, '        version: 18.3.1\n', '        version: 18.3.1\n          extra: 1\n');
+  const answer = lockfileGrant(BEFORE, deep, GRANT);
+  assert.equal(answer.ok, false);
+  assert.equal(answer.block, 'importers');
+  assert.match(answer.reason, /writes "extra: 1"/);
+});
+
+test('a line that declares no key is refused naming the line', () => {
+  const prose = edit(SMALL, '  apps/web:\n', '  apps/web\n');
+  const answer = lockfileGrant(SMALL, prose, []);
+  assert.equal(answer.ok, false);
+  assert.equal(answer.block, 'importers');
+  assert.match(answer.reason, /writes "apps\/web"/);
+});
+
+test('a line the base cannot place is refused at the importers block', () => {
+  const hidden = edit(
+    BEFORE,
+    '  apps/api:\n    dependencies:\n',
+    '  apps/api:\n    dependencies: {left-pad: {specifier: ^1.3.0, version: 1.3.0}}\n',
+  );
+  const answer = lockfileGrant(hidden, AFTER, GRANT);
+  assert.equal(answer.ok, false);
+  assert.equal(answer.block, 'importers');
+  assert.match(answer.reason, /the base writes "dependencies: \{left-pad/);
+  assert.equal(answer.line, 12);
+});
+
+test('a new importer with a flow group is refused', () => {
+  const evil = edit(
+    AFTER,
+    AFTER_IMPORTERS,
+    '\n  apps/evil:\n    dependencies: {left-pad: {specifier: ^1.3.0, version: 1.3.0}}\n' +
+      AFTER_IMPORTERS,
+  );
+  const answer = lockfileGrant(BEFORE, evil, GRANT);
+  assert.equal(answer.ok, false);
+  assert.equal(answer.block, 'importers');
+  assert.match(answer.reason, /writes "dependencies: \{left-pad/);
+});
+
+test('a new importer the card names no dependency on is refused', () => {
+  // An importer key is a workspace package, and which packages the workspace
+  // holds is the workspace manifest's statement.
+  const evil = edit(
+    AFTER,
+    AFTER_IMPORTERS,
+    '\n  apps/evil:\n    dependencies:\n      left-pad:\n        specifier: ^1.3.0\n' +
+      '        version: 1.3.0\n' +
+      AFTER_IMPORTERS,
+  );
+  const answer = lockfileGrant(BEFORE, evil, GRANT);
+  assert.equal(answer.ok, false);
+  assert.equal(answer.block, 'importers');
+  assert.equal(
+    answer.reason,
+    'importers: the worktree holds the importer apps/evil, the base does not, and the card ' +
+      'names no dependency on it.',
+  );
+});
+
+test('a new importer with no entries is refused on the same rule', () => {
   const added = edit(SMALL, '\npackages:\n', '\n  apps/api: {}\n\npackages:\n');
-  assert.equal(lockfileGrant(SMALL, added, []).ok, true);
+  const answer = lockfileGrant(SMALL, added, []);
+  assert.equal(answer.ok, false);
+  assert.equal(answer.block, 'importers');
+  assert.match(answer.reason, /the worktree holds the importer apps\/api/);
+});
+
+test('an importer the base holds and the worktree does not is refused', () => {
+  const shrunk = edit(
+    AFTER,
+    "  packages/shared:\n    dependencies:\n      '@sindresorhus/merge-streams':\n" +
+      '        specifier: ^4.0.0\n        version: 4.0.0\n      is-odd:\n' +
+      '        specifier: ^3.0.1\n        version: 3.0.1\n\n',
+    '',
+  );
+  const answer = lockfileGrant(BEFORE, shrunk, GRANT);
+  assert.equal(answer.ok, false);
+  assert.equal(answer.block, 'importers');
+  assert.equal(
+    answer.reason,
+    'importers: the base holds the importer packages/shared and the worktree does not, and a ' +
+      'story removes no workspace package.',
+  );
 });
