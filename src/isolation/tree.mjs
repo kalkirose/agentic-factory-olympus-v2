@@ -667,6 +667,28 @@ export async function filesAt(tree, sha, entries) {
 }
 
 /**
+ * Which of the named files the tree's HEAD changed against a sha. The read is
+ * scoped to those files, so the answer costs one diff over a handful of paths
+ * however large the rest of the work is.
+ *
+ * The range is the plain two-dot one, which is what `git diff <sha> HEAD` asks:
+ * the question is whether the file itself moved since that sha, not what the
+ * two histories did around it. A file the answer does not hold is byte-identical
+ * to the sha.
+ */
+export async function changedSince(tree, sha, files) {
+  if (files.length === 0) return [];
+  const out = await git(['diff', '--name-only', sha, 'HEAD', '--', ...files], {
+    cwd: tree,
+    maxBuffer: MAX_DIFF_BYTES,
+  });
+  return out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+/**
  * Every tracked path at a sha, or in the working tree's index when the sha is
  * null. The spec lint reads it to tell a path the tree holds from one the spec
  * invented (ADR-0067). NUL-separated, so a bracket or a parenthesis in a route

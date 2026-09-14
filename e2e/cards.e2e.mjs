@@ -294,10 +294,13 @@ None; the card names none.
 `;
 
 // What the amendment writes: the guarantee the pin protected, restated in the
-// form the card mandates, and the file it lives in named in the clause.
+// form the card mandates, the file it lives in named in the clause, and the
+// card words the amendment rests on. A stated supersede is an obligation the
+// suite seat owes, so the entry carries its own authority (ADR-0091).
 const BETA_SPEC_AMENDED = BETA_SPEC.replace(
   'Supersedes:\n- None',
-  'Supersedes:\n- tests/exports.test.mjs - supersede - the published set is exactly f and g',
+  'Supersedes:\n- tests/exports.test.mjs - supersede - the published set is exactly f and g - ' +
+    `foreseen: "${BETA_NOTE}"`,
 );
 
 function scenarioFor(callDir, memoDir) {

@@ -24,6 +24,7 @@ import {
   abortMerge,
   changedFiles,
   changedInRange,
+  changedSince,
   commitAll,
   headSha,
   mergeIntoTree,
@@ -63,7 +64,9 @@ import { readInheritance } from './resume.mjs';
 import {
   SUPERSEDE_BRIEF_LINES,
   SUPERSEDE_CLAIM_PROPERTIES,
+  SUPERSEDE_CLAUSES,
   authorizeSupersede,
+  authorizedSupersedes,
   ownerPinnedFiles,
   refusalLine,
   supersedeClaim,
@@ -74,6 +77,7 @@ import {
   componentIndex,
   frozenExclusions,
   lintSpec,
+  supersedeEntries,
   supersedeTargets,
 } from './speclint.mjs';
 import {
@@ -726,6 +730,7 @@ async function specBirth(ctx) {
     base = await laneBase(ctx);
     events = runEvents(ctx);
   }
+  const authority = { ctx, pinned: [] };
   const { report, fail } = await seatWithChecks(ctx, {
     seat: 'spec-birth',
     schema: SPEC_BIRTH_SCHEMA,
@@ -733,10 +738,14 @@ async function specBirth(ctx) {
     env: base.env,
     constitution: base.constitution,
     buildRole: (brief) => birthRole(base, escalationLog(events), brief),
-    checks: (r) => birthChecks(base, r),
+    checks: (r) => birthChecks(base, r, authority),
     defectReason: 'spec-defect',
   });
   if (fail) return fail;
+  // The one refusal the corrective loop cannot answer, raised before the birth
+  // is stamped so the answer re-enters a stage that still has its seat to run.
+  const pinned = pinnedSupersedePark(base, authority);
+  if (pinned) return pinned;
   if (report.outcome === 'grounding-conflict') {
     return parkDirective('grounding-conflict', {
       question: report.conflict?.trim() || report.summary,
@@ -764,7 +773,7 @@ async function specBirth(ctx) {
  * hold: the contract carries no minimum length, and an empty list is a
  * question nobody can answer.
  */
-async function birthChecks(base, report) {
+async function birthChecks(base, report, authority = null) {
   if (report.outcome === 'grounding-conflict') return [];
   if (report.outcome === 'dependency-needed') {
     if ((report.dependencies ?? []).length > 0) return [];
@@ -776,7 +785,7 @@ async function birthChecks(base, report) {
   if (!existsSync(base.specPath) || readFileSync(base.specPath, 'utf8').trim().length === 0) {
     return [`the spec is missing or empty at ${base.specPath}; author it there.`];
   }
-  return specLintDefects(base);
+  return specLintDefects(base, authority);
 }
 
 // -- a dependency the card does not name (the owner's call) ------------------
@@ -910,8 +919,21 @@ function cardWithDependencies(text, dependencies) {
  * The spec lint at its two run points: after birth, and after every amendment
  * (ADR-0019). It runs before the spec gate spawns, so a template defect is
  * fixed by the seat that wrote it and never spends a gate round.
+ *
+ * `authority`, where the caller passes one, makes this the pre-freeze lint: the
+ * stated supersedes carry the card words they rest on (rule (p)), and every one
+ * of them is authorized here, at site `spec-birth`. A supersede is one
+ * obligation wherever the run finds it, so the check that runs at the gate and
+ * at the verdict runs here too, and a refusal is either a lint defect the next
+ * corrective round answers or the one refusal no round can answer — an
+ * owner-pinned target, which the caller parks on (ADR-0044).
+ *
+ * @param {object} base
+ * @param {{ctx: object, pinned: object[]}|null} [authority] the collector the
+ *   caller reads the owner-pinned refusals back off. It holds the refusals of
+ *   the last lint run and no earlier one.
  */
-export async function specLintDefects(base) {
+export async function specLintDefects(base, authority = null) {
   if (!base.card) return [];
   let text;
   try {
@@ -919,15 +941,122 @@ export async function specLintDefects(base) {
   } catch {
     return [`the spec is missing at ${base.specPath}; author it there.`];
   }
-  return lintSpec(text, {
+  const baseFiles = await supersedeBaseFiles(base, text);
+  const defects = lintSpec(text, {
     card: base.card,
     cardPath: base.cardPath,
     worktree: base.worktree,
     testPaths: base.testPaths,
     tier: base.tier,
-    baseFiles: await supersedeBaseFiles(base, text),
+    baseFiles,
     ground: await specGround(base, text),
+    quotedSupersedes: authority !== null,
   });
+  if (!authority) return defects;
+  return [...defects, ...statedSupersedeDefects(base, text, baseFiles, authority)];
+}
+
+/**
+ * Every supersede the spec states, authorized where it is stated.
+ *
+ * The entries this skips are the ones another rule already owns: an entry with
+ * no card words behind it is rule (p)'s, an entry whose target existed at
+ * neither sha is rule (f)'s, and an entry this run already stamped is done. One
+ * stamp per test per run is the whole of what the card buys, so a stamp at
+ * birth satisfies the gate and a stamp at the gate satisfies a later lint.
+ *
+ * @returns {string[]} the refusals that read as lint defects
+ */
+function statedSupersedeDefects(base, text, baseFiles, authority) {
+  authority.pinned = [];
+  if (base.cardAuthorizedSupersede === false) return [];
+  const { ctx } = authority;
+  const defects = [];
+  // The pins the owner has already ruled on. The park below is raised once per
+  // test: the collision is re-derived from the spec text on every lint, and a
+  // run that asked its question and got its answer would otherwise ask it again
+  // on the next read of the same line.
+  const ruled = ruledPins(runEvents(ctx));
+  // The tree the clause was written against, narrowed to the test paths: a
+  // supersede reaches a test file and nothing else. A run with no base sha to
+  // read falls back to the worktree, which `frozenTest` answers on its own.
+  const held = (baseFiles ?? []).filter((file) => underAny(file, base.testPaths));
+  for (const entry of supersedeEntries(text, { card: base.card })) {
+    if (entry.disposition !== 'supersede' || !entry.section || !entry.quote) continue;
+    const claim = supersedeClaim({
+      supersedes: entry.path,
+      supersedeAssertion: entry.clause,
+      supersedeQuote: entry.quote,
+      supersedeClause: entry.section,
+    });
+    if (!claim) continue;
+    const events = runEvents(ctx);
+    if (authorizedSupersedes(events).some((e) => e.test === claim.test)) continue;
+    const { event, refused } = authorizeSupersede(ctx.store, {
+      actor: ACTOR,
+      site: 'spec-birth',
+      claim,
+      cardText: base.cardText,
+      cardPath: base.cardPath,
+      worktree: base.worktree,
+      testPaths: base.testPaths,
+      // There is no freeze yet, so the frozen-set check reads the tree the spec
+      // was written against instead. An empty list turns it back into the
+      // worktree check, which is the answer for a run with no base sha.
+      frozen: held,
+      pins: [],
+      enabled: base.cardAuthorizedSupersede,
+    });
+    if (event) continue;
+    // The target existed at neither sha: rule (f) reports it, and a second
+    // message about one missing file says nothing the first does not.
+    if (refused === 'test-not-frozen' && !existsSync(join(base.worktree, claim.test))) continue;
+    if (refused === 'owner-pinned') {
+      // Answered once is answered. The owner's ruling is the authority from
+      // here, and it owes no stamp: nothing amends a pinned test on a card.
+      if (!ruled.has(claim.test)) authority.pinned.push({ ...claim, id: entry.id });
+      continue;
+    }
+    defects.push(
+      `${entry.id} supersedes ${entry.path} and the card does not authorize it: ` +
+        `${refusalLine(refused, null)}`,
+    );
+  }
+  return defects;
+}
+
+/**
+ * The park a stated supersede of an owner-pinned test raises, or null.
+ *
+ * The pin is the one refusal no corrective round can answer: the card is not
+ * the authority over a test the owner reserved, so the question is the owner's
+ * whatever the card says, exactly as it is at the gate (ADR-0044).
+ */
+function pinnedSupersedePark(base, authority) {
+  const pinned = authority?.pinned ?? [];
+  if (pinned.length === 0) return null;
+  return parkDirective('intent-conflict', {
+    question:
+      'The spec supersedes a frozen test the owner pinned:\n' +
+      pinned.map((p) => `- [${p.id}] ${p.test}: ${p.assertion}`).join('\n') +
+      `\n\nThe card did not settle it: ${refusalLine('owner-pinned', null)}`,
+    text: RULING_TEXT,
+    refs: [base.cardPath],
+    // The tests the question is about. The answer rules on them, and the rule
+    // is spent: the next lint reads the same clause and asks nothing.
+    detail: { pins: pinned.map((p) => p.test) },
+  });
+}
+
+/** The owner-pinned supersedes this run already asked about and got an answer for. */
+function ruledPins(events) {
+  const ruled = new Set();
+  for (const e of events) {
+    if (e.event !== 'park' || e.type !== 'intent-conflict') continue;
+    if (!events.some((a) => a.event === 'answer' && a.parkSeq === e.seq)) continue;
+    for (const test of e.detail?.pins ?? []) ruled.add(test);
+  }
+  return ruled;
 }
 
 /**
@@ -1276,16 +1405,22 @@ async function gateRound(ctx, base, { round }) {
 async function amendSpec(ctx, base, brief) {
   const noCriteria = criteriaBlock(ctx, base.card, base.cardPath);
   if (noCriteria) return { fail: noCriteria };
-  return seatWithChecks(ctx, {
+  const authority = { ctx, pinned: [] };
+  const outcome = await seatWithChecks(ctx, {
     seat: 'spec-birth',
     schema: SPEC_AMEND_SCHEMA,
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
     buildRole: (defects) => amendRole(base, brief, defects),
-    checks: () => specLintDefects(base),
+    checks: () => specLintDefects(base, authority),
     defectReason: 'spec-defect',
   });
+  if (outcome.fail) return outcome;
+  // An amendment can state a supersede the birth never did, so the pin is asked
+  // about here too. It ends the stage the way every other refusal here does.
+  const pinned = pinnedSupersedePark(base, authority);
+  return pinned ? { fail: pinned } : outcome;
 }
 
 // -- suite authoring (seat) --------------------------------------------------
@@ -1365,6 +1500,15 @@ async function suiteChecks(ctx, base, report, phase) {
   for (const file of await changedFiles(base.worktree)) {
     if (!underAny(file, base.testPaths)) defects.push(`change outside the test paths: ${file}`);
   }
+  // The supersedes this run authorized. A stated supersede is an obligation on
+  // this write, and the seat that leaves one unexecuted hands the freeze a test
+  // that reddens the dev seat for a reason the spec already wrote down.
+  for (const file of await unamendedSupersedes(base)) {
+    defects.push(
+      `the spec supersedes ${file} and it is unchanged; the amendment is this write's. ` +
+        'Restate the guarantee that pin protects in the form the card mandates; never delete it.',
+    );
+  }
   for (const red of report.reds) {
     if (red.class !== 'feature-absence') {
       defects.push(`expected red "${red.test}" is classed ${red.class}; every red must be feature-absence`);
@@ -1419,6 +1563,17 @@ function freezeHandler(nextStage) {
       const fixSha = await commitAll(base.worktree, `suite red-state fix: ${base.card.key}`);
       ctx.store.append('suite-committed', { actor: ACTOR, sha: fixSha, phase: 'fix', files: report.suiteFiles });
     }
+    // A stated supersede that no seat executed cannot freeze. The suite check
+    // refused it while the seat was live; this is the record's own refusal, and
+    // it is the last place the run can still say so. A freeze taken over an
+    // unamended pin hands the dev seat a red the spec already answered, and the
+    // dev seat may not touch a test file (ADR-0091).
+    const refused = await freezeSupersedeRefusal(base);
+    if (refused) {
+      ctx.store.append('freeze-refused', { actor: ACTOR, ...refused });
+      ctx.store.append('seat-failure', { actor: ACTOR, seat: 'suite', reason: refused.reason });
+      return seatFail(ctx, 'suite', { reason: refused.reason }, { note: freezeRefusalNote(refused) });
+    }
     // The freeze record — the completion signal of the pre-freeze chain.
     const events = runEvents(ctx);
     const sha = await headSha(base.worktree);
@@ -1450,6 +1605,18 @@ function freezeHandler(nextStage) {
       // later reader takes the map off one record (ADR-0072).
       surfaceMap: lastSuite.surfaceMap ?? [],
       dimensionsOutOfScope: lastSuite.dimensionsOutOfScope ?? [],
+      // The supersedes the freeze is taken over, each with the site that
+      // stamped it. Every one of them is a frozen test this run amended before
+      // the freeze on the card's authority, and the record is where a later
+      // reader takes that off one file, as it takes the exclusions and the pins
+      // (ADR-0091).
+      supersedes: (base.supersedes ?? []).map((e) => ({
+        test: e.test,
+        site: e.site,
+        assertion: e.assertion,
+        clause: e.clause,
+        cardQuote: e.cardQuote,
+      })),
       redState: { result: 'red', sha, reds },
     };
     const recordPath = join(ctx.paths.runs, ctx.runId, 'freeze.json');
@@ -1464,6 +1631,38 @@ function freezeHandler(nextStage) {
     });
     return { next: nextStage };
   };
+}
+
+/**
+ * Why this freeze is refused, or null when nothing holds it.
+ *
+ * Two refusals, and both are about the same fact: the run cannot say that every
+ * supersede it authorized was executed. One is an unamended target, read
+ * against the base sha the clause was written against. The other is a run whose
+ * payload carries no base sha at all — the check cannot be made, and a freeze
+ * over an unverified file is the state this whole route exists to stop, so the
+ * safe direction is the refusal.
+ *
+ * @returns {Promise<{reason: string, files: string[]}|null>}
+ */
+export async function freezeSupersedeRefusal(base) {
+  const targets = [...new Set((base.supersedes ?? []).map((e) => e.test))];
+  if (targets.length === 0) return null;
+  if (typeof base.baseSha !== 'string' || base.baseSha.length === 0) {
+    return { reason: 'no-base-sha', files: targets };
+  }
+  const unamended = await unamendedSupersedes(base);
+  return unamended.length > 0 ? { reason: 'supersede-unamended', files: unamended } : null;
+}
+
+/** What the refusal's park question says beyond the seat and the reason. */
+function freezeRefusalNote(refused) {
+  const files = refused.files.map((f) => `- ${f}`).join('\n');
+  return refused.reason === 'no-base-sha'
+    ? 'This run authorized a supersede and its launch recorded no base sha, so no check can ' +
+        `say whether these frozen tests were amended:\n${files}`
+    : 'This run authorized a supersede of these frozen tests and no suite write amended ' +
+        `them:\n${files}\nA supersede the run stated and no seat executed cannot freeze.`;
 }
 
 // -- role blocks -------------------------------------------------------------
@@ -1546,7 +1745,9 @@ function templateLines() {
     '   - the intent of the criterion, three sentences at most;',
     '   - a line "Test mapping:" and under it one list item per asserted behavior, written "<path> — <the behavior the test asserts>": the repo-relative path of the test file first, on the same line as the behavior. One mapping is one bullet on one line. Never wrap a mapping across two lines and never nest a list under one, however long the line runs;',
     '   - a line "Named constants:" and under it one list item per constant, written "NAME = value". A constant is named in one place; every other mention refers to it.',
-    '   - a line "Supersedes:" and under it one list item per frozen test this criterion contradicts, written "<path> — keep|supersede — <the clause that replaces it>". Write "- None" when it contradicts none.',
+    '   - a line "Supersedes:" and under it one list item per frozen test this criterion contradicts. A test whose every clause still stands is written "<path> — keep — <why it stands>". A test a clause of this criterion replaces is written "<path> — supersede — <the clause that replaces it> — <section>: "<the card line that mandates the change, copied word for word out of the card>"", where <section> is one of ' +
+      `${SUPERSEDE_CLAUSES.join(', ')}. Write "- None" when it contradicts none.`,
+    '   A stated supersede is an obligation, not a note: the suite seat amends that test file before the freeze, and the card line you quote is the whole of the authority for it. The quote is checked against the card mechanically, so copy the line and never paraphrase it. Restate what the pin protected in the form the card mandates; a pin is amended, never deleted.',
     '3. One fenced block, opened by ```touched-paths and closed by ```, naming every repo-relative path the work touches: one path per line, each followed by " — dev" or " — suite" for the seat that owns the file. Exactly one such block in the document, and every line names one file.',
     '   Every path in the block exists in the repository as it stands, or the work creates it. Write a path the work creates with the marker (new) between the path and the owner: "src/new-module.mjs (new) — dev". The lint refutes a path that is neither.',
     '   A test file that mentions a touched path by its repo-relative path is a pin on it. Name every such pin in the block, or name it in the Supersedes clause of the criterion that replaces it; the lint reports a pin the spec says nothing about.',
@@ -1626,6 +1827,9 @@ function supersedeBrief(detail, event) {
     `The frozen test ${event.test} pins: ${event.assertion}`,
     'Amend the spec so the criterion states the supersede and names that test file in its ' +
       'Supersedes clause. Go exactly as far as the quoted card line reaches and no further.',
+    'Write the entry in the template\'s form, with the card words it rests on:',
+    `- ${event.test} — supersede — <the clause that replaces it> — ${event.clause}: ` +
+      `"${event.cardQuote}"`,
     'Restate what the pin protected in the form the card mandates. The guarantee survives in its ' +
       'new form; a pin is amended, never deleted.',
   ].join('\n');
@@ -1718,7 +1922,56 @@ function suiteReportLines(base) {
     ...surfaceMapLines(),
     ...suiteCheckLines(base.suiteChecks),
     ...noteLines(base),
+    ...supersedeLines(base),
   ];
+}
+
+/**
+ * The supersedes this run authorized before the freeze, as the amendments the
+ * suite seat owes.
+ *
+ * Every pre-freeze suite write gets them — the author write and the red-state
+ * fix — because each one runs in fresh context and each one can leave a stated
+ * supersede unexecuted without ever knowing it was owed. The check under this
+ * brief refuses that write, and the freeze refuses the record after it: a
+ * supersede the run stated and no seat executed cannot freeze.
+ */
+function supersedeLines(base) {
+  const owed = base.supersedes ?? [];
+  if (owed.length === 0) return [];
+  return [
+    'This run authorized these supersedes on the intent card. The amendment is this write\'s: ' +
+      'no later seat edits a frozen test on the card\'s authority before the freeze.',
+    ...owed.map(
+      (e) =>
+        `- Amend ${e.test}: ${e.assertion}. Restate the guarantee the pin protects in its new ` +
+        `form; never delete it. The card's ${e.clause} section says: "${e.cardQuote}"`,
+    ),
+    'Go exactly as far as each quoted card line reaches and no further.',
+  ];
+}
+
+/**
+ * The authorized supersede targets this run has not amended yet.
+ *
+ * One derivation for the two checks that must agree: the suite check, which
+ * refuses the write while the seat is still live and the correction is cheap,
+ * and the freeze, which refuses the record. A target counts as amended when the
+ * commits since the base sha moved it or the working tree holds a write to it,
+ * so the red-state fix write is never asked to amend a file the author write
+ * already did.
+ *
+ * A run with no base sha reads the working tree alone. It can freeze nothing
+ * here either way: the freeze refuses that run by name.
+ */
+async function unamendedSupersedes(base) {
+  const targets = [...new Set((base.supersedes ?? []).map((e) => e.test))];
+  if (targets.length === 0) return [];
+  const amended = new Set(await changedFiles(base.worktree));
+  if (typeof base.baseSha === 'string' && base.baseSha.length > 0) {
+    for (const file of await changedSince(base.worktree, base.baseSha, targets)) amended.add(file);
+  }
+  return targets.filter((file) => !amended.has(file));
 }
 
 /**
@@ -1804,6 +2057,13 @@ async function laneBase(ctx) {
     // Derived from the ledger like every other position in this lane, so a
     // restart mid-suite re-reads the same notes instead of losing them.
     gateNotes: gateNotes(runEvents(ctx)),
+    // The supersedes this run authorized before the freeze, whichever of the
+    // two pre-freeze sites found them. They are the suite seat's own work: the
+    // brief states each one and the freeze refuses an unamended one. A verdict
+    // stamp is a different obligation, spent by the re-freeze route (ADR-0091).
+    supersedes: authorizedSupersedes(runEvents(ctx)).filter(
+      (e) => e.site === 'spec-birth' || e.site === 'spec-gate',
+    ),
     constitution: readConstitution(worktree, config),
     testPaths: config.repo.testPaths,
     routesRoot: config.repo.routesRoot ?? null,

@@ -298,11 +298,28 @@ export const RUN_EVENTS = new Set([
   // write and the freeze is a map a corrective round wrote (ADR-0072).
   'surface-map',
   'freeze',
+  // A freeze the run refused to write, with the `reason` and the `files`. Two
+  // reasons: `supersede-unamended`, a supersede the spec stated and the card
+  // authorized that no suite write executed; `no-base-sha`, a run whose payload
+  // carries no base sha, so no check can say whether the file moved. Both park
+  // the suite seat. A supersede the run stated and no seat executed cannot
+  // freeze, and two of these in one run says the suite seat cannot execute one
+  // (ADR-0091).
+  'freeze-refused',
   // A launch that inherited a prior run's freeze instead of deriving one.
   // A resumed run never stamps `freeze`: it did not earn one.
   'freeze-inherited',
   // verdict
   'implementation-committed',
+  // A dev pass that handed over a red tree and said which frozen tests it
+  // attributes the red to: the `files` and the `count` of clauses. The entries
+  // themselves stay in the seat report, which the triage brief reads. It is
+  // evidence for the verdict and not a defect of the seat: the seat may not
+  // touch a test file, so a collision it finds after the freeze has exactly one
+  // legal answer, and the triage classes it (ADR-0091). A run where every named
+  // file is then classed `code-defect` is a seat that used the field to dodge
+  // work, and the count is what says so.
+  'dev-suite-conflict',
   // One gate layer, at the moment its process starts: the cycle, the layer,
   // the sha, and the attempt (the flake filter's re-run is the second). A
   // layer can hold a run for an hour, and without this the ledger ran silent

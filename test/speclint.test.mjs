@@ -11,6 +11,7 @@ import {
   componentIndex,
   lintSpec,
   frozenExclusions,
+  supersedeEntries,
   SPEC_LINE_CAP,
 } from '../src/lanes/speclint.mjs';
 import { specLintDefects } from '../src/lanes/story.mjs';
@@ -108,9 +109,19 @@ function lint(
     on = card,
     baseFiles = null,
     ground = null,
+    quotedSupersedes = false,
   } = {},
 ) {
-  return lintSpec(text, { card: on, cardPath: CARD_PATH, worktree, testPaths, tier, baseFiles, ground });
+  return lintSpec(text, {
+    card: on,
+    cardPath: CARD_PATH,
+    worktree,
+    testPaths,
+    tier,
+    baseFiles,
+    ground,
+    quotedSupersedes,
+  });
 }
 
 /** The tree the fixture spec is written against, as the lane hands it over. */
@@ -1104,4 +1115,83 @@ test('the components section is an amended part of its own', () => {
   const before = spec({ components: ['`PriceTag`'] });
   const after = spec({ components: ['`PriceTag`', '`RadioField` (new)'] });
   assert.deepEqual(amendedSections(before, after, { card }), ['components']);
+});
+
+// -- (p) a stated supersede carries the card words it rests on ---------------
+
+// The card line the fixture entries quote, on one line where a card wraps it.
+const CARD_LINE =
+  'This story adds a second published export to the feature module; the export ' +
+  'set an earlier story closed is extended here, not replaced.';
+
+const AUTHORIZED = `tests/feature.test.mjs — supersede — the export set is exactly ["f", "g"] — scope-boundary: "${CARD_LINE}"`;
+
+/** The fixture spec with one Supersedes entry under AC-1. */
+function supersedingSpec(entry) {
+  return spec({
+    sections: [
+      section('AC-1', ['tests/feature.test.mjs — f(2) is 4'], { supersedes: [entry] }),
+      section('AC-2', ['tests/feature.test.mjs — f("x") throws']),
+    ].join('\n'),
+  });
+}
+
+test('a supersede entry is read as path, disposition, clause and the card words', () => {
+  const text = spec({
+    sections: [
+      section('AC-1', ['tests/feature.test.mjs — f(2) is 4'], { supersedes: [AUTHORIZED] }),
+      section('AC-2', ['tests/feature.test.mjs — f("x") throws'], {
+        supersedes: ['tests/feature.test.mjs — keep — the chain gains one entry'],
+      }),
+    ].join('\n'),
+  });
+  const [first, second] = supersedeEntries(text, { card });
+  assert.equal(first.id, 'AC-1');
+  assert.equal(first.path, 'tests/feature.test.mjs');
+  assert.equal(first.disposition, 'supersede');
+  assert.equal(first.clause, 'the export set is exactly ["f", "g"]');
+  assert.equal(first.section, 'scope-boundary');
+  assert.equal(first.quote, CARD_LINE);
+  // A keep entry keeps its own form, and states no authority.
+  assert.equal(second.disposition, 'keep');
+  assert.equal(second.clause, 'the chain gains one entry');
+  assert.equal(second.section, null);
+  assert.equal(second.quote, null);
+});
+
+test('the clause of a supersede entry may carry a dash of its own', () => {
+  const text = supersedingSpec(
+    'tests/feature.test.mjs — supersede — the set is closed — three entries now — ' +
+      `decisions: "${CARD_LINE}"`,
+  );
+  const [entry] = supersedeEntries(text, { card });
+  assert.equal(entry.clause, 'the set is closed — three entries now');
+  assert.equal(entry.section, 'decisions');
+  assert.equal(entry.quote, CARD_LINE);
+});
+
+test('(p) a supersede entry with no card words is a defect, and only where the card rules', (t) => {
+  const bare = supersedingSpec('tests/feature.test.mjs — supersede — the export set grows');
+  const worktree = fixtureTree(t);
+  const defects = lint(t, bare, { worktree, quotedSupersedes: true });
+  assert.equal(defects.length, 1, defects.join(' | '));
+  assert.match(
+    defects[0],
+    /AC-1 supersedes tests\/feature\.test\.mjs and states no card authority/,
+  );
+  assert.match(defects[0], /acceptance, scope-boundary, decisions, foreseen/);
+  // A section the clause set does not hold is no authority either.
+  const wrong = supersedingSpec(
+    `tests/feature.test.mjs — supersede — the set grows — goal: "${CARD_LINE}"`,
+  );
+  assert.equal(lint(t, wrong, { worktree, quotedSupersedes: true }).length, 1);
+  // The whole entry passes.
+  assert.deepEqual(lint(t, supersedingSpec(AUTHORIZED), { worktree, quotedSupersedes: true }), []);
+  // A keep entry is never asked for one.
+  const kept = supersedingSpec('tests/feature.test.mjs — keep — every clause stands');
+  assert.deepEqual(lint(t, kept, { worktree, quotedSupersedes: true }), []);
+  // The rule belongs to the pre-freeze lint, where the card is the authority.
+  // After the freeze a ruling can be the owner's own answer, which is in no
+  // card, so the lint there reads the entry and asks nothing of it.
+  assert.deepEqual(lint(t, bare, { worktree }), []);
 });

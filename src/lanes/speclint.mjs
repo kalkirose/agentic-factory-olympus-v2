@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { underEntry } from '../config/project.mjs';
 import { parseTouchedBlock } from '../seats/diffpolicy.mjs';
 import { isCriterionId, noCriteriaMessage } from './card.mjs';
+import { SUPERSEDE_CLAUSES } from './supersede.mjs';
 
 /** The template's hard cap. A spec past it is a document nobody reads whole. */
 export const SPEC_LINE_CAP = 400;
@@ -97,11 +98,15 @@ const COMPONENT_EXTENSIONS = ['svelte', 'tsx', 'jsx', 'vue'];
  *
  * @param {string} specText
  * @param {{card: object, cardPath: string|null, worktree: string, testPaths: string[],
- *   tier: object|null, baseFiles: string[]|null, ground: object|null}} ctx `tier`
+ *   tier: object|null, baseFiles: string[]|null, ground: object|null,
+ *   quotedSupersedes: boolean}} ctx `tier`
  *   is the lane's diff policy, or null when the project declares none;
  *   `cardPath` names the card in rule (a)'s messages; `baseFiles` is the
  *   supersede targets that exist at the spec's base sha, or null when the base
- *   sha is unknown; `ground` is the tree the spec is written against (ADR-0067):
+ *   sha is unknown; `quotedSupersedes` turns rule (p) on, which the pre-freeze
+ *   chain does because the card is the authority there and the stated entry is
+ *   what the authorization is read off; `ground` is the tree the spec is
+ *   written against (ADR-0067):
  *   `files`, every tracked path at the base sha; `pins`, a map from each
  *   touched path to the test files that mention it; `routesRoot`, the directory
  *   route ids resolve under; `componentsRoot` and `components`, the directory
@@ -111,7 +116,16 @@ const COMPONENT_EXTENSIONS = ['svelte', 'tsx', 'jsx', 'vue'];
  */
 export function lintSpec(
   specText,
-  { card, cardPath = null, worktree, testPaths = [], tier = null, baseFiles = null, ground = null },
+  {
+    card,
+    cardPath = null,
+    worktree,
+    testPaths = [],
+    tier = null,
+    baseFiles = null,
+    ground = null,
+    quotedSupersedes = false,
+  },
 ) {
   const text = typeof specText === 'string' ? specText : '';
   const lines = text.split(/\r?\n/);
@@ -410,6 +424,26 @@ export function lintSpec(
           'section is the whole of that permission, so no spec lists the path.',
     );
   }
+
+  // (p) every stated supersede carries the card words it rests on.
+  //
+  // A supersede stated in the spec is an obligation: a suite seat owes the
+  // amendment before the freeze, and the freeze refuses an unamended one. The
+  // authorization for that obligation is the card, and the card is checked
+  // mechanically against a quote, so an entry with no section and no quote is
+  // an obligation with nothing behind it. The rule is the lint's because the
+  // correction is a spec edit, which is what a lint defect buys (ADR-0091).
+  if (quotedSupersedes) {
+    for (const entry of supersedes) {
+      if (entry.disposition !== 'supersede' || (entry.section && entry.quote)) continue;
+      defects.push(
+        `${entry.id} supersedes ${entry.path} and states no card authority; a supersede entry ` +
+          'is written "<path> — supersede — <the clause that replaces it> — <section>: ' +
+          `"<the card line, verbatim>"", where <section> is one of ` +
+          `${SUPERSEDE_CLAUSES.join(', ')}. A "keep" entry keeps its own form.`,
+      );
+    }
+  }
   return defects;
 }
 
@@ -548,9 +582,28 @@ function cleanToken(raw) {
  * @returns {string[]}
  */
 export function supersedeTargets(specText, { card }) {
+  return unique(supersedeEntries(specText, { card }).map((entry) => entry.path));
+}
+
+/**
+ * Every Supersedes entry a spec states, in document order, each with the
+ * criterion it sits under: the path, the disposition, the clause that replaces
+ * it and, on a `supersede` entry, the card section and the card line it rests
+ * on. `section` and `quote` are null where the entry states neither.
+ *
+ * One parser for the clause serves the lint, the authorization at spec birth
+ * and the base-sha read: a second reading of the same lines would be free to
+ * disagree with all three.
+ *
+ * @param {string} specText
+ * @param {{card: object}} ctx
+ * @returns {{id: string, path: string, disposition: string, clause: string,
+ *   section: string|null, quote: string|null}[]}
+ */
+export function supersedeEntries(specText, { card }) {
   const lines = String(specText ?? '').split(/\r?\n/);
   const known = new Set((card?.acceptance ?? []).map((c) => c.id));
-  return unique(specSections(lines, known).flatMap((s) => s.supersedes.map((m) => m.path)));
+  return specSections(lines, known).flatMap((s) => s.supersedes.map((m) => ({ ...m, id: s.id })));
 }
 
 /**
@@ -873,13 +926,44 @@ function testMapping(item) {
   return { path: cleanPath(first), behavior: rest.join(' ').replace(/^[—–-]\s*/, '') };
 }
 
-/** `<path> — keep | supersede — <replacement clause>`, or "None". */
+/**
+ * The authority tail of a supersede entry: the card section the amendment
+ * rests on, and the card line itself, quoted.
+ *
+ * It is read off the LAST field of the entry rather than off a position,
+ * because the replacement clause between them is prose and prose carries
+ * dashes. A tail this does not match leaves the whole of that text with the
+ * clause, which is what rule (p) then reports.
+ */
+const AUTHORITY_TAIL = new RegExp(
+  `^(${SUPERSEDE_CLAUSES.join('|')})\\s*:\\s*["“'\`](.+)["”'\`]\\s*$`,
+  'i',
+);
+
+/**
+ * `<path> — keep — <clause>`, `<path> — supersede — <clause> — <section>:
+ * "<card line>"`, or "None".
+ *
+ * A `supersede` entry is an obligation and not a note: a suite seat owes the
+ * amendment and the freeze refuses it unamended, so the entry carries the card
+ * words the obligation rests on. A `keep` entry claims nothing and keeps the
+ * form it always had.
+ */
 function supersede(item) {
   if (NONE.test(item)) return null;
   const fields = item.split(/\s+[—–-]\s+/);
   const [first, ...rest] = fields[0].split(/\s+/);
   const disposition = (fields[1] ?? rest.join(' ')).trim().toLowerCase();
-  return { path: cleanPath(first), disposition };
+  const entry = { path: cleanPath(first), disposition, clause: '', section: null, quote: null };
+  const tail = fields.length > 3 ? AUTHORITY_TAIL.exec(fields[fields.length - 1].trim()) : null;
+  if (tail) {
+    entry.section = tail[1].toLowerCase();
+    entry.quote = tail[2].trim();
+    entry.clause = fields.slice(2, -1).join(' — ').trim();
+    return entry;
+  }
+  entry.clause = fields.slice(2).join(' — ').trim();
+  return entry;
 }
 
 function cleanPath(token) {

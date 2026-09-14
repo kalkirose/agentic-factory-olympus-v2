@@ -1459,11 +1459,18 @@ function diffLines(diff) {
  * judgment, and this is the seat that already judges the diff against the
  * validated spec. A stretched authorization is a HIGH, and confirm-to-block
  * does the rest (ADR-0044).
+ *
+ * Every site, and never one of them: a supersede is one obligation wherever the
+ * run found it. The spec states it at birth, the gate finds it, or the dev seat
+ * finds it after the freeze, and the amendment that follows is the same
+ * amendment. A duty that read one site would leave the other two amendments
+ * unverified, which is the whole of what this lens is for.
  */
-function supersedeDutyLines(base, supersedes) {
+export function supersedeDutyLines(base, supersedes) {
   if (supersedes.length === 0) return [];
   return [
-    'This run amended frozen tests on the intent card\'s authority, without asking the owner.',
+    'This run amended frozen tests on the intent card\'s authority, without asking the owner. ' +
+      'The amendment ran before the freeze or after it; the duty is the same either way.',
     `The card: ${base.cardPath ?? '(the run names none)'}`,
     'Verify every one of these against the card: the quoted line is in the card, and what it ' +
       'mandates genuinely reaches the assertion that changed. It reaches it when no ' +

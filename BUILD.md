@@ -915,3 +915,28 @@ never carries a project's specifics.
   and `gates.driftHeld` enter the project config. ADR-0090 is new, ADR-0075 and
   ADR-0079 carry the supersession on one seat per record and on the per-record
   dispatch, and ADR-0080 is rewritten around it.
+- 2026-09-14: a supersede is one obligation wherever the run finds it. Three
+  places in a run can find a frozen test a story's own card authorizes it to
+  amend, and only one of them executed the amendment: a spec that stated the
+  supersede at birth owed nobody the edit, the gate wrote the entry into the
+  spec and owed nobody the edit either, and the dev seat that met the pin after
+  the freeze could say only that the suite was red, which the harness read as
+  unfinished work. Now the three sites are one obligation with one record. A
+  stated supersede entry carries the card section and the card line it rests on,
+  the pre-freeze lint refuses an entry that carries neither, and it runs the
+  same card check the gate runs, at site `spec-birth`: an owner-pinned target
+  parks `intent-conflict` once, and one stamp per test per run means a stamp at
+  either pre-freeze site satisfies the other. The suite seat is briefed with
+  every authorized supersede on every pre-freeze write, its check refuses a
+  write that left one unexecuted, and the freeze refuses the record when a
+  target is byte-identical to the base sha or when the run holds no base sha to
+  check against. The freeze record carries `supersedes`, each with the site that
+  stamped it. After the freeze, a dev seat states the reds it attributes to
+  frozen pins under `suiteConflicts`: a red with entries that name the run's own
+  frozen files is accepted, stamps `dev-suite-conflict` and goes to the verdict
+  as a green report does, and the triage brief carries the entries so the
+  existing card check and re-freeze route rule on them. A red that names no
+  conflict is refused as before. `freeze-refused` and `dev-suite-conflict` enter
+  the run registry, `supersede-authorized` gains the site `spec-birth`, and the
+  spec-lens duty and the eval-review brief read every site. ADR-0091 is new;
+  ADR-0044 and ADR-0053 stand and are the authority it executes.
