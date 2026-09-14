@@ -377,7 +377,12 @@ suite authoring (seat) → freeze (process).
   spec has a fixed template (ADR-0019): a header, one section per card
   acceptance criterion in card order (intent, test mapping, named constants,
   supersedes), one `touched-paths` block with an owner per path, an
-  environment section, 400 lines at most.
+  environment section, 400 lines at most. A Supersedes entry that keeps a
+  frozen test states the path, `keep` and why it stands. One that replaces a
+  clause states the path, `supersede`, the clause that replaces it, and the
+  card section and card line the replacement rests on (ADR-0091): a stated
+  supersede is an obligation on a suite seat, and the card words are the
+  authority for it.
 - **Spec lint** (process) runs after birth and after every amendment, before
   any judging seat spawns: the criterion sections match the card's id set,
   the cap holds, the touched-paths block parses and its entries clear the
@@ -397,11 +402,23 @@ suite authoring (seat) → freeze (process).
   and a bullet in it that is not one component name on one line is a defect
   naming the line. The last two rules run only where
   the tree holds their root; a tree git cannot read turns the four rules
-  off for that lint. A failure is a work-product defect — one corrective
-  invocation, then the `seat-failure` park — and never spends a gate round.
+  off for that lint. One rule runs in the pre-freeze chain and nowhere else
+  (ADR-0091): a `supersede` entry states the card section and the card line it
+  rests on, or it is a defect. The same lint runs on a post-freeze amendment,
+  whose authority can be an owner's answer to a park rather than a card. A
+  failure is a work-product defect — one corrective invocation, then the
+  `seat-failure` park — and never spends a gate round.
   The `Components` section is read twice more: the spec-gate seat is told the
   lint has already settled the component set, and every suite seat is told to
   target those components through the story's own test ids and no others.
+- **A stated supersede is authorized where it is stated** (ADR-0091). The
+  pre-freeze lint runs the card check on every `supersede` entry, at site
+  `spec-birth`: the quoted line must be in the named card section word for
+  word, and the target must exist at the spec's base sha under the test paths,
+  because no freeze exists yet. A quote the card does not hold is a lint
+  defect. A target the owner pinned parks `intent-conflict`, asked once per
+  test. One stamp per test per run, so a stamp at birth satisfies the gate and
+  a stamp at the gate satisfies a later lint.
 - **Spec gate**: one fresh-context round on the born spec (grounding
   spot-checks, scope against the card, AC encodability), evidence-cited. The
   birth seat amends; the gate re-checks amended sections only. There is no
@@ -469,13 +486,27 @@ suite authoring (seat) → freeze (process).
 - **Red-state check** (process): the suite must be red against the
   pre-implementation tree, and the freeze report classes every red as
   feature-absence. Any other cause is a suite defect to fix before freeze.
+- **The suite seat owes every authorized supersede** (ADR-0091). Every
+  pre-freeze suite write is briefed with one line per supersede this run
+  authorized at either pre-freeze site: the file, the guarantee the pin
+  protects, the duty to restate it and never delete it, and the card line
+  behind it. The suite check reports a target the run has not amended, and a
+  target counts as amended when a commit since the base sha moved it or the
+  working tree holds a write to it, so the red-state fix is never asked to
+  redo the authoring write's amendment.
 - **Freeze record**: suite file set at a SHA, red-state record, born-spec ref,
   the surface map of the last
   suite write and the dimensions it declared out of scope, the frozen
   exclusions (the test-path files the spec assigned to the implementing pass),
-  and the frozen tests pinned to the owner. The exclusions leave the dev seats'
+  the frozen tests pinned to the owner, and the supersedes the freeze is taken
+  over, each with the site that stamped it. The exclusions leave the dev seats'
   deny rules and every story-mode restore. The
   valid record is the completion signal.
+- **A supersede the run stated and no seat executed cannot freeze** (ADR-0091).
+  The freeze refuses its record when an authorized target is byte-identical to
+  the base sha, and refuses it the same way when the run holds no base sha to
+  check against. Either refusal appends `freeze-refused` with the reason and
+  the files, and parks the suite seat.
 
 ## Verdict machinery
 
@@ -721,6 +752,18 @@ suite authoring (seat) → freeze (process).
   `persisting` field; a later cycle requires the field and the brief lists
   the open ids it may hold. Every check defect states the rule beside the
   entry. The ship stage's CI triage is the same step with the same shape.
+- **A red the dev seat attributes to the frozen suite is a verdict input**
+  (ADR-0091). A dev seat may not touch a test file, so a frozen clause no
+  implementation of the spec can leave true has one legal answer. The dev
+  report carries it: `suiteState: red` with one `suiteConflicts` entry per
+  pinned clause — the test file, the clause, why no implementation leaves it
+  true, and the card line and section where the card mandates the change. A red
+  that names no conflict is refused as it always was, and so is an entry naming
+  a file outside the run's frozen suite. An accepted report stamps
+  `dev-suite-conflict` and the stage goes to the verdict as it does on a green
+  report; the triage brief carries the entries as the dev seat's evidence and
+  classes each as a suite defect at intent depth or as a code defect. The
+  repair lane has no frozen suite and takes neither field.
 - **Corrective rounds and crash retries** are two budgets (ADR-0067). Every
   lane contract loop has one corrective round on a work-product defect, then
   the `seat-failure` park. A retry bought at that park is one invocation
@@ -759,12 +802,14 @@ suite authoring (seat) → freeze (process).
   the re-freeze route as the ruling, with `source: 'card'` on the stamp. A
   collision the card is silent on parks as it always did, and so does one on a
   test the owner pinned (`olympus:owner-pinned` in the test file, recorded at
-  the freeze). Both classification sites work this way: the spec gate before
-  the freeze, the verdict ladder after it. The amendment nobody was asked about
-  is read by the panel's spec lens on the cycle behind it, and every
-  authorization is a `supersede-authorized` stamp the eval review counts.
-  `lanes.story.cardAuthorizedSupersede: false` restores the always-park
-  default.
+  the freeze). Three sites classify this way, and all three are one obligation
+  with one record (ADR-0091): the spec states the supersede at birth, the spec
+  gate finds the collision, or the verdict triage finds it after the freeze. The
+  amendment nobody was asked about is read by the panel's spec lens on the cycle
+  behind it, whichever site stamped it, and every authorization is a
+  `supersede-authorized` stamp the eval review counts by site.
+  `lanes.story.cardAuthorizedSupersede: false` restores the always-park default,
+  at every site.
 - **Covered is necessity, not naming** (ADR-0053). The classifier asks one
   question: does the card mandate a behavior whose implementation necessarily
   changes what the pinned clause asserts? A card states what the story must do
