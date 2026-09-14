@@ -298,6 +298,14 @@ export const RUN_EVENTS = new Set([
   // write and the freeze is a map a corrective round wrote (ADR-0072).
   'surface-map',
   'freeze',
+  // A freeze the run refused to write, with the `reason` and the `files`. Two
+  // reasons: `supersede-unamended`, a supersede the spec stated and the card
+  // authorized that no suite write executed; `no-base-sha`, a run whose payload
+  // carries no base sha, so no check can say whether the file moved. Both park
+  // the suite seat. A supersede the run stated and no seat executed cannot
+  // freeze, and two of these in one run says the suite seat cannot execute one
+  // (ADR-0091).
+  'freeze-refused',
   // A launch that inherited a prior run's freeze instead of deriving one.
   // A resumed run never stamps `freeze`: it did not earn one.
   'freeze-inherited',

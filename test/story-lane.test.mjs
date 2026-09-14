@@ -8,7 +8,7 @@ import { basename, dirname, join } from 'node:path';
 import { COMMAND_LOG_ROOT } from '../src/lanes/exec.mjs';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { scaffoldHome, archivedRunLedgerPath, runLedgerPath } from '../src/daemon/home.mjs';
-import { SUITE_SCHEMA, storyLane } from '../src/lanes/story.mjs';
+import { SUITE_SCHEMA, freezeSupersedeRefusal, storyLane } from '../src/lanes/story.mjs';
 import { unrunSuiteCheck } from '../src/lanes/suitechecks.mjs';
 import { SURFACE_KINDS } from '../src/lanes/surfacemap.mjs';
 import { SECURITY_DIMENSIONS } from '../src/lanes/lenses.mjs';
@@ -1672,14 +1672,40 @@ const PINNED_SPEC = FIXTURE_SPEC.replace(
   'tests/feature.test.mjs (new) — suite\ntests/pinned.test.mjs — suite',
 );
 
-function collisionSeats(gate) {
+// The pin as the amendment leaves it: the guarantee it protected, restated
+// over the set the card mandates. The suite stays red — the module is still
+// absent — so the freeze's red-state claim is untouched.
+const AMENDED_PIN = `import test from 'node:test';
+import assert from 'node:assert/strict';
+test('the export set is closed', async () => {
+  const mod = await import('../src/feature.mjs');
+  assert.deepEqual(Object.keys(mod).sort(), ['f', 'g']);
+});
+`;
+
+// The same amendment, written so the pre-implementation tree passes it. One
+// scenario needs a green suite at the red-state check, and it needs the pin
+// amended before that.
+const GREEN_AMENDED_PIN = `import test from 'node:test';
+test('the export set is closed', () => {});
+`;
+
+/**
+ * The seats of the collision scenario. `amend` says whether the suite write
+ * executes the supersede: a run the card authorized owes the amendment, and a
+ * run that parked for the owner owes nothing, because nothing was authorized.
+ */
+function collisionSeats(gate, { amend = false, birth = PINNED_SPEC } = {}) {
   return {
-    'spec-birth': amendingBirth(PINNED_SPEC),
+    'spec-birth': amendingBirth(birth),
     'spec-gate': gate,
     suite: () => ({
-      files: { 'tests/feature.test.mjs': STRONG_TEST },
+      files: {
+        'tests/feature.test.mjs': STRONG_TEST,
+        ...(amend && { 'tests/pinned.test.mjs': AMENDED_PIN }),
+      },
       report: {
-        suiteFiles: ['tests/feature.test.mjs'],
+        suiteFiles: ['tests/feature.test.mjs', ...(amend ? ['tests/pinned.test.mjs'] : [])],
         reds: [{ test: 'f doubles', class: 'feature-absence' }],
         ...NO_SURFACE,
         summary: 'authored',
@@ -1691,7 +1717,7 @@ function collisionSeats(gate) {
 test('the gate supersedes a collision the card covers, and never asks', async (t) => {
   const fx = storyFixture(t, {
     card: SUPERSEDE_CARD,
-    seats: collisionSeats(collidingGate(GATE_CLAIM)),
+    seats: collisionSeats(collidingGate(GATE_CLAIM), { amend: true }),
     files: { 'tests/pinned.test.mjs': REPO_PIN },
   });
   const runId = await fx.launch();
@@ -1725,6 +1751,48 @@ test('the gate supersedes a collision the card covers, and never asks', async (t
         'pinned clause asserts',
     ),
   );
+  // The authorization is an obligation on the suite seat, and the suite seat
+  // was told so: one line per authorized supersede, with the card words.
+  const authoring = fx.calls.find((c) => c.seat === 'suite');
+  assert.ok(authoring.prompt.includes('Amend tests/pinned.test.mjs'));
+  assert.ok(authoring.prompt.includes('never delete it'));
+  assert.ok(authoring.prompt.includes(GATE_COVERING_LINE));
+  // It executed it, and the freeze record says so: the target, and the site
+  // that stamped the authorization behind it.
+  const record = JSON.parse(
+    readFileSync(join(fx.paths.archivedRuns, runId, 'freeze.json'), 'utf8'),
+  );
+  assert.deepEqual(
+    record.supersedes.map((s) => [s.test, s.site]),
+    [['tests/pinned.test.mjs', 'spec-gate']],
+  );
+  assert.equal(events.filter((e) => e.event === 'freeze-refused').length, 0);
+  const committed = events.find((e) => e.event === 'suite-committed' && e.phase === 'author');
+  assert.ok(committed.files.includes('tests/pinned.test.mjs'));
+});
+
+test('a suite write that leaves a stated supersede unamended is refused', async (t) => {
+  const fx = storyFixture(t, {
+    card: SUPERSEDE_CARD,
+    // The gate authorizes the supersede; the suite seat writes its own file and
+    // never touches the pin, on both of the invocations the contract buys.
+    seats: collisionSeats(collidingGate(GATE_CLAIM)),
+    files: { 'tests/pinned.test.mjs': REPO_PIN },
+  });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'seat-failure');
+  assert.ok(park.question.includes('The suite seat failed'));
+  const events = readEvents(runLedgerPath(fx.paths, runId));
+  const refused = events.filter((e) => e.event === 'seat-refused' && e.seat === 'suite');
+  assert.equal(refused.length, 2);
+  assert.ok(
+    refused[0].defects.some((d) =>
+      d.includes('the spec supersedes tests/pinned.test.mjs and it is unchanged'),
+    ),
+    refused[0].defects.join(' | '),
+  );
+  // Nothing froze: a supersede the run stated and no seat executed cannot.
+  assert.equal(events.filter((e) => e.event === 'freeze').length, 0);
 });
 
 test('the gate parks a collision the card is silent on, and refuses a fabricated quote', async (t) => {
@@ -1764,6 +1832,236 @@ test('an owner-pinned test in the repository parks the gate, covering card or no
   const events = await waitClosed(fx.paths, runId);
   assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
   assert.equal(events.filter((e) => e.event === 'supersede-authorized').length, 0);
+});
+
+// -- a supersede the spec states at birth (ADR-0091) -------------------------
+
+/** The fixture spec with one Supersedes entry under AC-1, in the given form. */
+function supersedingSpec(entry) {
+  return PINNED_SPEC.replace('Supersedes:\n- None', `Supersedes:\n- ${entry}`);
+}
+
+const BIRTH_ENTRY =
+  'tests/pinned.test.mjs — supersede — the published export set is exactly ["f", "g"] — ' +
+  `scope-boundary: "${GATE_COVERING_LINE}"`;
+
+/** A spec-birth seat that writes one spec and amends to the same text. */
+function birthWriting(spec) {
+  return ({ prompt }) =>
+    prompt.includes('Amend the born spec')
+      ? {
+          files: { [specPathFrom(prompt)]: spec },
+          report: { amendedSections: ['AC-1'], summary: 'amended' },
+        }
+      : {
+          files: { [specPathFrom(prompt)]: spec },
+          report: { outcome: 'spec-born', summary: 'born' },
+        };
+}
+
+const CLEAN_GATE = () => ({
+  report: { findings: [], summary: 'clean', intentConflict: { conflict: false, detail: 'None.' } },
+});
+
+test('a supersede the spec states at birth is authorized there, executed, and frozen', async (t) => {
+  const fx = storyFixture(t, {
+    card: SUPERSEDE_CARD,
+    seats: {
+      ...collisionSeats(CLEAN_GATE, { amend: true }),
+      'spec-birth': birthWriting(supersedingSpec(BIRTH_ENTRY)),
+    },
+    files: { 'tests/pinned.test.mjs': REPO_PIN },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.deepEqual(
+    events.filter((e) => e.event === 'park').map((e) => e.type),
+    [],
+  );
+  // One stamp, at the site that found the collision: the spec stated it, so
+  // nobody had to wait for the gate to find it again.
+  const stamps = events.filter((e) => e.event === 'supersede-authorized');
+  assert.equal(stamps.length, 1);
+  assert.equal(stamps[0].site, 'spec-birth');
+  assert.equal(stamps[0].test, 'tests/pinned.test.mjs');
+  assert.equal(stamps[0].clause, 'scope-boundary');
+  assert.equal(stamps[0].cardQuote, GATE_COVERING_LINE);
+  assert.equal(stamps[0].assertion, 'the published export set is exactly ["f", "g"]');
+  // The suite seat owed the amendment and was told so, and it executed it.
+  const authoring = fx.calls.find((c) => c.seat === 'suite');
+  assert.ok(authoring.prompt.includes('Amend tests/pinned.test.mjs'));
+  const record = JSON.parse(
+    readFileSync(join(fx.paths.archivedRuns, runId, 'freeze.json'), 'utf8'),
+  );
+  assert.deepEqual(
+    record.supersedes.map((s) => [s.test, s.site]),
+    [['tests/pinned.test.mjs', 'spec-birth']],
+  );
+  assert.equal(events.filter((e) => e.event === 'freeze-refused').length, 0);
+});
+
+test('a supersede entry with no card words buys one corrective spec round', async (t) => {
+  const good = supersedingSpec(BIRTH_ENTRY);
+  const bare = supersedingSpec(
+    'tests/pinned.test.mjs — supersede — the published export set is exactly ["f", "g"]',
+  );
+  const fx = storyFixture(t, {
+    card: SUPERSEDE_CARD,
+    seats: {
+      ...collisionSeats(CLEAN_GATE, { amend: true }),
+      // The first write states the supersede and quotes nothing; the round the
+      // lint buys writes the card line the obligation rests on.
+      'spec-birth': ({ prompt }) =>
+        birthWriting(prompt.includes('states no card authority') ? good : bare)({ prompt }),
+    },
+    files: { 'tests/pinned.test.mjs': REPO_PIN },
+  });
+  const runId = await fx.launch();
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const refused = events.filter((e) => e.event === 'seat-refused' && e.seat === 'spec-birth');
+  assert.equal(refused.length, 1);
+  assert.ok(
+    refused[0].defects.some((d) => d.includes('states no card authority')),
+    refused[0].defects.join(' | '),
+  );
+  assert.equal(events.filter((e) => e.event === 'supersede-authorized').length, 1);
+});
+
+test('a supersede the card cannot carry is a lint defect, never a stamp', async (t) => {
+  // The card is silent, and the spec quotes a line the card does not hold.
+  const fx = storyFixture(t, {
+    card: SILENT_CARD,
+    seats: {
+      ...collisionSeats(CLEAN_GATE),
+      'spec-birth': birthWriting(supersedingSpec(BIRTH_ENTRY)),
+    },
+    files: { 'tests/pinned.test.mjs': REPO_PIN },
+  });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'seat-failure');
+  assert.ok(park.question.includes('The spec-birth seat failed'));
+  const events = readEvents(runLedgerPath(fx.paths, runId));
+  const refused = events.filter((e) => e.event === 'seat-refused' && e.seat === 'spec-birth');
+  assert.ok(
+    refused[0].defects.some((d) =>
+      d.includes('the card does not authorize it: the quoted line is not in the card section'),
+    ),
+    refused[0].defects.join(' | '),
+  );
+  assert.equal(events.filter((e) => e.event === 'supersede-authorized').length, 0);
+});
+
+test('a supersede of an owner-pinned test parks at birth, and asks once', async (t) => {
+  const fx = storyFixture(t, {
+    card: SUPERSEDE_CARD,
+    seats: {
+      ...collisionSeats(CLEAN_GATE),
+      'spec-birth': birthWriting(supersedingSpec(BIRTH_ENTRY)),
+    },
+    files: {
+      'tests/pinned.test.mjs': `// ${OWNER_PIN_MARKER}: the closed set is the owner's call.\n${REPO_PIN}`,
+    },
+  });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'intent-conflict');
+  assert.ok(park.question.includes('The spec supersedes a frozen test the owner pinned'));
+  assert.ok(park.question.includes('carries the owner pin'));
+  assert.deepEqual(park.detail.pins, ['tests/pinned.test.mjs']);
+  assert.equal(
+    readEvents(runLedgerPath(fx.paths, runId)).filter((e) => e.event === 'supersede-authorized')
+      .length,
+    0,
+  );
+  // The owner rules, and the rule is spent: the next lint reads the same clause
+  // and asks nothing. Nothing amends a pinned test on a card's authority, so
+  // the run owes no suite amendment either.
+  fx.daemon.engine.answer({ runId, actor: 'operator', answer: 'Granted; extend the set.' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  assert.equal(events.filter((e) => e.event === 'park' && e.type === 'intent-conflict').length, 1);
+  assert.equal(events.filter((e) => e.event === 'supersede-authorized').length, 0);
+});
+
+test('the freeze refuses an unamended supersede, and a run that cannot check one', async (t) => {
+  const dir = tempDir('olympus-freeze-supersede-');
+  t.after(() => removeDir(dir));
+  initOriginRepo(dir, { 'tests/pinned.test.mjs': REPO_PIN, 'src/base.mjs': 'export const b = 1;\n' });
+  const baseSha = gitSync(['rev-parse', 'HEAD'], dir).trim();
+  const supersedes = [
+    { test: 'tests/pinned.test.mjs', site: 'spec-birth', assertion: 'the set is closed' },
+  ];
+  const base = { worktree: dir, baseSha, supersedes };
+  // Nothing moved the file since the sha the clause was written against.
+  assert.deepEqual(await freezeSupersedeRefusal(base), {
+    reason: 'supersede-unamended',
+    files: ['tests/pinned.test.mjs'],
+  });
+  // A run whose launch recorded no base sha cannot make the check at all, and a
+  // freeze over a file nothing verified is what this refusal exists to stop.
+  assert.deepEqual(await freezeSupersedeRefusal({ ...base, baseSha: null }), {
+    reason: 'no-base-sha',
+    files: ['tests/pinned.test.mjs'],
+  });
+  // The amendment, committed: the check is against the base sha, so a target a
+  // committed write moved is executed and the freeze proceeds.
+  writeFileSync(join(dir, 'tests', 'pinned.test.mjs'), AMENDED_PIN);
+  gitSync(['add', '-A'], dir);
+  gitSync(['-c', 'commit.gpgsign=false', 'commit', '-m', 'amend the pin'], dir);
+  assert.equal(await freezeSupersedeRefusal(base), null);
+  // A run that authorized nothing is never held here.
+  assert.equal(await freezeSupersedeRefusal({ ...base, supersedes: [] }), null);
+});
+
+test('a later suite write that undoes the amendment ends in freeze-refused, never a freeze', async (t) => {
+  // The suite check reads the write in front of it, so a write that executes
+  // the supersede passes it and a LATER write can still undo the file. The
+  // freeze reads the whole run against its base sha, which is why it is the
+  // backstop: the author write amends the pin and leaves the suite green, the
+  // red-state fix round puts the suite red and restores the pin's own bytes,
+  // and the record refuses.
+  const fx = storyFixture(t, {
+    card: SUPERSEDE_CARD,
+    seats: {
+      'spec-birth': birthWriting(supersedingSpec(BIRTH_ENTRY)),
+      'spec-gate': CLEAN_GATE,
+      suite: ({ prompt }) =>
+        prompt.includes('red-state check failed')
+          ? {
+              files: { 'tests/feature.test.mjs': STRONG_TEST, 'tests/pinned.test.mjs': REPO_PIN },
+              report: {
+                suiteFiles: ['tests/feature.test.mjs', 'tests/pinned.test.mjs'],
+                reds: [{ test: 'f doubles', class: 'feature-absence' }],
+                ...NO_SURFACE,
+                summary: 'fixed',
+              },
+            }
+          : {
+              files: {
+                'tests/feature.test.mjs': TAUTOLOGY_TEST,
+                'tests/pinned.test.mjs': GREEN_AMENDED_PIN,
+              },
+              report: {
+                suiteFiles: ['tests/feature.test.mjs', 'tests/pinned.test.mjs'],
+                reds: [{ test: 'always green', class: 'feature-absence' }],
+                ...NO_SURFACE,
+                summary: 'authored',
+              },
+            },
+    },
+    files: { 'tests/pinned.test.mjs': REPO_PIN },
+  });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'seat-failure');
+  assert.ok(park.question.includes('The suite seat failed (supersede-unamended)'));
+  assert.ok(park.question.includes('tests/pinned.test.mjs'));
+  const events = readEvents(runLedgerPath(fx.paths, runId));
+  const refused = events.filter((e) => e.event === 'freeze-refused');
+  assert.equal(refused.length, 1);
+  assert.equal(refused[0].reason, 'supersede-unamended');
+  assert.deepEqual(refused[0].files, ['tests/pinned.test.mjs']);
+  assert.equal(events.filter((e) => e.event === 'freeze').length, 0);
 });
 
 test('the freeze records which frozen tests are pinned to the owner', async (t) => {
