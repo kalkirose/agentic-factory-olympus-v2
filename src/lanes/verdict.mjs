@@ -137,6 +137,7 @@ import { lockfileGrant } from './lockfile.mjs';
 import {
   SUPERSEDE_BRIEF_LINES,
   SUPERSEDE_CLAIM_PROPERTIES,
+  SUPERSEDE_CLAUSES,
   authorizeSupersede,
   authorizedSupersedes,
   refusalLine,
@@ -171,6 +172,7 @@ import {
   freezeSuiteFiles,
   seatReportAfter,
   seatFailureAfter,
+  lastSeatReportEvent,
   readJson,
   parkDirective,
   GATE_FORMS,
@@ -271,6 +273,31 @@ export const DEV_SCHEMA = {
     // answers for, and a seat that hands over a tree it knows is red is
     // handing the verdict a cycle it will spend and then refuse.
     suiteState: { type: 'string', enum: ['green', 'red'] },
+    // The reds the seat attributes to the frozen suite itself: a pinned clause
+    // no implementation of this spec can leave true. The seat may not touch a
+    // test file, so without this field a collision it finds after the freeze
+    // has one legal answer — a red report — that the refusal below reads as
+    // unfinished work. With it, the red is evidence and the verdict's own
+    // triage classes it (ADR-0091).
+    //
+    // Flat, like every other report field here: one entry names the test file,
+    // the pinned clause, why no implementation of the spec leaves it true, the
+    // card line that mandates the change and the card section it came from.
+    suiteConflicts: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          test: { type: 'string' },
+          assertion: { type: 'string' },
+          reason: { type: 'string' },
+          quote: { type: 'string' },
+          clause: { type: 'string', enum: [...SUPERSEDE_CLAUSES] },
+        },
+        required: ['test', 'assertion', 'reason'],
+      },
+    },
   },
   required: ['summary', 'suiteState'],
 };
@@ -284,7 +311,7 @@ export const DEV_SCHEMA = {
  */
 export function devSchema(mode) {
   if (mode === 'story') return DEV_SCHEMA;
-  const { suiteState, ...properties } = DEV_SCHEMA.properties;
+  const { suiteState, suiteConflicts, ...properties } = DEV_SCHEMA.properties;
   return {
     ...DEV_SCHEMA,
     properties,
@@ -1137,6 +1164,23 @@ function partSummary(part, layerMode) {
   };
 }
 
+/**
+ * The frozen-suite conflicts the dev pass that produced this tree reported.
+ *
+ * The last dev report and no earlier one: an earlier pass's conflicts were
+ * either answered by the re-freeze that followed them or are the same clauses
+ * this pass reports again. A report older than the last `re-freeze` is spent —
+ * the suite it named has been amended since, so briefing it would hand the
+ * triage a collision the run already settled.
+ */
+function devSuiteConflicts(events) {
+  const report = lastSeatReportEvent(events, 'dev');
+  if (!report) return [];
+  const refreeze = events.filter((e) => e.event === 're-freeze').pop();
+  if (refreeze && report.seq < refreeze.seq) return [];
+  return readJson(report.path)?.suiteConflicts ?? [];
+}
+
 /** A gate command that could not run at all: an environment defect. */
 function gateCommandError(ctx, error) {
   return commandError(
@@ -1187,6 +1231,7 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
     };
   }
   const redLayers = reds.map((r) => r.layer);
+  const conflicts = devSuiteConflicts(events);
   const takeBacks = recordedTakeBacks(events);
   // What the harness already read as a cause outside the tree, and the ladder
   // it already climbed against it. The seat is told, and the checks below
@@ -1218,6 +1263,7 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
           takeBacks.recaptured,
           { replays, budget, layers: tier1 },
           transient,
+          conflicts,
         ),
       // A report that asks for a probe it can still have is a request and not
       // a verdict, so the coverage rules do not judge it. Past the round
@@ -3060,26 +3106,74 @@ async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
     buildRole: (brief) => buildRole(brief, bound),
     checks: async (report) => [
       ...(await captureDefects(ctx, base, mode, { seat, capture })),
-      ...suiteStateDefects(mode, report),
+      ...suiteStateDefects(mode, base, report),
     ],
   });
+  // A red the seat attributed to frozen pins, once the checks took the report.
+  // The stamp is the verdict's entry point: the stage proceeds as it does on a
+  // green report, and the triage reads the entries off the seat report itself.
+  const conflicts = acceptedConflicts(mode, outcome.report);
+  if (conflicts.length > 0) {
+    ctx.store.append('dev-suite-conflict', {
+      actor: ACTOR,
+      files: [...new Set(conflicts.map((c) => normalizePath(c.test)))],
+      count: conflicts.length,
+      gist: gist(`the dev seat attributes ${conflicts.length} red(s) to frozen pins`),
+    });
+  }
   return { ...outcome, dropped: capture.dropped, allowlists: capture.allowlists };
 }
 
-/**
- * A tree the seat itself calls red against the frozen suite, refused.
- *
- * The verdict would find the same red one cycle later and spend the whole
- * spectrum doing it. A seat that knows the suite is red has not finished the
- * work it was given, and that is a defect of the work product like any other.
- */
-function suiteStateDefects(mode, report) {
+/** The conflicts of a report the checks accepted, or none. */
+function acceptedConflicts(mode, report) {
   if (mode !== 'story' || report?.suiteState !== 'red') return [];
+  return report.suiteConflicts ?? [];
+}
+
+/**
+ * A tree the seat itself calls red against the frozen suite, refused — unless
+ * the seat says which frozen pins the red belongs to.
+ *
+ * The plain red stays refused. The verdict would find the same red one cycle
+ * later and spend the whole spectrum doing it, and a seat that knows the suite
+ * is red and cannot say why has not finished the work it was given.
+ *
+ * A red the seat attributes to the frozen suite is a different thing. The seat
+ * may not touch a test file, so a collision the tree reveals after the freeze
+ * has exactly one legal answer, and refusing that answer parks a run on work
+ * the card had already authorized. The entries are checked for the
+ * one thing a check can settle — every named file is in the frozen suite of
+ * this run — and the verdict's own triage rules on the rest (ADR-0091).
+ */
+function suiteStateDefects(mode, base, report) {
+  if (mode !== 'story' || report?.suiteState !== 'red') return [];
+  const conflicts = report.suiteConflicts ?? [];
+  if (conflicts.length === 0) {
+    return [
+      'your report states the frozen suite is red and names no conflict; the suite defines ' +
+        'done, and a tree that does not satisfy it is not implemented. Finish the work, run ' +
+        'the suite, and report green. Where a red belongs to a frozen test this spec ' +
+        'supersedes, name it under "suiteConflicts" instead.',
+    ];
+  }
+  const frozen = new Set(
+    (base.frozenSuiteFiles ?? [])
+      .map(normalizePath)
+      .filter((file) => !(base.frozenExclusions ?? []).map(normalizePath).includes(file)),
+  );
+  const outside = conflicts
+    .map((c) => normalizePath(c.test))
+    .filter((file) => !frozen.has(file));
+  if (outside.length === 0) return [];
   return [
-    'your report states the frozen suite is red; the suite defines done, and a tree ' +
-      'that does not satisfy it is not implemented. Finish the work, run the suite, and ' +
-      'report green.',
+    `your report names ${outside.join(', ')} under "suiteConflicts", and the frozen suite of ` +
+      'this run does not hold it. A conflict is a pinned clause of the frozen suite; a red in ' +
+      'a file this run owns is yours to fix.',
   ];
+}
+
+function normalizePath(file) {
+  return String(file ?? '').replaceAll('\\', '/');
 }
 
 // -- role blocks -------------------------------------------------------------
@@ -3180,12 +3274,35 @@ function devRole(base, brief = null, bound = null) {
     `Implement the story spec at: ${base.specRef}`,
     'The frozen acceptance suite defines done. Do not edit or delete test files.',
     `Test paths (read-only): ${base.testPaths.join(', ')}`,
+    ...suiteConflictLines(),
     ...recordLines(base),
     ...dependencyLines(base),
     ...gateCommandLines(base, bound),
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
   ].join('\n');
+}
+
+/**
+ * The one route a dev seat has out of a frozen clause it cannot satisfy.
+ *
+ * It is stated up front and never left to the refusal, because the refusal
+ * costs the seat its one corrective invocation. A seat that learns the field
+ * exists from the refusal has already spent the round the run had, and the run
+ * then parks on a collision the card had already answered.
+ */
+function suiteConflictLines() {
+  return [
+    'Report what the frozen suite said in "suiteState".',
+    'A red you cannot satisfy because a frozen test pins a clause this spec replaces is not ' +
+      'yours to fix, and it is not a reason to stop: report "suiteState": "red" and name each ' +
+      'one under "suiteConflicts" — "test" (the frozen test file), "assertion" (the pinned ' +
+      'clause), "reason" (why no implementation of this spec leaves it true), and, where the ' +
+      'intent card mandates the change, "quote" (the card line, word for word) and "clause" ' +
+      `(${SUPERSEDE_CLAUSES.join(', ')}).`,
+    'The verdict classes those reds and the suite seat amends the test. You edit no test file, ' +
+      'and a red you can fix in the code is never a conflict.',
+  ];
 }
 
 function fixRole(base, brief = null, bound = null) {
@@ -3308,6 +3425,7 @@ function triageRole(
   recaptured = [],
   probe = null,
   transient = null,
+  conflicts = [],
 ) {
   const lines = [
     'Classify the persistent red Tier-1 layers below into findings. Cluster reds that share one root cause into one finding.',
@@ -3335,7 +3453,7 @@ function triageRole(
       'The report takes no "persisting" field on this cycle; write "findings" and "summary" only.',
     );
   }
-  lines.push(...takenBackLines(dropped, recaptured));
+  lines.push(...takenBackLines(dropped, recaptured), ...suiteConflictEvidence(conflicts));
   if (transient) {
     lines.push(
       'The harness read these reds as a cause outside the tree before you were spawned, and',
@@ -3360,6 +3478,31 @@ function triageRole(
   if (probe) lines.push(...probeOfferLines(probe));
   lines.push(...briefLines(brief));
   return lines.join('\n');
+}
+
+/**
+ * What the dev seat said about the reds it attributes to the frozen suite.
+ *
+ * It is evidence and not a verdict. The seat that wrote it may not edit a test
+ * file, so it could do nothing else with what it found; this seat decides
+ * whether the collision is real and whether the card covers it, and the two
+ * answers take the run down two different routes (ADR-0091).
+ */
+function suiteConflictEvidence(conflicts) {
+  if (conflicts.length === 0) return [];
+  return [
+    'The dev seat reported the frozen suite red and attributed these reds to frozen pins. It ' +
+      'may not edit a test file, so this is what it could say and no more:',
+    ...conflicts.map(
+      (c) =>
+        `- ${c.test} pins "${c.assertion}". The seat says: ${c.reason}` +
+        (c.quote ? ` The card's ${c.clause ?? 'card'} section says: "${c.quote}"` : ''),
+    ),
+    'Judge each one. A pin no implementation of the spec can leave true is a suite-defect ' +
+      'finding at depth "intent", and it carries the card claim when the card covers it. A pin ' +
+      'an implementation can satisfy is a code-defect finding, whatever the seat said.',
+    'A file named here whose layer is green in the reds below is no finding at all.',
+  ];
 }
 
 /**

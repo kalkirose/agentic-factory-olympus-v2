@@ -4871,6 +4871,101 @@ test("a collision the card covers is superseded with no park, on the card's own 
   );
 });
 
+// The conflict as the dev seat states it: the file, the pinned clause, why no
+// implementation of the spec leaves it true, and the card words behind it.
+const DEV_CONFLICT = {
+  test: 'tests/pinned.test.mjs',
+  assertion: PINNED_ASSERTION,
+  reason: 'the criterion publishes g, so the set cannot stay exactly ["f"]',
+  quote: COVERING_LINE,
+  clause: 'scope-boundary',
+};
+
+test('a red the dev seat attributes to a frozen pin is verdict evidence, not a defect', async (t) => {
+  const seats = {
+    dev: () => ({
+      files: { 'src/feature.mjs': PAIR_FEATURE },
+      // The honest report of the run this route was built for: the work is
+      // done, the frozen pin is red, and the seat may not touch the test file.
+      report: { summary: 'implemented', suiteState: 'red', suiteConflicts: [DEV_CONFLICT] },
+    }),
+    'verdict-triage': pinTriage(COVERING_CLAIM),
+    ...furyClean(),
+    'spec-birth': () => ({ report: { amendedSections: ['AC-1'], summary: 'amended' } }),
+    suite: pinSuite(),
+    'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+  };
+  const fx = pinFixture(t, { card: SUPERSEDE_CARD, seats });
+  const { runId } = await fx.launch({ card: 'cards/alpha.md' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The report stood: no corrective round, no park, and the stage went on to
+  // the verdict as it goes on from a green report.
+  assert.equal(events.filter((e) => e.event === 'seat-refused' && e.seat === 'dev').length, 0);
+  assert.equal(fx.calls.filter((c) => c.seat === 'dev').length, 1);
+  assert.deepEqual(
+    events.filter((e) => e.event === 'park').map((e) => e.type),
+    [],
+  );
+  const stamp = events.find((e) => e.event === 'dev-suite-conflict');
+  assert.deepEqual(stamp.files, ['tests/pinned.test.mjs']);
+  assert.equal(stamp.count, 1);
+  // The triage seat read the attribution as evidence, and was told what to do
+  // with it: judge the collision, and class it.
+  const triage = fx.calls.find((c) => c.seat === 'verdict-triage');
+  assert.ok(triage.prompt.includes('attributed these reds to frozen pins'));
+  assert.ok(triage.prompt.includes(DEV_CONFLICT.reason));
+  assert.ok(triage.prompt.includes(COVERING_LINE));
+  assert.ok(triage.prompt.includes('is a code-defect finding, whatever the seat said'));
+  // From there the route is the one that already worked: the card rules, the
+  // re-freeze amends the pin, and the next cycle is green.
+  const authorized = events.filter((e) => e.event === 'supersede-authorized');
+  assert.equal(authorized.length, 1);
+  assert.equal(authorized[0].site, 'verdict');
+  const refreeze = events.filter((e) => e.event === 're-freeze');
+  assert.equal(refreeze.length, 1);
+  assert.equal(refreeze[0].ruling.source, 'card');
+  assert.deepEqual(
+    events.filter((e) => e.event === 'verdict-rendered').map((e) => [e.cycle, e.verdict]),
+    [
+      [1, 'red'],
+      [2, 'green'],
+    ],
+  );
+});
+
+test('a conflict outside the frozen suite is refused, and a red with none still is', async (t) => {
+  const seats = {
+    dev: ({ label }) => ({
+      files: { 'src/feature.mjs': PAIR_FEATURE },
+      report:
+        label === 'dev-1'
+          ? {
+              summary: 'implemented',
+              suiteState: 'red',
+              // A file this run owns is not a pinned clause of the frozen suite.
+              suiteConflicts: [{ ...DEV_CONFLICT, test: 'src/feature.mjs' }],
+            }
+          : { summary: 'implemented', suiteState: 'red', suiteConflicts: [DEV_CONFLICT] },
+    }),
+    'verdict-triage': pinTriage(COVERING_CLAIM),
+    ...furyClean(),
+    'spec-birth': () => ({ report: { amendedSections: ['AC-1'], summary: 'amended' } }),
+    suite: pinSuite(),
+    'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
+  };
+  const fx = pinFixture(t, { card: SUPERSEDE_CARD, seats });
+  const { runId } = await fx.launch({ card: 'cards/alpha.md' });
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const refused = events.filter((e) => e.event === 'seat-refused' && e.seat === 'dev');
+  assert.equal(refused.length, 1);
+  assert.match(refused[0].defects[0], /src\/feature\.mjs under "suiteConflicts"/);
+  assert.match(refused[0].defects[0], /a red in a file this run owns is yours to fix/);
+  // The corrective round named a frozen file, and the report then stood.
+  assert.equal(events.filter((e) => e.event === 'dev-suite-conflict').length, 1);
+});
+
 test('the same collision on a card that does not cover it parks, exactly as before', async (t) => {
   const seats = {
     dev: () => ({ files: { 'src/feature.mjs': PAIR_FEATURE }, report: { summary: 'implemented' } }),

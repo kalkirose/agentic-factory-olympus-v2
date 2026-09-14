@@ -311,6 +311,15 @@ export const RUN_EVENTS = new Set([
   'freeze-inherited',
   // verdict
   'implementation-committed',
+  // A dev pass that handed over a red tree and said which frozen tests it
+  // attributes the red to: the `files` and the `count` of clauses. The entries
+  // themselves stay in the seat report, which the triage brief reads. It is
+  // evidence for the verdict and not a defect of the seat: the seat may not
+  // touch a test file, so a collision it finds after the freeze has exactly one
+  // legal answer, and the triage classes it (ADR-0091). A run where every named
+  // file is then classed `code-defect` is a seat that used the field to dodge
+  // work, and the count is what says so.
+  'dev-suite-conflict',
   // One gate layer, at the moment its process starts: the cycle, the layer,
   // the sha, and the attempt (the flake filter's re-run is the second). A
   // layer can hold a run for an hour, and without this the ledger ran silent
