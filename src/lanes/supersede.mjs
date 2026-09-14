@@ -27,7 +27,8 @@
 // site the `supersede-authorized` event is appended from:
 //
 //   - the quote must be in the card section the claim names, verbatim;
-//   - the test must be one the run actually froze;
+//   - the test must be one the run actually froze, or, before a freeze exists,
+//     one the tree the spec was written against actually holds;
 //   - a test the owner pinned parks whatever the card says.
 //
 // Every refusal is a park with its reason named, and the safe direction is
@@ -127,6 +128,10 @@ export const SUPERSEDE_BRIEF_LINES = Object.freeze([
     '"supersedeAssertion" (the guarantee the pin protects and the form it now takes), ' +
     '"supersedeQuote" (the card line the mandate rests on, copied word for word out of the card), ' +
     'and "supersedeClause" ("acceptance", "scope-boundary", "decisions" or "foreseen").',
+  'A supersede the spec states carries the same four facts. Its Supersedes entry is written ' +
+    '"<path> — supersede — <the clause that replaces it> — <section>: \\"<the card line, ' +
+    'verbatim>\\"", and an entry with no section and no quote authorizes nothing: the same ' +
+    'check runs on it, wherever the run finds the collision.',
   'The amendment restates the pin\'s protected guarantee in its new form; it never deletes it. A ' +
     'pin that asserted a closed set of two becomes a pin that asserts the closed set of three the ' +
     'card mandates. An amendment that drops the guarantee is a defect, not a supersede.',
@@ -190,7 +195,10 @@ export function supersedeClaim(source) {
  * @param {import('../telemetry/stores.mjs').TelemetryStore} store
  * @param {object} opts
  * @param {string} opts.actor
- * @param {'spec-gate'|'verdict'} opts.site where the collision was found
+ * @param {'spec-birth'|'spec-gate'|'verdict'} opts.site where the collision
+ *   was found. One obligation has three places it can be found and one record:
+ *   the spec states it at birth, the gate finds it, or the dev seat finds it
+ *   after the freeze. Every one of them stamps here.
  * @param {object|null} opts.claim from `supersedeClaim`
  * @param {string} opts.cardText the card, as the run holds it
  * @param {string} [opts.cardPath]

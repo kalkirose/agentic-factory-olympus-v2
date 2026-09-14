@@ -12,6 +12,7 @@ import {
   SUPERSEDE_BRIEF_LINES,
   SUPERSEDE_CLAUSES,
   SUPERSEDE_REFUSALS,
+  authorizeSupersede,
   authorizedSupersedes,
   ownerPinned,
   ownerPinnedFiles,
@@ -275,4 +276,90 @@ test('the ruling a card mints tells the amendment to restate the guarantee', () 
   ]);
   assert.ok(ruling.answer.includes('a pin is amended, never deleted'));
   assert.ok(ruling.answer.includes(MANDATE_LINE));
+});
+
+// -- one obligation, three sites (ADR-0091) ----------------------------------
+
+/** A ledger that answers the way the run store does: a seq, and the fields. */
+function fakeStore() {
+  const events = [];
+  return {
+    events,
+    append(event, fields) {
+      const stamp = { seq: events.length + 1, event, ...fields };
+      events.push(stamp);
+      return stamp;
+    },
+  };
+}
+
+function authorizeAt(t, site, { claim, files = {}, ...rest } = {}) {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  for (const [file, content] of Object.entries(files)) {
+    mkdirSync(join(root, 'tests'), { recursive: true });
+    writeFileSync(join(root, file), content);
+  }
+  const store = fakeStore();
+  const result = authorizeSupersede(store, {
+    actor: 'daemon',
+    site,
+    claim: claim === undefined ? claimOf() : claim,
+    cardText: CARD,
+    cardPath: 'stories/alpha.md',
+    worktree: root,
+    testPaths: ['tests'],
+    ...rest,
+  });
+  return { ...result, store };
+}
+
+test('a supersede stated before any freeze is authorized at the site that states it', (t) => {
+  // No frozen set exists yet, so the tree the spec was written against answers
+  // instead: the file under the test paths is the one the clause can name.
+  const { event, refused } = authorizeAt(t, 'spec-birth', {
+    files: { 'tests/pinned.test.mjs': PLAIN_TEST },
+    frozen: ['tests/pinned.test.mjs'],
+  });
+  assert.equal(refused, null);
+  assert.equal(event.site, 'spec-birth');
+  assert.equal(event.test, 'tests/pinned.test.mjs');
+  assert.equal(event.clause, 'scope-boundary');
+  assert.equal(event.cardQuote, COVERING_LINE);
+  assert.equal(event.card, 'stories/alpha.md');
+});
+
+test('the checks are the same checks at every site', (t) => {
+  const files = { 'tests/pinned.test.mjs': PLAIN_TEST };
+  const frozen = ['tests/pinned.test.mjs'];
+  // A paraphrase of the card line is not the card line.
+  const paraphrased = authorizeAt(t, 'spec-birth', {
+    files,
+    frozen,
+    claim: claimOf({ supersedeQuote: COVERING_LINE.replace('second', 'third') }),
+  });
+  assert.equal(paraphrased.refused, 'quote-not-in-card');
+  assert.equal(paraphrased.event, null);
+  assert.equal(paraphrased.store.events.length, 0);
+  // A test the owner pinned parks whatever the card says, here as at the gate.
+  const pinned = authorizeAt(t, 'spec-birth', {
+    files: { 'tests/pinned.test.mjs': PINNED_TEST },
+    frozen,
+  });
+  assert.equal(pinned.refused, 'owner-pinned');
+  // One stamp per test per run: a test the gate already stamped reads as
+  // authorized, and the second site takes nothing.
+  const again = authorizeAt(t, 'spec-birth', {
+    files,
+    frozen,
+    authorized: ['tests/pinned.test.mjs'],
+  });
+  assert.equal(again.refused, 'already-authorized');
+  assert.equal(again.store.events.length, 0);
+});
+
+test('the brief tells a seat what a stated supersede entry carries', () => {
+  const brief = SUPERSEDE_BRIEF_LINES.join('\n');
+  assert.ok(brief.includes('A supersede the spec states carries the same four facts'));
+  assert.ok(brief.includes('<path> — supersede — <the clause that replaces it> — <section>'));
 });
