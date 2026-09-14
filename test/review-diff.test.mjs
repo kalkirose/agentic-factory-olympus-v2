@@ -29,6 +29,7 @@ import {
   generalistReview,
   recordReviewRound,
   recordReviewSchema,
+  supersedeDutyLines,
 } from '../src/lanes/review.mjs';
 import {
   FINDING_GROUND_DUTY,
@@ -37,6 +38,7 @@ import {
   RECORD_CRITERION_KEYS,
   RECORD_RULE,
 } from '../src/lanes/lenses.mjs';
+import { authorizedSupersedes } from '../src/lanes/supersede.mjs';
 import { UNITS_BIN } from '../src/lanes/records.mjs';
 import {
   GOVERNING_RECORDS_LINE,
@@ -1679,3 +1681,35 @@ test('a record path is not in the file list the Fury round reads', async (t) => 
   assert.ok(!seats.includes('generalist-review'), seats.join(','));
 });
 
+
+// -- the spec lens verifies an amendment wherever it was made ----------------
+
+test('the supersede duty reads a stamp of every site', () => {
+  const stamp = (site, file) => ({
+    event: 'supersede-authorized',
+    seq: 1,
+    site,
+    test: file,
+    assertion: 'the export set is exactly ["f"]',
+    cardQuote: 'the export set an earlier story closed is extended here, not replaced',
+    clause: 'scope-boundary',
+  });
+  const events = [
+    stamp('spec-birth', 'tests/birth.test.mjs'),
+    stamp('spec-gate', 'tests/gate.test.mjs'),
+    stamp('verdict', 'tests/verdict.test.mjs'),
+  ];
+  // The selector takes every site: a supersede is one obligation wherever the
+  // run found it, and an amendment made before the freeze is verified as one
+  // made after it.
+  assert.equal(authorizedSupersedes(events).length, 3);
+  const base = { cardPath: 'cards/alpha.md' };
+  const lines = supersedeDutyLines(base, authorizedSupersedes(events)).join('\n');
+  for (const file of ['tests/birth.test.mjs', 'tests/gate.test.mjs', 'tests/verdict.test.mjs']) {
+    assert.ok(lines.includes(file), file);
+  }
+  assert.ok(lines.includes('before the freeze or after it'));
+  assert.ok(lines.includes('is a HIGH finding on the spec lens'));
+  // A run that amended nothing carries no duty at all.
+  assert.deepEqual(supersedeDutyLines(base, []), []);
+});
