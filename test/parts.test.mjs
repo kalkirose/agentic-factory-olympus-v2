@@ -16,8 +16,11 @@ import { openRunStore } from '../src/telemetry/stores.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { runCommand } from '../src/lanes/exec.mjs';
 import {
+  FILES_ENV,
   PARTS_ENV,
   PART_REASONS,
+  fileNarrowing,
+  isSuiteFile,
   layerGround,
   partGround,
   partPlan,
@@ -632,6 +635,79 @@ test('a failed-files line that names no file states nothing', async () => {
   assert.deepEqual(run.parts.map((p) => [p.name, p.failedFiles]), [['alpha', []]]);
 });
 
+test('a failed-file list this reader shortened says so', async () => {
+  // Three bounds can shorten the list, and each of them used to drop in
+  // silence. A caller reads the list as the part's whole red set, so a short
+  // list read as complete reads a red file as green (ADR-0092).
+  const long = 'x'.repeat(220);
+  const dropped = await runCommand([
+    'node',
+    '-e',
+    "console.log('::olympus part alpha');" +
+      `console.log('::olympus part-failed-files alpha a1,${long}');` +
+      "console.log('::olympus part-failed alpha');process.exitCode = 1;",
+  ]);
+  assert.deepEqual(dropped.parts[0].failedFiles, ['a1']);
+  assert.equal(dropped.parts[0].failedFilesCut, true);
+  // A list cut to nothing still marks its part: the one case with nothing
+  // left to say was the one case that said nothing.
+  const emptied = await runCommand([
+    'node',
+    '-e',
+    "console.log('::olympus part alpha');" +
+      `console.log('::olympus part-failed-files alpha ${long}');` +
+      "console.log('::olympus part-failed alpha');process.exitCode = 1;",
+  ]);
+  assert.deepEqual(emptied.parts[0].failedFiles, []);
+  assert.equal(emptied.parts[0].failedFilesCut, true);
+  // The count bound is the third, and it is 512 rather than 64: a whole-tree
+  // run of a large suite names every red file in it.
+  const many = Array.from({ length: 520 }, (_, i) => `tests/f${i}.mjs`).join(',');
+  const capped = await runCommand([
+    'node',
+    '-e',
+    "console.log('::olympus part alpha');" +
+      `console.log('::olympus part-failed-files alpha ${many}');` +
+      "console.log('::olympus part-failed alpha');process.exitCode = 1;",
+  ]);
+  assert.equal(capped.parts[0].failedFiles.length, 512);
+  assert.equal(capped.parts[0].failedFilesCut, true);
+  // A list inside every bound carries no mark at all.
+  const whole = await runCommand([
+    'node',
+    '-e',
+    "console.log('::olympus part alpha');" +
+      "console.log('::olympus part-failed-files alpha a1,a2');" +
+      "console.log('::olympus part-failed alpha');process.exitCode = 1;",
+  ]);
+  assert.equal(whole.parts[0].failedFilesCut, undefined);
+});
+
+test('a failed-files line the stream reader cut names no half path', async () => {
+  // A marker line longer than the reader's own line bound arrives in pieces,
+  // and the piece that arrives ends mid-path. Half a path names no file, so it
+  // is dropped and the part is marked. At these sizes the count bound holds the
+  // list as well, which is the point: every bound that shortens a list says so.
+  const run = await runCommand([
+    'node',
+    '-e',
+    [
+      "const pad = 'p'.repeat(150);",
+      "const many = Array.from({ length: 2500 }, (_, i) => 'tests/' + pad + i + '.mjs').join(',');",
+      // The line is written without its newline, so the reader meets its line
+      // bound with no end of line in sight, which is the case this covers.
+      "process.stdout.write('::olympus part-failed-files alpha ' + many);",
+      "process.stdout.write('\\n::olympus part alpha\\n::olympus part-failed alpha\\n');",
+      'process.exitCode = 1;',
+    ].join('\n'),
+  ]);
+  const alpha = run.parts.find((p) => p.name === 'alpha');
+  assert.equal(alpha.failedFilesCut, true);
+  assert.ok(alpha.failedFiles.length > 0);
+  // Every path the record holds is a whole path. A half path names no file.
+  assert.ok(alpha.failedFiles.every((f) => /^tests\/p+\d+\.mjs$/.test(f)));
+});
+
 test('the narrowing a re-run asks for states only what the encoding can carry', () => {
   assert.deepEqual(
     failedFileNarrowing([
@@ -639,7 +715,7 @@ test('the narrowing a re-run asks for states only what the encoding can carry', 
       { name: 'beta', failedFiles: [] },
       { name: 'gamma' },
     ]),
-    { value: 'alpha=a1,a2', files: 2 },
+    { value: 'alpha=a1,a2', files: 2, cut: new Set() },
   );
   // A name or a path holding a separator cannot be stated in this vocabulary,
   // so it is left out and the part re-runs whole. Doubt runs everything here
@@ -649,9 +725,78 @@ test('the narrowing a re-run asks for states only what the encoding can carry', 
       { name: 'a=b', failedFiles: ['a1'] },
       { name: 'delta', failedFiles: ['one,two'] },
     ]),
-    { value: '', files: 0 },
+    { value: '', files: 0, cut: new Set() },
   );
-  assert.deepEqual(failedFileNarrowing([]), { value: '', files: 0 });
+  assert.deepEqual(failedFileNarrowing([]), { value: '', files: 0, cut: new Set() });
+});
+
+test('a re-run over part of a failure says which parts it under-asked for', () => {
+  // Some paths of the part survive the encoding and some do not, so the part
+  // re-runs a SUBSET of its own reds and its next record is about that subset.
+  const partial = failedFileNarrowing([{ name: 'alpha', failedFiles: ['a1', 'one,two'] }]);
+  assert.deepEqual(partial.value, 'alpha=a1');
+  assert.deepEqual([...partial.cut], ['alpha']);
+  // A list the command reader already shortened is short however it encodes.
+  const short = failedFileNarrowing([
+    { name: 'alpha', failedFiles: ['a1'], failedFilesCut: true },
+  ]);
+  assert.deepEqual([...short.cut], ['alpha']);
+  // A part left OUT of the value entirely re-runs whole, and a whole run
+  // states the whole answer, so it is not a cut.
+  const none = failedFileNarrowing([{ name: 'alpha', failedFiles: ['one,two'] }]);
+  assert.deepEqual(none, { value: '', files: 0, cut: new Set() });
+});
+
+test('a per-part entry that would outgrow the environment bound is left out', () => {
+  const long = 'x'.repeat(9000);
+  const narrowing = failedFileNarrowing([
+    { name: 'alpha', failedFiles: [long] },
+    { name: 'beta', failedFiles: [long] },
+    { name: 'gamma', failedFiles: ['g1'] },
+  ]);
+  // The first fits, the second would carry the value past the bound, the third
+  // fits again. Every part the value does not name runs whole.
+  assert.equal(narrowing.value, `alpha=${long};gamma=g1`);
+  assert.deepEqual([...narrowing.cut], []);
+});
+
+test('a file list is refused whole where it cannot be stated whole', () => {
+  assert.deepEqual(fileNarrowing(['tests/a.spec.ts', 'tests/b.spec.ts']), {
+    value: 'tests/a.spec.ts,tests/b.spec.ts',
+    files: 2,
+  });
+  // A repeated path is one path.
+  assert.deepEqual(fileNarrowing(['tests/a.spec.ts', 'tests/a.spec.ts']), {
+    value: 'tests/a.spec.ts',
+    files: 1,
+  });
+  // One unstatable path refuses the WHOLE list, unlike the per-part encoding
+  // beside it: a shortened file list is a green over a file nothing ran.
+  assert.deepEqual(fileNarrowing(['tests/a.spec.ts', 'tests/b,c.spec.ts']), {
+    value: '',
+    files: 0,
+  });
+  // The same rule at the byte bound.
+  const many = Array.from({ length: 400 }, (_, i) => `tests/file-${i}.spec.ts`);
+  assert.equal(fileNarrowing(many).files, 400);
+  const far = Array.from({ length: 2000 }, (_, i) => `tests/file-${i}.spec.ts`);
+  assert.deepEqual(fileNarrowing(far), { value: '', files: 0 });
+  assert.deepEqual(fileNarrowing([]), { value: '', files: 0 });
+});
+
+test('a suite file is one a framework selects a test from', () => {
+  for (const file of [
+    'tests/a.spec.ts',
+    'tests/a.test.js',
+    'tests/a.e2e.tsx',
+    'src/a.test.mjs',
+    'src/a.spec.cjs',
+  ]) {
+    assert.equal(isSuiteFile(file), true, file);
+  }
+  for (const file of ['tests/helper.ts', 'tests/fixture.json', 'tests/README.md', 'specs/a.ts']) {
+    assert.equal(isSuiteFile(file), false, file);
+  }
 });
 
 test('a kept part names the attempt and the result that earned it', () => {
@@ -882,6 +1027,9 @@ function tree(t, second) {
   const dir = initOriginRepo(join(root, 'repo'), {
     'apps/alpha/mail.tsx': 'one\n',
     'apps/beta/api.ts': 'one\n',
+    'tests/alpha/mail.spec.ts': 'one\n',
+    'tests/alpha/other.spec.ts': 'one\n',
+    'tests/alpha/helper.ts': 'one\n',
     'package-lock.json': 'one\n',
   });
   const from = gitSync(['rev-parse', 'HEAD'], dir).trim();
@@ -890,7 +1038,7 @@ function tree(t, second) {
 }
 
 function targetBase(worktree, config = {}) {
-  return { worktree, layers: LAYERS, config: { gates: {}, ...config } };
+  return { worktree, layers: LAYERS, testPaths: ['tests'], config: { gates: {}, ...config } };
 }
 
 function targetPlan(sha) {
@@ -900,7 +1048,16 @@ function targetPlan(sha) {
     prior: new Map([
       [
         'acceptance',
-        { cycle: 1, seq: 10, sha, status: 'red', parts: [{ ...ALPHA, status: 'red' }, BETA] },
+        {
+          cycle: 1,
+          seq: 10,
+          sha,
+          status: 'red',
+          parts: [
+            { ...ALPHA, status: 'red', failedFiles: ['tests/alpha/red.spec.ts'] },
+            BETA,
+          ],
+        },
       ],
     ]),
   };
@@ -908,7 +1065,7 @@ function targetPlan(sha) {
 
 test('a cycle narrows a layer to the parts its own diff reached', async (t) => {
   const { worktree, from, to } = tree(t, { 'apps/alpha/mail.tsx': 'two\n' });
-  const targets = await partTargets(targetBase(worktree), [], {
+  const targets = await partTargets(targetBase(worktree), {
     plan: targetPlan(from),
     sha: to,
   });
@@ -923,7 +1080,7 @@ test('a diff that touches a lockfile re-runs every part of every layer', async (
     'apps/alpha/mail.tsx': 'two\n',
     'package-lock.json': 'two\n',
   });
-  const targets = await partTargets(targetBase(worktree), [], {
+  const targets = await partTargets(targetBase(worktree), {
     plan: targetPlan(from),
     sha: to,
   });
@@ -943,38 +1100,88 @@ test('the project may declare ground no suite of it reads', async (t) => {
   // The same diff, with the lockfile sworn unread. The cycle attributes what
   // is left and narrows to it (ADR-0059).
   const base = targetBase(worktree, { gates: { groundlessPaths: ['package-lock.json'] } });
-  const targets = await partTargets(base, [], { plan: targetPlan(from), sha: to });
+  const targets = await partTargets(base, { plan: targetPlan(from), sha: to });
   const plan = targets.get('acceptance');
   assert.deepEqual(plan.blindPaths, []);
   assert.deepEqual(plan.narrow.run, ['alpha']);
   assert.deepEqual(plan.narrow.carry.map((p) => p.name), ['beta']);
 });
 
-test('a re-freeze invalidates every carry', async (t) => {
-  const { worktree, from, to } = tree(t, { 'apps/alpha/mail.tsx': 'two\n' });
+test('a diff of suite files alone narrows the layer to those files', async (t) => {
+  // The shape of a cycle after a re-freeze: the amendment is committed, so the
+  // amended files are in the range the plan reads, and the plan keeps the
+  // carries instead of discarding them (ADR-0092).
+  const { worktree, from, to } = tree(t, { 'tests/alpha/mail.spec.ts': 'two\n' });
+  const targets = await partTargets(targetBase(worktree), { plan: targetPlan(from), sha: to });
+  const plan = targets.get('acceptance');
+  assert.deepEqual(plan.narrow.run, ['alpha']);
+  assert.deepEqual(
+    plan.narrow.carry.map((p) => p.name),
+    ['beta'],
+  );
+  // The changed file, plus the file the standing result left red in the part
+  // that runs.
+  assert.deepEqual(plan.files.sort(), ['tests/alpha/mail.spec.ts', 'tests/alpha/red.spec.ts']);
+});
+
+test('a diff holding one non-suite file under the test paths names no file', async (t) => {
+  const { worktree, from, to } = tree(t, {
+    'tests/alpha/mail.spec.ts': 'two\n',
+    'tests/alpha/helper.ts': 'two\n',
+  });
+  const targets = await partTargets(targetBase(worktree), { plan: targetPlan(from), sha: to });
+  // A helper is a file another test imports, and a list cannot say what
+  // changing it did. The layer runs on the part narrowing alone.
+  assert.deepEqual(targets.get('acceptance').files, []);
+  assert.deepEqual(targets.get('acceptance').narrow.run, ['alpha']);
+});
+
+test('a diff that leaves the test paths names no file', async (t) => {
+  const { worktree, from, to } = tree(t, {
+    'tests/alpha/mail.spec.ts': 'two\n',
+    'apps/alpha/mail.tsx': 'two\n',
+  });
+  const targets = await partTargets(targetBase(worktree), { plan: targetPlan(from), sha: to });
+  assert.deepEqual(targets.get('acceptance').files, []);
+});
+
+test('a red part with no usable red list refuses the file narrowing', async (t) => {
+  const { worktree, from, to } = tree(t, { 'tests/alpha/mail.spec.ts': 'two\n' });
+  for (const broken of [{ failedFiles: [] }, { failedFilesCut: true }]) {
+    const plan = targetPlan(from);
+    const parts = plan.prior.get('acceptance').parts;
+    parts[0] = { ...parts[0], ...broken };
+    const targets = await partTargets(targetBase(worktree), { plan, sha: to });
+    // The part is red and says nothing usable about which files are red, so
+    // nothing the standing result holds proves the files the list leaves out.
+    assert.deepEqual(targets.get('acceptance').files, []);
+  }
+});
+
+test('a blind cycle names no file however small its diff', async (t) => {
+  const { worktree, from, to } = tree(t, {
+    'tests/alpha/mail.spec.ts': 'two\n',
+    'tests/gamma/new.spec.ts': 'two\n',
+  });
+  const targets = await partTargets(targetBase(worktree), { plan: targetPlan(from), sha: to });
+  const plan = targets.get('acceptance');
+  assert.deepEqual(asObject(plan.reasons), { alpha: 'blind', beta: 'blind' });
+  assert.deepEqual(plan.files, []);
+});
+
+test('a standing result with no part table names no file, however vacuous its reasons', async (t) => {
+  const { worktree, from, to } = tree(t, { 'tests/alpha/mail.spec.ts': 'two\n' });
   const plan = targetPlan(from);
-  // The amendment lands after the result whose parts would be carried: the
-  // suite those parts were judged against is not the suite that runs now. The
-  // layer drops out of the map altogether, so no part of it is given a reason
-  // it did not earn. It ran for a reason that is not about its parts.
-  const after = await partTargets(targetBase(worktree), [{ event: 're-freeze', seq: 11 }], {
-    plan,
-    sha: to,
-  });
-  assert.equal(after, null);
-  // An amendment older than the result carries as it always would.
-  const before = await partTargets(targetBase(worktree), [{ event: 're-freeze', seq: 9 }], {
-    plan,
-    sha: to,
-  });
-  assert.deepEqual(before.get('acceptance').narrow.run, ['alpha']);
+  plan.prior.get('acceptance').parts = [];
+  const targets = await partTargets(targetBase(worktree), { plan, sha: to });
+  assert.deepEqual(targets.get('acceptance').files, []);
 });
 
 test('a layer whose standing result held no part table stays in the map', async (t) => {
   const { worktree, from, to } = tree(t, { 'apps/alpha/mail.tsx': 'two\n' });
   const plan = targetPlan(from);
   plan.prior.get('acceptance').parts = [];
-  const targets = await partTargets(targetBase(worktree), [], { plan, sha: to });
+  const targets = await partTargets(targetBase(worktree), { plan, sha: to });
   // Nothing to narrow and nothing to be blind against. The layer is planned
   // all the same, so every part its command opens is recorded as a part the
   // standing result did not hold.
@@ -987,18 +1194,18 @@ test('a layer whose standing result held no part table stays in the map', async 
 test('gates.partTargeting false restores the whole-layer re-run', async (t) => {
   const { worktree, from, to } = tree(t, { 'apps/alpha/mail.tsx': 'two\n' });
   const off = targetBase(worktree, { gates: { partTargeting: false } });
-  assert.equal(await partTargets(off, [], { plan: targetPlan(from), sha: to }), null);
+  assert.equal(await partTargets(off, { plan: targetPlan(from), sha: to }), null);
 });
 
 test('a cycle that runs the full spectrum narrows nothing', async (t) => {
   const { worktree, from, to } = tree(t, { 'apps/alpha/mail.tsx': 'two\n' });
   const full = { ...targetPlan(from), sweep: 'full', run: undefined, prior: undefined };
-  assert.equal(await partTargets(targetBase(worktree), [], { plan: full, sha: to }), null);
+  assert.equal(await partTargets(targetBase(worktree), { plan: full, sha: to }), null);
 });
 
 test('a range git cannot answer runs the layer whole', async (t) => {
   const { worktree, to } = tree(t, { 'apps/alpha/mail.tsx': 'two\n' });
-  const targets = await partTargets(targetBase(worktree), [], {
+  const targets = await partTargets(targetBase(worktree), {
     plan: targetPlan('0000000000000000000000000000000000000000'),
     sha: to,
   });

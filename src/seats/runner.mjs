@@ -691,7 +691,15 @@ function refusalsIn(path) {
   return lines;
 }
 
-/** One refusal on the ledger, as the hook wrote it. */
+/**
+ * One refusal on the ledger, as the hook wrote it.
+ *
+ * `narrowed` says the refusal was about the command's FORM and not about the
+ * seat's bound: the layer is the seat's to run, and the seat asked for the
+ * whole of it. It is a reading of its own, because a count of them on one seat
+ * says the brief is not stating the form and the seat is fighting the hook
+ * (ADR-0092).
+ */
 function stampRefusal(store, seat, line) {
   store.append('seat-command-refused', {
     actor: ACTOR,
@@ -699,6 +707,7 @@ function stampRefusal(store, seat, line) {
     layer: line.layer ?? null,
     command: line.command ?? '',
     reason: line.reason ?? '',
+    ...(line.narrowed === true && { narrowed: true }),
     ...(typeof line.at === 'string' && { at: line.at }),
   });
 }

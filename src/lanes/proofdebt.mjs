@@ -22,6 +22,7 @@ import { readEvents } from '../ledger/ledger.mjs';
 import { openEscapesStore } from '../telemetry/stores.mjs';
 import { recordEscape } from '../telemetry/escapes.mjs';
 import { assertDefectKind } from '../ledger/registry.mjs';
+import { ENV_VALUE_CAP } from './parts.mjs';
 import { PollWatcher } from '../daemon/watch.mjs';
 
 const ACTOR = 'proof-debt';
@@ -81,11 +82,28 @@ export function openProofDebts(paths) {
 export function narrowEnv(entry, { partsEnv, filesEnv }) {
   const parts = entry.parts ?? [];
   if (parts.length === 0) return {};
-  const files = Object.entries(entry.byPart ?? {})
-    .filter(([part, list]) => parts.includes(part) && (list ?? []).length > 0)
-    .map(([part, list]) => `${part}=${list.join(',')}`)
-    .join(';');
-  return { [partsEnv]: parts.join(','), ...(files.length > 0 && { [filesEnv]: files }) };
+  const named = parts.join(',');
+  // A host holds an environment variable to a bounded length, and a spawn past
+  // it fails before the command starts. The part list is all or nothing at that
+  // bound: a shortened list runs FEWER parts, and this caller asks the command
+  // to prove exactly these. So an oversized list sets no variable, the command
+  // runs whole, and every part the debt names is proven (ADR-0092).
+  if (named.length > ENV_VALUE_CAP) return {};
+  const entries = [];
+  let length = 0;
+  for (const [part, list] of Object.entries(entry.byPart ?? {})) {
+    if (!parts.includes(part) || (list ?? []).length === 0) continue;
+    const text = `${part}=${list.join(',')}`;
+    const grown = length + text.length + (entries.length > 0 ? 1 : 0);
+    // A per-part entry is the opposite case: one that does not fit is left out
+    // and the part it names runs whole, which is more work and never a weaker
+    // claim.
+    if (grown > ENV_VALUE_CAP) continue;
+    entries.push(text);
+    length = grown;
+  }
+  const files = entries.join(';');
+  return { [partsEnv]: named, ...(files.length > 0 && { [filesEnv]: files }) };
 }
 
 /**

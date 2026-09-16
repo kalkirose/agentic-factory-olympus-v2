@@ -199,6 +199,12 @@ export const RUN_EVENTS = new Set([
   // seat ends, from the file the hook appended to. A count above a few on one
   // seat says the brief does not state the bound and the seat is fighting the
   // hook, which is a defect of the brief rather than of the seat.
+  //
+  // `narrowed: true` says the refusal was about the command's FORM and not
+  // about the bound: the layer is the seat's to run and the seat asked for the
+  // whole of it. It is a reading of its own, because the brief states the form
+  // and more than a couple of these on one seat says it is not stating it well
+  // enough (ADR-0092).
   'seat-command-refused',
   // One read-only probe of one external credential, at the launch gate or at
   // the ship gate: `ok` carries the answer, and both answers are stamped, so
@@ -279,6 +285,21 @@ export const RUN_EVENTS = new Set([
   // them: the stage that did is gone from the lane.
   'adversary-wave',
   'survivor-disposition',
+  // What the suite command said about the tree the implementation starts on.
+  // The freeze rests on it: a suite that is green before the story is built
+  // asserts nothing about the story.
+  //
+  // `narrowedTo` names the files the check asked the command about, which are
+  // the run's own suite writes and never the whole suite of the project.
+  // `failedFiles` is the union the command reported failed. `perFile` says
+  // which of two readings decided `result`: true, every NEW test file of the
+  // write is among the reported reds; false, the exit code alone, which is what
+  // a runner that prints no part marker, a runner that failed a part without
+  // naming a file inside it, and a run with no base listing all fall back to.
+  // `notRed` names the new files that were not reported failed,
+  // which is why a `perFile` check did not pass, and `failedFilesCut` says a
+  // bound in the command reader shortened the list the reading rests on
+  // (ADR-0092). A stamp from before those fields existed carries none of them.
   'red-state-check',
   // One of the project's own checks over one suite write, run over the tree as
   // the seat left it and before anything is committed: the command, the write
@@ -327,6 +348,12 @@ export const RUN_EVENTS = new Set([
   // read like a stopped run and was provable alive only by hand. A record,
   // never state: the spectrum resumes off `layer-result` alone, so a restart
   // mid-layer stamps a fresh start for the execution it begins (ADR-0034).
+  //
+  // `narrowedTo` (parts, files) says what this execution was ASKED for, where
+  // it was asked for less than the whole layer. It rides the start as well as
+  // the terminal stamp, and the start is the one a reader has while the layer
+  // is still running. Its absence on an attempt the cycle's plan narrowed is
+  // the one symptom of a narrowing that never reached the command (ADR-0092).
   'layer-started',
   // What one gate layer decided, and the whole part table behind it. A part
   // carries `carriedFrom` where an older cycle earned its green (ADR-0046),
@@ -336,9 +363,13 @@ export const RUN_EVENTS = new Set([
   // holding either of the last two holds no `carriedFrom`: every part of it
   // ran at this sha. A part whose own command declared no inputs carries
   // `groundFrom` where the project config answered for it, which is what makes
-  // that fallback countable (ADR-0056). `narrowedTo` (parts, files) rides the
-  // flake filter's re-run alone and says what that attempt was asked for, so a
-  // re-run that answered a failure never reads as a re-run of the layer.
+  // that fallback countable (ADR-0056). `narrowedTo` (parts, files) says what
+  // the attempt behind this result was asked for, where it was asked for less
+  // than the whole layer: the flake filter's re-run, and a first attempt the
+  // cycle's own plan held to a file set (ADR-0092). A part carries
+  // `failedFilesCut` where the list of files it reported red is a subset of its
+  // reds rather than the whole of them, so no reader takes a short list for a
+  // complete one.
   // `elapsedMs` is what the attempt took on the clock. A gate's cost was
   // derivable only by pairing this stamp with its `layer-started`, which is a
   // join every reader had to write for itself and which no reader wrote; the
@@ -419,6 +450,13 @@ export const RUN_EVENTS = new Set([
   // none of the three. `confirmationParts` (ran, kept) is the confirmation
   // sweep's, over the layers it narrowed — what it executed, and what an earlier
   // pass of the same cycle had already proven at this sha (ADR-0046).
+  // `layerMs` is what the cycle's gate layers cost it, in milliseconds, split
+  // three ways: `run`, what its executions bought; `carried`, what it did not
+  // buy, from the newest reading the harness holds per carried layer; and
+  // `abandoned`, what it spent and threw away, from each `layer-abandoned`
+  // paired with the `layer-started` its `startedSeq` names. The narrowings are
+  // all for minutes, and `abandoned` is the number they exist to drive to
+  // nought (ADR-0092).
   // `diffTruncated: true` says the read cap cut this cycle's candidate diff, so
   // its judgment seats could not reach the end of the work anywhere; it is
   // stamped here as well as on the findings, because a round that raised nothing
@@ -1105,6 +1143,14 @@ export const GATE_INTEGRITY_KINDS = new Set([
   // knew was owed, lost at the close with nothing behind it. Stamped at
   // close-out, where both routes have had their chance (ADR-0026).
   'reconciliation-lost',
+  // A gate layer the cycle's own plan held to a file set, whose command started
+  // the layer whole. The narrowing was derived and never reached the execution,
+  // so the cycle bought the whole layer for a diff of a few files. Nothing else
+  // in the run reports it: the layer is green, the cycle is clean, and the only
+  // other symptom is the minutes. Threshold nought — one of these is a
+  // derivation that stopped working, a runner that stopped reading the
+  // variable, or a project whose trees moved under the list (ADR-0092).
+  'whole-rerun-after-refreeze',
   // A run merged holding a HIGH review finding that was stamped advisory on a
   // file the project calls a decision record. The count is always zero: a HIGH
   // goes to the verifier and is never advisory, and a finding below HIGH is a

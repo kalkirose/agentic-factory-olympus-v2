@@ -186,6 +186,73 @@ test('the frozen suite passes whatever its ground and its reading say', (t) => {
   assert.match(result.stderr, /^acceptance is outside your bound: the diff does not touch its ground\./);
 });
 
+test('the suite is refused without a narrowing in front of it, and passes with one', (t) => {
+  // A bound that says the suite is narrowed. The whole of it belongs to the
+  // verdict stage, so the bare command is refused however long the layer takes
+  // and however the seat spells it (ADR-0092).
+  const { boundPath } = fixture(t, { committed: API_EDIT, bound: { suiteNarrowed: true } });
+  const bare = runHook(boundPath, { command: 'pnpm run acceptance' });
+  assert.equal(bare.status, 2);
+  assert.match(bare.stderr, /^acceptance runs whole in the verdict stage alone\./);
+  assert.match(bare.stderr, /OLYMPUS_FILES=/);
+  // The refusal is about the form, and the ledger reads that word apart from
+  // a refusal about the bound.
+  const [line] = refusals(boundPath);
+  assert.equal(line.narrowed, true);
+  assert.equal(line.layer, 'acceptance');
+  // An assignment in front of the command on the same line passes.
+  for (const command of [
+    'OLYMPUS_FILES=tests/acceptance/buy.test.ts pnpm run acceptance',
+    'OLYMPUS_PARTS=api pnpm run acceptance',
+    'cd repo && OLYMPUS_FILES=a.spec.ts pnpm run acceptance',
+  ]) {
+    assert.equal(runHook(boundPath, { command }).status, 0, command);
+  }
+  // An empty assignment narrows nothing, and a mention that is not an
+  // assignment is not one either.
+  for (const command of [
+    'OLYMPUS_FILES= pnpm run acceptance',
+    'echo OLYMPUS_FILES; pnpm run acceptance',
+    'pnpm run acceptance OLYMPUS_FILES=a.spec.ts',
+  ]) {
+    assert.equal(runHook(boundPath, { command }).status, 2, command);
+  }
+});
+
+test('a bound that does not say the suite is narrowed passes it exactly as before', (t) => {
+  // The repair lane holds no suite at all, and a story bound written before the
+  // word existed carries none: both keep the behaviour they had.
+  const { boundPath } = fixture(t, { committed: API_EDIT });
+  assert.equal(runHook(boundPath, { command: 'pnpm run acceptance' }).status, 0);
+  const off = fixture(t, { committed: API_EDIT, bound: { suiteNarrowed: false } });
+  assert.equal(runHook(off.boundPath, { command: 'pnpm run acceptance' }).status, 0);
+});
+
+test('a layer is matched by the project\'s own name for it, as a whole word', (t) => {
+  const layers = LAYERS.map((layer) =>
+    layer.name === 'acceptance'
+      ? { ...layer, aliases: ['pnpm test:acceptance', 'pnpm run test:acceptance'] }
+      : layer,
+  );
+  const { boundPath } = fixture(t, {
+    committed: API_EDIT,
+    bound: { layers, suiteNarrowed: true },
+  });
+  // The canonical spelling is refused, which is the whole point: a refusal
+  // that only matched the config argv is a refusal nobody meets.
+  assert.equal(runHook(boundPath, { command: 'pnpm test:acceptance' }).status, 2);
+  assert.equal(runHook(boundPath, { command: 'pnpm run test:acceptance' }).status, 2);
+  assert.equal(
+    runHook(boundPath, { command: 'OLYMPUS_FILES=a.spec.ts pnpm test:acceptance' }).status,
+    0,
+  );
+  // A longer script name is a different command. A word-character boundary
+  // would match inside it, because a colon is not a word character.
+  assert.equal(runHook(boundPath, { command: 'pnpm test:acceptance:e2e' }).status, 0);
+  // Reading the file is not running the layer.
+  assert.equal(runHook(boundPath, { command: 'cat scripts/test-acceptance.ts' }).status, 0);
+});
+
 test('a layer inside the bound whose reading reaches the cap is refused', (t) => {
   const { boundPath } = fixture(t, { committed: API_EDIT });
   const result = runHook(boundPath, { command: 'pnpm run scan' });

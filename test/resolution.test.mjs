@@ -53,6 +53,7 @@ test('an owning event is an event some ledger can actually stamp', () => {
       're-freeze',
       'reconciliation-judged',
       'run-archived',
+      'run-closed',
       'verdict-rendered',
       'workflow-recovered',
     ],

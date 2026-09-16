@@ -1438,6 +1438,155 @@ test('a green red-state check routes one suite fix round before the freeze', asy
   assert.equal(record.redState.result, 'red');
 });
 
+/**
+ * A suite command that speaks the part marker protocol: it writes down the file
+ * list it was handed, names the files it calls red, and fails. The story
+ * fixture's default runner prints no marker at all, which is the runner the
+ * red-state check reads the exit code of; this one is the runner it can read
+ * per file (ADR-0092).
+ */
+function markerSuite(logPath, redFiles) {
+  return [
+    'node',
+    '-e',
+    [
+      "const fs = require('fs');",
+      `fs.appendFileSync(${JSON.stringify(logPath)}, (process.env.OLYMPUS_FILES || '') + '\\n');`,
+      "console.log('::olympus part unit');",
+      ...(redFiles.length > 0
+        ? [
+            `console.log('::olympus part-failed-files unit ' + ${JSON.stringify(
+              redFiles.join(','),
+            )});`,
+          ]
+        : []),
+      "console.log('::olympus part-failed unit');",
+      'process.exitCode = 1;',
+    ].join('\n'),
+  ];
+}
+
+/** One run's ledger, live while it runs and archived after it closes. */
+function ledgerOf(paths, runId) {
+  const live = runLedgerPath(paths, runId);
+  return readEvents(existsSync(live) ? live : archivedRunLedgerPath(paths, runId));
+}
+
+async function waitFrozen(fx, runId) {
+  await waitFor(() => ledgerOf(fx.paths, runId).some((e) => e.event === 'freeze'), {
+    label: 'freeze',
+    attempts: 600,
+    intervalMs: 100,
+  });
+  return ledgerOf(fx.paths, runId);
+}
+
+const RED_STATE_SEATS = {
+  'spec-birth': ({ prompt }) => ({
+    files: { [specPathFrom(prompt)]: FIXTURE_SPEC },
+    report: { outcome: 'spec-born', summary: 'born' },
+  }),
+  'spec-gate': () => ({ report: { findings: [], summary: 'clean' } }),
+  suite: () => ({
+    files: { 'tests/feature.test.mjs': STRONG_TEST },
+    report: {
+      suiteFiles: ['tests/feature.test.mjs'],
+      reds: [{ test: 'f doubles', class: 'feature-absence' }],
+      ...surfaceMapping('f doubles'),
+      summary: 'authored',
+    },
+  }),
+};
+
+test('the red-state check asks the command about the write\'s own files', async (t) => {
+  let logPath = null;
+  const fx = storyFixture(t, {
+    seats: RED_STATE_SEATS,
+    config: (root) => {
+      logPath = join(root, 'red-state.log');
+      return { commands: { suite: markerSuite(logPath, ['tests/feature.test.mjs']) } };
+    },
+  });
+  const runId = await fx.launch();
+  const events = await waitFrozen(fx, runId);
+  const check = events.find((e) => e.event === 'red-state-check');
+  // The command was handed the write's own file and nothing else, and the
+  // stamp says what it asked for and what came back.
+  assert.equal(readFileSync(logPath, 'utf8').split('\n')[0], 'tests/feature.test.mjs');
+  assert.equal(check.result, 'red');
+  assert.deepEqual(check.narrowedTo, ['tests/feature.test.mjs']);
+  assert.deepEqual(check.failedFiles, ['tests/feature.test.mjs']);
+  // The reading was per file: the exit code alone would have passed a green
+  // new file that some other red in the tree made the suite fail on.
+  assert.equal(check.perFile, true);
+});
+
+test('a new test file the command does not report red refuses the write', async (t) => {
+  let logPath = null;
+  const fx = storyFixture(t, {
+    seats: RED_STATE_SEATS,
+    config: (root) => {
+      logPath = join(root, 'red-state.log');
+      // The suite fails, and it fails on a file this write did not write. The
+      // exit code alone would read that as red state.
+      return { commands: { suite: markerSuite(logPath, ['tests/unrelated.test.mjs']) } };
+    },
+  });
+  const runId = await fx.launch();
+  const park = await waitParked(fx.paths, runId, 'seat-failure');
+  assert.equal(park.detail.seat, 'suite');
+  const events = readEvents(runLedgerPath(fx.paths, runId));
+  const checks = events.filter((e) => e.event === 'red-state-check');
+  assert.equal(checks.length, 2);
+  assert.deepEqual(checks[0].notRed, ['tests/feature.test.mjs']);
+  assert.equal(checks[0].result, 'green');
+  // One corrective suite round, then the park the lane already had.
+  assert.equal(events.filter((e) => e.event === 'suite-committed').length, 2);
+  assert.equal(
+    events.find((e) => e.event === 'seat-failure').reason,
+    'red-state-unproven',
+  );
+  // The brief names the file, so the seat knows which one it has to fix.
+  const calls = fx.calls.filter((c) => c.seat === 'suite');
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].prompt, /tests\/feature\.test\.mjs/);
+  assert.match(calls[1].prompt, /asserts nothing about the story/);
+});
+
+test('a runner that fails a part and names no file keeps the exit-code reading', async (t) => {
+  // Naming parts and naming files are two halves of the marker protocol, and a
+  // runner may speak either. A failure with no file list is a failure this
+  // check cannot attribute, so it reads the exit code and the freeze proceeds
+  // (ADR-0092).
+  let logPath = null;
+  const fx = storyFixture(t, {
+    seats: RED_STATE_SEATS,
+    config: (root) => {
+      logPath = join(root, 'red-state.log');
+      return { commands: { suite: markerSuite(logPath, []) } };
+    },
+  });
+  const runId = await fx.launch();
+  const check = (await waitFrozen(fx, runId)).find((e) => e.event === 'red-state-check');
+  assert.equal(check.result, 'red');
+  assert.equal(check.perFile, false);
+  assert.deepEqual(check.narrowedTo, ['tests/feature.test.mjs']);
+  assert.equal(check.notRed, undefined);
+});
+
+test('a runner that prints no part marker keeps the exit-code reading', async (t) => {
+  // The fixture's own runner is one: `node --test` names no part. Every
+  // project without the marker protocol reads the exit code, as it always did.
+  const fx = storyFixture(t, { seats: RED_STATE_SEATS, files: RECORD_TREE });
+  const runId = await fx.launch();
+  const check = (await waitFrozen(fx, runId)).find((e) => e.event === 'red-state-check');
+  assert.equal(check.result, 'red');
+  assert.equal(check.perFile, false);
+  // It still asks about the write's own files: narrowing the command is sound
+  // whatever the runner says back.
+  assert.deepEqual(check.narrowedTo, ['tests/feature.test.mjs']);
+});
+
 test('a spec that breaks the template takes one corrective round, then parks', async (t) => {
   const seats = {
     'spec-birth': ({ prompt }) => ({

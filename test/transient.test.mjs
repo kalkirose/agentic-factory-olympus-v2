@@ -210,6 +210,26 @@ test('a deferred proof asks for its own parts and their own files', () => {
   assert.deepEqual(narrowEnv({ parts: [] }, { partsEnv: PARTS_ENV, filesEnv: FAILED_FILES_ENV }), {});
 });
 
+test('a deferred proof that outgrows the environment bound asks for the whole layer', () => {
+  const long = 'x'.repeat(9000);
+  // A per-part file entry that does not fit is left out, and the part it names
+  // runs whole: more work, and never a weaker claim.
+  const files = narrowEnv(
+    { parts: ['api', 'web'], byPart: { api: [long], web: [long] } },
+    { partsEnv: PARTS_ENV, filesEnv: FAILED_FILES_ENV },
+  );
+  assert.equal(files[PARTS_ENV], 'api,web');
+  assert.equal(files[FAILED_FILES_ENV], `api=${long}`);
+  // A part LIST that does not fit is all or nothing: a shortened one would run
+  // fewer parts than the debt names, and the parts it dropped would settle
+  // green with nothing behind them.
+  const parts = Array.from({ length: 2000 }, (_, i) => `part-${i}`);
+  assert.deepEqual(
+    narrowEnv({ parts }, { partsEnv: PARTS_ENV, filesEnv: FAILED_FILES_ENV }),
+    {},
+  );
+});
+
 test('an open debt is a deferred proof with no settlement behind it', async (t) => {
   const { scaffoldHome, runLedgerPath } = await import('../src/daemon/home.mjs');
   const { openRunStore, openInstanceStore } = await import('../src/telemetry/stores.mjs');

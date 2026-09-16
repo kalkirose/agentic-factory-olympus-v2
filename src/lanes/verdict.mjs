@@ -92,6 +92,7 @@ import {
   rerunLayers,
   persistentReds,
   cyclePlan,
+  layerTime,
   priorStatus,
 } from './spectrum.mjs';
 import { certifiedAtAll, newestBaseCertification } from '../ledger/readers.mjs';
@@ -115,7 +116,16 @@ import {
 } from './waiting.mjs';
 import { askProbe } from './probes.mjs';
 import { configuredGroups } from './schedule.mjs';
-import { partPlan, carryTally, confirmationTally, layerGround, PARTS_ENV } from './parts.mjs';
+import {
+  partPlan,
+  carryTally,
+  confirmationTally,
+  fileNarrowing,
+  isSuiteFile,
+  layerGround,
+  FILES_ENV,
+  PARTS_ENV,
+} from './parts.mjs';
 import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview, recordFields } from './review.mjs';
 import { panelLenses } from './lenses.mjs';
@@ -131,7 +141,7 @@ import {
   ticketPathClass,
   withReconcileStage,
 } from './records-stage.mjs';
-import { freezeAnchor } from './resume.mjs';
+import { freezeAnchor, priorSuiteWrites, suiteWriteFiles } from './resume.mjs';
 import { parseIntentCard } from './card.mjs';
 import { lockfileGrant } from './lockfile.mjs';
 import {
@@ -724,7 +734,7 @@ async function runCycle(ctx, base, mode, { cycle }) {
     const footprint = await certifiedFootprint(ctx, base, sha);
     plan = cyclePlan(startEvents, { ...planArgs, footprint });
   }
-  const parts = await partTargets(base, startEvents, { plan, sha });
+  const parts = await partTargets(base, { plan, sha });
   let spectrum = await runSpectrum(ctx, {
     ...gates,
     run: plan.run,
@@ -734,6 +744,11 @@ async function runCycle(ctx, base, mode, { cycle }) {
     parts,
   });
   if (spectrum.error) return { directive: gateCommandError(ctx, spectrum.error) };
+  // What this cycle's own spectrum carried, held before the confirmation sweep
+  // replaces the result set. The sweep runs what the cycle did not run at this
+  // sha, so its own result set no longer says what the cycle carried, and the
+  // carry is half of what the layer measure reports.
+  const cycleResults = spectrum.results;
   let reds = persistentReds(spectrum.results);
   // The parts a ship went out without, where an operator took that trade. They
   // are red and they do not block: the record carries them and the daemon
@@ -914,6 +929,19 @@ async function runCycle(ctx, base, mode, { cycle }) {
   // reports its whole part count as `ran` and nought as `kept`, which is the
   // reading that says this narrowing has stopped working (ADR-0046).
   const swept = confirmation ? confirmationTally(spectrum.results) : null;
+  // The minutes, which is what every narrowing above is for. Three numbers on
+  // every render: what the cycle's executions bought, what it carried instead,
+  // and what it spent and threw away (ADR-0092).
+  const layerMs = layerTime(runEvents(ctx), cycle, {
+    results: cycleResults,
+    prior: plan.prior,
+    certified: plan.certified,
+  });
+  // A layer this cycle held to a file set and the command ran whole anyway.
+  // The narrowing was derived and bought nothing, and nothing else in the run
+  // says so: the layer is green, the cycle is clean, and the only symptom is
+  // the minutes.
+  stampWholeRerun(ctx, { cycle, sha, parts });
   const record = {
     runId: ctx.runId,
     cycle,
@@ -926,6 +954,7 @@ async function runCycle(ctx, base, mode, { cycle }) {
     // a condition that was not met, and the record names which.
     ...(plan.reason && { reason: plan.reason }),
     ...(tally ?? {}),
+    layerMs,
     ...(confirmation && { confirmation: true }),
     ...(swept && { confirmationParts: swept }),
     // The capture took these paths back before this tree was committed, so a
@@ -977,6 +1006,11 @@ async function runCycle(ctx, base, mode, { cycle }) {
     // taken from the ledgers and a metric that had to open a record file per
     // cycle would be reading somebody else's lifecycle (ADR-0058).
     ...(tally ?? {}),
+    // The layer minutes ride the event as well as the record, for the reason
+    // the carry share does: the reading is taken from the ledgers, and a metric
+    // that had to open a record file per cycle would be reading somebody else's
+    // lifecycle (ADR-0092).
+    layerMs,
     ...(confirmation && { confirmation: true }),
     ...(swept && { confirmationParts: swept }),
     ...(dropped.length > 0 && { dropped }),
@@ -990,33 +1024,101 @@ async function runCycle(ctx, base, mode, { cycle }) {
 }
 
 /**
+ * The alarm behind the file narrowing: a layer this cycle held to a file set,
+ * whose command ran it whole anyway.
+ *
+ * It is a loud `gate-integrity` because nothing else in the run reports it. The
+ * layer is green, the cycle is clean, the ledger holds a plan that narrowed,
+ * and the only symptom is the minutes the cycle spent. The threshold is nought:
+ * one is a derivation that stopped working, a runner that stopped reading the
+ * variable, or a project whose trees moved under the list.
+ *
+ * It keys on the START stamp's `narrowedTo`, which the runner writes from the
+ * same value it puts on the environment. So it sees a narrowing that did not
+ * reach the execution and nothing else: a command that reads the variable and
+ * ignores it runs whole, raises none of these, and shows up in the layer
+ * minutes instead. A plan whose file list the encoding refused set no variable
+ * either, so it is not one of these: the layer runs whole on purpose.
+ *
+ * A start carrying `confirmation` is excluded, and the exclusion is required
+ * rather than cosmetic. The confirmation sweep runs inside this same cycle and
+ * is dispatched with no part plan at all, so its starts are attempt 1 with no
+ * narrowing on them. Without the exclusion every successful narrowed cycle
+ * would raise one on its own sweep.
+ *
+ * Pure, and one record per layer per cycle: a render that runs again after a
+ * restart reads the record it already wrote and raises nothing twice.
+ *
+ * @param {Array<object>} events the run ledger, in order
+ * @param {{cycle: number, parts: Map<string, {files?: string[]}>|null}} plan
+ * @returns {Array<{layer: string, startedSeq: number}>}
+ */
+export function wholeRerunLayers(events, { cycle, parts }) {
+  if (!parts) return [];
+  const raised = new Set(
+    events
+      .filter((e) => e.event === 'gate-integrity' && e.kind === 'whole-rerun-after-refreeze')
+      .map((e) => `${e.cycle} ${e.layer}`),
+  );
+  const found = [];
+  for (const start of events) {
+    if (start.event !== 'layer-started') continue;
+    if (start.cycle !== cycle || start.attempt !== 1) continue;
+    if (start.confirmation === true || start.narrowedTo) continue;
+    const files = parts.get(start.layer)?.files ?? [];
+    if (files.length === 0 || fileNarrowing(files).value === '') continue;
+    if (raised.has(`${cycle} ${start.layer}`)) continue;
+    raised.add(`${cycle} ${start.layer}`);
+    found.push({ layer: start.layer, startedSeq: start.seq });
+  }
+  return found;
+}
+
+/** The one writer of the record above. */
+function stampWholeRerun(ctx, { cycle, sha, parts }) {
+  for (const { layer, startedSeq } of wholeRerunLayers(runEvents(ctx), { cycle, parts })) {
+    ctx.store.append('gate-integrity', {
+      actor: ACTOR,
+      kind: assertDefectKind('whole-rerun-after-refreeze'),
+      layer,
+      cycle,
+      sha,
+      startedSeq,
+      gist: `${layer} ran whole on a cycle whose plan held it to a file set`,
+    });
+  }
+}
+
+/**
  * The part plan of every layer this cycle runs: which parts of it the diff
  * since that layer's standing result could have reached, which greens it
  * carries instead (ADR-0046), and why every part that runs is running
  * (ADR-0058). Null for a cycle that plans no layer.
  *
  * Every clause here re-runs on doubt. A cycle that runs the full spectrum
- * plans no layer. A range git cannot answer, a result with no sha, a result
- * older than the last re-freeze: each of the three drops the layer out of the
- * map, and the layer then runs whole for a reason that is not about its parts,
- * so no part of it is given a word it did not earn.
+ * plans no layer. A range git cannot answer and a result with no sha each drop
+ * the layer out of the map, and the layer then runs whole for a reason that is
+ * not about its parts, so no part of it is given a word it did not earn.
  *
  * A layer whose standing result holds no part table stays IN the map. Its
  * plan narrows nothing and carries nothing, and the record it produces is the
  * one that says so: every part the command opened is a part the standing
  * result did not hold, and the result names each of them `no-record`.
  *
- * A re-freeze invalidates every carry because it moves the suite the parts
- * were judged against: a part's green is a statement about a pair of shas,
- * and the amendment changed the half this derivation cannot see in a diff of
- * the candidate tree.
+ * A RE-FREEZE NARROWS THIS PLAN; IT DOES NOT DROP IT. A re-freeze moves the
+ * suite the parts were judged against, and a plan that could not see the
+ * amendment had to discard every carry behind it. The plan does see it: the
+ * re-freeze COMMITS the amendment, so the amended files are inside
+ * `changedInRange(prior.sha, sha)` below and are attributed to parts exactly as
+ * code files are. Discarding the carries instead bought a whole spectrum for a
+ * three-file amendment, every time (ADR-0092).
  *
  * A record-only cycle plans no layer either, so a layer that runs there runs
  * whole. That cycle has no confirmation sweep behind it (ADR-0075), and a
  * narrowing whose parts all carried would leave a layer nothing ran at this
  * sha with nothing to prove it later.
  */
-export async function partTargets(base, events, { plan, sha }) {
+export async function partTargets(base, { plan, sha }) {
   if (plan.sweep !== 'targeted' || base.config?.gates?.partTargeting === false) return null;
   // Ground the project states no suite of it reads. It leaves every diff this
   // derivation reads, before anything is attributed to a part (ADR-0059).
@@ -1025,13 +1127,12 @@ export async function partTargets(base, events, { plan, sha }) {
   // joins each layer's own ground in `layerGround()`, so a project states each
   // layer's ground once and this list once (ADR-0056).
   const breadth = base.config?.gates?.breadthGround ?? [];
-  const refrozen = events.filter((e) => e.event === 're-freeze').pop()?.seq ?? -1;
   const diffs = new Map();
   const targets = new Map();
   for (const layer of base.layers) {
     if (!plan.run?.has(layer.name)) continue;
     const prior = plan.prior?.get(layer.name);
-    if (!prior || !prior.sha || prior.seq < refrozen) continue;
+    if (!prior || !prior.sha) continue;
     if (!diffs.has(prior.sha)) {
       diffs.set(
         prior.sha,
@@ -1046,6 +1147,10 @@ export async function partTargets(base, events, { plan, sha }) {
         groundless,
         layer,
         breadth,
+        // The trees a suite file may live in. A diff that stays inside them and
+        // holds suite files alone lets the plan name the files the layer runs,
+        // instead of every file of every part the diff could reach (ADR-0092).
+        testPaths: base.testPaths ?? [],
         // A record path is attributed inside the record layers and is groundless
         // for every other layer, so no code layer re-runs every part of itself
         // for a path it never reads (ADR-0075).
@@ -3204,7 +3309,7 @@ function gateCommandLines(base, bound) {
       : "No Tier-1 gate command is yours yet: the work as declared reaches no layer's ground.",
     ...layers.map((l) => `- ${l.name}: ${(base.commands[l.command] ?? []).join(' ')}`),
     ...(inBound === null ? [] : [BOUND_LINE]),
-    ...partsLines(base, layers),
+    ...partsLines(base, layers, bound),
   ];
 }
 
@@ -3232,20 +3337,40 @@ const BOUND_LINE =
   'never refused on it.';
 
 /**
- * The one narrowing a bounded seat may take inside its bound (ADR-0046). The
- * frozen suite is in the bound on every story spawn and is the heaviest layer
- * of most projects, so a seat told nothing runs it whole every time.
+ * The two narrowings a bounded seat may take inside its bound: by part
+ * (ADR-0046) and by file (ADR-0092). The frozen suite is in the bound on every
+ * story spawn and is the heaviest layer of most projects, so a seat told
+ * nothing runs it whole every time.
  *
- * Told, never required: the verdict runs the whole layer whatever the seat did,
- * so this is a saving the seat may take and never a check it owes. The ban on
- * verification scaffolding in this module's header settles the wording.
+ * Told, never required, for every layer but one: the verdict runs the whole
+ * layer whatever the seat did, so this is a saving the seat may take and never
+ * a check it owes. The ban on verification scaffolding in this module's header
+ * settles the wording.
+ *
+ * The exception is the suite where the bound says it is narrowed, and the seat
+ * is told that here rather than left to meet the hook's refusal. A refusal
+ * reaches the seat as a tool error, which reads as a defect of the environment
+ * unless the seat was told the rule first.
  */
-function partsLines(base, layers) {
+function partsLines(base, layers, bound = null) {
   if (layers.length === 0 || base.config?.gates?.partTargeting === false) return [];
+  const suite = typeof bound?.suite === 'string' ? bound.suite : null;
+  const narrowed = bound?.suiteNarrowed === true && layers.some((l) => l.name === suite);
   return [
     `A layer above that names its parts takes ${PARTS_ENV}=<comma-separated part names> and ` +
       'runs those parts alone, so you may hold a bound layer to the parts your own diff ' +
       'reaches. The verdict proves every part of every layer at the sha it ships.',
+    `Any layer above also takes ${FILES_ENV}=<comma-separated repo-relative test paths> and ` +
+      'runs those files inside every part that holds one, whole for every part that holds ' +
+      'none. Both go in front of the command on the same line.',
+    ...(narrowed
+      ? [
+          `The ${suite} layer is refused without one of the two in front of it on the same ` +
+            'line, whatever the layer costs. It is the heaviest layer of the project and the ' +
+            'verdict runs all of it at the sha it ships, so the whole of it is never yours ' +
+            'to buy.',
+        ]
+      : []),
   ];
 }
 
@@ -3274,6 +3399,7 @@ function devRole(base, brief = null, bound = null) {
     `Implement the story spec at: ${base.specRef}`,
     'The frozen acceptance suite defines done. Do not edit or delete test files.',
     `Test paths (read-only): ${base.testPaths.join(', ')}`,
+    ...suiteFileLines(base),
     ...suiteConflictLines(),
     ...recordLines(base),
     ...dependencyLines(base),
@@ -3281,6 +3407,29 @@ function devRole(base, brief = null, bound = null) {
     'Do not commit; the orchestrator commits your work.',
     ...briefLines(brief),
   ].join('\n');
+}
+
+/**
+ * The suite files this run wrote, named to the seat that has to satisfy them.
+ *
+ * A dev seat told only "the frozen suite defines done" holds the whole suite as
+ * its question, and the whole suite is the verdict's to run. The files this run
+ * wrote are the ones that define THIS story, and they are what the seat may
+ * hold the suite layer to. Told, never required: the verdict runs the whole
+ * layer whatever the seat did.
+ *
+ * Empty for a run whose ledger names none, and then the seat is told nothing
+ * extra and works exactly as it did.
+ */
+function suiteFileLines(base) {
+  const files = base.suiteWrites ?? [];
+  if (files.length === 0) return [];
+  return [
+    'The test files this run wrote, which are what this story has to satisfy:',
+    ...files.map((file) => `- ${file}`),
+    'Run those first. Then run the frozen tests your own change can reach. The whole suite ' +
+      'belongs to the verdict stage and never to you.',
+  ];
 }
 
 /**
@@ -3778,21 +3927,101 @@ async function seatBound(ctx, base, mode) {
   for (const row of newestBaseCertification(ctx.paths, ctx.project)?.layers ?? []) {
     if (typeof row.elapsedMs === 'number') elapsedMs[row.name] = row.elapsedMs;
   }
+  const scripts = rootScripts(base.worktree);
   return {
     worktree: base.worktree,
     baseSha,
-    layers: base.layers.map((layer) => ({
-      name: layer.name,
-      argv: base.commands[layer.command] ?? [],
-      ground: layer.ground ?? [],
-      needs: layer.needs ?? [],
-      setup: layer.setup === true,
-    })),
+    layers: base.layers.map((layer) => {
+      const argv = base.commands[layer.command] ?? [];
+      const aliases = layerAliases(scripts, argv);
+      return {
+        name: layer.name,
+        argv,
+        // The project's own names for this same run. A refusal that matched the
+        // config spelling alone is a refusal nobody ever meets: a seat runs a
+        // layer by the name the project's script table gives it. The field is
+        // omitted where a layer has no other name, so a bound file says nothing
+        // it did not derive (ADR-0092).
+        ...(aliases.length > 0 && { aliases }),
+        ground: layer.ground ?? [],
+        needs: layer.needs ?? [],
+        setup: layer.setup === true,
+      };
+    }),
     suite: suiteLayer(base.layers, config, mode),
+    // Whether the suite layer is the seat's to run whole. It is not, in the
+    // lane that has one: the suite is the heaviest layer of most projects, the
+    // verdict runs every file of it at the sha it ships, and a seat that spends
+    // half an hour on it has bought the run nothing. The seat runs it narrowed
+    // or not at all. The repair lane holds no suite and sets this false, which
+    // is exactly the behaviour it had before the field existed (ADR-0092).
+    suiteNarrowed: mode === 'story',
     declared: declaredTouchedPaths(base),
     elapsedMs: Object.keys(elapsedMs).length > 0 ? elapsedMs : null,
     capMs: SEAT_LAYER_CAP_MS,
   };
+}
+
+/**
+ * The project's own script table, from the root manifest of the worktree, or an
+ * empty table where there is none to read. A project that names its commands
+ * nowhere derives no alias and keeps the matching it had.
+ */
+function rootScripts(worktree) {
+  try {
+    const manifest = JSON.parse(readFileSync(join(worktree, 'package.json'), 'utf8'));
+    const scripts = manifest?.scripts;
+    return scripts !== null && typeof scripts === 'object' ? scripts : {};
+  } catch {
+    return {};
+  }
+}
+
+// A token that names a file inside the tree: a path with a separator in it and
+// an extension on the end. It is what ties a layer's argv to the script table
+// entries that run the same file.
+const SCRIPT_PATH = /^[^\s]*\/[^\s/]+\.[A-Za-z0-9]+$/;
+
+/**
+ * The other whole-command spellings of one layer, derived from the project's
+ * own script table and from the argv's own shape. Never configured: a second
+ * command table is a second place to forget.
+ *
+ * Two derivations, and both are about the same run stated another way.
+ *
+ * A layer whose argv names a file gains every script name whose body runs that
+ * file, as `pnpm <name>` and `pnpm run <name>`. That is the canonical spelling
+ * a seat reaches for, because it is the one the project's own documentation
+ * uses.
+ *
+ * A layer whose argv IS a script call gains the other spelling of the same
+ * call, since `pnpm x` and `pnpm run x` are one command written two ways.
+ *
+ * The reverse is deliberately not derived: a layer spelled `pnpm gate:x` does
+ * not gain the file its script runs. A seat that runs that file directly stays
+ * unmatched and unrefused, which is stated rather than claimed away.
+ */
+export function layerAliases(scripts, argv = []) {
+  const spelled = argv.map((token) => String(token).replaceAll('\\', '/'));
+  if (spelled.length === 0) return [];
+  const aliases = new Set();
+  if (spelled[0] === 'pnpm') {
+    if (spelled.length === 3 && spelled[1] === 'run') aliases.add(`pnpm ${spelled[2]}`);
+    else if (spelled.length === 2 && spelled[1] !== 'run') aliases.add(`pnpm run ${spelled[1]}`);
+  }
+  const paths = spelled.filter((token) => SCRIPT_PATH.test(token));
+  if (paths.length > 0) {
+    for (const [name, body] of Object.entries(scripts)) {
+      if (typeof body !== 'string') continue;
+      const text = body.replaceAll('\\', '/');
+      if (!paths.some((path) => text.includes(path))) continue;
+      aliases.add(`pnpm ${name}`);
+      aliases.add(`pnpm run ${name}`);
+    }
+  }
+  // A layer is never an alias of itself: the argv is matched on its own.
+  aliases.delete(spelled.join(' '));
+  return [...aliases];
 }
 
 /**
@@ -3806,6 +4035,25 @@ function declaredTouchedPaths(base) {
   } catch {
     return [];
   }
+}
+
+/**
+ * The test files this run's story is about: the union of its own suite writes,
+ * or the prior run's where the freeze was inherited, filtered to the files the
+ * worktree holds.
+ *
+ * The tree filter is what keeps a deleted file out of a brief and out of a
+ * narrowing. A write declares the files it wrote, and a later write may delete
+ * one; the union is the only complete reading of the set, and the tree is the
+ * only statement of what is still there.
+ */
+function runSuiteWrites(ctx, events, worktree, testPaths = []) {
+  const own = suiteWriteFiles(events);
+  const inherited = events.find((e) => e.event === 'freeze-inherited');
+  const named = own.length > 0 ? own : priorSuiteWrites(ctx.paths, inherited?.from);
+  return named.filter(
+    (file) => underAny(file, testPaths) && existsSync(join(worktree, file)),
+  );
 }
 
 async function verdictBase(ctx, mode) {
@@ -3841,6 +4089,11 @@ async function verdictBase(ctx, mode) {
       recordLifecycle: config.repo.recordLifecycle,
       styleFiles: config.repo.styleFiles ?? [],
       testPaths: config.repo.testPaths,
+      // The test files this run's suite writes named, filtered to the ones the
+      // worktree still holds. A run that inherited its freeze wrote none of its
+      // own, and the prior run's ledger is the only statement there is
+      // (ADR-0092).
+      suiteWrites: runSuiteWrites(ctx, events, worktree, config.repo.testPaths),
       uiPaths: config.repo.uiPaths ?? [],
       // The decision-record tree. It is frozen for every seat of this lane, it
       // leaves every code review's file list, and the layers it selects are the

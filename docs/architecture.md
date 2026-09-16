@@ -253,6 +253,16 @@ Two levels; the ownership test decides placement.
   a settings file the CLI refuses is ignored in silence. A seat the files cannot
   be written for does not spawn. The brief lists the bound and says the verdict
   runs the rest.
+  The bound file also carries, per layer, the project's own script names for
+  that layer, derived from the root manifest, and the hook matches those as whole
+  command words beside the config argv (ADR-0092): a refusal that matched the
+  config spelling alone is one no seat ever meets. Where the bound says
+  `suiteNarrowed`, the suite layer is refused unless `OLYMPUS_FILES` or
+  `OLYMPUS_PARTS` is assigned inline in front of the command on the same line,
+  whatever the layer's duration says, and the refusal names the form and rides
+  the ledger with `narrowed: true`. The brief names the run's own test files and
+  both narrowing forms, so the seat meets the rule before the refusal. The repair
+  lane holds no suite and refuses nothing on form.
 - **Constitution.** A project may version a policy file in its own repository
   (`constitutionPath`, default `.olympus/constitution.md`). Its text rides as
   a third block between the core and the role block, for a closed set of
@@ -486,6 +496,21 @@ suite authoring (seat) → freeze (process).
 - **Red-state check** (process): the suite must be red against the
   pre-implementation tree, and the freeze report classes every red as
   feature-absence. Any other cause is a suite defect to fix before freeze.
+  The check asks the suite command about the run's OWN suite writes rather than
+  about the whole suite of the project (ADR-0092): the union of every
+  `suite-committed` file list, filtered to files under the test paths, of suite
+  shape, and held by the tree at the sha the attempt judges, in `OLYMPUS_FILES`.
+  It reads the answer per file: the exit is nonzero AND every NEW test file of
+  the write is among the files the command reported failed, where new means
+  absent at the sha the run started from. Four cases have no per-file question
+  to ask and read the exit code alone, as before: a runner that printed no part
+  marker, a runner that failed a part and named no file inside it, a run with no
+  base listing, and a new file missing from a red list the command reader
+  shortened. A refusal takes the corrective suite round the lane
+  already had, with the file named. The stamp carries `narrowedTo`,
+  `failedFiles`, `perFile` and, where it refused, `notRed`. An inherited freeze
+  runs the same check over the prior run's suite writes, read from that run's
+  ledger.
 - **The suite seat owes every authorized supersede** (ADR-0091). Every
   pre-freeze suite write is briefed with one line per supersede this run
   authorized at either pre-freeze site: the file, the guarantee the pin
@@ -667,10 +692,32 @@ suite authoring (seat) → freeze (process).
   whole part table, and a carried part carries `carriedFrom` — the cycle whose
   execution earned its green — into the verdict record and into the repair
   seat's layer line. A part whose ground the config answered for carries
-  `groundFrom` into both, so the fallback is countable. A re-freeze invalidates every carry, and the confirmation
+  `groundFrom` into both, so the fallback is countable. A re-freeze narrows the
+  plan rather than discarding it: the amendment is committed, so the amended
+  files are inside the range the plan already reads and are attributed to parts
+  like any other file. The confirmation
   sweep will not stand on a result that carried anything, so the cycle whose
   green ships proves every part at its own sha.
   `gates.partTargeting: false` returns every layer to a whole re-run per cycle.
+- **File-level targeting inside a layer** (ADR-0092). A part is a sequence over
+  many files, so a diff of a few amended tests still buys every file of the part
+  that holds them. A cycle whose diff is suite files and nothing else therefore
+  names the files as well: the changed files plus the files the standing result
+  left red in the parts that run, in `OLYMPUS_FILES` on the command's
+  environment, comma-separated and repo-relative. A command that honours it runs
+  the named files inside every part whose own trees hold one, and runs a part
+  that holds NONE of them whole, because the list says nothing about that part;
+  the list never leaves a part unrun. Every clause refuses towards the whole
+  layer: a diff holding one non-suite file, a diff leaving the test paths, a
+  standing result with no part table, a part that is blind or undeclared, a red
+  part with no red-file list or one the command reader shortened
+  (`failedFilesCut`). The freeze's red-state check and a bounded seat set the
+  same variable, and the attempt that runs under it carries `narrowedTo` on its
+  `layer-started` and on its `layer-result`. A file list this encoding cannot
+  carry whole sets no variable at all, because a shortened list is a green over
+  a file nothing ran. `verdict-rendered` carries `layerMs` (`run`, `carried`,
+  `abandoned`), and a layer the plan narrowed whose command started it whole
+  raises the loud `whole-rerun-after-refreeze`.
 - **The confirmation sweep buys the difference** (ADR-0046). Of a layer whose
   same-cycle result carried a part, the sweep runs the carried parts alone,
   named in `OLYMPUS_PARTS`. The parts the cycle already ran at this sha it

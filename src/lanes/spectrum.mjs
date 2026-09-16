@@ -59,6 +59,16 @@
 // cycle already ran at this sha are kept, each naming the pass that ran them,
 // and the merged record holds no carry at all.
 //
+// A part plan may go one level finer still, and name the FILES the layer's
+// execution is held to (ADR-0092). A part is a sequence over many files, and a
+// diff of three amended tests re-runs every file of the part that holds them.
+// So a cycle whose diff is suite files and nothing else passes the changed
+// files, and the files the standing result left red, in `OLYMPUS_FILES`. The
+// command runs a part whose own trees hold none of them WHOLE: the list says
+// nothing about that part, and a part skipped on it would report a green about
+// files it never ran. A command that ignores the variable runs the layer as it
+// always did, which is slow and correct.
+//
 // The order the layers run in is the order the project declared, one at a
 // time, unless the project named concurrency groups (ADR-0047). Then the
 // layers of one group that follow each other in that order hold the machine
@@ -108,9 +118,11 @@ import { runCommand } from './exec.mjs';
 import { layerBatches } from './schedule.mjs';
 import {
   FAILED_FILES_ENV,
+  FILES_ENV,
   PARTS_ENV,
   carriedParts,
   failedFileNarrowing,
+  fileNarrowing,
   keptParts,
   layerGround,
   mergeParts,
@@ -160,7 +172,8 @@ const ATTEMPTS = 2;
  *   prior?: Map<string, object>|null,
  *   certified?: Map<string, object>|null, confirmation?: boolean,
  *   parts?: Map<string, {narrow: {run: string[], carry: Array<object>}|null,
- *     reasons: Map<string, string>, blindPaths: string[]}>|null,
+ *     reasons: Map<string, string>, blindPaths: string[],
+ *     files?: string[]}>|null,
  *   groups?: Array<string[]>|null, flakeRerun?: 'narrowed'|'whole',
  *   credentials?: Array<object>, exec?: typeof runCommand}} opts
  *   `run` names the layers this cycle executes; every other layer carries its
@@ -181,7 +194,9 @@ const ATTEMPTS = 2;
  *   before the field existed.
  *   `parts` is the cycle's part plan per layer (ADR-0046). `narrow` names the
  *   parts a diff could have reached and the greens carried instead, or is null
- *   where the layer runs whole; `reasons` and `blindPaths` say why each part
+ *   where the layer runs whole; `files` names the files the layer may be held
+ *   to, empty where it must run every file the parts it runs hold (ADR-0092);
+ *   `reasons` and `blindPaths` say why each part
  *   that runs is running, whether the layer narrowed or not (ADR-0058). Absent
  *   for every layer it does not mention, and absent altogether for a cycle
  *   that plans nothing.
@@ -344,9 +359,9 @@ export async function runSpectrum(
         ...(record.output && { output: record.output }),
         ...(record.log && { log: record.log }),
         ...(record.parts?.length > 0 && { parts: record.parts }),
-        // What the flake filter's re-run asked for, on the result the re-run
-        // earned. Absent everywhere else, including on a first attempt that
-        // judged the layer.
+        // What this attempt was asked for, where it was asked for less than the
+        // whole layer: the flake filter's re-run, and a first attempt the cycle
+        // held to a file set. Absent on an attempt that ran the layer whole.
         ...(record.narrowedTo && { narrowedTo: record.narrowedTo }),
         // The paths this cycle's part plan could attribute to no part of this
         // layer. They are why every part of it ran, so they travel with the
@@ -539,7 +554,26 @@ async function runLayer(
   // everything it ran (ADR-0046). A plan that narrows nothing sets no
   // variable: the layer runs whole, exactly as it did before the plan existed,
   // and the plan's reasons still ride the result (ADR-0058).
-  const layerEnv = target?.narrow ? { ...env, [PARTS_ENV]: target.narrow.run.join(',') } : env;
+  //
+  // The two narrowings are independent and a layer takes either, both or
+  // neither. The parts are which of the layer's own sequences to run; the files
+  // are which files the caller's question is about, inside whichever of them
+  // hold one (ADR-0092).
+  const asked = target?.files?.length > 0 ? fileNarrowing(target.files) : { value: '', files: 0 };
+  const layerEnv =
+    target?.narrow || asked.value !== ''
+      ? {
+          ...env,
+          ...(target?.narrow && { [PARTS_ENV]: target.narrow.run.join(',') }),
+          ...(asked.value !== '' && { [FILES_ENV]: asked.value }),
+        }
+      : env;
+  // What a file-narrowed execution was asked for, for the record. It rides
+  // every attempt that runs under `layerEnv`, which is the first attempt and
+  // any re-run the flake filter did not narrow further: those run exactly this
+  // set, and a record that said nothing would read as a whole run of the layer.
+  const askedForFiles =
+    asked.value !== '' ? { parts: target.narrow?.run ?? [], files: asked.files } : null;
   let previous = null;
   let narrowed = null;
   // The parts an earlier execution of this same cycle earned, and the word
@@ -548,6 +582,10 @@ async function runLayer(
   // filter's re-run; null for the layer that neither touches, which is the
   // record shape every layer had before this.
   let keep = target?.keep?.length > 0 ? { parts: target.keep, mark: { confirmation: true } } : null;
+  // The parts this attempt re-runs over LESS than the whole of what the
+  // replaced attempt reported red. Their own red list is then a statement about
+  // the subset that ran, so it travels with the mark that says so.
+  let cut = null;
   for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
     const settled = await runAttempt(ctx, {
       argv,
@@ -565,8 +603,11 @@ async function runLayer(
       // says about why (ADR-0058).
       target,
       keep,
+      cut,
       attempt,
-      ...(narrowed && { narrowedTo: narrowed.narrowedTo }),
+      ...((narrowed?.narrowedTo ?? askedForFiles) && {
+        narrowedTo: narrowed?.narrowedTo ?? askedForFiles,
+      }),
       // Retry provenance: an attempt above the first names the attempt it
       // replaced and what spawned it, so a replacement is never silent.
       ...(previous && { retryOf: previous.seq, trigger: 'flake-filter' }),
@@ -587,6 +628,7 @@ async function runLayer(
         parts: [...(keep?.parts ?? []), ...narrowed.keep.map((part) => ({ ...stood, ...part }))],
         mark: { ...stood, attempt: attempt + 1 },
       };
+      cut = narrowed.cut.size > 0 ? narrowed.cut : null;
     }
   }
   // Unreachable: the last attempt never supersedes itself. A throw beats a
@@ -605,12 +647,20 @@ async function runLayer(
  * re-runs whole, and a re-run whose every part is red and file-less is the
  * whole layer, so it asks for the layer.
  *
+ * The re-run also says which parts it narrowed to LESS than their whole
+ * failure. A part whose file set the encoding could not carry whole re-runs a
+ * subset of its own reds, so the record the re-run produces for it is a
+ * statement about that subset. `cut` names those parts and the caller marks
+ * them, because a later reader that took such a record for the whole would read
+ * a red file as green (ADR-0092).
+ *
  * @param {Array<{name: string, ok: boolean, inputs?: string[],
- *   failedFiles?: string[]}>} [parts] the replaced attempt's own parts
+ *   failedFiles?: string[], failedFilesCut?: boolean}>} [parts] the replaced
+ *   attempt's own parts
  * @param {object} env the environment the layer runs in
  * @param {number} attempt the attempt whose greens are being kept
  * @returns {{env: object, narrowedTo: {parts: string[], files: number},
- *   keep: Array<object>}|null}
+ *   keep: Array<object>, cut: Set<string>}|null}
  */
 function narrowRerun(parts, env, attempt) {
   if (!parts || parts.length === 0) return null;
@@ -634,6 +684,7 @@ function narrowRerun(parts, env, attempt) {
     },
     narrowedTo: { parts: again.map((part) => part.name), files: files.files },
     keep,
+    cut: files.cut,
   };
 }
 
@@ -658,6 +709,11 @@ async function runAttempt(ctx, spec) {
     attempt,
     sha,
     ...(retryOf !== undefined && { retryOf, trigger }),
+    // What this execution was asked for, at the moment it starts. The terminal
+    // stamp carries it too; this one is what a reader has while the layer is
+    // still running, and it is what says a narrowing was derived at all when
+    // the command ignored it and ran whole (ADR-0092).
+    ...(spec.narrowedTo && { narrowedTo: spec.narrowedTo }),
     // The span this stamp opens overlaps these layers' spans (ADR-0047).
     ...(spec.concurrentWith?.length > 0 && { concurrentWith: spec.concurrentWith }),
     ...mark,
@@ -704,9 +760,15 @@ function attemptLogFile(ctx, { cycle, layer, attempt }) {
  * is a filter that can lose it.
  */
 function settle(ctx, spec, made) {
-  const { layer, cycle, sha, mark, attempt, absent, target, keep, narrowedTo, concurrentWith } =
+  const { layer, cycle, sha, mark, attempt, absent, target, keep, cut, narrowedTo, concurrentWith } =
     spec;
-  const disposition = dispositionOf(made, attempt, layer.memoryCeilingMb ?? null, target, keep);
+  const disposition = dispositionOf(made, {
+    attempt,
+    ceilingMb: layer.memoryCeilingMb ?? null,
+    target,
+    keep,
+    cut,
+  });
   made.disposition = disposition;
   const elapsedMs = elapsedSince(made.start);
   // The terminal stamp closes the span the start opened, and says the same
@@ -738,9 +800,10 @@ function settle(ctx, spec, made) {
       // keep (ADR-0045).
       ...(disposition.resources && { resources: disposition.resources }),
       ...(disposition.exhaustion && { exhaustion: disposition.exhaustion }),
-      // What this attempt was narrowed to, on the result it earned. Only the
-      // flake filter's re-run sets it, so it is the record's own statement
-      // that this green or this red answers the failure and not the layer.
+      // What this attempt was narrowed to, on the result it earned. It is the
+      // record's own statement that this green or this red answers less than
+      // the whole layer: the files the failure named, or the files the cycle's
+      // own plan held the layer to (ADR-0092).
       ...(narrowedTo && { narrowedTo }),
       ...disposition.evidence,
       // The mechanical half of the attribution: this layer declared a
@@ -854,8 +917,15 @@ function stampExhaustion(ctx, { layer, cycle, sha, mark }, exhaustion) {
  * was not asked to buy again — the flake filter's replaced attempt, or the
  * pass the confirmation sweep is confirming — with the word this attempt's own
  * parts are marked with beside it. Null for every layer neither touched.
+ *
+ * `cut` names the parts this attempt was narrowed to less than the whole of
+ * their own failure. Their record is a statement about the files that ran and
+ * not about the part, and it says so.
  */
-function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, target = null, keep = null) {
+function dispositionOf(
+  { outcome, thrown },
+  { attempt, ceilingMb = null, target = null, keep = null, cut = null },
+) {
   const carry = target?.narrow?.carry ?? [];
   if (thrown) {
     return { event: 'layer-abandoned', reason: 'runner-error', detail: thrown.message };
@@ -924,6 +994,7 @@ function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, target = 
     // rides them — a green says all it has to say in the tail.
     const parts = partTable(recordedParts(outcome.parts, { green: true }), {
       keep,
+      cut,
       carry,
       reasons: target?.reasons,
       groundFrom: target?.groundFrom,
@@ -951,6 +1022,7 @@ function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, target = 
   const ran = recordedParts(outcome.parts, { green: false });
   const parts = partTable(ran, {
     keep,
+    cut,
     carry,
     reasons: target?.reasons,
     groundFrom: target?.groundFrom,
@@ -991,9 +1063,20 @@ function dispositionOf({ outcome, thrown }, attempt, ceilingMb = null, target = 
  * `carriedFrom`: a keep is a green of this sha, and a carry never is.
  *
  * A layer with nothing kept takes the table it always took, unmarked.
+ *
+ * `cut` is separate from the keep and is applied per part: a part this
+ * execution ran over less than the whole of its own failure says so itself, so
+ * a later reader never takes its red list for the part's whole red set.
  */
-function partTable(stated, { keep = null, carry = [], reasons, groundFrom }) {
-  const own = keep ? stated.map((part) => ({ ...part, ...keep.mark })) : stated;
+function partTable(stated, { keep = null, cut = null, carry = [], reasons, groundFrom }) {
+  const own =
+    keep || cut
+      ? stated.map((part) => ({
+          ...part,
+          ...(keep ? keep.mark : {}),
+          ...(cut?.has(part.name) === true && { failedFilesCut: true }),
+        }))
+      : stated;
   return withPartReasons(
     mergeParts(mergeParts(own, keep?.parts ?? []), carry),
     reasons,
@@ -1043,6 +1126,11 @@ function recordedParts(parts = [], { green = false } = {}) {
     // these files (ADR-0065, ADR-0069). A green part carries none — it named
     // no failure.
     ...(p.failed && p.failedFiles?.length > 0 && { failedFiles: p.failedFiles }),
+    // A bound in the command reader shortened that list, so it is a subset of
+    // the part's reds. It travels with the list wherever the list goes: the
+    // narrowing that reads the list as complete is the one reading of this
+    // mechanism that ships a defect (ADR-0092).
+    ...(p.failed && p.failedFilesCut === true && { failedFilesCut: true }),
   }));
 }
 
@@ -1116,6 +1204,7 @@ export async function rerunLayers(
       concurrentWith: [],
       target: null,
       keep: narrowed?.keep?.length > 0 ? { parts: narrowed.keep, mark: { attempt } } : null,
+      cut: narrowed?.cut?.size > 0 ? narrowed.cut : null,
       attempt,
       ...(narrowed && { narrowedTo: narrowed.narrowedTo }),
       ...(standing && { retryOf: standing.seq }),
@@ -1166,7 +1255,77 @@ function rerunParts(parts) {
     ok: part.status === 'green',
     ...(part.inputs?.length > 0 && { inputs: part.inputs }),
     ...(part.failedFiles?.length > 0 && { failedFiles: part.failedFiles }),
+    // A short list stays short through the ladder: the re-run it feeds narrows
+    // to a subset of the part's reds and the record of that re-run says so.
+    ...(part.failedFilesCut === true && { failedFilesCut: true }),
   }));
+}
+
+/**
+ * What one cycle's gate layers cost it, split three ways, in milliseconds.
+ *
+ * The whole point of every narrowing above is minutes, and until this the only
+ * record of them was a pair of stamps a reader had to join by hand. Three
+ * numbers, because the three are spent differently and a single total hides the
+ * one that matters:
+ *
+ * - `run` is what executions of this cycle spent and the cycle got an answer
+ *   for. It is the sum of `elapsedMs` over the cycle's own `layer-result`
+ *   stamps that are not carries, so a confirmation sweep's own executions are
+ *   in it beside the cycle's first pass.
+ * - `abandoned` is what the cycle spent and threw away: an attempt the flake
+ *   filter replaced, a command that could not run, an attempt a restart left
+ *   open. The abandoned stamp carries no duration of its own, so the reading is
+ *   the pairing with the `layer-started` its `startedSeq` names. This is the
+ *   number the file narrowing exists to drive to nought.
+ * - `carried` is what the cycle did NOT spend: the newest reading the harness
+ *   holds for each layer the cycle's own spectrum carried — this run's standing
+ *   result for a carry inside the run, the base certification's row for a carry
+ *   from the default branch. A layer with no reading contributes nothing rather
+ *   than a guess. A layer the confirmation sweep then bought is counted here as
+ *   carried and in `run` for what the sweep spent: the two answer different
+ *   questions and neither is the other's correction.
+ *
+ * Milliseconds, as every other duration in this harness is, and as the name
+ * says. A reader that wants minutes divides.
+ *
+ * @param {Array<object>} events the run ledger, in order
+ * @param {number} cycle
+ * @param {{results?: Array<object>, prior?: Map<string, object>|null,
+ *   certified?: Map<string, object>|null}} [opts] `results` is the cycle's own
+ *   spectrum result set, read for what it carried; `prior` and `certified` are
+ *   the two places a carried layer's reading comes from
+ * @returns {{run: number, carried: number, abandoned: number}}
+ */
+export function layerTime(events, cycle, { results = [], prior = null, certified = null } = {}) {
+  const starts = new Map();
+  let run = 0;
+  let abandoned = 0;
+  for (const e of events) {
+    // Every start, whatever its cycle: an abandoned stamp names its start by
+    // seq, and a restart's recovery sweep pairs one written cycles earlier.
+    if (e.event === 'layer-started') starts.set(e.seq, e);
+    if (e.cycle !== cycle) continue;
+    if (e.event === 'layer-result' && e.mode !== 'carried' && typeof e.elapsedMs === 'number') {
+      run += e.elapsedMs;
+    }
+    if (e.event !== 'layer-abandoned') continue;
+    const began = Date.parse(starts.get(e.startedSeq)?.ts ?? '');
+    const ended = Date.parse(e.ts ?? '');
+    // An abandoned stamp with no start to pair with counts as nothing. An
+    // invented duration would be worse than a missing one.
+    if (Number.isFinite(began) && Number.isFinite(ended)) abandoned += Math.max(0, ended - began);
+  }
+  let carried = 0;
+  for (const result of results) {
+    if (result.mode !== 'carried') continue;
+    const reading =
+      result.carriedFrom === 'base'
+        ? certified?.get(result.layer)?.elapsedMs
+        : prior?.get(result.layer)?.elapsedMs;
+    if (typeof reading === 'number') carried += reading;
+  }
+  return { run, carried, abandoned };
 }
 
 /** The red layers of a spectrum result set — the persistent reds. */

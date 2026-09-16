@@ -122,6 +122,19 @@ export const LOUD_OWNERSHIP = {
       match: (item) => item.kind === 'reconciliation-lost',
       by: 'the human, from a console',
     },
+    // A layer the cycle held to a file set and the command ran whole. What
+    // answers it is nothing inside the run: the cycle is over, the layer is
+    // green, and the repair is a change to the derivation or to the project's
+    // own runner. So the record lives exactly as long as the run that reports
+    // it, and the count of them across the ledgers is what the record is for.
+    // The run's close is the owner, which every terminal state reaches through
+    // one path, a kill included, so the record never outlives its run
+    // (ADR-0092).
+    {
+      name: 'whole-rerun-after-refreeze',
+      match: (item) => item.kind === 'whole-rerun-after-refreeze',
+      owner: 'run-closed',
+    },
     // A HIGH record finding shipped as advice. The merge has happened and the
     // finding is in the product's own documentation, so nothing a later stamp
     // says brings it back: the rule that routes a HIGH to the verifier did not
