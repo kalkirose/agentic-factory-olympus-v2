@@ -3,6 +3,7 @@
 // the eval seat all read through here; none of them holds daemon state.
 import { existsSync, readdirSync } from 'node:fs';
 import { readEvents } from '../ledger/ledger.mjs';
+import { carriedFastPath } from '../lanes/codehead.mjs';
 import { runLedgerPath, archivedRunLedgerPath } from '../daemon/home.mjs';
 import { streamIndexPath, readStreamIndex } from './streams.mjs';
 
@@ -169,19 +170,21 @@ export function listShips(paths) {
  * seq, the default-branch commits it examined, and the declaration version it
  * was decided under.
  *
- * A run whose fast-path record is a refusal is not one of these: it took the
- * full re-verdict, like every ship before the flag existed. Neither is a run
- * that took the fast path and then rendered a GREEN verdict anyway: that
- * verdict judged the tree that lands, so the run earned the certification it
- * shipped and the trade this list measures was never made. A red render is not
- * that: it certifies nothing, and the run that recovers from one still ships on
- * the certification the fast path carried.
+ * A run whose fast-path record refused the code question is not one of these:
+ * it took the full re-verdict, like every ship before the flag existed. A
+ * record refused for a record reason that kept the code answer IS one, because
+ * the code certification is the whole of what a ship skips (ADR-0093). Neither
+ * is a run that carried the certification and then rendered a GREEN verdict
+ * anyway: that verdict judged the tree that lands, so the run earned the
+ * certification it shipped and the trade this list measures was never made. A
+ * red render is not that: it certifies nothing, and the run that recovers from
+ * one still ships on the certification the fast path carried.
  * @param {ReturnType<import('../daemon/home.mjs').homePaths>} paths
  */
 export function listFastPathShips(paths, { project } = {}) {
   const ships = [];
   for (const { runId, archived, project: owner, events } of listRunEvents(paths, { project })) {
-    const fast = events.filter((e) => e.event === 'fast-path-ship' && e.taken === true).pop();
+    const fast = events.filter(carriedFastPath).pop();
     if (!fast) continue;
     if (
       events.some(

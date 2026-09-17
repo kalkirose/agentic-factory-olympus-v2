@@ -62,6 +62,7 @@ import {
   underEntry,
 } from '../config/project.mjs';
 import { MAX_DIFF_BYTES, git } from '../isolation/git.mjs';
+import { carriedFastPath } from './codehead.mjs';
 import { layerGround, partGround, recordMatch } from './parts.mjs';
 import { priorStatus } from './spectrum.mjs';
 
@@ -995,6 +996,13 @@ export function fastPathVerdict({
       refusal: assertFastPathRefusal(refused.refusal),
       detail: refused.detail,
       ...answers,
+      // A refusal that kept the code answer carried the code certification onto
+      // the merged tree, so the record has to name the render it carried. The
+      // next moved base of the same pass asks this module which render stands
+      // over the tree it holds, and the tree is the merge: no verdict rendered
+      // at that sha, and without the record the check would refuse its own
+      // carry for want of a certification (ADR-0093).
+      ...(answers.code?.answer === 'kept' && { certification }),
     };
   }
   return {
@@ -1168,6 +1176,13 @@ export function lensFindingsOf(path) {
  * carries the cycle whose execution the declarations came out of, and the
  * record file the deferred proofs and the lens findings are read from.
  *
+ * A tree this check itself carried a certification onto is answered from the
+ * record of that carry. The code head after a carried record is the merge sha,
+ * and no verdict rendered there: the render the carry stood on is the one the
+ * stamp wrote down. Without this reading, the second moved base of one pass
+ * would be refused `no-certification` into a full cycle the first update had
+ * already answered (ADR-0093).
+ *
  * @param {object[]} events the run ledger
  * @param {{ok: boolean, sha: string}|null|undefined} certified
  *   `certifiedTrees.code`; undefined for a caller that names no lane
@@ -1183,7 +1198,14 @@ export function codeCertification(events, certified) {
   const render = back.find(
     (e) => e.event === 'verdict-rendered' && e.verdict === 'green' && e.sha === certified.sha,
   );
-  return render ? carried(render) : null;
+  if (render) return carried(render);
+  const stamp = back.find((e) => e.toSha === certified.sha && carriedFastPath(e));
+  const record = stamp?.certification;
+  // A record that cannot name all three is no certification. The refusal it
+  // buys is the full re-verdict, which is the answer this module gives whenever
+  // it cannot show its ground.
+  if (typeof record?.record !== 'string' || typeof record.sha !== 'string') return null;
+  return { cycle: record.cycle, sha: record.sha, record: record.record };
 }
 
 /** One render, as the check reads a certification off it. */

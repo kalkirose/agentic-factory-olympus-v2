@@ -236,10 +236,18 @@ export class RunEngine {
       // The last heartbeat this run recorded, from any voice. The stage beat
       // reads it to know whether a polling handler has already spoken.
       lastBeatSeq: null,
+      // The stages this run has entered since the last line of any other kind.
+      // Every handler decides from the ledger, the worktree and the forge, and
+      // every decision that changes anything stamps. So a stage entered twice
+      // with nothing stamped between has made the same decision from the same
+      // evidence and would make it again (ADR-0093).
+      quiet: [],
     };
     run.store = openRunStore(this.paths, runId, {
       onAppend: (line, ledger) => {
         if (line.event === 'stage-heartbeat') run.lastBeatSeq = line.seq;
+        if (line.event === 'stage-entered') run.quiet.push(line.stage);
+        else run.quiet = [];
         // The watcher's event key first, so it reads the seat's own stamp
         // before it reads anything the budget check appends behind it.
         this.onEvent?.(project, line, ledger);
@@ -287,13 +295,34 @@ export class RunEngine {
   }
 
   /**
-   * The one place stages chain, and so the one place an operator hold is read.
+   * The one place stages chain, and so the one place an operator hold is read
+   * and the one place a quiet cycle is refused.
+   *
    * A hold interrupts nothing: whatever ran has run, and the run stops here
-   * rather than entering what comes next (ADR-0040).
+   * rather than entering what comes next (ADR-0040). The hold is read first,
+   * because a held run is standing still by a person's word and is chaining
+   * nothing: reading the cycle first would leave it violated with no
+   * `stage-held` behind it, so no release would find it and a resolve would run
+   * its stage under the hold. The streak restarts at the release, and a cycle
+   * that survives the hold is refused three transitions after it.
+   *
+   * A stage this run has already entered since its last stamp of any other kind
+   * is the second half of a cycle: the handler decided from evidence that has
+   * not changed, and the chain would run for as long as the daemon does. The
+   * run stops loud and stands inert, as every violated run does. Nothing here
+   * judges which stage is wrong; the line names the cycle so the reader can
+   * (ADR-0093).
    */
   chainStage(run, next) {
-    if (this.runHeld(run)) this.holdAt(run, next);
-    else this.enterStage(run, next);
+    if (this.runHeld(run)) {
+      this.holdAt(run, next);
+      return;
+    }
+    if (run.quiet.includes(next)) {
+      this.stampViolation(run, `stage cycle: ${cycleOf(run.quiet, next)} with no event between`);
+      return;
+    }
+    this.enterStage(run, next);
   }
 
   /**
@@ -1142,6 +1171,7 @@ export class RunEngine {
       run.deferred = state.deferred;
       run.deferredResume = state.deferredResume;
       run.ownHold = state.ownHold;
+      run.quiet = state.quiet;
       // Before the run does anything else: a gate-layer attempt the dead
       // instance left open is closed here, and it has to be closed before the
       // stage re-enters, because a re-entered verdict stage stamps a fresh
@@ -1231,6 +1261,19 @@ function resumeStageOf(lane, stage) {
 
 function gist(text) {
   return text.length > GIST_MAX ? text.slice(0, GIST_MAX - 1) + '…' : text;
+}
+
+/**
+ * The cycle a refused chain makes, named from the last entry of the stage it
+ * would return to.
+ *
+ * The streak can be longer than the cycle: a resumed run carries the stages its
+ * ledger recorded, and a chain that passed through four stages before it turned
+ * back holds all four. What the reader needs is the loop, so the history in
+ * front of it is cut off.
+ */
+function cycleOf(quiet, next) {
+  return [...quiet.slice(quiet.lastIndexOf(next)), next].join(' > ');
 }
 
 /**

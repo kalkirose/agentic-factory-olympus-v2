@@ -969,3 +969,32 @@ never carries a project's specifics.
   ownership rule at the run close, and `red-state-check` leaves the retired list
   it was wrongly on. ADR-0092 is new; ADR-0046, ADR-0065 and ADR-0084 stand and
   are the decisions it extends.
+- 2026-09-17: the code head is one definition, and a quiet stage cycle stops
+  loud. Four readers asked one question of the tree a run holds: the admission
+  gate, the verdict's moved check, the suite restore's anchor and the update
+  stage. Each answered from a set of stamps of its own. They agree while
+  the run's last commit is its implementation commit and stop agreeing the
+  moment a suite amendment or a merge lands after it, and two readers that
+  disagree are a run three stages hand round for as long as the daemon runs.
+  Now `src/lanes/codehead.mjs` holds the list: three stamps, each with whether
+  it moved the tree and which sha it left, the record commits outside it and
+  `branch-update` and a merge round's re-freeze excluded with their reasons.
+  Whenever the update stage finds its base unmoved it compares the worktree
+  head to what the ledger names (the head, a tree under an open request, a
+  tree a check carried, every record commit, a refreshed tree), and stamps
+  `unnamedHead` on a head none of them names, which closes every crash window
+  of that stage. The resume rule reads the two certifications instead of
+  counting renders, a re-run the stage decided and never handed on is read off
+  the stamp that holds it, a check record written and never carried into a
+  route is completed from itself, a re-run over a standing fallback is folded
+  to `fallback-stands`, and a fresh pass a merge round bought goes back to the
+  verdict with the ship token given up. A code answer of `kept` is a carry
+  wherever it is read: the gate, the close mark, the escape attribution, the
+  telemetry list and the trade counter. The engine keeps the stages entered
+  since the last line of any other kind, folds them at replay, and refuses a
+  chain into one of them with a loud `liveness-violation` naming the cycle.
+  `pre-verdict-update` gains `toSha`, `certification`, `unnamedHead` and the
+  records reason `fallback-stands`; `re-freeze` gains `source`;
+  `fast-path-ship` carries `certification` on a carried refusal; the centre
+  measures `uncertified` and `unnamedHead`. ADR-0093 is new and ADR-0075 cites
+  it.

@@ -206,10 +206,23 @@ test('a fast-path ship is found by its request number or by its merge commit', (
     line(1, '2026-08-04T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
     line(2, '2026-08-04T01:00:00Z', 'fast-path-ship', { taken: true, commits: ['c2'] }),
   ]);
+  // A record refused for a record reason that kept the code answer: the code
+  // certification is the whole of what a ship skips, so this is one of these
+  // (ADR-0093).
+  writeLedger(archivedRunLedgerPath(paths, 'half'), [
+    line(1, '2026-08-05T00:00:00Z', 'run-launched', { project: 'p', lane: 'story' }),
+    line(2, '2026-08-05T01:00:00Z', 'fast-path-ship', {
+      taken: false,
+      refusal: 'records-rerun',
+      code: { answer: 'kept' },
+    }),
+    line(3, '2026-08-05T02:00:00Z', 'merged', { pr: 9, sha: 'h3', mergeSha: 'm3' }),
+  ]);
   assert.deepEqual(
-    listFastPathShips(paths).map((s) => s.runId),
-    ['fast'],
+    listFastPathShips(paths).map((s) => s.runId).sort(),
+    ['fast', 'half'],
   );
+  assert.equal(fastPathShipOf(paths, { project: 'p', pr: 9 }).runId, 'half');
   const ship = fastPathShipOf(paths, { project: 'p', pr: 7 });
   assert.equal(ship.runId, 'fast');
   assert.equal(ship.seq, 2);

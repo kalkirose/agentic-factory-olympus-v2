@@ -35,12 +35,19 @@ export function deriveRunState(events) {
     // the wait the run is in right now (ADR-0069).
     waiting: null,
     lastAnswer: null,
+    // The stages entered since the last line of any other kind, as the ledger
+    // left them. A run whose tail is a quiet cycle carries the streak over the
+    // restart, so its first chained transition is refused rather than opening
+    // the spin again (ADR-0093).
+    quiet: [],
     closed: null,
   };
   let resumeSeq = 0;
   const violations = [];
   const resolved = new Set();
   for (const e of events) {
+    if (e.event === 'stage-entered') state.quiet.push(e.stage);
+    else state.quiet = [];
     switch (e.event) {
       case 'run-launched': {
         state.launched = true;

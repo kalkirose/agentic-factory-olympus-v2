@@ -220,6 +220,104 @@ test('a handler error and an off-catalog park both violate loud', async (t) => {
   assert.equal(openLoud(paths).length, 2);
 });
 
+// -- a quiet stage cycle (ADR-0093) ------------------------------------------
+//
+// Every handler decides from the ledger, the worktree and the forge, and every
+// decision that changes anything stamps. So a stage entered twice with nothing
+// stamped between has made the same decision from the same evidence and would
+// make it again for as long as the daemon runs.
+
+test('two stages that hand a run back and forth with nothing stamped stop loud', async (t) => {
+  const { paths, engine } = setup(t);
+  engine.registerLane('spin', {
+    stages: ['left', 'right'],
+    handlers: {
+      left: () => ({ next: 'right' }),
+      right: () => ({ next: 'left' }),
+    },
+  });
+  engine.launch({ runId: 'r1', project: 'proj', lane: 'spin' });
+  const violation = await waitFor(
+    () => readEvents(runLedgerPath(paths, 'r1')).find((e) => e.event === 'liveness-violation'),
+    { label: 'stage-cycle violation' },
+  );
+  assert.equal(violation.stream, 'loud');
+  // The line names the loop, so a reader knows which two stages disagree.
+  assert.equal(violation.detail, 'stage cycle: left > right > left with no event between');
+  assert.equal(violation.stage, 'right');
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  // The chain is refused at the second entry of a stage the run has already
+  // been in, so the ledger holds the two entries and nothing more.
+  assert.equal(events.filter((e) => e.event === 'stage-entered').length, 2);
+  assert.equal(events.filter((e) => e.event === 'liveness-violation').length, 1);
+  // Alert, never auto-kill: the run stands open and holds its slot, as every
+  // violated run does.
+  assert.equal(engine.activeCount('proj'), 1);
+  assert.deepEqual(engine.checkLiveness(), []);
+  engine.killRun('r1', { actor: 'operator' });
+});
+
+test('a stage that stamped anything is no cycle', async (t) => {
+  const { paths, engine } = setup(t);
+  let laps = 0;
+  engine.registerLane('beating', {
+    stages: ['left', 'right'],
+    handlers: {
+      left: (ctx) => {
+        laps += 1;
+        if (laps > 2) return { close: { state: 'shipped' } };
+        // A stage that waits on the forge or the token beats, and a beat is a
+        // line: the run is quiet on purpose and not stuck.
+        ctx.store.append('stage-heartbeat', { actor: 'daemon', stage: 'left', waitingOn: 'ci' });
+        return { next: 'right' };
+      },
+      right: () => ({ next: 'left' }),
+    },
+  });
+  engine.launch({ runId: 'r1', project: 'proj', lane: 'beating' });
+  await waitFor(() => existsSync(archivedRunLedgerPath(paths, 'r1')), { label: 'run archived' });
+  const events = archivedEvents(paths, 'r1');
+  assert.ok(!events.some((e) => e.event === 'liveness-violation'));
+  assert.equal(events.at(-1).state, 'shipped');
+});
+
+test('a held run stands at its boundary rather than cycling into a violation', async (t) => {
+  // The hold is read first. A run violated in place of being held would carry
+  // no `stage-held`, so no release would find it and a resolve would run its
+  // stage under a hold that is still standing.
+  const home = tempDir();
+  const paths = scaffoldHome(home);
+  const held = new Set(['proj']);
+  const engine = new RunEngine(paths, { getSlotCap: () => 3, isHeld: (p) => held.has(p) });
+  t.after(async () => {
+    await engine.stop();
+    removeDir(home);
+  });
+  engine.registerLane('spin', {
+    stages: ['left', 'right'],
+    handlers: {
+      left: () => ({ next: 'right' }),
+      right: () => ({ next: 'left' }),
+    },
+  });
+  engine.launch({ runId: 'r1', project: 'proj', lane: 'spin' });
+  const boundary = await waitFor(
+    () => readEvents(runLedgerPath(paths, 'r1')).find((e) => e.event === 'stage-held'),
+    { label: 'stage held' },
+  );
+  assert.equal(boundary.next, 'right');
+  assert.ok(!readEvents(runLedgerPath(paths, 'r1')).some((e) => e.event === 'liveness-violation'));
+  // The release restarts the streak, and the cycle is refused behind it.
+  held.delete('proj');
+  engine.releaseHeldRuns();
+  const violation = await waitFor(
+    () => readEvents(runLedgerPath(paths, 'r1')).find((e) => e.event === 'liveness-violation'),
+    { label: 'stage-cycle violation after the release' },
+  );
+  assert.match(violation.detail, /^stage cycle: /);
+  engine.killRun('r1', { actor: 'operator' });
+});
+
 // -- a stamp behind the close -------------------------------------------------
 
 // The lane a kill meets in practice: a stage waiting on a child that outlives

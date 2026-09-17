@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, renameSync, readdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, renameSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { Daemon } from '../src/daemon/daemon.mjs';
 import { RunEngine } from '../src/engine/engine.mjs';
@@ -378,4 +378,42 @@ test('a lane refuses a retired entry that names a stage it still runs or does no
   assert.throws(() => engine.registerLane('x', lane({ c: 'd' })), /unknown stage d/);
   assert.doesNotThrow(() => engine.registerLane('x', lane({ c: 'b' })));
   engine.stop();
+});
+
+// A ledger whose tail is a run entering stages with nothing stamped between is
+// a spin the stop interrupted. The streak is a fold of the file, so the restart
+// refuses the chain rather than opening the spin again (ADR-0093).
+test('a run whose ledger tail is a quiet cycle resumes into the violation', async (t) => {
+  const { paths } = setupHome(t);
+  const dir = join(paths.runs, 'r1');
+  mkdirSync(dir, { recursive: true });
+  const ts = '2026-09-17T00:00:00.000Z';
+  writeFileSync(
+    join(dir, 'ledger.jsonl'),
+    [
+      { seq: 1, ts, event: 'run-launched', actor: 'daemon', project: 'proj', lane: 'story' },
+      { seq: 2, ts, event: 'stage-entered', actor: 'daemon', stage: 'left' },
+      { seq: 3, ts, event: 'stage-entered', actor: 'daemon', stage: 'right' },
+    ]
+      .map((line) => JSON.stringify(line))
+      .join('\n') + '\n',
+  );
+  const engine = new RunEngine(paths, { getSlotCap: () => 1 });
+  t.after(async () => {
+    await engine.stop();
+  });
+  engine.registerLane('story', {
+    stages: ['left', 'right'],
+    handlers: { left: () => ({ next: 'right' }), right: () => ({ next: 'left' }) },
+  });
+  assert.deepEqual(engine.resumeOpenRuns(), ['r1']);
+  const violation = await waitFor(
+    () => readEvents(runLedgerPath(paths, 'r1')).find((e) => e.event === 'liveness-violation'),
+    { label: 'stage-cycle violation after the resume' },
+  );
+  assert.match(violation.detail, /^stage cycle: left > /);
+  // One chained transition, and the run stands: the spin never re-opened.
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  assert.equal(events.filter((e) => e.event === 'stage-entered').length, 3);
+  assert.equal(events.at(-1).event, 'liveness-violation');
 });

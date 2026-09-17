@@ -908,6 +908,15 @@ test('a record of the neighbourhood re-runs the reconciliation and keeps the cod
   // owns the records, and the word says which of the two sent it.
   assert.equal(out.taken, false);
   assert.equal(out.refusal, 'records-rerun');
+  // The code answer carried the certification onto the merged tree, so the
+  // record names the render it carried. Nothing else can: no verdict stands at
+  // that sha (ADR-0093).
+  assert.deepEqual(out.certification, CERTIFICATION);
+  // A refusal the code answer fell to carries none: there is nothing to carry.
+  assert.equal(
+    fastPathVerdict(inputs({ records: NEIGHBOURHOOD, breadth: [] })).certification,
+    undefined,
+  );
 });
 
 test('a moved base outside both grounds carries both certifications', () => {
@@ -1075,6 +1084,47 @@ test('the certification a lane names is the render at that sha', () => {
   assert.equal(codeCertification(ledger, { ok: true, sha: 'ccc' }), null);
   assert.equal(codeCertification(ledger, { ok: false, sha: 'aaa' }), null);
   assert.equal(codeCertification(ledger, null), null);
+});
+
+test('a tree this check carried is answered from the record of that carry', () => {
+  // The code head after a carry is the merge sha, and no verdict rendered
+  // there: the render the carry stood on is written into the record, and the
+  // second moved base of one pass reads it back (ADR-0093).
+  const render = {
+    event: 'verdict-rendered',
+    cycle: 2,
+    verdict: 'green',
+    sha: 'aaa',
+    record: '/r/v2.json',
+  };
+  const held = { cycle: 2, sha: 'aaa', record: '/r/v2.json' };
+  const carry = (extra) => ({ event: 'fast-path-ship', toSha: 'mmm', ...extra });
+  assert.deepEqual(
+    codeCertification([render, carry({ taken: true, certification: held })], {
+      ok: true,
+      sha: 'mmm',
+    }),
+    held,
+  );
+  // A record refused for a record reason carries the code answer, so it
+  // carries the render too.
+  const refused = carry({
+    taken: false,
+    refusal: 'records-rerun',
+    code: { answer: 'kept' },
+    certification: held,
+  });
+  assert.deepEqual(codeCertification([render, refused], { ok: true, sha: 'mmm' }), held);
+  // A record that carried nothing, and one that names no verdict file: neither
+  // is a certification, and the refusal each buys is the full cycle.
+  assert.equal(
+    codeCertification([render, carry({ taken: false, code: { answer: 'rejudge' } })], {
+      ok: true,
+      sha: 'mmm',
+    }),
+    null,
+  );
+  assert.equal(codeCertification([render, carry({ taken: true })], { ok: true, sha: 'mmm' }), null);
 });
 
 test('no-certification is refused for a certification the lane has and for no other', async () => {
