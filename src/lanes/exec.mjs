@@ -59,12 +59,16 @@
 // part that did not run declares nothing. Opening a part twice is opening the
 // same part.
 //
-// The caller's half of the protocol is two environment variables (see
-// parts.mjs): `OLYMPUS_PARTS`, the parts it asks for by name, and
+// The caller's half of the protocol is three environment variables (see
+// parts.mjs): `OLYMPUS_PARTS`, the parts it asks for by name;
 // `OLYMPUS_FAILED_FILES`, the files it asks for inside a part
-// (`<part>=<path>,<path>;<part>=…`). A command that ignores either runs
-// everything, which costs time and never correctness — what the record holds
-// is what the stream said ran.
+// (`<part>=<path>,<path>;<part>=…`); and `OLYMPUS_FILES`, a flat list of
+// repo-relative test paths the caller's question is about. A command that
+// ignores any of them runs everything, which costs time and never correctness —
+// what the record holds is what the stream said ran. A command that honours
+// `OLYMPUS_FILES` runs a part whose own trees hold none of the named files
+// WHOLE, because the list says nothing about that part; skipping a part stays
+// the job of `OLYMPUS_PARTS` alone (ADR-0092).
 //
 // A caller may also ask what the command cost the machine. The measurement is
 // the same additive shape the file is: an option to ask for it, a field on the
@@ -98,10 +102,13 @@ const PART_LIMIT = 64;
 // honest one and exist for the command that has lost its mind.
 const PART_INPUTS = 64;
 const PART_INPUT_LENGTH = 200;
-// The failed files one part may name. The same bound and the same reason: a
-// part that names more files than this is a part whose whole re-run is the
-// cheaper answer anyway.
-const PART_FAILED_FILES = 64;
+// The failed files one part may name. It is higher than the input bound above
+// because the list is read as a claim and not only as a re-run narrowing: a
+// caller asks whether a named file is among the reds, and a whole-tree run of a
+// large suite names every red file in it. A bound that cut such a list would
+// make the caller refuse a correct answer. A cut is never silent either way
+// (`failedFilesCut`).
+const PART_FAILED_FILES = 512;
 // A marker is one line. Text this long with no newline in it is not a marker,
 // and holding it back to look for one would only grow a buffer.
 const LINE_LIMIT = 65536;
@@ -237,7 +244,7 @@ function openCommandLog(path, cap) {
  * @returns {Promise<{code: number|null, signal?: string|null, output: string,
  *   truncated: boolean,
  *   parts: Array<{name: string, failed: boolean, ok: boolean, output: string,
- *     inputs: string[], failedFiles: string[]}>,
+ *     inputs: string[], failedFiles: string[], failedFilesCut?: boolean}>,
  *   log: {path: string, bytes: number, truncated: boolean, removed?: boolean,
  *     error?: string}|null,
  *   resources: {peakRssMb: number, peakProcess?: {name: string, rssMb: number},
@@ -252,6 +259,10 @@ function openCommandLog(path, cap) {
  *   `inputs` is the part's declared input set, empty for a part that declared
  *   none. `failedFiles` is what the part said failed inside it, empty for a
  *   part that named nothing — and then the part re-runs whole.
+ *   `failedFilesCut` says a bound here shortened that list, so it is a subset
+ *   of the part's reds and not the whole of them. A caller that reads the list
+ *   as complete reads a red file as green, so the mark is the one thing that
+ *   makes the list safe to read at all.
  *   `truncated` says the stream outgrew the in-memory bound, so `output` is a
  *   tail. It is not a statement that anything was lost: `log` says what the
  *   harness still holds. `log.truncated` is the loss — the file hit its cap —
@@ -349,16 +360,38 @@ export function runCommand(
     // and never to whatever part happens to be open. A line with no path list
     // states nothing and is dropped: an empty narrowing is a whole re-run, and
     // that is the direction a broken parse has to fall in.
-    const declareFailedFiles = (text) => {
+    //
+    // WHERE THIS READER SHORTENS A LIST, IT SAYS SO. A caller reads the list as
+    // the part's whole red set — the re-run narrows to it, and a caller asking
+    // whether a named file went red reads its absence as a green. Three bounds
+    // here can shorten it: a path past the entry length, the count bound, and a
+    // marker line the stream reader cut at `LINE_LIMIT`. Each of the three sets
+    // `failedFilesCut`, and a caller that cannot answer its question from a
+    // short list falls back to the whole part.
+    //
+    // The part is opened before any of the three, so a list cut to nothing still
+    // marks the part it belongs to. Without that the one case with nothing left
+    // to say would be the one case that said nothing.
+    const declareFailedFiles = (text, lineCut = false) => {
       const line = FAILED_FILES_LINE.exec(text);
       if (!line) return;
-      const paths = line[2]
-        .split(',')
-        .filter((path) => path !== '' && path.length <= PART_INPUT_LENGTH);
-      if (paths.length === 0) return;
       const part = openPart(line[1]);
-      for (const path of paths) {
-        if (part.failedFiles.length >= PART_FAILED_FILES) return;
+      const entries = line[2].split(',');
+      if (lineCut) {
+        // The reader cut this line mid-path, and half a path names no file.
+        entries.pop();
+        part.failedFilesCut = true;
+      }
+      for (const path of entries) {
+        if (path === '') continue;
+        if (path.length > PART_INPUT_LENGTH) {
+          part.failedFilesCut = true;
+          continue;
+        }
+        if (part.failedFiles.length >= PART_FAILED_FILES) {
+          part.failedFilesCut = true;
+          break;
+        }
         if (!part.failedFiles.includes(path)) part.failedFiles.push(path);
       }
     };
@@ -383,7 +416,11 @@ export function runCommand(
       if (current) current.output = (current.output + text).slice(-PART_OUTPUT);
     };
 
-    const absorb = (text) => {
+    // `lineCut` says this text is a line the reader gave up on: it reached
+    // `LINE_LIMIT` with no newline in it, so what arrives here ends mid-token
+    // and the rest of the line arrives later as text of its own. Only the
+    // no-newline flush sets it, and such a flush is always exactly one line.
+    const absorb = (text, lineCut = false) => {
       if (text === '') return;
       if (!text.includes(PART_PREFIX)) {
         hold(text);
@@ -400,7 +437,7 @@ export function runCommand(
           continue;
         }
         if (marker[1] === 'part-failed-files') {
-          declareFailedFiles(marker[2]);
+          declareFailedFiles(marker[2], lineCut);
           continue;
         }
         const part = openPart(marker[2]);
@@ -413,11 +450,11 @@ export function runCommand(
     // The one gate every byte passes: redacted once, then written to the file
     // and read for markers. Whole lines, so a value cannot be halved by a
     // chunk boundary, and the file gets the text the caller would have seen.
-    const take = (raw) => {
+    const take = (raw, lineCut = false) => {
       if (raw === '') return;
       const text = redact ? redact(raw) : raw;
       if (log) log.write(text);
-      absorb(text);
+      absorb(text, lineCut);
     };
 
     const collect = (chunk) => {
@@ -425,7 +462,7 @@ export function runCommand(
       const end = pending.lastIndexOf('\n');
       if (end === -1) {
         if (pending.length > LINE_LIMIT) {
-          take(pending);
+          take(pending, true);
           pending = '';
         }
         return;

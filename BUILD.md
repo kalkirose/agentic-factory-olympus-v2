@@ -940,3 +940,32 @@ never carries a project's specifics.
   the run registry, `supersede-authorized` gains the site `spec-birth`, and the
   spec-lens duty and the eval-review brief read every site. ADR-0091 is new;
   ADR-0044 and ADR-0053 stand and are the authority it executes.
+- 2026-09-16: a cycle runs the files that changed. A gate layer is the largest
+  single cost of a verdict cycle, and most of what it spent was work the run had
+  already done: the harness knew which files had moved and had no way to say so
+  to the command it ran. It has one now. `OLYMPUS_FILES` carries repo-relative
+  test paths, comma-separated, and a command that honours it runs the named
+  files inside every part whose trees hold one and runs a part that holds none
+  of them WHOLE. The list never skips a part; skipping stays `OLYMPUS_PARTS`'s.
+  A re-freeze no longer discards the part plan behind it: the amendment is
+  committed, so the amended files are inside the range the plan already reads.
+  A diff that is suite files and nothing else sets the file list to the changed
+  files plus the files the standing result left red in the parts that run, and
+  every clause of that derivation refuses towards the whole layer. A red-file
+  list the command reader shortened now says so (`failedFilesCut`), the bound on
+  it rises to 512, and every reader that would take a short list for a complete
+  one refuses instead. The freeze's red-state check asks the command about the
+  run's own suite writes rather than about the project's whole suite, and reads
+  the answer per file: every NEW test file of the write has to be among the
+  reported reds, with the exit code as the fallback where no per-file question
+  can be asked. An implementation seat is told its own test files and the two
+  narrowing forms, and the hook refuses the suite layer without one of them in
+  front of the command, matching the project's own script names for a layer as
+  well as its config argv. `verdict-rendered` carries `layerMs`, the cycle's
+  layer minutes split into run, carried and abandoned, and a layer the plan
+  narrowed whose command started it whole raises the loud
+  `whole-rerun-after-refreeze`. `OLYMPUS_FILES` and the cut mark enter the
+  protocol in `exec.mjs`, the kind enters `GATE_INTEGRITY_KINDS` with its
+  ownership rule at the run close, and `red-state-check` leaves the retired list
+  it was wrongly on. ADR-0092 is new; ADR-0046, ADR-0065 and ADR-0084 stand and
+  are the decisions it extends.

@@ -115,6 +115,7 @@ test('the vocabulary says which record carries each kind, and the two sets are d
       'record-finding-shipped',
       'resource-exhaustion',
       'triage-log-missing',
+      'whole-rerun-after-refreeze',
     ],
   );
   assert.deepEqual(

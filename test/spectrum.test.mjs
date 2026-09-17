@@ -15,6 +15,7 @@ import {
   persistentReds,
   cyclePlan,
   groundedLayers,
+  layerTime,
   priorStatus,
   targetedLayers,
   SWEEP_REASONS,
@@ -455,6 +456,7 @@ function narrowingCmd(logFile, table, { nameFiles = true, alwaysRed = false } = 
     `const log = ${JSON.stringify(logFile)};`,
     'const first = !fs.existsSync(log);',
     "const only = (process.env.OLYMPUS_PARTS || '').split(',').filter(Boolean);",
+    "const named = (process.env.OLYMPUS_FILES || '').split(',').filter(Boolean);",
     'const narrow = new Map();',
     "for (const entry of (process.env.OLYMPUS_FAILED_FILES || '').split(';')) {",
     "  const at = entry.indexOf('=');",
@@ -467,7 +469,15 @@ function narrowingCmd(logFile, table, { nameFiles = true, alwaysRed = false } = 
     'for (const part of table) {',
     '  if (only.length > 0 && !only.includes(part.name)) continue;',
     '  const asked = narrow.get(part.name);',
-    '  const files = asked ? part.files.filter((f) => asked.includes(f)) : part.files;',
+    // The file-list half of the contract: a part whose own files hold some of
+    // the named ones runs those, a part that holds none of them runs whole,
+    // and a part both variables name runs the intersection.
+    '  const mine = part.files.filter((f) => named.includes(f));',
+    '  let files = asked ? part.files.filter((f) => asked.includes(f)) : part.files;',
+    '  if (mine.length > 0) {',
+    '    const both = asked ? mine.filter((f) => asked.includes(f)) : mine;',
+    '    files = both.length > 0 ? both : mine;',
+    '  }',
     "  ran.push(part.name + ':' + files.join('+'));",
     "  console.log('::olympus part ' + part.name);",
     "  console.log('::olympus part-inputs ' + part.inputs.join(' '));",
@@ -581,6 +591,141 @@ test('a layer that named no part at all is left exactly as it was', async (t) =>
   assert.deepEqual(ranOf(log), [['', ''], ['', '']]);
   assert.equal(results[0].narrowedTo, undefined);
   assert.equal(results[0].parts, undefined);
+});
+
+// -- what a cycle spent on its layers -----------------------------------------
+
+test('a cycle records what it bought, what it carried and what it threw away', () => {
+  const events = [
+    { seq: 1, event: 'layer-started', cycle: 1, layer: 'a', attempt: 1, ts: '2026-01-01T00:00:00Z' },
+    {
+      seq: 2,
+      event: 'layer-abandoned',
+      cycle: 1,
+      layer: 'a',
+      attempt: 1,
+      startedSeq: 1,
+      ts: '2026-01-01T00:30:00Z',
+    },
+    { seq: 3, event: 'layer-started', cycle: 1, layer: 'a', attempt: 2, ts: '2026-01-01T00:30:00Z' },
+    { seq: 4, event: 'layer-result', cycle: 1, layer: 'a', attempt: 2, elapsedMs: 90_000 },
+    // Another cycle's stamps say nothing about this one.
+    { seq: 5, event: 'layer-result', cycle: 2, layer: 'a', attempt: 1, elapsedMs: 5_000 },
+    // A carried layer's own stamp is not a cost this cycle paid.
+    { seq: 6, event: 'layer-result', cycle: 1, layer: 'c', mode: 'carried', elapsedMs: 11 },
+  ];
+  const measured = layerTime(events, 1, {
+    results: [
+      { layer: 'a', mode: 'run' },
+      { layer: 'b', mode: 'carried' },
+      { layer: 'c', mode: 'carried', carriedFrom: 'base' },
+      { layer: 'd', mode: 'carried' },
+    ],
+    prior: new Map([['b', { elapsedMs: 600_000 }]]),
+    certified: new Map([['c', { elapsedMs: 120_000 }]]),
+  });
+  // The abandoned attempt carries no duration of its own, so the reading is
+  // the pairing with the start its `startedSeq` names.
+  assert.deepEqual(measured, { run: 90_000, carried: 720_000, abandoned: 1_800_000 });
+  // A carried layer with no reading anywhere contributes nothing rather than
+  // a guess, and a cycle that abandoned nothing records nought.
+  assert.deepEqual(layerTime([], 1, { results: [{ layer: 'd', mode: 'carried' }] }), {
+    run: 0,
+    carried: 0,
+    abandoned: 0,
+  });
+});
+
+// -- what a cycle holds a layer to, by file -----------------------------------
+
+/** One layer's plan, as `partTargets` builds one. */
+function filePlan({ files, narrow = null, reasons = {} }) {
+  return new Map([
+    ['acceptance', { narrow, files, reasons: new Map(Object.entries(reasons)), blindPaths: [] }],
+  ]);
+}
+
+async function heldTo(t, table, plan, opts = {}) {
+  const { root, ctx } = fixture(t);
+  const log = join(root, 'ran.log');
+  const { results } = await runSpectrum(ctx, {
+    layers: [{ name: 'acceptance', command: 'parts' }],
+    commands: { parts: narrowingCmd(log, table, opts) },
+    cwd: process.cwd(),
+    cycle: 1,
+    sha: 'sha1',
+    parts: plan,
+  });
+  return { ctx, results, ran: ranOf(log) };
+}
+
+const CLEAN_TABLE = [
+  { name: 'alpha', inputs: ['tests/alpha'], files: ['a1', 'a2'], red: [] },
+  { name: 'beta', inputs: ['tests/beta'], files: ['b1'], red: [] },
+];
+
+test('a layer the plan holds to a file set runs those files, and whole where it names none', async (t) => {
+  const { ctx, results, ran } = await heldTo(
+    t,
+    CLEAN_TABLE,
+    filePlan({ files: ['a1'], reasons: { alpha: 'touched', beta: 'touched' } }),
+  );
+  // Alpha holds a named file and runs it alone. Beta holds none of them, so
+  // the list says nothing about beta and beta runs whole.
+  assert.deepEqual(ran, [['alpha:a1', 'beta:b1']]);
+  assert.deepEqual(results[0].narrowedTo, { parts: [], files: 1 });
+  // The start says it too, which is what a reader has while the layer runs.
+  const started = events(ctx).filter((e) => e.event === 'layer-started');
+  assert.deepEqual(started[0].narrowedTo, { parts: [], files: 1 });
+  assert.equal(started[0].attempt, 1);
+});
+
+test('a layer takes the part narrowing and the file narrowing together', async (t) => {
+  const { results, ran } = await heldTo(
+    t,
+    CLEAN_TABLE,
+    filePlan({
+      files: ['a1'],
+      narrow: { run: ['alpha'], carry: [{ name: 'beta', status: 'green', carriedFrom: 1 }] },
+      reasons: { alpha: 'touched' },
+    }),
+  );
+  assert.deepEqual(ran, [['alpha:a1']]);
+  assert.deepEqual(results[0].narrowedTo, { parts: ['alpha'], files: 1 });
+  assert.deepEqual(
+    results[0].parts.map((p) => [p.name, p.carriedFrom]),
+    [
+      ['alpha', undefined],
+      ['beta', 1],
+    ],
+  );
+});
+
+test('a file list this encoding cannot carry whole sets no variable at all', async (t) => {
+  const { results, ran } = await heldTo(
+    t,
+    CLEAN_TABLE,
+    filePlan({ files: ['a1', 'one,two'], reasons: { alpha: 'touched', beta: 'touched' } }),
+  );
+  // Shortening the list would run fewer files under a green about all of them.
+  // So the whole narrowing is refused and the layer runs as it always did.
+  assert.deepEqual(ran, [['alpha:a1+a2', 'beta:b1']]);
+  assert.equal(results[0].narrowedTo, undefined);
+});
+
+test('a re-run over part of a failure records that its red list is a subset', async (t) => {
+  const long = 'x'.repeat(220);
+  const table = [
+    { name: 'alpha', inputs: ['tests/alpha'], files: ['a1', long], red: ['a1', long] },
+    { name: 'beta', inputs: ['tests/beta'], files: ['b1'], red: [] },
+  ];
+  const { results } = await narrowed(t, table);
+  // The command reader drops the over-long path from the list, so the re-run
+  // bought a1 alone and nothing re-ran the other red. The record says so
+  // rather than reporting a green nobody earned.
+  const alpha = results[0].parts.find((p) => p.name === 'alpha');
+  assert.equal(alpha.failedFilesCut, true);
+  assert.equal(results[0].narrowedTo.files, 1);
 });
 
 test('gates.flakeRerun "whole" runs the layer again, exactly as it did before', async (t) => {

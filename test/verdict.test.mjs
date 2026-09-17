@@ -21,6 +21,7 @@ import {
 import { boundLayerNames } from '../src/seats/bound.mjs';
 import { commitAll } from '../src/isolation/tree.mjs';
 import { Ledger, readEvents } from '../src/ledger/ledger.mjs';
+import { layerAliases, wholeRerunLayers } from '../src/lanes/verdict.mjs';
 import { INSTANCE_EVENTS } from '../src/ledger/registry.mjs';
 import { ackFingerprint, findingFingerprint, standingAcksFor } from '../src/ledger/acks.mjs';
 import { readEscapeSet } from '../src/telemetry/escapes.mjs';
@@ -575,6 +576,13 @@ test('a clean implementation ships green in one cycle; advisory findings never b
   assert.equal(renders[0].verdict, 'green');
   assert.equal(renders[0].pass, 1);
   assert.deepEqual(renders[0].open, []);
+  // What the cycle spent on its layers, which is what every narrowing above is
+  // for. This cycle ran three layers, carried none and abandoned none
+  // (ADR-0092).
+  assert.ok(renders[0].layerMs.run > 0);
+  assert.equal(renders[0].layerMs.carried, 0);
+  assert.equal(renders[0].layerMs.abandoned, 0);
+  assert.deepEqual(readRecord(fx.paths, runId, 1).layerMs, renders[0].layerMs);
   // The MED finding landed advisory in the ledger and stayed out of the record.
   const findings = events.filter((e) => e.event === 'finding');
   assert.equal(findings.length, 1);
@@ -1262,6 +1270,12 @@ test('an implementation seat is spawned inside a bound the ledger names', async 
   assert.equal(bound.seat, 'dev');
   // The suite layer is named by its command, so a project may call it anything.
   assert.equal(bound.suite, 'unit');
+  // In the lane that has a frozen suite, the whole of it is the verdict's to
+  // run, and the bound file is where the hook is told so (ADR-0092).
+  assert.equal(bound.suiteNarrowed, true);
+  // This project names its commands in no script table, so no layer carries an
+  // alias and the entries are exactly what they were before the field existed.
+  assert.ok(bound.layers.every((l) => l.aliases === undefined));
   assert.deepEqual(bound.declared, ['src/feature.mjs', 'tests/feature.test.mjs']);
   assert.equal(bound.capMs, 300000);
   // No base certification yet, so the seat runs under no time bound at all.
@@ -5550,4 +5564,74 @@ test('a project with no setup layer keeps the full sweep, and the record says wh
     readRecord(fx.paths, runId, 1).spectrum.map((r) => r.mode),
     ['run', 'run', 'run', 'run'],
   );
+});
+
+// -- the two derivations behind the file narrowing ---------------------------
+
+test('a layer gains the project\'s own names for it, and never a name for another', () => {
+  const scripts = {
+    'test:acceptance': 'tsx scripts/test-acceptance.ts',
+    'test:acceptance:e2e': 'tsx scripts/test-acceptance.ts --e2e',
+    lint: 'eslint .',
+  };
+  // A layer whose argv names a file gains every script that runs that file,
+  // in both spellings of a script call.
+  assert.deepEqual(
+    layerAliases(scripts, ['pnpm', 'exec', 'tsx', 'scripts/test-acceptance.ts']).sort(),
+    [
+      'pnpm run test:acceptance',
+      'pnpm run test:acceptance:e2e',
+      'pnpm test:acceptance',
+      'pnpm test:acceptance:e2e',
+    ].sort(),
+  );
+  // A layer that IS a script call gains the other spelling of the same call,
+  // and nothing else: the file its script runs stays unmatched on purpose.
+  assert.deepEqual(layerAliases(scripts, ['pnpm', 'lint']), ['pnpm run lint']);
+  assert.deepEqual(layerAliases(scripts, ['pnpm', 'run', 'lint']), ['pnpm lint']);
+  // A project with no script table, and a layer that names no file, derive
+  // nothing and behave as they did before the field existed.
+  assert.deepEqual(layerAliases({}, ['pnpm', 'exec', 'tsx', 'scripts/test-acceptance.ts']), []);
+  assert.deepEqual(layerAliases(scripts, ['node', '--test']), []);
+  assert.deepEqual(layerAliases(scripts, []), []);
+});
+
+test('the whole-rerun alarm sees a narrowing that never reached the command', () => {
+  const parts = new Map([['acceptance', { files: ['tests/a.spec.ts'] }]]);
+  const start = (over = {}) => ({
+    seq: 1,
+    event: 'layer-started',
+    cycle: 3,
+    layer: 'acceptance',
+    attempt: 1,
+    ...over,
+  });
+  // The plan set a file list and the start does not say so.
+  assert.deepEqual(wholeRerunLayers([start()], { cycle: 3, parts }), [
+    { layer: 'acceptance', startedSeq: 1 },
+  ]);
+  // A start that carries the narrowing is the successful case.
+  assert.deepEqual(
+    wholeRerunLayers([start({ narrowedTo: { parts: [], files: 1 } })], { cycle: 3, parts }),
+    [],
+  );
+  // The confirmation sweep is dispatched with no part plan at all, so its own
+  // starts carry no narrowing. Without this exclusion every narrowed cycle
+  // would raise one on its own sweep.
+  assert.deepEqual(wholeRerunLayers([start({ confirmation: true })], { cycle: 3, parts }), []);
+  // The flake filter's re-run is not a first attempt.
+  assert.deepEqual(wholeRerunLayers([start({ attempt: 2 })], { cycle: 3, parts }), []);
+  // A layer the plan named no file for runs whole by design, and so does one
+  // whose file list the encoding refused.
+  assert.deepEqual(wholeRerunLayers([start()], { cycle: 3, parts: new Map() }), []);
+  const refused = new Map([['acceptance', { files: ['one,two'] }]]);
+  assert.deepEqual(wholeRerunLayers([start()], { cycle: 3, parts: refused }), []);
+  // One record per layer per cycle: a render that runs again after a restart
+  // reads the record it already wrote.
+  const held = [
+    start(),
+    { seq: 2, event: 'gate-integrity', kind: 'whole-rerun-after-refreeze', cycle: 3, layer: 'acceptance' },
+  ];
+  assert.deepEqual(wholeRerunLayers(held, { cycle: 3, parts }), []);
+  assert.deepEqual(wholeRerunLayers([start()], { cycle: 3, parts: null }), []);
 });

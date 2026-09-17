@@ -42,6 +42,7 @@ import {
 } from './card.mjs';
 import { pushCardPaths } from './cards.mjs';
 import { runCommand } from './exec.mjs';
+import { FILES_ENV, fileNarrowing, isSuiteFile } from './parts.mjs';
 import { probeCredentials } from './probes.mjs';
 import {
   runSuiteChecks,
@@ -60,7 +61,7 @@ import {
 } from './surfacemap.mjs';
 import { recordBase, recordsStageHandler } from './records-stage.mjs';
 import { governingRecordLines } from './units.mjs';
-import { readInheritance } from './resume.mjs';
+import { readInheritance, suiteWriteFiles } from './resume.mjs';
 import {
   SUPERSEDE_BRIEF_LINES,
   SUPERSEDE_CLAIM_PROPERTIES,
@@ -695,14 +696,30 @@ async function advanceBase(ctx, { worktree, config, story, prior, base, from }) 
     toSha: merged.sha,
     mainSha: base,
   });
+  // The same narrowing and the same reading the freeze's own check takes, over
+  // the PRIOR run's suite writes: this run wrote no suite, and the prior
+  // ledger is the only statement of what its frozen suite is for (ADR-0092).
+  const inheritedBase = { worktree, testPaths };
+  const asked = (prior.suiteWrites ?? []).filter(
+    (file) => underAny(file, testPaths) && isSuiteFile(file),
+  );
+  const heldNow = new Set(await filesAt(worktree, merged.sha, testPaths).catch(() => []));
+  const named = asked.filter((file) => heldNow.has(file));
+  const narrow = fileNarrowing(named);
   const run = await runCommand(config.commands[story.suiteCommand], {
     cwd: worktree,
-    env: runEnv(ctx, config),
+    env: { ...runEnv(ctx, config), ...(narrow.value !== '' && { [FILES_ENV]: narrow.value }) },
     log: commandLogPath(ctx.paths, ctx.runId, 'red-state-inherited'),
   });
   if (run.code === null) return commandFail(ctx, run);
-  const red = run.code !== 0;
-  ctx.store.append('red-state-check', { actor: ACTOR, sha: merged.sha, result: red ? 'red' : 'green' });
+  const reading = redStateReading(run, await newSuiteFiles(inheritedBase, prior.baseSha, named));
+  const red = reading.red;
+  ctx.store.append('red-state-check', {
+    actor: ACTOR,
+    sha: merged.sha,
+    result: red ? 'red' : 'green',
+    ...redStateStamp(named, reading),
+  });
   if (!red) {
     return blocked(
       ctx,
@@ -1540,23 +1557,34 @@ function freezeHandler(nextStage) {
     // by feature absence alone. One corrective fix round on green, then fail.
     for (let attempt = 1; ; attempt++) {
       const sha = await headSha(base.worktree);
+      // The check asks about the files this run's suite writes wrote, and about
+      // nothing else. Before this it ran the whole suite of the project to
+      // prove a handful of new files red, which is half an hour of every run
+      // spent proving what the command could be asked directly (ADR-0092).
+      const asked = await redStateFiles(ctx, base, sha);
+      const narrow = fileNarrowing(asked);
       const run = await runCommand(base.suiteArgv, {
         cwd: base.worktree,
-        env: base.env,
+        env: { ...base.env, ...(narrow.value !== '' && { [FILES_ENV]: narrow.value }) },
         log: commandLogPath(ctx.paths, ctx.runId, `red-state-a${attempt}`),
       });
       if (run.code === null) return commandFail(ctx, run);
-      const red = run.code !== 0;
-      ctx.store.append('red-state-check', { actor: ACTOR, sha, result: red ? 'red' : 'green' });
-      if (red) break;
+      const reading = redStateReading(run, await newSuiteFiles(base, base.baseSha, asked));
+      ctx.store.append('red-state-check', {
+        actor: ACTOR,
+        sha,
+        result: reading.red ? 'red' : 'green',
+        ...redStateStamp(asked, reading),
+      });
+      if (reading.red) break;
       if (attempt === 2) {
-        ctx.store.append('seat-failure', { actor: ACTOR, seat: 'suite', reason: 'red-state-green' });
-        return seatFail(ctx, 'suite', { reason: 'red-state-green' });
+        ctx.store.append('seat-failure', { actor: ACTOR, seat: 'suite', reason: reading.reason });
+        return seatFail(ctx, 'suite', { reason: reading.reason });
       }
       const { report, fail } = await suiteSeatWithChecks(ctx, base, {
         phase: 'fix',
         schema: SUITE_SCHEMA,
-        buildRole: (brief) => redStateFixRole(base, brief),
+        buildRole: (brief) => redStateFixRole(base, redStateBrief(reading, brief), reading),
         checks: (r) => suiteChecks(ctx, base, r, 'fix'),
       });
       if (fail) return fail;
@@ -1631,6 +1659,156 @@ function freezeHandler(nextStage) {
     });
     return { next: nextStage };
   };
+}
+
+/**
+ * The files the red-state check asks the suite command about: this run's own
+ * suite writes, filtered three ways.
+ *
+ * UNDER THE TEST PATHS and A SUITE FILE BY SHAPE, because the command selects
+ * tests from files and a fixture or a helper is not one it can select from.
+ *
+ * HELD BY THE TREE at the sha this attempt judges, because a write declares the
+ * files it wrote and a later write may delete one. A deleted path handed to the
+ * command is a path the command refuses, and a refusal there buys back the
+ * whole suite, which is the cost this narrowing exists to remove.
+ *
+ * The union of every write, never the last write alone: nothing requires a
+ * later write to restate an earlier one, so the last list would drop the author
+ * write's other files out of the check entirely.
+ *
+ * Empty for a run whose writes named nothing this can use, and then the command
+ * runs whole, exactly as it did before.
+ */
+async function redStateFiles(ctx, base, sha) {
+  const declared = suiteWriteFiles(runEvents(ctx)).filter(
+    (file) => underAny(file, base.testPaths) && isSuiteFile(file),
+  );
+  if (declared.length === 0) return [];
+  const held = new Set(await filesAt(base.worktree, sha, base.testPaths).catch(() => []));
+  return declared.filter((file) => held.has(file));
+}
+
+/**
+ * Which of the asked files are NEW: absent from the tree at the sha the run
+ * started from. Null where no such listing can be read, and then the check has
+ * no per-file question to ask and reads the exit code alone.
+ *
+ * An amended existing file may be red or green: the story may be about a clause
+ * of it that already passes. Only a file this run created has to be red, and
+ * that is the policy this check imposes: a new test file that passes before the
+ * story is implemented asserts nothing about the story.
+ */
+async function newSuiteFiles(base, baseSha, asked) {
+  if (typeof baseSha !== 'string' || baseSha.length === 0) return null;
+  const held = await filesAt(base.worktree, baseSha, base.testPaths).catch(() => null);
+  if (held === null) return null;
+  const at = new Set(held);
+  return asked.filter((file) => !at.has(file));
+}
+
+/**
+ * What one red-state run proved, per file where the runner can answer per file
+ * and on the exit code where it cannot.
+ *
+ * The exit code alone was never the claim the freeze needs. A narrowed run of
+ * files the framework selects no test from exits 0 under a pass-with-no-tests
+ * flag, and a whole run exits nonzero for any red in the tree, including one
+ * that has nothing to do with the write. The claim is per file: every NEW test
+ * file of the write is among the files the runner reported failed.
+ *
+ * Four readings fall back to the exit code, and each one is a case where no
+ * per-file question can be asked.
+ *
+ * A runner that printed no part marker reported no files. Every project without
+ * the marker protocol keeps the reading it had.
+ *
+ * A runner that reported a part it did not pass and named no file inside it has
+ * answered about the part and not about its files. Naming parts and naming
+ * files are two halves of the marker protocol and a runner may speak either,
+ * so a failure with no file list is a failure this reading cannot attribute.
+ *
+ * A run with no base listing cannot say which file is new.
+ *
+ * A red list a bound in the command reader cut can omit a red; it can never
+ * invent one. So a new file the list DOES name is proven red whatever was cut,
+ * and only a new file the list does not name leaves the question open. That one
+ * case falls back, so no correct write is ever refused for a bound the harness
+ * itself imposed.
+ *
+ * @returns {{red: boolean, perFile: boolean, failedFiles: string[],
+ *   missing?: string[], cut?: boolean, reason: string}}
+ */
+function redStateReading(run, newFiles) {
+  const parts = run.parts ?? [];
+  const failed = new Set(
+    parts.flatMap((part) => (part.failedFiles ?? []).map(forwardSlashes)),
+  );
+  const failedFiles = [...failed];
+  const exitRed = run.code !== 0;
+  // A part that did not pass and named no file inside it. Its failure is real
+  // and this reading cannot say which file carried it.
+  const silent = parts.some((part) => !part.ok && (part.failedFiles ?? []).length === 0);
+  // The word the park carries when the check did not pass: the suite was green,
+  // or it was red and a new file of the write was not one of the reds.
+  const byExit = (extra = {}) => ({
+    red: exitRed,
+    perFile: false,
+    failedFiles,
+    reason: 'red-state-green',
+    ...extra,
+  });
+  if (parts.length === 0 || silent || newFiles === null) return byExit();
+  const missing = newFiles.filter((file) => !failed.has(forwardSlashes(file)));
+  if (missing.length === 0) {
+    return { red: exitRed, perFile: true, failedFiles, reason: 'red-state-green' };
+  }
+  if (parts.some((part) => part.failedFilesCut === true)) return byExit({ cut: true });
+  return {
+    red: false,
+    perFile: true,
+    failedFiles,
+    missing,
+    reason: exitRed ? 'red-state-unproven' : 'red-state-green',
+  };
+}
+
+/** One path as both sides of the comparison spell it. */
+function forwardSlashes(path) {
+  return String(path).replaceAll('\\', '/');
+}
+
+/** What the `red-state-check` stamp carries beyond its sha and its result. */
+function redStateStamp(asked, reading) {
+  return {
+    ...(asked.length > 0 && { narrowedTo: asked }),
+    ...(reading.failedFiles.length > 0 && { failedFiles: reading.failedFiles }),
+    perFile: reading.perFile,
+    ...(reading.cut === true && { failedFilesCut: true }),
+    // The new files of the write the runner did not report red. They are why
+    // the check did not pass, and the brief names them to the seat.
+    ...(reading.missing?.length > 0 && { notRed: reading.missing }),
+  };
+}
+
+/**
+ * The correction brief for a check that did not pass: the defect this reading
+ * found, in front of whatever the contract loop already had to say. Null where
+ * there is nothing to say, because an empty list still prints a heading.
+ */
+function redStateBrief(reading, brief) {
+  const given = brief === null || brief === undefined ? [] : [].concat(brief);
+  const defects =
+    reading.missing?.length > 0
+      ? [
+          'These test files are new in this run and the suite command did not report them ' +
+            `failed: ${reading.missing.join(', ')}. A new test file that passes before the ` +
+            'story is implemented asserts nothing about the story. Make each one fail by ' +
+            'feature absence, or take it out of the write.',
+        ]
+      : [];
+  const all = [...defects, ...given];
+  return all.length > 0 ? all : null;
 }
 
 /**
@@ -2016,9 +2194,12 @@ function specTouchedPaths(base) {
   }
 }
 
-function redStateFixRole(base, brief) {
+function redStateFixRole(base, brief, reading = null) {
   return [
-    'The red-state check failed: the suite is green against the pre-implementation tree.',
+    reading?.missing?.length > 0
+      ? 'The red-state check failed: a new test file of this write is not among the files ' +
+        'the suite command reported failed against the pre-implementation tree.'
+      : 'The red-state check failed: the suite is green against the pre-implementation tree.',
     `Fix the suite so it asserts the behavior specified at: ${base.specPath}`,
     ...suiteReportLines(base),
     // The same records the authoring seat was given. This seat rewrites the

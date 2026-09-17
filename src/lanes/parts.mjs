@@ -35,8 +35,20 @@
 // replaced attempt did not pass, and only for the files those parts named; the
 // confirmation sweep asks only for the parts the cycle carried. Neither reads
 // a diff, so neither belongs to the derivation above. What they take from here
-// is the two environment variables, the merge, and the shapes a kept part and
+// is the three environment variables, the merge, and the shapes a kept part and
 // a carried part hold.
+//
+// A third question is asked of the same record and answered here: which FILES a
+// layer's next execution may be held to (ADR-0092). A part plan says which
+// parts a diff could reach and then the part runs every file it holds, which on
+// a diff of three test files is the whole of a suite for three amendments. So a
+// diff that is suite files and nothing else derives a file set as well: the
+// changed files, plus the files the standing result left red in the parts that
+// run. What it leaves out is what the standing result proved green at a sha the
+// diff did not move. Every clause of it refuses towards the whole layer, and
+// the reasons above are what makes the refusal decidable: a part that is blind,
+// undeclared or red with no usable file list holds no file-level claim, so no
+// file list may stand for it.
 //
 // One class of path is attributed by the project and not by a declaration. A
 // record of a decision is read by the record layers the project names in
@@ -203,6 +215,20 @@ export const PARTS_ENV = 'OLYMPUS_PARTS';
  */
 export const FAILED_FILES_ENV = 'OLYMPUS_FAILED_FILES';
 
+/**
+ * The environment variable a caller narrows a layer command to a FILE SET with:
+ * repo-relative test paths, comma-separated, forward-slashed. Absent means
+ * every file the parts it runs hold, which is the whole of what a command that
+ * reads no variable ever does.
+ *
+ * It is flat where `FAILED_FILES_ENV` is per part, because the callers that set
+ * it know which files their question is about and do not know which part holds
+ * them. The command answers that half: a step whose own trees hold none of the
+ * named files runs whole, because the list says nothing about it. So the list
+ * never skips a step, and skipping stays the job of `PARTS_ENV` (ADR-0092).
+ */
+export const FILES_ENV = 'OLYMPUS_FILES';
+
 // What the encoding cannot carry. The separators are the vocabulary, so a name
 // or a path that holds one of them cannot be stated in it. Such a part is left
 // out of the variable and re-runs whole, which is the direction every doubt in
@@ -210,25 +236,104 @@ export const FAILED_FILES_ENV = 'OLYMPUS_FAILED_FILES';
 const UNENCODABLE = /[;,=]/;
 
 /**
- * The narrowing a re-run asks for inside the parts it runs: the variable's
- * value, and how many files it names. Empty for a set of parts that reported
- * no files, and then the re-run runs those parts whole.
+ * How long one environment variable's value may grow here.
  *
- * @param {Array<{name: string, failedFiles?: string[]}>} parts the parts the
- *   re-run is about to run, as the replaced attempt reported them
- * @returns {{value: string, files: number}}
+ * A host holds an environment variable to a bounded length, and a spawn past
+ * that bound fails before the command starts: no exit code, no output, and a
+ * caller reading a layer that produced nothing. The bound below is well inside
+ * the smallest of them, so a value this module builds always spawns.
+ *
+ * What a caller does at the bound differs between the two encodings, and the
+ * difference is the whole of what each one means. A per-part entry that does
+ * not fit is left out and the part it names runs WHOLE, which is more work and
+ * never a wrong answer. A file list that does not fit may not be shortened at
+ * all: the command runs exactly the files it is handed, so a dropped path is a
+ * file nothing ran under a green the layer then reports. There the whole
+ * narrowing is refused instead, and the layer runs whole.
+ */
+export const ENV_VALUE_CAP = 16000;
+
+/**
+ * The shape of a file a suite framework selects a test from. A file list holds
+ * a command to the files it names, so it may only ever name files a framework
+ * runs. A helper, a fixture or a README under the same trees is a file another
+ * test imports, and no list can say what changing one of those did.
+ */
+const SUITE_FILE = /\.(test|spec|e2e)\.(m|c)?[jt]sx?$/;
+
+/** Whether one repo-relative path is a suite file by that shape. */
+export function isSuiteFile(file) {
+  return typeof file === 'string' && SUITE_FILE.test(file);
+}
+
+/**
+ * The narrowing a re-run asks for inside the parts it runs: the variable's
+ * value, how many files it names, and the parts whose file set the value
+ * carries only in part.
+ *
+ * `cut` is the soundness half. A part the value names with FEWER files than the
+ * replaced attempt reported red re-runs a subset of its own failure, so the
+ * next attempt's own red list is a statement about that subset and not about
+ * the part. A later reader that took such a list for the whole would read a red
+ * file as green. A part the value leaves out ENTIRELY is not in `cut`: an
+ * unnamed part runs whole, and a whole run states the whole answer.
+ *
+ * @param {Array<{name: string, failedFiles?: string[],
+ *   failedFilesCut?: boolean}>} parts the parts the re-run is about to run, as
+ *   the replaced attempt reported them
+ * @returns {{value: string, files: number, cut: Set<string>}}
  */
 export function failedFileNarrowing(parts = []) {
   const named = [];
+  const cut = new Set();
   let files = 0;
+  let length = 0;
   for (const part of parts) {
     if (UNENCODABLE.test(part.name)) continue;
-    const paths = (part.failedFiles ?? []).filter((path) => !UNENCODABLE.test(path));
+    const declared = part.failedFiles ?? [];
+    const paths = declared.filter((path) => !UNENCODABLE.test(path));
     if (paths.length === 0) continue;
-    named.push(`${part.name}=${paths.join(',')}`);
+    // One `;` joins this entry to the one before it.
+    const entry = `${part.name}=${paths.join(',')}`;
+    const grown = length + entry.length + (named.length > 0 ? 1 : 0);
+    if (grown > ENV_VALUE_CAP) continue;
+    named.push(entry);
+    length = grown;
     files += paths.length;
+    // The two ways this part's re-run is a subset of its own failure: the
+    // record the caller was given was already short, or a path of it holds a
+    // separator this encoding cannot state.
+    if (part.failedFilesCut === true || paths.length < declared.length) cut.add(part.name);
   }
-  return { value: named.join(';'), files };
+  return { value: named.join(';'), files, cut };
+}
+
+/**
+ * The narrowing a caller asks a layer command for by file: the variable's
+ * value, and how many files it names. Empty for a caller that names no file,
+ * and empty for a list this encoding cannot carry whole. The layer then runs
+ * whole.
+ *
+ * Every doubt refuses the WHOLE list and never one entry of it. The reason is
+ * in `ENV_VALUE_CAP` above: a shortened file list is a green over a file
+ * nothing ran.
+ *
+ * @param {string[]} files repo-relative paths, in the caller's own order
+ * @returns {{value: string, files: number}}
+ */
+export function fileNarrowing(files = []) {
+  const named = [];
+  const seen = new Set();
+  for (const path of files) {
+    if (typeof path !== 'string' || path === '') continue;
+    if (UNENCODABLE.test(path)) return { value: '', files: 0 };
+    if (seen.has(path)) continue;
+    seen.add(path);
+    named.push(path);
+  }
+  const value = named.join(',');
+  if (value.length > ENV_VALUE_CAP) return { value: '', files: 0 };
+  return { value, files: named.length };
 }
 
 /**
@@ -376,7 +481,11 @@ export function partReasons(
  *   as `partReasons`
  * @returns {{reasons: Map<string, string>, blindPaths: string[],
  *   groundFrom: Map<string, string>,
- *   narrow: {run: string[], carry: Array<object>}|null}}
+ *   narrow: {run: string[], carry: Array<object>}|null, files: string[]}}
+ *   `files` is the file set the layer may be held to, empty where it must run
+ *   whole. It is derived whether `narrow` is null or not: `narrow` is null when
+ *   every part runs, and a layer whose every part runs is exactly the one worth
+ *   holding to its own changed files.
  */
 export function partPlan(prior, changed, options = {}) {
   const { reasons, blindPaths, groundFrom } = partReasons(prior, changed, options);
@@ -390,7 +499,74 @@ export function partPlan(prior, changed, options = {}) {
   // Nothing to run, or nothing to save: either way the narrowing buys nothing
   // and the layer runs as it always did.
   const narrow = run.length === 0 || carry.length === 0 ? null : { run, carry };
-  return { reasons, blindPaths, groundFrom, narrow };
+  return {
+    reasons,
+    blindPaths,
+    groundFrom,
+    narrow,
+    files: fileTargets(prior, changed, reasons, options),
+  };
+}
+
+/**
+ * The files one layer's next execution may be held to, or an empty list where
+ * it must run whole (ADR-0092).
+ *
+ * The set is the changed files plus the files the standing result left red, and
+ * what it leaves out is every file that was green at the standing result's sha
+ * and that the diff did not touch. Four conditions have to hold, and each one
+ * that fails runs the layer whole.
+ *
+ * ONE. The standing result holds a part table and the plan derived at least one
+ * reason. `partReasons` answers an empty map for a result with no parts, and
+ * "every reason is one this rule admits" is vacuously true of an empty map, so
+ * a layer would be narrowed on a record that says nothing about its parts. It
+ * is reachable: a not-runnable result carries a sha and no parts.
+ *
+ * TWO. Every changed path lies under the project's test paths AND is a suite
+ * file by shape. The test paths hold helpers, fixtures and data that a suite
+ * imports, and a list cannot say what changing one of those did to the files
+ * that read it.
+ *
+ * THREE. Every part that RUNS is one this rule can name files for. A `touched`
+ * part runs the files the diff moved. A `not-green` part runs those and its own
+ * recorded red files, which is sound only while that record is the part's WHOLE
+ * red set: a set the harness cut is a subset, and reading a subset as complete
+ * reads a red file as green. So a cut list refuses, an empty list refuses, and
+ * `blind`, `undeclared` and every later word refuse, because none of them holds
+ * a file-level claim at all.
+ *
+ * FOUR. A part that carries contributes nothing. It is green at the standing
+ * sha and the diff cannot reach it.
+ *
+ * @param {{parts?: Array<object>}} prior the layer's standing `layer-result`
+ * @param {string[]} changed the paths that moved since it was earned
+ * @param {Map<string, string>} reasons the plan's reasons for this layer
+ * @param {{testPaths?: string[]}} [options]
+ * @returns {string[]}
+ */
+export function fileTargets(prior, changed = [], reasons = new Map(), { testPaths = [] } = {}) {
+  const parts = prior?.parts ?? [];
+  if (parts.length === 0 || reasons.size === 0) return [];
+  const under = groundEntries(testPaths);
+  if (under.length === 0) return [];
+  for (const file of changed) {
+    if (!isSuiteFile(file)) return [];
+    if (!under.some((entry) => underEntry(file, entry))) return [];
+  }
+  const files = new Set(changed);
+  for (const part of parts) {
+    const reason = reasons.get(part.name);
+    // No reason is a part that carries: its green stands and the diff cannot
+    // reach it.
+    if (reason === undefined || reason === 'touched') continue;
+    if (reason !== 'not-green') return [];
+    if (part.failedFilesCut === true) return [];
+    const red = part.failedFiles ?? [];
+    if (red.length === 0) return [];
+    for (const file of red) files.add(file);
+  }
+  return [...files];
 }
 
 /**

@@ -22,6 +22,54 @@ export function priorRunDir(paths, runId) {
 }
 
 /**
+ * The suite files one run's own writes declared, as a union in ledger order.
+ *
+ * It is the run's statement about which test files it wrote, and it is much
+ * narrower than the freeze record's `suiteFiles`, which is every file under the
+ * test paths at the freeze sha. Two readers need the narrow list: the red-state
+ * check, whose question is about the files the write changed, and the dev
+ * brief, which tells the seat which files define its own story.
+ *
+ * A later write need not restate an earlier one, so the union is the only
+ * complete reading. What it may hold that the tree does not is a file a later
+ * write deleted, and every caller filters against the tree it is asking about.
+ *
+ * @param {Array<object>} events one run ledger, in order
+ * @returns {string[]}
+ */
+export function suiteWriteFiles(events = []) {
+  const files = [];
+  const seen = new Set();
+  for (const e of events) {
+    if (e.event !== 'suite-committed') continue;
+    for (const file of e.files ?? []) {
+      if (typeof file !== 'string' || seen.has(file)) continue;
+      seen.add(file);
+      files.push(file);
+    }
+  }
+  return files;
+}
+
+/**
+ * The same union, read out of another run's ledger — live directory or archive.
+ *
+ * A run that inherited a freeze wrote no suite of its own, so every reader of
+ * "the files this run's suite writes named" has to reach the prior run for
+ * them. It validates nothing: the inheritance was validated where it was taken,
+ * and a reader that cannot open the ledger is told the run named no file, which
+ * is the answer every caller here already handles.
+ */
+export function priorSuiteWrites(paths, runId) {
+  if (typeof runId !== 'string' || runId.length === 0) return [];
+  try {
+    return suiteWriteFiles(readEvents(join(priorRunDir(paths, runId), 'ledger.jsonl')));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * The freeze anchor of a run: the freeze it earned, or the one it inherited.
  * Both name the sha the suite is restored from and the tree an implementation
  * starts on, so every reader after the freeze takes either.
@@ -114,6 +162,10 @@ export function readInheritance(paths, runId) {
     // owes none of them; a resumed run that stamped nothing would count every
     // record it inherited as one the judge found late (ADR-0074).
     records: inheritedRecords(events),
+    // The test files the prior run's own suite writes named. The resumed run
+    // writes no suite, so this is the only statement of what its frozen suite
+    // is FOR, as against every file the test paths happen to hold.
+    suiteWrites: suiteWriteFiles(events),
     openFindings: openFindingIds(events),
     openLoud: openLoudSeqs(events),
   };
