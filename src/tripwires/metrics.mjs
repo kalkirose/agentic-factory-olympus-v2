@@ -19,6 +19,7 @@ import {
   kindEscapesWindow,
 } from '../telemetry/escapes.mjs';
 import { computeFrontier } from '../frontier/graph.mjs';
+import { carriedFastPath } from '../lanes/codehead.mjs';
 import { ALL_LENSES } from '../lanes/lenses.mjs';
 import { harnessPinTs, recordRenders } from '../ledger/cycles.mjs';
 
@@ -107,8 +108,11 @@ const IMPLEMENTATIONS = {
   },
 
   // What the fast path bought over the same window: the share of its records
-  // that carried the certification. A record per moved base, `taken: true` over
-  // all of them.
+  // that carried the certification. A record per moved base, the carried ones
+  // over all of them. A record refused for a record reason that kept the code
+  // answer is a carry: the code certification is what a ship skips, so it
+  // counts once and as carried, and its refusal word stays off the histogram
+  // (ADR-0093).
   //
   // The window is the shipped runs, so this reading and `fast-path-escapes`
   // are about one set of ships and can be read side by side. Eligibility is the
@@ -132,7 +136,7 @@ const IMPLEMENTATIONS = {
       moved += 1;
       records += decisions.length;
       for (const decision of decisions) {
-        if (decision.taken === true) taken += 1;
+        if (carriedFastPath(decision)) taken += 1;
         else if (typeof decision.refusal === 'string') {
           refusals[decision.refusal] = (refusals[decision.refusal] ?? 0) + 1;
         }

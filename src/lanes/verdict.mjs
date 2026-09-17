@@ -199,6 +199,7 @@ import {
   briefLines,
   gist,
 } from './shared.mjs';
+import { CODE_HEAD_STAMPS } from './codehead.mjs';
 
 // The cap the repair arm counts a pass's rounds under. One cap: no diff this
 // lane judges is a record diff, because a record is judged in the reconcile
@@ -491,19 +492,19 @@ function verdictHandler(mode, nextStage) {
       const events = runEvents(ctx);
       const renders = events.filter((e) => e.event === 'verdict-rendered');
       const last = renders[renders.length - 1];
+      // What moved the tree since the last render is the one list every reader
+      // of the code head takes, so this stage and the admission gate cannot
+      // disagree about whether the tree the run holds has been judged
+      // (ADR-0093). The update stage's stamp is on it twice over: the merge it
+      // made and recorded, and the head it found under itself that no stamp
+      // named. `operational-fix` stands beside the list rather than in it. It
+      // commits nothing, so it moves this reading and names no head.
       const moved =
         !last ||
         events.some(
           (e) =>
             e.seq > last.seq &&
-            (e.event === 'implementation-committed' ||
-              e.event === 're-freeze' ||
-              e.event === 'operational-fix' ||
-              // The update stage merged the default branch into the tree and
-              // handed it back. The render behind it judged a tree that no
-              // longer exists, and the whole point of that update is that the
-              // verdict certifies the tree that lands (ADR-0033).
-              (e.event === 'pre-verdict-update' && e.ran === true)),
+            (CODE_HEAD_STAMPS.get(e.event)?.moved(e) === true || e.event === 'operational-fix'),
         );
       // A moved tree earns a cycle — unless the ladder still owes this render
       // the re-freeze it began. The ladder acts in arms, and an arm that parks
@@ -4253,7 +4254,16 @@ export function restoreAnchor(events) {
     if (e.event === 'freeze' || e.event === 'freeze-inherited' || e.event === 're-freeze') {
       suite = e.sha;
       anchor = e.sha;
-    } else if (e.event === 'branch-update' || (e.event === 'pre-verdict-update' && e.ran === true)) {
+    } else if (e.event === 'pre-verdict-update') {
+      // The update stage's own reading of what it did to the tree, taken off
+      // the one list (ADR-0093). A head the stage found and no stamp named is a
+      // merge that was made: the tree stands at the merge sha, and an anchor
+      // left at the commit before it would restore every test-path file the
+      // default branch advanced, which is the revert this anchor exists to
+      // prevent.
+      const sha = CODE_HEAD_STAMPS.get(e.event).sha(e);
+      if (sha !== null) anchor = sha;
+    } else if (e.event === 'branch-update') {
       if (typeof e.toSha === 'string') anchor = e.toSha;
     } else if (e.event === 'fresh-pass') {
       anchor = typeof e.sha === 'string' ? e.sha : suite;

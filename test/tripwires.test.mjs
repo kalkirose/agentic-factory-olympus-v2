@@ -284,9 +284,17 @@ test('escapes-window counts escapes after the oldest ship of the project', async
 });
 
 // A shipped run of one project that met `decisions` moved bases, each stated as
-// a fast-path record: `true` for a take, a refusal word for a refusal.
+// a fast-path record: `true` for a take, a refusal word for a refusal, and a
+// word in a list for a refusal whose code answer stood.
 function fastPathRun(paths, runId, project, ts, decisions) {
   const lines = [line(1, ts, 'run-launched', { project, lane: 'story' })];
+  const stated = (decision) => {
+    if (decision === true) return { taken: true };
+    if (Array.isArray(decision)) {
+      return { taken: false, refusal: decision[0], code: { answer: 'kept' } };
+    }
+    return { taken: false, refusal: decision };
+  };
   decisions.forEach((decision, i) => {
     lines.push(
       line(2 + i, ts, 'fast-path-ship', {
@@ -294,7 +302,7 @@ function fastPathRun(paths, runId, project, ts, decisions) {
         mainSha: 'm'.repeat(7),
         fromSha: 'f'.repeat(7),
         toSha: 't'.repeat(7),
-        ...(decision === true ? { taken: true } : { taken: false, refusal: decision }),
+        ...stated(decision),
       }),
     );
   });
@@ -327,6 +335,26 @@ test('fast-path-takes is the share of moved bases the check carried', async (t) 
     // The histogram is the answer's own evidence: each word names a different
     // repair, so a reader of a breach needs the counts and not the rate.
     refusals: { 'diff-changed': 2 },
+  });
+});
+
+test('a record refused for a record reason that kept the code answer counts once, as a carry', async (t) => {
+  const paths = home(t);
+  // The code certification is what a ship skips, so a half carry is a carry:
+  // it counts as taken, and its refusal word leaves the histogram, because the
+  // record counts once (ADR-0093).
+  fastPathRun(paths, 's1', 'p', '2026-09-01T00:00:00Z', [['records-rerun']]);
+  fastPathRun(paths, 's2', 'p', '2026-09-02T00:00:00Z', ['diff-changed']);
+  fastPathRun(paths, 's3', 'p', '2026-09-03T00:00:00Z', [true]);
+  const result = await evaluateMetric('fast-path-takes', { paths, project: 'p', window: 10 });
+  assert.equal(result.value, round3(2 / 3));
+  assert.equal(result.eligible, true);
+  assert.deepEqual(result.detail, {
+    ships: 3,
+    runs: 3,
+    records: 3,
+    taken: 2,
+    refusals: { 'diff-changed': 1 },
   });
 });
 

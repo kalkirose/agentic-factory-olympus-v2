@@ -878,15 +878,27 @@ function lateShare(runs) {
  * (ADR-0075). A re-run share near the re-judgment share says the record
  * neighbourhood is as wide as the whole suite ground, which is the reading that
  * would send the ground back for review.
+ *
+ * Two of the numbers are alarms rather than costs, and both are expected at
+ * nought. `uncertified` counts the stamps where the gate could show no
+ * certification over the head the run holds, and `unnamedHead` the stamps where
+ * that head was a tree no stamp of the ledger names. They are counted off every
+ * stamp and not off the moved ones, because both ride a base that did not move
+ * (ADR-0093).
  */
 function movedTreeCost(runs) {
   let updates = 0;
   let rejudged = 0;
   let rerun = 0;
   let both = 0;
+  let uncertified = 0;
+  let unnamedHead = 0;
   for (const { events } of runs) {
     for (const e of events) {
-      if (e.event !== 'pre-verdict-update' || e.ran !== true) continue;
+      if (e.event !== 'pre-verdict-update') continue;
+      if (e.uncertified === true) uncertified += 1;
+      if (e.unnamedHead === true) unnamedHead += 1;
+      if (e.ran !== true) continue;
       updates += 1;
       const code = e.code?.answer === 'rejudge';
       const records = e.records?.answer === 'rerun';
@@ -895,7 +907,15 @@ function movedTreeCost(runs) {
       if (code && records) both += 1;
     }
   }
-  return { updates, rejudged, rerun, both, neither: updates - rejudged - rerun + both };
+  return {
+    updates,
+    rejudged,
+    rerun,
+    both,
+    neither: updates - rejudged - rerun + both,
+    uncertified,
+    unnamedHead,
+  };
 }
 
 /**

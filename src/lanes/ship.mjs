@@ -101,6 +101,7 @@ import { derivedLabels } from '../ship/labels.mjs';
 import { releaseShipToken, takeShipToken } from '../ship/token.mjs';
 import { parseIntentCard } from './card.mjs';
 import { cardSweep } from './cards.mjs';
+import { carriedFastPath, codeHead, MERGE_ROUND, namedHeads } from './codehead.mjs';
 import { fastPathDecision } from './fastpath.mjs';
 import { probeCredentials, worldConfig } from './probes.mjs';
 import { MERGE_SUITE_SCHEMA } from './story.mjs';
@@ -319,19 +320,30 @@ function updateHandler({ forgeFor, pollMs }) {
 
 /**
  * The stage a release left the run owing, or null: the token given back on the
- * way to a cycle, and no green render of that cycle's own kind since.
+ * way to a cycle, and the certification that cycle was for still not standing.
  *
  * The release is the last thing the stage does before it hands the run on, so
  * this reads exactly one state: the crash window between that stamp and the
  * transition behind it. A green render after the release is the run coming back
  * the way it left, and the stage takes the token again.
  *
- * The reason is half the question, and it now names two journeys. A release for
- * a park stops the run AT this stage, and the answer resumes the stage to finish
+ * It reads the certification and not the render alone. A run whose head already
+ * carries a green earned that green before the release, at a suite amendment or
+ * at a merge judged after the implementation commit. Sending it to the verdict
+ * would tell a judged tree to be judged again, which the verdict refuses
+ * because it reads the same head as unmoved. The two stages would then hand the
+ * run back and forth with nothing stamped between (ADR-0093).
+ *
+ * The reason is half the question, and it names two journeys. A release for a
+ * park stops the run AT this stage, and the answer resumes the stage to finish
  * the update it could not finish; reading that release as a re-verdict would
  * send the answered run to judge a tree it never merged. A release for a record
  * re-run is answered by a green `reconcile-rendered` and never by a code verdict,
- * because the two certifications stand on two trees (ADR-0075).
+ * because the two certifications stand on two trees (ADR-0075), or by the
+ * fallback write the stage takes at its cap, which `reconcileCertification`
+ * reads as the stage's answer and the gate admits (ADR-0080). A re-run asked
+ * over a fallback stalls at the same cap and writes the same fallback, so a
+ * rule that waited for a render would wait for one nobody will make.
  * @returns {'verdict'|'reconcile'|null}
  */
 export function releasedForVerdict(events) {
@@ -341,13 +353,55 @@ export function releasedForVerdict(events) {
     const green = events.some(
       (e) => e.event === 'verdict-rendered' && e.verdict === 'green' && e.seq > token.seq,
     );
-    return green ? null : 'verdict';
+    if (green) return null;
+    return codeTree(events)?.ok === true ? null : 'verdict';
   }
   if (token.reason !== 're-reconcile') return null;
   const green = events.some(
     (e) => e.event === 'reconcile-rendered' && e.verdict === 'green' && e.seq > token.seq,
   );
-  return green ? null : RECONCILE_STAGE;
+  if (green) return null;
+  const fallback = events.some(
+    (e) => e.event === 'reconciliation-written' && e.ok === false && e.seq > token.seq,
+  );
+  return fallback ? null : RECONCILE_STAGE;
+}
+
+/**
+ * Whether the ledger says the records are owed a re-run this stage decided and
+ * never handed on.
+ *
+ * The stage decides the re-run, stamps it, and only then gives the token back
+ * and returns the route. A stop in that window resumes into a stage that finds
+ * its base where the merge left it and reads both certifications standing, so
+ * it would open the request over records the merge moved and the run itself
+ * asked to read again. The reconcile stage cannot answer for it either: it
+ * reads the re-run off this ledger and it is never entered.
+ *
+ * Both stamps that can carry the answer are read, because both are written
+ * before the transition: the stage's own `pre-verdict-update`, and the
+ * `fast-path-ship` of a check whose record answer stands alone. The window
+ * closes the way the reconcile stage closes it, with a green render or with the
+ * fallback write at the cap, and it is bounded by the fresh pass for the reason
+ * that stage bounds its own reading by one: a pass born after the answer
+ * carries a record set of its own.
+ * @param {object[]} events the run's ledger, in order
+ */
+export function rerunOwed(events) {
+  const asked = sinceFreshPass(
+    events,
+    (e) =>
+      (e.event === 'pre-verdict-update' || e.event === 'fast-path-ship') &&
+      e.records?.answer === 'rerun',
+  );
+  if (!asked) return false;
+  const answered = events.some(
+    (e) =>
+      e.seq > asked.seq &&
+      ((e.event === 'reconcile-rendered' && e.verdict === 'green') ||
+        (e.event === 'reconciliation-written' && e.ok === false)),
+  );
+  return !answered;
 }
 
 // Why a capped pass leaves the update to the ship stage. The stamp carries it,
@@ -375,12 +429,25 @@ const UNCERTIFIED_TREE_NOTE =
   'the tree at the head is not a tree any green verdict judged and not one a ' +
   'fast path carried: it is judged now';
 
+// Why a head the ledger cannot name is judged. The stamp is the first record
+// of that tree, so the note says what the reader is looking at.
+const UNNAMED_HEAD_NOTE =
+  'the worktree head is a tree no stamp of this ledger names: a merge was made ' +
+  'and never recorded, and the tree is judged from this head';
+
+/**
+ * The word a records answer carries where the reconciliation's own fallback is
+ * what keeps it. It is not a carry the records earned: it is the stage's last
+ * word standing, and the ticket the close writes is what moves the work on.
+ */
+const FALLBACK_STANDS = 'fallback-stands';
+
 /**
  * The two certifications the admission gate reads, each with its own sha.
  *
- * A code certification is a green `verdict-rendered` at the last code commit's
- * sha, or a taken fast-path record that carried one onto it. A record
- * certification is a green `reconcile-rendered` at the last record commit's sha.
+ * A code certification is a green `verdict-rendered` at the code head, or a
+ * fast-path record that carried one onto it. A record certification is a green
+ * `reconcile-rendered` at the last record commit's sha.
  * They are two facts about two trees and they are never one: the stage commits
  * records after the verdict's final green, so no green code render ever stands
  * at the head sha again, and a gate that asked one question of the head would
@@ -408,17 +475,27 @@ export function certifiedTrees(events, base = {}) {
   };
 }
 
-/** The code tree at the run's last code commit, and whether a green covers it. */
+/**
+ * The code tree the run holds, and whether a green covers it.
+ *
+ * The sha is the code head and never the last implementation commit alone
+ * (ADR-0093). A suite amendment and a merge this stage made are both commits
+ * the run ships and neither is a dev pass, so a gate that read the
+ * implementation commit would ask for a green over a tree the run will never
+ * ship, and refuse a run whose green stands exactly where it should.
+ *
+ * Two proofs cover it. A green `verdict-rendered` at that sha is the judgment
+ * itself. A `fast-path-ship` that carried the certification onto that sha is
+ * the check's own answer that the judgment behind it still stands over the tree
+ * the merge built (ADR-0056).
+ */
 function codeTree(events) {
-  const commit = [...events]
-    .reverse()
-    .find((e) => e.event === 'implementation-committed' && typeof e.sha === 'string');
-  const sha = commit?.sha ?? null;
+  const sha = codeHead(events);
   if (sha === null) return null;
   const ok = events.some(
     (e) =>
       (e.event === 'verdict-rendered' && e.verdict === 'green' && e.sha === sha) ||
-      (e.event === 'fast-path-ship' && e.taken === true && e.toSha === sha),
+      (e.event === 'fast-path-ship' && e.toSha === sha && carriedFastPath(e)),
   );
   return { sha, ok };
 }
@@ -482,6 +559,25 @@ export const UNJUDGED_RECORDS_QUESTION =
 async function preVerdictUpdate(ctx, base) {
   const events = runEvents(ctx);
   const pass = currentPass(events);
+  // A fresh pass this stage's own merge round bought, interrupted between its
+  // stamp and its dev seat. The tree under the run is the reset one, with no
+  // implementation of the pass on it, so nothing here may merge it or ship it.
+  // The verdict stage owns that step and finishes it at its entry; the route
+  // there gives the token back on the way, because the pass is a whole dev seat
+  // and every other run of the project would otherwise wait through it
+  // (ADR-0033).
+  if (pendingMergeFreshPass(events)) return { next: 'verdict' };
+  // The crash window between the check's own stamp and the stamp that carries
+  // its route. The check ran, the merge it judged stands in the tree, and the
+  // record of what it decided is on the ledger: the decision is completed from
+  // that record rather than taken again, because taking it again against a
+  // default branch that has moved since would answer a different question and
+  // lose the answer this one gave.
+  const interrupted = await interruptedFastPath(ctx, base, events);
+  if (interrupted) return stampUpdate(ctx, base, interrupted);
+  // The same window one stamp later: the re-run was decided and recorded, and
+  // the transition to the stage that answers it never happened.
+  if (rerunOwed(events)) return { next: RECONCILE_STAGE, rerun: true };
   const taken = events.filter(
     (e) => e.event === 'pre-verdict-update' && e.pass === pass && e.ran,
   ).length;
@@ -492,6 +588,10 @@ async function preVerdictUpdate(ctx, base) {
         pass,
         ran: false,
         capped: true,
+        // The tree this pass stopped chasing a moving base with. The stamp is
+        // written before any merge of its own, so the sha is the worktree's.
+        toSha: await headSha(base.worktree),
+        certification: certifiedTrees(events, base),
         updates: taken,
         cap: UPDATE_CAP,
         note: UPDATE_CAP_NOTE,
@@ -504,11 +604,12 @@ async function preVerdictUpdate(ctx, base) {
   const out = await branchUpdate(ctx, base, { push: false, stamp: false });
   if (out.directive) return out.directive;
   const ran = out.toSha !== out.fromSha;
+  const after = runEvents(ctx);
   // The route reads the ledger's proof about the tree the run now holds, never
   // this call's merge. A merge is idempotent, so every crash window in this
   // stage resumes with a merge that answers "already up to date" and a base
   // that reads as one which never moved (ADR-0033).
-  const certified = admitted(runEvents(ctx), base);
+  const certified = admitted(after, base);
   // The records lane with no render at all. Every other uncertified tree goes
   // back to the stage that certifies it. This one would go back to a stage that
   // already answered, so it is the loud answer instead. A run that walked the
@@ -517,25 +618,37 @@ async function preVerdictUpdate(ctx, base) {
   // is a ledger missing a stamp the stages wrote, and a merge over a record tree
   // no review read is the one thing this lane must never do in silence
   // (ADR-0080).
-  if (unjudgedRecords(runEvents(ctx), base)) {
+  if (unjudgedRecords(after, base)) {
     return blocked(ctx, 'records-uncertified', UNJUDGED_RECORDS_QUESTION);
   }
-  const uncertified = { toSha: out.toSha, uncertified: true, note: UNCERTIFIED_TREE_NOTE };
   if (!ran) {
-    // The base never moved. Nothing was re-decided, so the stamp says what the
-    // ledger already held about the tree the run stands on.
-    ctx.store.append('pre-verdict-update', {
-      actor: ACTOR,
+    // The base never moved, so nothing was re-decided here. What the stamp says
+    // is what the ledger already held about the tree the run stands on, and
+    // whether the ledger can name that tree at all.
+    //
+    // The check is unconditional. A merge this stage made and never recorded
+    // reads exactly like a base that never moved, so a head no stamp names is
+    // the one evidence that such a merge happened: the crash windows of this
+    // stage all end here. The stamp names the head, the verdict reads the stamp
+    // as a move and judges the tree at it, and the suite restore anchors on it
+    // (ADR-0093). Asking the gate first would send an uncertified tree at an
+    // unnamed head to a verdict that reads it as unmoved, which is the cycle
+    // this rule exists to prevent.
+    const unnamed = !namedHeads(after).has(out.toSha);
+    return stampUpdate(ctx, base, {
       pass,
       ran: false,
-      mainSha: out.mainSha,
-      ...(!certified && uncertified),
+      unnamed,
+      certified,
+      certification: certifiedTrees(after, base),
+      shas: { mainSha: out.mainSha, toSha: out.toSha },
+      // A tree the ledger cannot name is a tree built by a merge whose files
+      // nobody listed, so every certification the lane holds is earned again.
+      // That is the answer the fast path gives when it cannot run at all, and
+      // the reasons are the same: the shas it reads went with the record the
+      // crash took.
+      decision: unnamed ? offPath(after, base) : null,
     });
-    // A tree nothing certified that this call's merge did not build: the run
-    // took a merge it never recorded, and the shas the fast path reads went with
-    // the record. The full re-certification, never the fast path over shas it
-    // cannot name.
-    return certified ? { next: 'ship' } : { next: certifyingStage(base) };
   }
   // The flag is the whole of the difference. Absent or false, the moved tree
   // goes back to the verdict exactly as it always has, and nothing above or
@@ -543,34 +656,144 @@ async function preVerdictUpdate(ctx, base) {
   const decision =
     base.config?.gates?.fastPathShip === true && certified
       ? await fastPathShip(ctx, base, out)
-      : offPath(runEvents(ctx), base);
+      : offPath(after, base);
+  return stampUpdate(ctx, base, {
+    pass,
+    ran: true,
+    certified,
+    // The certification the route was decided on: the head before this merge,
+    // beside the merged sha the stamp carries. The two together are what a
+    // reader needs to tell a carry from a re-judgment.
+    certification: certifiedTrees(after, base),
+    shas: { mainSha: out.mainSha, fromSha: out.fromSha, toSha: out.toSha },
+    decision,
+  });
+}
+
+/**
+ * The stamp one entry to this stage earns, and the route behind it.
+ *
+ * Every `pre-verdict-update` this stage writes goes through here, so the fields
+ * a later stage reads off one cannot depend on which path wrote it: the head
+ * the tree stands at, the two certifications the route was decided on, and the
+ * two answers where a merge asked for them (ADR-0093).
+ */
+function stampUpdate(
+  ctx,
+  base,
+  { pass, ran, unnamed = false, certified, certification, shas, decision },
+) {
+  // A records re-run asked over a certification that is already a fallback is a
+  // round that stalls at the cap it already spent and writes the fallback again
+  // (ADR-0080). The fold is here, where the stage decides, and not inside the
+  // check: a re-run is built in one place and copied from seven refusals, and
+  // one funnel covers all of them while the check's own stamp keeps what the
+  // check said.
+  const settled = fallbackStands(runEvents(ctx), decision);
+  const notes = [];
+  if (unnamed) notes.push(UNNAMED_HEAD_NOTE);
+  if (!certified) notes.push(UNCERTIFIED_TREE_NOTE);
   ctx.store.append('pre-verdict-update', {
     actor: ACTOR,
     pass,
-    ran: true,
-    mainSha: out.mainSha,
-    fromSha: out.fromSha,
-    toSha: out.toSha,
-    ...(decision.code && { code: { answer: decision.code.answer, files: decision.code.files ?? [] } }),
-    ...(decision.records && {
+    ran,
+    ...shas,
+    certification,
+    ...(settled?.code && { code: { answer: settled.code.answer, files: settled.code.files ?? [] } }),
+    ...(settled?.records && {
       records: {
-        answer: decision.records.answer,
+        answer: settled.records.answer,
         // Why the records answer reads as it does. The two questions are
         // answered apart, so a records answer can stand where the code answer
         // fell, and a stamp that says `kept` without a reason cannot tell a
         // carry the reconciliation earned from one it was handed.
-        ...(decision.records.reason && { reason: decision.records.reason }),
-        files: decision.records.files ?? [],
+        ...(settled.records.reason && { reason: settled.records.reason }),
+        files: settled.records.files ?? [],
       },
     }),
-    ...(!certified && uncertified),
+    ...(unnamed && { unnamedHead: true }),
+    ...(!certified && { uncertified: true }),
+    ...(notes.length > 0 && { note: notes.join('; ') }),
   });
   // The code answer routes first where both were redone. The reconcile stage
   // stands behind the verdict in every lane graph, and it reads the re-run off
   // this stamp, so one route carries both journeys in their own order.
-  if (decision.code?.answer === 'rejudge') return { next: 'verdict' };
-  if (decision.records?.answer === 'rerun') return { next: RECONCILE_STAGE, rerun: true };
-  return { next: 'ship' };
+  if (settled?.code?.answer === 'rejudge') return { next: certifyingStage(base) };
+  if (settled?.records?.answer === 'rerun') return { next: RECONCILE_STAGE, rerun: true };
+  if (unnamed) return { next: certifyingStage(base) };
+  return certified ? { next: 'ship' } : { next: certifyingStage(base) };
+}
+
+/**
+ * The records answer with a re-run over a standing fallback folded to a carry,
+ * or the decision unchanged.
+ *
+ * The fallback is the reconcile stage's last word: the records are owed, the run
+ * said so in its own stamp, and the ticket the close writes is what carries them
+ * on (ADR-0080). A re-run asked over one buys a round that ends at the same cap
+ * and writes the same fallback.
+ *
+ * A lane with no render at all holds no certification to fall back from, and the
+ * advisory word is one such lane, so the read is guarded rather than assumed.
+ */
+function fallbackStands(events, decision) {
+  if (decision?.records?.answer !== 'rerun') return decision;
+  if (!reconcileCertification(events)?.fallback) return decision;
+  return {
+    ...decision,
+    records: {
+      answer: 'kept',
+      reason: FALLBACK_STANDS,
+      files: decision.records.files ?? [],
+    },
+  };
+}
+
+/**
+ * Whether a fresh pass this stage's merge round bought is still owed its dev
+ * seat.
+ *
+ * The stamp lands before the seat runs, so a stop inside the seat leaves a
+ * `fresh-pass` with no implementation behind it and a tree that holds the reset
+ * and nothing else. Both lanes that run a dev seat reach it; the records lane
+ * runs none and stamps no fresh pass.
+ * @param {object[]} events the run's ledger, in order
+ */
+function pendingMergeFreshPass(events) {
+  const fresh = findLast(events, 'fresh-pass');
+  if (fresh?.trigger !== 'merge-conflict') return false;
+  return !events.some((e) => e.event === 'implementation-committed' && e.seq > fresh.seq);
+}
+
+/**
+ * The fast-path decision this stage stamped and never carried into its own
+ * stamp, or null.
+ *
+ * The check writes its record and the stage writes the route behind it, in that
+ * order and with nothing between. A `fast-path-ship` newer than the last
+ * `pre-verdict-update` is therefore one thing only: the stop that caught the
+ * stage between the two. The merge that record judged is in the tree, so the
+ * completion states it as the merge it was, with the answers the check gave.
+ *
+ * The worktree is asked to confirm it. A tree that no longer stands at the sha
+ * the record names is not the tree that record judged, and the ordinary path
+ * below, the merge and the head check and the gate, answers for that one.
+ */
+async function interruptedFastPath(ctx, base, events) {
+  const fast = findLast(events, 'fast-path-ship');
+  if (!fast) return null;
+  const stamped = findLast(events, 'pre-verdict-update');
+  if (stamped && stamped.seq > fast.seq) return null;
+  if (typeof fast.toSha !== 'string') return null;
+  if ((await headSha(base.worktree)) !== fast.toSha) return null;
+  return {
+    pass: currentPass(events),
+    ran: true,
+    certified: admitted(events, base),
+    certification: certifiedTrees(events, base),
+    shas: { mainSha: fast.mainSha, fromSha: fast.fromSha, toSha: fast.toSha },
+    decision: { code: fast.code ?? null, records: fast.records ?? null },
+  };
 }
 
 /**
@@ -654,18 +877,24 @@ async function recordNeighbourhood(base) {
 }
 
 /**
- * The taken fast-path record this run actually shipped on, or undefined.
+ * The fast-path record this run actually shipped on, or undefined.
  *
- * A taken record is not the end of the question. The run can take the fast path
- * over one moved base and then meet a second one, or a red at the request, and
- * render the full verdict after all. That verdict certifies the tree that
+ * A record the check refused for a record reason and kept the code answer of is
+ * one of these. The code certification it carried is the whole of what a ship
+ * skips, and a reader that asked only whether the record was taken would leave a
+ * ship that skipped a certifying pass unmarked, uncounted, and its escapes
+ * attributed to the story rather than to the trade (ADR-0056).
+ *
+ * A carried record is not the end of the question. The run can take the fast
+ * path over one moved base and then meet a second one, or a red at the request,
+ * and render the full verdict after all. That verdict certifies the tree that
  * lands, which is the whole of what the fast path skipped, so the trade was not
  * made and nothing here may say it was: the close does not mark the ship, the
  * escape kind is not assigned, and the tripwire that counts the trade does not
  * count this ship (ADR-0056).
  */
 export function fastPathTaken(events) {
-  const fast = [...events].reverse().find((e) => e.event === 'fast-path-ship' && e.taken === true);
+  const fast = [...events].reverse().find(carriedFastPath);
   if (!fast) return undefined;
   return supersededFastPath(events, fast) ? undefined : fast;
 }
@@ -1867,9 +2096,19 @@ async function mergeRound(
     `merge ${base.defaultBranch} into ${base.branch}`,
   );
   if (testConflicts.length > 0 && base.storyLane) {
-    // The merged tests are the frozen suite now: the round re-freezes.
+    // The merged tests are the frozen suite now: the round re-freezes. The
+    // source says where: this commit is a step inside a merge the caller has
+    // not finished recording, so it moves the verdict's reading and names no
+    // code head of its own. The stamp that names the head comes after it
+    // (ADR-0093).
     ctx.store.append('suite-committed', { actor: ACTOR, sha, phase: 're-freeze', files: testConflicts });
-    ctx.store.append('re-freeze', { actor: ACTOR, sha, files: testConflicts, findings: [] });
+    ctx.store.append('re-freeze', {
+      actor: ACTOR,
+      sha,
+      files: testConflicts,
+      findings: [],
+      source: MERGE_ROUND,
+    });
   }
   if (doPush) {
     const directive = await pushBranch(ctx, base);

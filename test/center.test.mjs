@@ -396,6 +396,10 @@ function seedRecordRun(paths) {
       code: { answer: 'kept', files: [] },
       records: { answer: 'rerun', files: ['docs/adr/x.md'] },
     }),
+    // The two alarms ride a base that did not move, so they are counted off
+    // every stamp and never off the moved ones alone (ADR-0093).
+    line(131, 'pre-verdict-update', { pass: 1, ran: false, toSha: 'u1', uncertified: true }),
+    line(132, 'pre-verdict-update', { pass: 1, ran: false, toSha: 'u2', unnamedHead: true }),
     line(135, 'stage-entered', { stage: 'reconcile' }),
     line(140, 'reconcile-rendered', {
       cycle: 6,
@@ -441,7 +445,17 @@ test('the records section derives its measures from the ledger', async (t) => {
   // Nothing merged with a finding standing: the second render is green.
   assert.deepEqual(r.standing, { merged: 0, findings: 0, standing: [] });
   assert.deepEqual(r.late, { born: 1, late: 1, share: 0.5 });
-  assert.deepEqual(r.movedTree, { updates: 1, rejudged: 0, rerun: 1, both: 0, neither: 0 });
+  // The two alarms ride the same measure and are counted off every stamp, not
+  // off the moved ones: both of theirs found the base where the run left it.
+  assert.deepEqual(r.movedTree, {
+    updates: 1,
+    rejudged: 0,
+    rerun: 1,
+    both: 0,
+    neither: 0,
+    uncertified: 1,
+    unnamedHead: 1,
+  });
   assert.deepEqual(r.recheck, { rechecks: 1, answered: 0, yield: 0 });
   // Two minutes of layers on the first render, one on the second; the third
   // ran no layer and is no reading. The carried layer of the first render adds

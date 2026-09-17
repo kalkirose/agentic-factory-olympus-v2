@@ -17,7 +17,7 @@ import {
   runLedgerPath,
 } from '../src/daemon/home.mjs';
 import { postFreeze, repairLane, restoreAnchor } from '../src/lanes/verdict.mjs';
-import { recordsLane } from '../src/lanes/records-stage.mjs';
+import { RECONCILE_STAGE, recordsLane } from '../src/lanes/records-stage.mjs';
 import {
   admitted,
   certifiedTrees,
@@ -28,6 +28,7 @@ import {
   checksByName,
   fastPathTaken,
   releasedForVerdict,
+  rerunOwed,
   shipStep,
   CHECKLESS_POLLS,
   UPDATE_CAP,
@@ -37,7 +38,8 @@ import { shipTokenState, takeShipToken } from '../src/ship/token.mjs';
 import { FLAKE_LIMIT, RERUN_BUDGET } from '../src/ledger/cycles.mjs';
 import { gitHubForge, noLogReason, parseGitHubRepo, PartialLogRefusal } from '../src/ship/forge.mjs';
 import { derivedLabels } from '../src/ship/labels.mjs';
-import { commitAll, restorePaths } from '../src/isolation/tree.mjs';
+import { commitAll, headSha, restorePaths } from '../src/isolation/tree.mjs';
+import { codeHead, namedHeads, carriedFastPath } from '../src/lanes/codehead.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { openEscapesStore, openRunStore, TelemetryStore } from '../src/telemetry/stores.mjs';
 import { BEATS_PER_STAMP } from '../src/telemetry/heartbeat.mjs';
@@ -440,6 +442,21 @@ function furyClean() {
   return seats;
 }
 
+/** One verdict record on disk and the render that names it. */
+function stageRender(ctx, { cycle, sha, verdict }) {
+  const record = join(ctx.paths.runs, ctx.runId, `verdict-${cycle}.json`);
+  writeFileSync(record, JSON.stringify({ cycle, sha, verdict, open: [] }, null, 2) + '\n');
+  ctx.store.append('verdict-rendered', {
+    actor: 'daemon',
+    cycle,
+    pass: 1,
+    sha,
+    verdict,
+    open: [],
+    record,
+  });
+}
+
 /** Seeds the freeze boundary: suite committed, spec written, freeze stamped. */
 function seedHandler(seedExtra = null) {
   return async (ctx) => {
@@ -488,6 +505,11 @@ function shipFixture(
     // reach, so a test of that route needs the real close-out behind it.
     repairShips = false,
     seedExtra = null,
+    // The first stage of the `staged` lane: it writes the ledger shape a test
+    // wants the ship path to meet, and hands the run on. The lane exists so a
+    // ledger a crash or a red cycle would have left can be stated exactly,
+    // instead of being produced by half a run (ADR-0093).
+    stage = null,
   } = {},
 ) {
   const root = tempDir();
@@ -538,10 +560,44 @@ function shipFixture(
       ...shipLane.handlers,
     },
   };
+  // A lane whose first stage states the ledger and whose verdict stage renders
+  // green over the worktree head and hands the run back down the ship path.
+  // The render is the whole of what the ship path reads off that stage, so the
+  // routes under test are the real ones.
+  const staged = {
+    stages: ['stage', 'verdict', ...shipLane.stages],
+    handlers: {
+      stage: stage ?? (async () => ({ next: RECONCILE_STAGE })),
+      verdict: async (ctx) => {
+        const worktree = ctx.payload.worktree;
+        let events = runEventsOf(paths, ctx.runId);
+        // The step a stop left half done, finished at the entry, exactly as
+        // `resumeInterrupted` finishes it: the seat runs and the pass commits.
+        const fresh = [...events].reverse().find((e) => e.event === 'fresh-pass');
+        if (fresh && !events.some((e) => e.event === 'implementation-committed' && e.seq > fresh.seq)) {
+          writeFileSync(join(worktree, 'src/resumed.mjs'), 'export const resumed = true;\n');
+          const sha = await commitAll(worktree, 'implement: the resumed pass');
+          ctx.store.append('implementation-committed', {
+            actor: 'daemon',
+            pass: fresh.pass,
+            phase: 'fresh',
+            baseSha: fresh.sha ?? sha,
+            sha,
+          });
+          events = runEventsOf(paths, ctx.runId);
+        }
+        const cycle = events.filter((e) => e.event === 'verdict-rendered').length + 1;
+        stageRender(ctx, { cycle, sha: await headSha(worktree), verdict: 'green' });
+        return { next: RECONCILE_STAGE };
+      },
+      ...shipLane.handlers,
+    },
+  };
   const lanes = {
     story: { stages: ['seed', ...post.stages], handlers: { seed: seedHandler(seedExtra), ...post.handlers } },
     repair: repairShips ? repairship : repairLane({ afterVerdict: done }),
     repairship,
+    staged,
     // The whole records lane, with the same ship stages behind it: a records
     // request opens, merges and closes exactly where a story request does.
     records: recordsLane({ afterRecords: shipLane, forgeFor: () => forge }),
@@ -2413,6 +2469,13 @@ test('textual conflicts take the merge round; test hunks go to the suite seat', 
   // the resolved tests are the frozen suite now: the round re-froze
   const refreeze = events.find((e) => e.event === 're-freeze');
   assert.equal(refreeze.sha, round.sha);
+  // The source says where the amendment was written: inside a merge whose own
+  // record comes after it, so the sha is no code head of its own (ADR-0093).
+  assert.equal(refreeze.source, 'merge-round');
+  assert.equal(codeHead(events), events.find((e) => e.event === 'implementation-committed').sha);
+  // And the tree it produced is named all the same: the branch update behind it
+  // put that tree under the open request the forge certifies.
+  assert.ok(namedHeads(events).has(round.sha));
   assert.ok(
     events.some((e) => e.event === 'suite-committed' && e.phase === 're-freeze'),
   );
@@ -4221,6 +4284,27 @@ test('a run resumed on its own release goes to the stage it left for', () => {
     releasedForVerdict([rerun, { seq: 11, event: 'reconcile-rendered', verdict: 'green' }]),
     null,
   );
+  // The certification, and not the render alone. A run whose head already
+  // carries a green earned it before the release, and the verdict reads that
+  // same head as unmoved: telling it to judge again is the cycle (ADR-0093).
+  const impl = { seq: 1, event: 'implementation-committed', sha: 'a'.repeat(40) };
+  const green = { seq: 2, event: 'verdict-rendered', verdict: 'green', sha: 'a'.repeat(40) };
+  assert.equal(releasedForVerdict([impl, green, held, released]), null);
+  assert.equal(releasedForVerdict([impl, held, released]), 'verdict');
+  // A record re-run over a fallback stalls at the cap it already spent, so the
+  // stage's own fallback write answers the release (ADR-0080).
+  assert.equal(
+    releasedForVerdict([
+      { seq: 9, event: 'reconcile-rendered', verdict: 'red' },
+      rerun,
+      { seq: 11, event: 'reconciliation-written', ok: false, cause: 'record-cap' },
+    ]),
+    null,
+  );
+  assert.equal(
+    releasedForVerdict([rerun, { seq: 11, event: 'reconciliation-written', ok: true }]),
+    'reconcile',
+  );
 });
 
 
@@ -4514,6 +4598,605 @@ test('the restore anchor follows the tree: the freeze, then the merge, then the 
   assert.equal(
     restoreAnchor([freeze, born, { event: 'branch-update', toSha: 'd'.repeat(40) }]),
     'd'.repeat(40),
+  );
+  // A head the ledger could not name is a merge that was made: the tree stands
+  // at the merge sha, and an anchor left behind it would restore every
+  // test-path file the default branch advanced (ADR-0093).
+  const unnamed = {
+    event: 'pre-verdict-update',
+    ran: false,
+    unnamedHead: true,
+    toSha: 'e'.repeat(40),
+  };
+  assert.equal(restoreAnchor([freeze, unnamed]), unnamed.toSha);
+  assert.equal(
+    restoreAnchor([freeze, { event: 'pre-verdict-update', ran: false, toSha: 'e'.repeat(40) }]),
+    freeze.sha,
+  );
+});
+
+// -- the tree the run holds, on the ship path (ADR-0093) ---------------------
+//
+// The ledger shapes below are the ones a red cycle, a crash or a merge round
+// leaves. Each is stated at the first stage of the `staged` lane and then met
+// by the real reconcile, update, ship and close-out handlers.
+
+/** Starts the daemon and launches one staged run. */
+async function launchStaged(fx) {
+  await fx.daemon.start();
+  fx.daemon.engine.seatDefaults = () => ({ commandFor: seatFixture(BASE_SEATS).commandFor });
+  const { runId } = await fx.daemon.launchRun({
+    project: 'proj',
+    lane: 'staged',
+    ticket: 'docs/fix.md',
+  });
+  return runId;
+}
+
+/** The implementation commit of a staged run, and the render over it. */
+async function stageImplementation(ctx, { verdict = 'green' } = {}) {
+  const worktree = ctx.payload.worktree;
+  writeFileSync(join(worktree, 'src/feature.mjs'), GOOD_FEATURE);
+  const sha = await commitAll(worktree, 'implement: the pass');
+  ctx.store.append('implementation-committed', {
+    actor: 'daemon',
+    pass: 1,
+    phase: 'fresh',
+    baseSha: sha,
+    sha,
+  });
+  stageRender(ctx, { cycle: 1, sha, verdict });
+  return sha;
+}
+
+test('a green earned at the amendment certifies the tree the run ships', async (t) => {
+  // The implementation commit was judged red, the suite seat amended one frozen
+  // test, and the green stands at that amendment. The head is the amendment, so
+  // the gate admits the run and the verdict is never asked again.
+  const fx = shipFixture(t, {
+    stage: async (ctx) => {
+      const worktree = ctx.payload.worktree;
+      await stageImplementation(ctx, { verdict: 'red' });
+      mkdirSync(join(worktree, 'tests'), { recursive: true });
+      writeFileSync(join(worktree, 'tests/feature.test.mjs'), STRONG_TEST);
+      const sha = await commitAll(worktree, 'suite: the amendment');
+      ctx.store.append('suite-committed', {
+        actor: 'daemon',
+        sha,
+        phase: 're-freeze',
+        files: ['tests/feature.test.mjs'],
+      });
+      ctx.store.append('re-freeze', {
+        actor: 'daemon',
+        sha,
+        files: ['tests/feature.test.mjs'],
+        findings: [],
+      });
+      stageRender(ctx, { cycle: 2, sha, verdict: 'green' });
+      return { next: RECONCILE_STAGE };
+    },
+  });
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await launchStaged(fx);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const refreeze = events.find((e) => e.event === 're-freeze');
+  const update = events.find((e) => e.event === 'pre-verdict-update');
+  assert.equal(update.ran, false);
+  assert.equal(update.toSha, refreeze.sha);
+  assert.deepEqual(update.certification.code, { sha: refreeze.sha, ok: true });
+  assert.equal(update.uncertified, undefined);
+  assert.equal(update.unnamedHead, undefined);
+  // Two renders, and the run went to the request behind the second one: the
+  // stage that judges was never asked about a tree it had already judged.
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 2);
+  assert.ok(events.some((e) => e.event === 'pr-opened'));
+  assert.ok(!events.some((e) => e.event === 'liveness-violation'));
+});
+
+test('a head no stamp names is stamped, judged at that head, and shipped', async (t) => {
+  // The crash window between a clean merge and the stamp that records it. The
+  // merge is idempotent, so the resumed stage reads a base that never moved;
+  // the head under it is the only evidence the merge happened.
+  const fx = shipFixture(t, {
+    stage: async (ctx) => {
+      const worktree = ctx.payload.worktree;
+      await stageImplementation(ctx);
+      writeFileSync(join(worktree, 'src/merged.mjs'), 'export const merged = true;\n');
+      await commitAll(worktree, 'merge main into the run branch');
+      // The stage the stop caught, re-entered: nothing between the merge and
+      // this entry recorded the tree the run now stands on.
+      return { next: 'update' };
+    },
+  });
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await launchStaged(fx);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const updates = events.filter((e) => e.event === 'pre-verdict-update');
+  assert.equal(updates.length, 2);
+  const [first, second] = updates;
+  // The check is unconditional: the ledger's own certification stands, and the
+  // tree under the run is not the tree it stands over. So the stamp names the
+  // head and asks for every certification the lane holds again.
+  assert.equal(first.unnamedHead, true);
+  assert.equal(first.ran, false);
+  assert.equal(first.certification.code.ok, true);
+  assert.equal(first.uncertified, undefined);
+  assert.equal(first.code.answer, 'rejudge');
+  assert.match(first.note, /no stamp of this ledger names/);
+  // The second render judged that head, and the restore anchors on it.
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.equal(renders.length, 2);
+  assert.equal(renders[1].sha, first.toSha);
+  assert.equal(restoreAnchor(events), first.toSha);
+  // And the next entry reads the head as named and certified.
+  assert.equal(second.unnamedHead, undefined);
+  assert.equal(second.uncertified, undefined);
+  assert.equal(second.toSha, first.toSha);
+  assert.deepEqual(second.certification.code, { sha: first.toSha, ok: true });
+  assert.ok(events.some((e) => e.event === 'pr-opened'));
+  assert.ok(!events.some((e) => e.event === 'liveness-violation'));
+});
+
+test('an uncertified run at an unnamed head stamps both flags and is judged', async (t) => {
+  // Nothing judged the tree the ledger names, and nothing names the tree the
+  // run holds. Gating the head check on the gate would send this one to a
+  // verdict that reads the head as unmoved, which is the cycle itself.
+  const fx = shipFixture(t, {
+    stage: async (ctx) => {
+      const worktree = ctx.payload.worktree;
+      await stageImplementation(ctx, { verdict: 'red' });
+      writeFileSync(join(worktree, 'src/merged.mjs'), 'export const merged = true;\n');
+      await commitAll(worktree, 'merge main into the run branch');
+      return { next: 'update' };
+    },
+  });
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await launchStaged(fx);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const first = events.find((e) => e.event === 'pre-verdict-update');
+  assert.equal(first.unnamedHead, true);
+  assert.equal(first.uncertified, true);
+  assert.equal(first.certification.code.ok, false);
+  assert.match(first.note, /no stamp of this ledger names.*not a tree any green verdict judged/s);
+  // Judged at that head, and never handed round: three stage entries at most
+  // between the stamp and the render.
+  const render = events.filter((e) => e.event === 'verdict-rendered').at(-1);
+  assert.equal(render.sha, first.toSha);
+  assert.ok(!events.some((e) => e.event === 'liveness-violation'));
+});
+
+test('the stamps a merge round writes name no head of their own', async (t) => {
+  // Each of them is written inside the merge, before the stamp that records
+  // it: a stop between the two leaves the merged tree with nothing behind it.
+  const fx = shipFixture(t, {
+    stage: async (ctx) => {
+      const worktree = ctx.payload.worktree;
+      const implSha = await stageImplementation(ctx);
+      mkdirSync(join(worktree, 'tests'), { recursive: true });
+      writeFileSync(join(worktree, 'tests/feature.test.mjs'), STRONG_TEST);
+      const sha = await commitAll(worktree, 'merge main into the run branch');
+      ctx.store.append('suite-committed', {
+        actor: 'daemon',
+        sha,
+        phase: 're-freeze',
+        files: ['tests/feature.test.mjs'],
+      });
+      ctx.store.append('re-freeze', {
+        actor: 'daemon',
+        sha,
+        files: ['tests/feature.test.mjs'],
+        findings: [],
+        source: 'merge-round',
+      });
+      ctx.store.append('merge-round', {
+        actor: 'daemon',
+        resolved: true,
+        sha,
+        mainSha: implSha,
+        conflicts: ['tests/feature.test.mjs'],
+        testFiles: ['tests/feature.test.mjs'],
+      });
+      return { next: 'update' };
+    },
+  });
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await launchStaged(fx);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const first = events.find((e) => e.event === 'pre-verdict-update');
+  assert.equal(first.unnamedHead, true);
+  assert.equal(first.toSha, events.find((e) => e.event === 'merge-round').sha);
+  // The re-freeze moved the verdict's reading all the same, and the suite
+  // restore anchors on the merged tree.
+  assert.equal(restoreAnchor(events), first.toSha);
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').at(-1).sha, first.toSha);
+});
+
+test('a check whose record never reached a route has its decision completed', async (t) => {
+  // The stop that caught the stage between its two writes. The merge the record
+  // judged is in the tree, so the decision is stated as the merge it was.
+  const fx = shipFixture(t, {
+    stage: async (ctx) => {
+      const worktree = ctx.payload.worktree;
+      const implSha = await stageImplementation(ctx);
+      writeFileSync(join(worktree, 'src/merged.mjs'), 'export const merged = true;\n');
+      const sha = await commitAll(worktree, 'merge main into the run branch');
+      ctx.store.append('fast-path-ship', {
+        actor: 'daemon',
+        pass: 1,
+        mainSha: sha,
+        fromSha: implSha,
+        toSha: sha,
+        taken: false,
+        refusal: 'ground-intersects',
+        detail: 'src/base.mjs is a declared suite input',
+        code: { answer: 'rejudge', files: ['src/base.mjs'] },
+      });
+      return { next: 'update' };
+    },
+  });
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await launchStaged(fx);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const fast = events.find((e) => e.event === 'fast-path-ship');
+  const first = events.find((e) => e.event === 'pre-verdict-update');
+  // The merge is stated as the merge it was, with the answer the record holds,
+  // and the check is never taken a second time against a branch that moved on.
+  assert.equal(first.ran, true);
+  assert.equal(first.toSha, fast.toSha);
+  assert.equal(first.fromSha, fast.fromSha);
+  assert.deepEqual(first.code, { answer: 'rejudge', files: ['src/base.mjs'] });
+  assert.equal(first.unnamedHead, undefined);
+  assert.equal(events.filter((e) => e.event === 'fast-path-ship').length, 1);
+  // And the merged tree was judged before the request opened.
+  const render = events.filter((e) => e.event === 'verdict-rendered').at(-1);
+  assert.equal(render.sha, fast.toSha);
+  assert.ok(events.find((e) => e.event === 'pr-opened').seq > render.seq);
+});
+
+test('a head the ship stage named ships on the green before it', async (t) => {
+  // The same tree under an open request: the forge certifies that one, and a
+  // local cycle over it would repeat the checks the forge already ran.
+  const fx = shipFixture(t, {
+    stage: async (ctx) => {
+      const worktree = ctx.payload.worktree;
+      const implSha = await stageImplementation(ctx);
+      writeFileSync(join(worktree, 'src/merged.mjs'), 'export const merged = true;\n');
+      const sha = await commitAll(worktree, 'merge main into the run branch');
+      ctx.store.append('branch-update', { actor: 'daemon', fromSha: implSha, toSha: sha, mainSha: sha });
+      return { next: RECONCILE_STAGE };
+    },
+  });
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await launchStaged(fx);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const updates = events.filter((e) => e.event === 'pre-verdict-update');
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].unnamedHead, undefined);
+  assert.equal(updates[0].uncertified, undefined);
+  // The gate read the green at the head before the branch update, as it does
+  // for every request the forge is watching.
+  assert.equal(updates[0].certification.code.sha, events.find((e) => e.event === 'verdict-rendered').sha);
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 1);
+});
+
+test('a merge stamped and never handed on is judged, not shipped', async (t) => {
+  // The crash window between the `ran: true` stamp and the release behind it.
+  // The head is the merge, no green stands at it, and the run judges it.
+  const fx = shipFixture(t, {
+    stage: async (ctx) => {
+      const worktree = ctx.payload.worktree;
+      const implSha = await stageImplementation(ctx);
+      writeFileSync(join(worktree, 'src/merged.mjs'), 'export const merged = true;\n');
+      const sha = await commitAll(worktree, 'merge main into the run branch');
+      ctx.store.append('pre-verdict-update', {
+        actor: 'daemon',
+        pass: 1,
+        ran: true,
+        mainSha: sha,
+        fromSha: implSha,
+        toSha: sha,
+        certification: { code: { sha: implSha, ok: true }, records: null },
+        code: { answer: 'rejudge', files: [] },
+      });
+      return { next: 'update' };
+    },
+  });
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await launchStaged(fx);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const updates = events.filter((e) => e.event === 'pre-verdict-update');
+  const merged = updates[0].toSha;
+  assert.equal(updates[1].uncertified, true);
+  assert.equal(updates[1].toSha, merged);
+  assert.deepEqual(updates[1].certification.code, { sha: merged, ok: false });
+  const renders = events.filter((e) => e.event === 'verdict-rendered');
+  assert.equal(renders.length, 2);
+  assert.equal(renders[1].sha, merged);
+  // The request opened behind the render that judged the merge, and never
+  // before it.
+  const opened = events.find((e) => e.event === 'pr-opened');
+  assert.ok(opened.seq > renders[1].seq);
+});
+
+test('a fresh pass the merge round bought is finished before anything ships', async (t) => {
+  // The stamp lands before the seat runs, so a stop inside the seat leaves a
+  // reset tree with no implementation on it. The stage hands it back and gives
+  // the token up on the way.
+  const fx = shipFixture(t, {
+    stage: async (ctx) => {
+      const sha = await stageImplementation(ctx);
+      ctx.store.append('merge-round', {
+        actor: 'daemon',
+        resolved: false,
+        mainSha: sha,
+        conflicts: ['src/feature.mjs'],
+        cause: 'dev seat failed',
+      });
+      ctx.store.append('stall', { actor: 'daemon', pass: 1, reason: 'merge-conflict', open: 0 });
+      ctx.store.append('fresh-pass', { actor: 'daemon', pass: 2, trigger: 'merge-conflict', sha });
+      return { next: 'update' };
+    },
+  });
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await launchStaged(fx);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const fresh = events.find((e) => e.event === 'fresh-pass');
+  const resumed = events.find(
+    (e) => e.event === 'implementation-committed' && e.seq > fresh.seq,
+  );
+  assert.ok(resumed, 'the pass was never finished');
+  // The token went back on the way out, so no other run of the project waited
+  // through the dev seat.
+  const token = events.filter((e) => e.event === 'ship-token');
+  assert.equal(token[0].state, 'acquired');
+  assert.equal(token[1].state, 'released');
+  assert.equal(token[1].reason, 're-verdict');
+  assert.ok(token[1].seq < resumed.seq);
+  // And nothing merged or opened over the reset tree.
+  const opened = events.find((e) => e.event === 'pr-opened');
+  assert.ok(opened.seq > resumed.seq);
+  assert.ok(!events.some((e) => e.event === 'pre-verdict-update' && e.seq < resumed.seq));
+});
+
+test('a capped pass stamps the tree it stopped chasing a moving base with', async (t) => {
+  const fx = shipFixture(t, {
+    stage: async (ctx) => {
+      const sha = await stageImplementation(ctx);
+      for (let i = 0; i < UPDATE_CAP; i += 1) {
+        ctx.store.append('pre-verdict-update', {
+          actor: 'daemon',
+          pass: 1,
+          ran: true,
+          mainSha: sha,
+          fromSha: sha,
+          toSha: sha,
+          certification: { code: { sha, ok: true }, records: null },
+          code: { answer: 'kept', files: [] },
+        });
+      }
+      return { next: RECONCILE_STAGE };
+    },
+  });
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await launchStaged(fx);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  const capped = events.find((e) => e.event === 'pre-verdict-update' && e.capped);
+  const impl = events.find((e) => e.event === 'implementation-committed');
+  assert.equal(capped.toSha, impl.sha);
+  assert.deepEqual(capped.certification.code, { sha: impl.sha, ok: true });
+});
+
+test('a fallback stands: the record re-run is folded and the reconciliation is not re-entered', async (t) => {
+  // The check's own record, written and never carried into a route: the code
+  // answer stood, the record answer asked for a re-run, and the run's
+  // reconciliation is already the fallback its cap wrote (ADR-0080).
+  const fx = shipFixture(t, {
+    stage: async (ctx) => {
+      const worktree = ctx.payload.worktree;
+      const implSha = await stageImplementation(ctx);
+      ctx.store.append('reconcile-rendered', {
+        actor: 'daemon',
+        cycle: 1,
+        sha: implSha,
+        verdict: 'red',
+        open: ['reconcile/1'],
+        records: ['docs/adr/0001.md'],
+        layers: [],
+      });
+      ctx.store.append('reconciliation-written', {
+        actor: 'daemon',
+        ok: false,
+        cause: 'record-cap',
+        partial: true,
+        residual: [],
+      });
+      writeFileSync(join(worktree, 'src/merged.mjs'), 'export const merged = true;\n');
+      const sha = await commitAll(worktree, 'merge main into the run branch');
+      ctx.store.append('fast-path-ship', {
+        actor: 'daemon',
+        pass: 1,
+        mainSha: sha,
+        fromSha: implSha,
+        toSha: sha,
+        taken: false,
+        refusal: 'records-rerun',
+        detail: 'the default branch moved a record this run wrote',
+        code: { answer: 'kept', files: [] },
+        records: { answer: 'rerun', reason: 'own-record', files: ['docs/adr/0001.md'] },
+        certification: { cycle: 1, sha: implSha, record: join(ctx.paths.runs, ctx.runId, 'verdict-1.json') },
+      });
+      return { next: 'update' };
+    },
+  });
+  fx.forge.state.autoChecks = () => [green()];
+  const runId = await launchStaged(fx);
+  const events = await waitClosed(fx.paths, runId);
+  assert.equal(events.find((e) => e.event === 'run-closed').state, 'shipped');
+  // The decision the check recorded, completed rather than taken again.
+  const updates = events.filter((e) => e.event === 'pre-verdict-update');
+  assert.equal(updates.length, 1);
+  const fast = events.find((e) => e.event === 'fast-path-ship');
+  assert.equal(updates[0].ran, true);
+  assert.equal(updates[0].toSha, fast.toSha);
+  assert.deepEqual(updates[0].code, { answer: 'kept', files: [] });
+  assert.equal(updates[0].records.answer, 'kept');
+  assert.equal(updates[0].records.reason, 'fallback-stands');
+  // The certification names the head before the merge, beside the merged sha.
+  assert.equal(updates[0].certification.code.sha, events.find((e) => e.event === 'implementation-committed').sha);
+  assert.equal(updates[0].certification.records.fallback, 'record-cap');
+  // No further round, no re-judgment, and the close says the ship carried.
+  assert.ok(!events.some((e) => e.event === 'ship-token' && e.reason === 're-reconcile'));
+  assert.equal(events.filter((e) => e.event === 'verdict-rendered').length, 1);
+  assert.ok(!events.some((e) => e.event === 'stage-entered' && e.stage === RECONCILE_STAGE));
+  assert.equal(events.find((e) => e.event === 'run-closed').fastPath, true);
+});
+
+// -- the code head, and the heads the ledger names (ADR-0093) -----------------
+//
+// One question, one list. The gate, the verdict, the anchor and the update
+// stage all read the tree the run holds off these, so a ledger shape that reads
+// one way here reads that way in every one of them.
+
+const SHA = (c) => c.repeat(40);
+
+test('the code head is the last stamp that moved the tree and named a sha', () => {
+  const impl = { event: 'implementation-committed', sha: SHA('1') };
+  assert.equal(codeHead([]), null);
+  assert.equal(codeHead([impl]), impl.sha);
+  // A suite amendment commits tests and no implementation, and it is the tree
+  // the run ships: the head follows it.
+  const refreeze = { event: 're-freeze', sha: SHA('2') };
+  assert.equal(codeHead([impl, refreeze]), refreeze.sha);
+  // The merge this stage made and recorded, and the head it found under itself
+  // that no stamp named. Both move the head to the sha they carry.
+  const merged = { event: 'pre-verdict-update', ran: true, toSha: SHA('3') };
+  assert.equal(codeHead([impl, refreeze, merged]), merged.toSha);
+  const unnamed = { event: 'pre-verdict-update', ran: false, unnamedHead: true, toSha: SHA('4') };
+  assert.equal(codeHead([impl, unnamed]), unnamed.toSha);
+  // And every stamp that carries a sha and moves no head.
+  const quiet = { event: 'pre-verdict-update', ran: false, toSha: SHA('5') };
+  const capped = { event: 'pre-verdict-update', ran: false, capped: true, toSha: SHA('6') };
+  const round = { event: 're-freeze', sha: SHA('7'), source: 'merge-round' };
+  const branch = { event: 'branch-update', toSha: SHA('8') };
+  const written = { event: 'record-written', sha: SHA('9') };
+  const committed = { event: 'records-committed', sha: SHA('a') };
+  assert.equal(codeHead([impl, quiet, capped, round, branch, written, committed]), impl.sha);
+});
+
+test('a named head is a sha some judgment, carry or record commit stands behind', () => {
+  const impl = { event: 'implementation-committed', sha: SHA('1') };
+  const named = (lines) => [...namedHeads([impl, ...lines])].sort();
+  // The head itself, the tree under an open request, the tree a carry
+  // certified, every record commit, and a tree put back on the branch head.
+  assert.deepEqual(named([]), [SHA('1')]);
+  assert.deepEqual(
+    named([
+      { event: 'branch-update', toSha: SHA('2') },
+      { event: 'fast-path-ship', taken: true, toSha: SHA('3') },
+      { event: 'fast-path-ship', taken: false, code: { answer: 'kept' }, toSha: SHA('4') },
+      { event: 'reconcile-rendered', sha: SHA('5') },
+      { event: 'record-written', sha: SHA('6') },
+      { event: 'reconciliation-written', ok: true, sha: SHA('7') },
+      { event: 'records-committed', sha: SHA('8') },
+      { event: 'tree-refreshed', moved: true, to: SHA('9') },
+    ]),
+    ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map(SHA),
+  );
+  // And the five that name a tree nothing has judged. Each is written inside a
+  // merge the stage has not finished recording, so a head named by one of them
+  // alone is the tree a stop left unjudged.
+  assert.deepEqual(
+    named([
+      { event: 'merge-round', resolved: true, sha: SHA('b') },
+      { event: 're-freeze', sha: SHA('c'), source: 'merge-round' },
+      { event: 'suite-committed', sha: SHA('d'), phase: 're-freeze' },
+      { event: 'fast-path-ship', taken: false, code: { answer: 'rejudge' }, toSha: SHA('e') },
+      { event: 'fresh-pass', pass: 2, sha: SHA('f') },
+    ]),
+    [SHA('1')],
+  );
+  // A refresh that stood down left the tree where it was; the branch head it
+  // read is a tree this run never held.
+  assert.deepEqual(named([{ event: 'tree-refreshed', moved: false, to: SHA('b') }]), [SHA('1')]);
+});
+
+test('a code answer of kept is a carry, whatever the record answer said', () => {
+  assert.equal(carriedFastPath({ event: 'fast-path-ship', taken: true }), true);
+  assert.equal(
+    carriedFastPath({ event: 'fast-path-ship', taken: false, code: { answer: 'kept' } }),
+    true,
+  );
+  assert.equal(
+    carriedFastPath({ event: 'fast-path-ship', taken: false, code: { answer: 'rejudge' } }),
+    false,
+  );
+  assert.equal(carriedFastPath({ event: 'fast-path-ship', taken: false }), false);
+  assert.equal(carriedFastPath({ event: 'branch-update', taken: true }), false);
+  assert.equal(carriedFastPath(undefined), false);
+});
+
+test('the gate reads the head, and a carry over it is a certification', () => {
+  const base = { mode: 'story' };
+  const impl = { seq: 1, event: 'implementation-committed', sha: SHA('1') };
+  const red = { seq: 2, event: 'verdict-rendered', verdict: 'red', sha: SHA('1') };
+  const refreeze = { seq: 3, event: 're-freeze', sha: SHA('2') };
+  const green = { seq: 4, event: 'verdict-rendered', verdict: 'green', sha: SHA('2') };
+  // The run whose implementation commit was judged red and whose green was
+  // earned at the amendment it ships: the head is the amendment.
+  assert.deepEqual(certifiedTrees([impl, red, refreeze, green], base).code, {
+    sha: SHA('2'),
+    ok: true,
+  });
+  assert.equal(admitted([impl, red, refreeze, green], base), true);
+  assert.deepEqual(certifiedTrees([impl, red, refreeze], base).code, { sha: SHA('2'), ok: false });
+  // A carried record certifies the tree its merge built, and a refused one
+  // certifies nothing.
+  const merged = { seq: 5, event: 'pre-verdict-update', ran: true, toSha: SHA('3') };
+  const carry = (answer) => ({
+    seq: 6,
+    event: 'fast-path-ship',
+    taken: false,
+    refusal: 'records-rerun',
+    code: { answer },
+    toSha: SHA('3'),
+  });
+  const held = [impl, red, refreeze, green, merged];
+  assert.equal(certifiedTrees([...held, carry('kept')], base).code.ok, true);
+  assert.equal(certifiedTrees([...held, carry('rejudge')], base).code.ok, false);
+  // And the mark on the ship follows the same predicate.
+  assert.equal(fastPathTaken([carry('kept')]).seq, 6);
+  assert.equal(fastPathTaken([carry('rejudge')]), undefined);
+});
+
+test('a re-run the stage decided and never handed on is still owed', () => {
+  const asked = { seq: 1, event: 'pre-verdict-update', ran: true, records: { answer: 'rerun' } };
+  assert.equal(rerunOwed([]), false);
+  assert.equal(rerunOwed([asked]), true);
+  // The check's own record carries the answer too, and it is written first: a
+  // stop between the two leaves the re-run on that stamp alone.
+  const checked = { seq: 1, event: 'fast-path-ship', taken: false, records: { answer: 'rerun' } };
+  assert.equal(rerunOwed([checked]), true);
+  // The stage answers with a green render, or with the fallback write at its
+  // cap; nothing else clears it.
+  assert.equal(rerunOwed([asked, { seq: 2, event: 'reconcile-rendered', verdict: 'green' }]), false);
+  assert.equal(rerunOwed([asked, { seq: 2, event: 'reconcile-rendered', verdict: 'red' }]), true);
+  assert.equal(rerunOwed([asked, { seq: 2, event: 'reconciliation-written', ok: false }]), false);
+  assert.equal(rerunOwed([asked, { seq: 2, event: 'reconciliation-written', ok: true }]), true);
+  // A pass born after the answer carries a record set of its own.
+  assert.equal(rerunOwed([asked, { seq: 2, event: 'fresh-pass', pass: 2 }]), false);
+  // A records answer that was kept asks for nothing.
+  assert.equal(
+    rerunOwed([{ seq: 1, event: 'pre-verdict-update', ran: true, records: { answer: 'kept' } }]),
+    false,
   );
 });
 

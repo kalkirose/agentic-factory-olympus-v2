@@ -31,9 +31,10 @@ record certification is null. The records lane spawns no judge at all: its diff
 is the records, so the birth is the judgment (ADR-0080).
 
 **Two grounds, two shas.** `certifiedTrees` in `src/lanes/ship.mjs` returns two
-trees with two greens: the code tree at the last code commit, the record tree at
-the last record commit. The admission gate requires both. The verdict reads no
-record stamp, so a corrective round buys no code cycle.
+trees with two greens: the code tree at the code head, the record tree at the
+last record commit. ADR-0093 defines the code head and names every reader of it.
+The admission gate requires both. The verdict reads no record stamp, so a
+corrective round buys no code cycle.
 
 **Two questions at the merge.** `groundVerdict` in `src/lanes/fastpath.mjs` lists
 the incoming files once. It answers each certification on its own ground. The

@@ -504,6 +504,11 @@ export const RUN_EVENTS = new Set([
   // checks the card against, and the count of them is what an outlier window is
   // read from (ADR-0044).
   'supersede-authorized',
+  // The suite amended and frozen again, at the sha the amendment commits at.
+  // `source: 'merge-round'` names the one writer whose sha is not the code
+  // head: that re-freeze commits the merged tests inside a merge the stage has
+  // not yet recorded, and the stamp behind it is the one that says who holds
+  // the tree (ADR-0093).
   're-freeze',
   'operational-fix',
   // The gate answered itself on a standing acknowledgment: every finding it
@@ -571,8 +576,22 @@ export const RUN_EVENTS = new Set([
   // and a reader who cannot see which ground the incoming work touched cannot
   // tell a wide ground from a busy branch (ADR-0075).
   // A records answer carries `reason` as well: `no-record-moved` where it
-  // stands, the record that moved where it does not, and the closed refusal
-  // that settled it where one did.
+  // stands, the record that moved where it does not, the closed refusal that
+  // settled it where one did, and `fallback-stands` where the reconciliation's
+  // own fallback is what keeps it. A re-run over a fallback stalls at the cap
+  // it already spent (ADR-0080).
+  //
+  // Every stamp carries `toSha`, the head the tree stands at, and
+  // `certification`, the two trees the route was decided on: `{code, records}`,
+  // each `{sha, ok}` or null, records carrying `fallback` where one stands. On
+  // a `ran: true` stamp the certification names the head BEFORE the merge, and
+  // `toSha` the merged tree, so a reader sees both sides of the trade. `capped`
+  // carries the worktree head, because that stamp is written before any merge.
+  // `unnamedHead: true` says the worktree head was a tree no stamp of this
+  // ledger names: a merge was made and never recorded, and the stamp is the
+  // first record of that tree. It moves the code head exactly as `ran: true`
+  // does, so the verdict judges the tree and the suite restore anchors on it
+  // (ADR-0093).
   'pre-verdict-update',
   // The clean-rebase fast path's answer about one moved base: whether the
   // certification the run already earned stands over the tree the update
@@ -584,6 +603,13 @@ export const RUN_EVENTS = new Set([
   // that skipped a certifying pass has to say so, and because a flag that
   // fires for nothing has to be readable as one. Stamped only where the flag
   // is on: a project without it stamps nothing, as it always did.
+  //
+  // The check answers the code question and the record question apart, so a
+  // record refused for a record reason can hold a code answer of `kept`. That
+  // record carried the code certification onto the merged tree, and it carries
+  // `certification` for the same reason a taken one does: the render the carry
+  // stands on is at no sha the merged tree holds, and nothing else names it
+  // (ADR-0093). Every reader of a carried ship reads both forms.
   'fast-path-ship',
   'pr-opened',
   // The labels the request carries, derived from its own diff by the project's
@@ -808,6 +834,14 @@ export const RUN_EVENTS = new Set([
   // it, and the stamp carries the cause (ADR-0055).
   'tree-refreshed',
   // liveness (loud)
+  //
+  // `detail` says which invariant failed. One of them names a chain: a detail
+  // beginning `stage cycle:` is a run that entered a stage it had already
+  // entered since its last stamp of any other kind, with the loop written out.
+  // Two stages disagreed about the state of the run and handed it back and
+  // forth, so the recovery is the fix of that disagreement on a new pin, and a
+  // resolve with the cause still in place re-trips within three transitions
+  // (ADR-0093).
   'liveness-violation',
   // paired resolution append for loud items and breaches
   'resolved',
