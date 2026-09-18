@@ -27,18 +27,24 @@ const RATE_LIMITED = 'rate-limit';
 const CLI_RATE_LIMIT_ERROR = 'rate_limit';
 
 /**
- * Builds the child-process spec for one seat invocation. `denyTools` adds
- * caller rules to the disallowed set — the test-edit boundary rides here.
+ * Builds the child-process spec for one seat invocation.
+ *
+ * Every argument here is bounded by the seat definition or by the harness, and
+ * no argument grows with the project (ADR-0095). `--disallowedTools` carries
+ * the definition's own tool policy and nothing else: three names at most. A
+ * caller's edit rules are a list the size of the project's test tree, so they
+ * ride the settings file as `permissions.deny` instead.
+ *
  * `cmd` stays the name the config declares; the supervisor resolves it
  * against the host at spawn time.
  * `settingsPath` names the CLI settings file that carries this dispatch's
- * bound hook. It comes with `--include-hook-events`, because a settings file
- * that fails validation is ignored without a word in print mode: the load is
- * proven from the hook's own line in the stream, and the events have to be in
- * the stream for that.
+ * bound hook and its edit boundary. It comes with `--include-hook-events`,
+ * because a settings file that fails validation is ignored without a word in
+ * print mode: the load is proven from the hook's own line in the stream, and
+ * the events have to be in the stream for that.
  * @param {{claudeCommand?: string[], prompt: string, model: string,
  *   effort: string, def: {web: boolean, explore: number}, resume?: string,
- *   denyTools?: string[], settingsPath?: string}} opts
+ *   settingsPath?: string}} opts
  * @returns {{cmd: string, args: string[], parseLine: typeof parseClaudeLine}}
  */
 export function claudeSeatCommand({
@@ -48,10 +54,9 @@ export function claudeSeatCommand({
   effort,
   def,
   resume,
-  denyTools = [],
   settingsPath,
 }) {
-  const disallowed = [...denyTools];
+  const disallowed = [];
   if (!def.web) disallowed.push('WebSearch', 'WebFetch');
   if (!(def.explore > 0)) disallowed.push('Task');
   const args = [

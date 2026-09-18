@@ -26,8 +26,9 @@ is that footprint, and the tool call is where it can be enforced.
 
 **An implementation seat is spawned with a bound, and a command that runs a layer
 outside it is refused before it starts.** The seats are the ones that write code
-against a tree: the dev seat and the repair-dev seat. The suite seat runs its own
-suite and is already held to the test paths; a judging seat runs no layer.
+against a tree: the dev seat, the repair-dev seat, and the dev seat a merge round
+dispatches over a conflict. The suite seat runs its own suite and is already held
+to the test paths; a judging seat runs no layer.
 
 - **The runner writes two files at the spawn, inside the run directory.** The
   bound file states what cannot change inside one session: the worktree, the base
@@ -35,11 +36,12 @@ suite and is already held to the test paths; a judging seat runs no layer.
   whether it is a setup layer, the frozen suite's name where the lane has one,
   the paths the run declared, the per-layer durations of the certified base, and
   the cap. The settings file loads one pre-tool hook over the command tools,
-  in the exec form, with the bound file's path as its argument.
+  in the exec form, with the bound file's path as its argument, and it carries
+  the seat's edit deny rules beside it (ADR-0095).
 - **A seat the two files cannot be written for does not spawn.** The settings
-  file is the whole of the bound, and an unbounded seat is the thing the bound
-  exists to prevent. The refusal is the same failure the runner stamps when the
-  load cannot be proven.
+  file is the whole of the bound and of the boundary, and an unbounded seat is
+  the thing the bound exists to prevent. The refusal is the same failure the
+  runner stamps when the load cannot be proven.
 - **The hook decides alone, on every call.** It reads the tool input as a shell
   string, normalises whitespace, and matches it against each layer's argv. A
   command that contains no layer's argv passes. For a matched layer it computes
@@ -83,7 +85,10 @@ suite and is already held to the test paths; a judging seat runs no layer.
   beside it ends the seat and stamps the failure. A hook-started line is not
   evidence, because the host's own settings raise one for the same event. A call
   a hook denied settles nothing and the next one is read instead, and the denial
-  is read from the hook's own exit code rather than from any message text.
+  is read from the hook's own exit code rather than from any message text. One
+  file holds the hook and the deny rules, so the one proof covers both: a seat
+  ended for a bound that never loaded carries edit rules that never loaded
+  either (ADR-0095).
 - **The brief tells the seat whose the other layers are.** It lists the layers of
   the bound at the spawn and states the rule: a refused layer is not a defect to
   work around, the verdict stage runs every layer of the project at the sha it
@@ -142,10 +147,11 @@ seat call, and the stamps stay for what they already recorded.
 
 ## References
 
-- ADR-0005, ADR-0016, ADR-0022, ADR-0046, ADR-0056, ADR-0088
+- ADR-0005, ADR-0016, ADR-0022, ADR-0046, ADR-0056, ADR-0088, ADR-0095
 - `src/seats/bound-hook.mjs`
 - `src/seats/runner.mjs`
 - `src/seats/claude.mjs`
 - `src/lanes/verdict.mjs`
+- `src/lanes/ship.mjs`
 - `src/daemon/home.mjs`
 - `src/ledger/registry.mjs`

@@ -4,6 +4,13 @@
 // Seat events appear in run ledgers and, for instance-scoped jobs, in the
 // instance ledger.
 const SEAT_EVENTS = [
+  // One dispatch, as it was spawned: the `seat`, the `model`, the `attempt`,
+  // and the shape the invocation took (`retry`, `corrective`, `degraded`,
+  // `afterWait`). `argv` is the command line this dispatch measured, in
+  // characters, and `denyRules` the number of caller edit rules the settings
+  // file carried beside the bound, omitted where there were none. The two say
+  // the line stayed inside what the harness bounds, and they name the list that
+  // would otherwise have grown it (ADR-0095).
   'seat-spawned',
   'seat-progress',
   'seat-report',
@@ -16,6 +23,11 @@ const SEAT_EVENTS = [
   // the contract working, and the spent budget stamps `seat-failure` beside it
   // (ADR-0073).
   'seat-refused',
+  // How one dispatch ended without a report: the `reason`, and the evidence
+  // that reason carries. On the reason `spawn` an `argv` names the command line
+  // the runner refused, as `{chars, longest}`: its length, and the argument
+  // that carried the excess, by the flag in front of it or by its position.
+  // Never by its content (ADR-0095).
   'seat-failure',
   'seat-terminated',
   'model-substituted',

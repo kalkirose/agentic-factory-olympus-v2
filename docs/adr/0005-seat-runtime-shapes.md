@@ -99,12 +99,14 @@ assembly, and the headless runner — gets these concrete shapes:
   the answer (`error: "rate_limit"` with `is_api_error_message: true`).
   Never the exit code, and never the message text.
 - **Argv order is load-bearing.** `--disallowedTools` takes a variadic value
-  list, which consumes every following argument up to the next flag. The
-  prompt is a trailing positional (`-p` is a boolean), so a boolean flag has
-  to close the list: `--dangerously-skip-permissions` is emitted last, after
-  the tool list, after any `--resume`, and after the settings file a bounded
-  seat carries (ADR-0084), whose flag takes a value of its own and therefore
-  cannot be the one that closes the list.
+  list, which consumes every following argument up to the next flag. The list
+  holds the seat definition's own tool policy and nothing else; a caller's edit
+  rules ride the settings file (ADR-0095). The prompt is a trailing positional
+  (`-p` is a boolean), so a boolean flag has to close the list:
+  `--dangerously-skip-permissions` is emitted last, after the tool list, after
+  any `--resume`, and after the settings file a bounded seat carries
+  (ADR-0084), whose flag takes a value of its own and therefore cannot be the
+  one that closes the list.
 - **A prompt never rides an unbounded command line.** Before each dispatch
   the runner measures the argv it built against `COMMAND_LINE_MAX` (32767,
   the Windows CreateProcess ceiling, applied on every platform). Over the
@@ -112,7 +114,9 @@ assembly, and the headless runner — gets these concrete shapes:
   and the command line carries a pointer to that file instead. The
   substitution stamps `prompt-spilled` (new registry event: seat, attempt,
   path, characters) before the spawn. Under the ceiling the prompt rides argv
-  byte for byte, unchanged.
+  byte for byte, unchanged. The line is measured again after the substitution,
+  and one still over the ceiling is refused with the argument named rather than
+  handed to a host that answers it with a throw (ADR-0095).
 - **Failure evidence.** Every `seat-failure` the supervisor stamps carries a
   bounded tail of what the child emitted: the last 600 characters of stderr
   and the last 3 stdout lines, each clipped to 200 characters. A seat that

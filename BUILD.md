@@ -1039,3 +1039,27 @@ never carries a project's specifics.
   registries; the three kinds are owned by the run close. ADR-0094 is new;
   ADR-0044, ADR-0091, ADR-0092 and ADR-0093 stand and are the decisions it
   extends.
+- 2026-09-18: the command line of a seat holds only what the harness bounds, and
+  a spawn the host refuses is a seat failure. Two arguments were not the
+  harness's to size: the prompt, which already moved to a file over the ceiling,
+  and the edit deny list, which grows with the directories a freeze exemption
+  sits in. A line over the ceiling is refused by the host before any child
+  exists, and it says so by throwing where the call stands, so the throw left the
+  supervisor, the dispatch and the stage handler and stood as a violation naming
+  no argument. Now the deny rules ride the settings file the dispatch already
+  names, as `permissions.deny`, beside the hook whose marker proves that file
+  loaded; a dispatch with rules and no bound gets the file for the rules alone
+  and stamps nothing about a bound it does not have; and a rule names `Edit`
+  alone, because that rule holds every built-in tool that edits the path. The
+  runner measures the line it will spawn after every substitution and refuses
+  one still over the ceiling, naming the argument by its flag or its position
+  and never by its content. The supervisor and the layer runner catch a
+  synchronous spawn throw and answer it the way each already answers a spawn
+  refusal. The merge round's dev seat writes code, so it now runs inside the
+  bound in every lane and its brief carries the layers of that bound; the ship
+  base carries the Tier-1 layers and the command table that derivation reads. A
+  git command line built from a path set is built in batches, a refusal over the
+  ceiling names the command, and no caller may swallow one. `seat-spawned` gains
+  `argv` and `denyRules`, `seat-failure` gains `argv` on a refused spawn, and
+  both are declared in the registry. ADR-0095 is new; ADR-0005, ADR-0006,
+  ADR-0019 and ADR-0084 cite it.

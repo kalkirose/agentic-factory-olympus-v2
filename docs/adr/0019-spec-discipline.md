@@ -87,6 +87,9 @@ structured field the freeze acts on.
   and denies every path but the exempt file, collapsing every subtree that
   holds no exemption back to one rule. Without a worktree to walk, the
   boundary stays whole: a run that cannot narrow keeps the guarantee it had.
+  The size of the list is then the size of the directories the exempt file sits
+  in, which no rule here decides; that is safe because the list lives in the
+  seat's settings file and never on its command line (ADR-0095).
 - **A restore with exclusions cleans file by file.** `git clean -d` collapses
   a wholly untracked directory to the directory itself, and an exclude
   pathspec inside it does not save its contents — so an exempt file in a new
@@ -235,12 +238,14 @@ to project config with 400 as the default. Trigger: one park a human answers
 by widening the scope rather than by cutting the spec. Reversal cost: low, one
 constant becomes one config field.
 
-If narrowed deny rules grow past what an invocation can carry — a flat test
-directory of hundreds of files with an exemption inside it — the deny set
-falls back to naming the frozen suite files from the freeze record instead of
-walking the tree. Trigger: one seat invocation refused for argument length.
-Reversal cost: medium, the rule source changes and new files under the test
-paths are then covered by the structural restore alone.
+If narrowed deny rules grow past what the seat's settings file can carry — a
+flat test directory of hundreds of files with an exemption inside it — the deny
+set falls back to naming the frozen suite files from the freeze record instead
+of walking the tree. The rules ride that file and never the command line
+(ADR-0095), so the trigger is a settings file the runner CLI refuses, which
+ends the seat as `bound-not-loaded`. Reversal cost: medium, the rule source
+changes and new files under the test paths are then covered by the structural
+restore alone.
 
 If the exclusions prove to be a route around the test-edit boundary rather
 than a relief valve for it, the lint gains a rule capping their number, and a

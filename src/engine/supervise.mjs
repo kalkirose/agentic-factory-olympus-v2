@@ -104,25 +104,34 @@ export function superviseSeat(
   });
   // The seat command (`claudeCommand`) names a tool; the host decides which
   // file that is. A resolution refusal is a spawn failure like any other.
-  let spec;
+  //
+  // The spawn itself is under the same try, because the host refuses some
+  // command lines before any child exists and says so by throwing where it
+  // stands: a line over the platform's ceiling, an argument the platform
+  // cannot carry. That throw leaves no `error` event to answer it, and outside
+  // this catch it escapes the supervisor, the runner and the stage handler and
+  // reads as a run that stopped for no stated cause. Every spawn the host
+  // refuses is one `seat-failure` with the reason `spawn` and the host's own
+  // words, on every platform (ADR-0095).
+  let child;
   try {
-    spec = resolveArgv([cmd, ...args], { env: childEnv });
+    const spec = resolveArgv([cmd, ...args], { env: childEnv });
+    child = spawn(spec.file, spec.args, {
+      cwd,
+      env: childEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // A seat runs on a console of its own that has no window, so nothing it
+      // starts can put one on the operator's screen and nothing aimed at a seat
+      // reaches the daemon through it; off Windows it leads a process group, so
+      // the kill reaches the tree it spawned (ADR-0016).
+      ...treeSpawnOptions(),
+      ...(spec.windowsVerbatimArguments && { windowsVerbatimArguments: true }),
+    });
   } catch (error) {
     const failure = { failed: true, reason: 'spawn', error: error.message, cost: 0, meta: {} };
     store.append('seat-failure', { actor: 'daemon', seat, reason: 'spawn', error: error.message });
     return { done: Promise.resolve(failure), terminate() {}, seat };
   }
-  const child = spawn(spec.file, spec.args, {
-    cwd,
-    env: childEnv,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    // A seat runs on a console of its own that has no window, so nothing it
-    // starts can put one on the operator's screen and nothing aimed at a seat
-    // reaches the daemon through it; off Windows it leads a process group, so
-    // the kill reaches the tree it spawned (ADR-0016).
-    ...treeSpawnOptions(),
-    ...(spec.windowsVerbatimArguments && { windowsVerbatimArguments: true }),
-  });
   let cost = 0;
   let buffer = '';
   let terminatedReason = null;

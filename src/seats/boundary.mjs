@@ -2,7 +2,9 @@
 // to every test path — not only the frozen suite — so a test change can only
 // route through the suite seat, and to every record path, so a decision
 // record is written by a record seat and by nothing else (ADR-0074).
-// The rules ride the seat invocation as disallowed-tool entries.
+// The rules ride the seat's settings file as its deny list, because the list is
+// the size of the project's tree and a command line holds only what the harness
+// bounds (ADR-0095).
 //
 // A record-path entry may be an exclusion, `!<path>`, which names a file that
 // is not a record. An exclusion is not a deny rule: the file it names is
@@ -21,12 +23,19 @@ import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { isGlobEntry, underEntry } from '../config/project.mjs';
 
-const EDIT_TOOLS = ['Edit', 'Write', 'NotebookEdit'];
+/**
+ * The tool a deny rule names. An `Edit(path)` rule holds every built-in tool
+ * that edits that path, so one rule per pattern states the whole boundary. A
+ * rule naming a second editing tool is accepted, consulted by nothing, and
+ * warned about at startup, and it costs a third of a list that has a ceiling
+ * to stay under (ADR-0095).
+ */
+const EDIT_TOOLS = ['Edit'];
 const GLOB_CHARS = /[*?[\]]/;
 
 /**
- * Deny rules for every edit tool over the project's test paths and record
- * paths. A plain prefix covers its subtree (`prefix/**`); a glob entry is
+ * Deny rules over the project's test paths and record paths, one per pattern.
+ * A plain prefix covers its subtree (`prefix/**`); a glob entry is
  * already a complete pattern and passes through unsuffixed; an `!` exclusion
  * entry is skipped. The test paths come first, and a path both lists name is
  * denied once.
@@ -38,7 +47,7 @@ const GLOB_CHARS = /[*?[\]]/;
  *
  * @param {{testPaths?: string[], recordPaths?: string[], except?: string[],
  *   worktree?: string|null}} opts path entries relative to the repo root
- * @returns {string[]} disallowed-tool entries
+ * @returns {string[]} deny rules for the seat's settings file
  */
 export function editDenyRules({ testPaths = [], recordPaths = [], except = [], worktree = null } = {}) {
   const exempt = new Set((except ?? []).map(normalize));

@@ -413,6 +413,9 @@ function seatFixture(seats) {
       attempt: opts.attempt,
       prompt: opts.prompt,
       denyTools: opts.denyTools,
+      // The file the deny rules and the bound ride. A dispatch that named none
+      // carried its rules nowhere (ADR-0095).
+      settingsPath: opts.settingsPath,
     });
     const behavior = seats[seat];
     if (!behavior) throw new Error(`no fixture behavior for seat ${seat}`);
@@ -2494,6 +2497,24 @@ test('textual conflicts take the merge round; test hunks go to the suite seat', 
     conflictCall.denyTools.some((rule) => rule.includes('docs/adr')),
     'the merge-conflict dev seat could reach the record tree',
   );
+  // The rules ride a settings file of this dispatch's own, and the same file
+  // carries the bound the seat runs inside: this seat writes code, so it is
+  // held the way every implementing seat is held (ADR-0084, ADR-0095).
+  assert.ok(conflictCall.settingsPath, 'the merge-round dev seat carried no settings file');
+  assert.match(conflictCall.settingsPath, /dev-\d+\.settings\.json$/);
+  const bound = events.filter((e) => e.event === 'seat-bound' && e.seat === 'dev');
+  assert.ok(
+    bound.some((e) => e.seq > events.find((x) => x.event === 'pr-opened').seq),
+    'the merge-round dev seat ran outside a bound',
+  );
+  // And its brief names the layers of that bound, so a refusal does not reach
+  // it as a broken environment.
+  assert.ok(
+    conflictCall.prompt.includes('gate commands your work is bounded to') ||
+      conflictCall.prompt.includes('No Tier-1 gate command is yours yet'),
+    conflictCall.prompt,
+  );
+  assert.ok(conflictCall.prompt.includes('is refused before it starts'), conflictCall.prompt);
 });
 
 test("the merge round's briefs name the active records that govern the run's paths", async (t) => {

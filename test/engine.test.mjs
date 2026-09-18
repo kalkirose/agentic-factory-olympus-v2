@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { RunEngine } from '../src/engine/engine.mjs';
-import { scaffoldHome, runLedgerPath, archivedRunLedgerPath } from '../src/daemon/home.mjs';
+import {
+  scaffoldHome,
+  runLedgerPath,
+  runReportPath,
+  archivedRunLedgerPath,
+} from '../src/daemon/home.mjs';
 import { readEvents } from '../src/ledger/ledger.mjs';
 import { openInstanceStore } from '../src/telemetry/stores.mjs';
 import { openLoud, openStreamItems } from '../src/telemetry/readers.mjs';
@@ -218,6 +223,48 @@ test('a handler error and an off-catalog park both violate loud', async (t) => {
   assert.match(badPark.detail, /not in the catalog/);
   assert.ok(!readEvents(runLedgerPath(paths, 'r-park')).some((e) => e.event === 'park'));
   assert.equal(openLoud(paths).length, 2);
+});
+
+// A spawn the host refuses is a seat failure, and the lane reads it the way it
+// reads a child that died. Without the catch in the supervisor the throw leaves
+// the seat dispatch, the stage handler and the engine, and the run stands inert
+// on a violation nobody can route (ADR-0095).
+test("a seat whose spawn the host refuses fails the seat, and violates nothing", async (t) => {
+  const { paths, engine } = setup(t);
+  let outcome = null;
+  engine.registerLane('refused-spawn', {
+    stages: ['only'],
+    handlers: {
+      only: async (ctx) => {
+        outcome = await ctx.runSeat({
+          seat: 'dev',
+          roleBlock: 'ROLE',
+          reportPath: runReportPath(paths, 'r-spawn', 'dev-1'),
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: { verdict: { type: 'string' } },
+            required: ['verdict'],
+          },
+          // An argument no host carries, refused by a synchronous throw on
+          // every platform.
+          commandFor: () => ({ cmd: process.execPath, args: ['-e', 'process.exit(0)\u0000'] }),
+        });
+        return { close: { state: 'failed' } };
+      },
+    },
+  });
+  engine.launch({ runId: 'r-spawn', project: 'proj', lane: 'refused-spawn' });
+  await waitFor(
+    () => archivedEvents(paths, 'r-spawn').find((e) => e.event === 'run-closed'),
+    { label: 'the run closes' },
+  );
+  const events = archivedEvents(paths, 'r-spawn');
+  assert.equal(events.find((e) => e.event === 'seat-failure').reason, 'spawn');
+  assert.ok(!events.some((e) => e.event === 'liveness-violation'));
+  assert.equal(openLoud(paths).length, 0);
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.reason, 'spawn');
 });
 
 // -- a quiet stage cycle (ADR-0093) ------------------------------------------

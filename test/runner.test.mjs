@@ -1423,6 +1423,7 @@ test('a bounded seat is spawned on its own settings file, and the bound is stamp
     reportPath,
     schema: SCHEMA,
     settings: { bound: BOUND, settingsPath, boundPath },
+    denyTools: ['Edit(tests/**)', 'Edit(docs/adr/**)'],
     commandFor: (opts) => {
       built = opts;
       return claudeFixtureCommand({
@@ -1436,7 +1437,11 @@ test('a bounded seat is spawned on its own settings file, and the bound is stamp
   // The argv builder is told the settings file, and the file names the hook by
   // absolute path with the bound file as its argument.
   assert.equal(built.settingsPath, settingsPath);
-  const hook = JSON.parse(readFileSync(settingsPath, 'utf8')).hooks.PreToolUse[0];
+  const file = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  // One file, both halves: the hook the seat is bounded by, and the edit rules
+  // it is denied. The rules never reach the command line (ADR-0095).
+  assert.deepEqual(file.permissions.deny, ['Edit(tests/**)', 'Edit(docs/adr/**)']);
+  const hook = file.hooks.PreToolUse[0];
   assert.equal(hook.matcher, 'Bash|PowerShell|REPL');
   assert.equal(hook.hooks[0].type, 'command');
   assert.match(hook.hooks[0].args[0], /src\/seats\/bound-hook\.mjs$/);
@@ -1453,7 +1458,8 @@ test('a bounded seat is spawned on its own settings file, and the bound is stamp
     bound.layers.map((l) => l.name),
     ['lint', 'suite', 'e2e'],
   );
-  const stamp = readEvents(runLedgerPath(paths, 'r1')).find((e) => e.event === 'seat-bound');
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  const stamp = events.find((e) => e.event === 'seat-bound');
   // The stamp is the bound at the spawn and not the battery: it is the whole
   // record of what this seat was allowed to run.
   assert.deepEqual(stamp.layers, ['lint', 'suite']);
@@ -1462,6 +1468,89 @@ test('a bounded seat is spawned on its own settings file, and the bound is stamp
     createHash('sha256').update(readFileSync(boundPath)).digest('hex'),
     'the stamped digest is the digest of the bytes the hook reads',
   );
+  // The measured line and the size of the list that rode the file beside it.
+  // The line is what the harness bounds; the list is what would have grown it.
+  const spawned = events.find((e) => e.event === 'seat-spawned');
+  assert.equal(spawned.denyRules, 2);
+  assert.ok(spawned.argv > 0 && spawned.argv < COMMAND_LINE_MAX);
+});
+
+// A dispatch with rules and no bound: the file is written for the rules alone,
+// nothing is stamped about a bound the seat does not have, and no proof is
+// armed, because no hook answers a call (ADR-0095).
+test('a seat with rules and no bound is spawned on a settings file all the same', async (t) => {
+  const { paths, store } = setup(t, 'rules');
+  const reportPath = runReportPath(paths, 'rules', 'dev-1');
+  const { settingsPath, boundPath } = boundFiles(paths, 'rules');
+  let built = null;
+  const result = await runSeat(store, {
+    sleep: NO_WAIT,
+    seat: 'dev',
+    roleBlock: 'ROLE',
+    reportPath,
+    schema: SCHEMA,
+    settings: { settingsPath, boundPath },
+    denyTools: ['Edit(docs/adr/**)'],
+    commandFor: (opts) => {
+      built = opts;
+      return claudeFixtureCommand({
+        report: { verdict: 'pass' },
+        reportPath,
+        // A command tool call with no hook line beside it: the stream a seat
+        // whose settings file names no hook produces. It proves nothing and
+        // ends nothing.
+        lines: commandStream(false),
+      });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(built.settingsPath, settingsPath);
+  const file = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  assert.deepEqual(file.permissions.deny, ['Edit(docs/adr/**)']);
+  assert.equal(file.hooks, undefined);
+  assert.ok(!existsSync(boundPath));
+  const events = readEvents(runLedgerPath(paths, 'rules'));
+  assert.ok(!events.some((e) => e.event === 'seat-bound'));
+  assert.ok(!events.some((e) => e.event === 'seat-failure'));
+  assert.equal(events.find((e) => e.event === 'seat-spawned').denyRules, 1);
+});
+
+// The second measurement. The first one moves the prompt to a file; this one
+// decides the spawn, because an argument the first substitution did not move
+// can carry the line over the ceiling on its own. The host answers such a line
+// with a synchronous throw that names no seat, so the runner refuses it first
+// and says which argument carried it (ADR-0095).
+test('a command line still over the ceiling is refused, and nothing is spawned', async (t) => {
+  const { paths, store } = setup(t, 'ceiling');
+  const reportPath = runReportPath(paths, 'ceiling', 'dev-1');
+  const result = await runSeat(store, {
+    sleep: NO_WAIT,
+    seat: 'dev',
+    roleBlock: Array.from({ length: 400 }, (_, i) => `- defect ${i}: ${'p'.repeat(100)}`).join('\n'),
+    reportPath,
+    schema: SCHEMA,
+    // A fixed argument the prompt spill cannot move, over the ceiling on its
+    // own: the shape any argument the harness does not bound would take.
+    commandFor: ({ prompt }) => ({
+      cmd: process.execPath,
+      args: ['-e', 'process.exit(0)', '--fixed', 'x'.repeat(COMMAND_LINE_MAX), prompt],
+    }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'spawn');
+  assert.ok(result.argv.chars > COMMAND_LINE_MAX);
+  const events = readEvents(runLedgerPath(paths, 'ceiling'));
+  // The prompt still moved to its file: the refusal is about what was left.
+  assert.ok(events.some((e) => e.event === 'prompt-spilled'));
+  // No child, so no spawn stamp between the spill and the failure.
+  assert.ok(!events.some((e) => e.event === 'seat-spawned'));
+  const failure = events.find((e) => e.event === 'seat-failure');
+  assert.equal(failure.reason, 'spawn');
+  assert.equal(failure.argv.chars, result.argv.chars);
+  // The argument is named by the flag in front of it, never by its content.
+  assert.equal(failure.argv.longest, '--fixed');
+  assert.ok(!JSON.stringify(failure).includes('xxxx'));
+  assert.match(failure.error, /over the 32767 ceiling/);
 });
 
 test('a seat whose bound never loaded fails on the stream, not on the write', async (t) => {

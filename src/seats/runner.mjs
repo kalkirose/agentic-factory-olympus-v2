@@ -53,6 +53,13 @@
 // spawn: the settings file is the whole of the bound, and an unbounded seat is
 // the thing the bound exists to prevent.
 //
+// The same settings file carries the caller's edit rules as `permissions.deny`
+// (ADR-0095). The rules grow with the project's test tree, and a command line
+// holds only what the harness bounds, so the runner measures the line it will
+// spawn after every substitution and refuses over the ceiling with the
+// argument named, rather than letting the host refuse it as a throw that names
+// nothing.
+//
 // The hook decides alone and writes its refusals to a file, because the run
 // ledger has one in-process writer holding the sequence in memory. So the
 // runner reads that file when the seat ends and stamps what the hook refused,
@@ -121,7 +128,7 @@ const BOUND_HOOK_TIMEOUT_S = 30;
  *   semaphores?: import('./semaphore.mjs').ModelSemaphores,
  *   cwd?: string, env?: object, secretEnv?: string[], costCeiling?: number,
  *   silenceMs?: number, claudeCommand?: string[], denyTools?: string[],
- *   settings?: {bound: object, settingsPath: string, boundPath: string},
+ *   settings?: {bound?: object, settingsPath: string, boundPath: string},
  *   waits?: {register?: Function, holdBarrier?: Function},
  *   sleep?: (ms: number) => Promise<void>, now?: () => number,
  *   commandFor?: (opts: object) => {cmd: string, args: string[], parseLine?: Function},
@@ -181,13 +188,18 @@ export async function runSeat(store, opts) {
     });
   }
   mkdirSync(dirname(reportPath), { recursive: true });
-  // The bound, before anything spawns. A seat that cannot be held to one does
-  // not run: the harness would be asking a seat to judge a tree it was told
-  // one stage judges, and no later stamp recovers the hour it spends doing it.
+  // The bound and the edit boundary, before anything spawns, in one file
+  // (ADR-0095). A seat that cannot be held to its bound does not run: the
+  // harness would be asking a seat to judge a tree it was told one stage
+  // judges, and no later stamp recovers the hour it spends doing it.
+  const rules = denyTools ?? [];
   let held = null;
+  let settingsPath = null;
   if (settings) {
     try {
-      held = writeSeatBound(seat, settings);
+      const written = writeSeatSettings(seat, { ...settings, denyTools: rules });
+      held = written.bound;
+      settingsPath = written.settingsPath;
     } catch (error) {
       store.append('seat-failure', {
         actor: ACTOR,
@@ -197,6 +209,8 @@ export async function runSeat(store, opts) {
       });
       return { ok: false, failed: true, reason: 'bound-not-loaded', error: error.message };
     }
+  }
+  if (held !== null) {
     // What a dispatch the daemon lost refused, before this dispatch's own
     // stamp: the hook wrote those lines, and a restart between the write and
     // the read is the one way they reach no ledger at all.
@@ -302,18 +316,18 @@ export async function runSeat(store, opts) {
           denyTools,
           attempt,
           resume,
-          ...(settings && { settingsPath: settings.settingsPath }),
+          ...(settingsPath && { settingsPath }),
         });
       let spec = build(prompt);
+      let chars = commandLineLength([spec.cmd, ...spec.args]);
       // A prompt is content, and content has no bound the harness controls:
-      // a correction brief carries one line per defect, a constitution grows
-      // with the project, a tool deny list grows with the test tree. Past the
-      // command-line ceiling the spawn dies with `ENAMETOOLONG` — no child,
-      // no transcript, and a stage handler that failed for a reason no ledger
-      // reader can see. So the prompt moves to a file and the command line
-      // carries the path. Below the ceiling nothing changes: the prompt rides
-      // argv byte for byte, as it always has.
-      if (commandLineLength([spec.cmd, ...spec.args]) > COMMAND_LINE_MAX) {
+      // a correction brief carries one line per defect, and a constitution
+      // grows with the project. Past the command-line ceiling the spawn dies
+      // with `ENAMETOOLONG`: no child, no transcript, and a stage handler that
+      // failed for a reason no ledger reader can see. So the prompt moves to a
+      // file and the command line carries the path. Below the ceiling nothing
+      // changes: the prompt rides argv byte for byte, as it always has.
+      if (chars > COMMAND_LINE_MAX) {
         const path = promptPath(reportPath, attempt, retry);
         writeFileSync(path, prompt, 'utf8');
         store.append('prompt-spilled', {
@@ -325,6 +339,32 @@ export async function runSeat(store, opts) {
           chars: prompt.length,
         });
         spec = build(promptFileRef(path));
+        chars = commandLineLength([spec.cmd, ...spec.args]);
+      }
+      // The line as it will be spawned, measured again after the substitution.
+      // The first measurement decides one argument; this one decides the
+      // spawn. A line still over the ceiling is refused here, with the length
+      // and the argument that carries it, because the host refuses it as a
+      // synchronous throw that names no seat and no argument (ADR-0095).
+      if (chars > COMMAND_LINE_MAX) {
+        const longest = longestArgument([spec.cmd, ...spec.args]);
+        const error =
+          `the command line is ${chars} characters, over the ${COMMAND_LINE_MAX} ceiling`;
+        store.append('seat-failure', {
+          actor: ACTOR,
+          seat,
+          reason: 'spawn',
+          error,
+          argv: { chars, longest },
+        });
+        return {
+          failed: true,
+          reason: 'spawn',
+          error,
+          argv: { chars, longest },
+          cost: 0,
+          meta: {},
+        };
       }
       // The proof rides the dialect parser: the supervisor reads every line
       // through it, and the bound's own answer is one of those lines. One proof
@@ -355,6 +395,11 @@ export async function runSeat(store, opts) {
           model,
           effort: def.effort,
           attempt,
+          // What the line measured, and how many caller rules rode the file
+          // beside it. The two readings say the command line stayed bounded
+          // and name what would have grown it (ADR-0095).
+          argv: chars,
+          ...(rules.length > 0 && { denyRules: rules.length }),
           // A retry names the shape it took: resumed into the session the
           // crashed child was writing, or dispatched fresh. `resumed` is
           // stamped either way, so a reader never has to read absence.
@@ -610,8 +655,15 @@ export async function runSeat(store, opts) {
 }
 
 /**
- * Writes the two files one bounded dispatch runs inside, and answers what the
- * ledger records about them.
+ * Writes the files one dispatch runs inside, and answers what the ledger
+ * records about them.
+ *
+ * One file carries both halves of what a seat may do: the hook that holds it
+ * inside its bound, and the deny rules that hold it out of the test tree and
+ * the record tree (ADR-0095). The rules are a list the size of the project's
+ * tree, and the command line is the one place a list of that kind cannot go.
+ * The file is JSON on disk, so five hundred rules are a few kilobytes of it and
+ * the command line carries the path it already carries.
  *
  * The settings file names this machine's node binary and the hook script by
  * absolute path, because a hook is spawned as a child of the CLI whose working
@@ -621,46 +673,51 @@ export async function runSeat(store, opts) {
  *
  * The digest is over the bytes the hook reads, so the marker line the hook
  * prints identifies exactly this file.
- * @returns {{digest: string, layers: string[], refusalsPath: string}}
+ *
+ * The answer's `bound` is null for a dispatch that carries rules alone: no hook
+ * answers a call, so there is no load to prove, no bound to stamp and no
+ * refusals file to read. `settingsPath` is null where neither half is there,
+ * and the command line then names no settings file at all.
+ * @returns {{settingsPath: string|null,
+ *   bound: {digest: string, layers: string[], refusalsPath: string}|null}}
  */
-function writeSeatBound(seat, { bound, settingsPath, boundPath }) {
-  const text = JSON.stringify({ ...bound, seat }, null, 2) + '\n';
-  mkdirSync(dirname(boundPath), { recursive: true });
-  writeFileSync(boundPath, text, 'utf8');
-  mkdirSync(dirname(settingsPath), { recursive: true });
-  writeFileSync(
-    settingsPath,
-    JSON.stringify(
-      {
-        hooks: {
-          PreToolUse: [
+function writeSeatSettings(seat, { bound = null, denyTools = [], settingsPath, boundPath }) {
+  const rules = denyTools ?? [];
+  const file = {};
+  let held = null;
+  if (bound) {
+    const text = JSON.stringify({ ...bound, seat }, null, 2) + '\n';
+    mkdirSync(dirname(boundPath), { recursive: true });
+    writeFileSync(boundPath, text, 'utf8');
+    file.hooks = {
+      PreToolUse: [
+        {
+          matcher: COMMAND_TOOLS.join('|'),
+          hooks: [
             {
-              matcher: COMMAND_TOOLS.join('|'),
-              hooks: [
-                {
-                  type: 'command',
-                  command: hostPath(process.execPath),
-                  args: [BOUND_HOOK, hostPath(boundPath)],
-                  timeout: BOUND_HOOK_TIMEOUT_S,
-                },
-              ],
+              type: 'command',
+              command: hostPath(process.execPath),
+              args: [BOUND_HOOK, hostPath(boundPath)],
+              timeout: BOUND_HOOK_TIMEOUT_S,
             },
           ],
         },
-      },
-      null,
-      2,
-    ) + '\n',
-    'utf8',
-  );
-  return {
-    digest: createHash('sha256').update(text).digest('hex'),
-    // The bound, not the battery: the stamp is the whole record of what this
-    // seat was allowed to run, and the file holds every layer because the hook
-    // needs the ground and the `needs` of the ones it refuses too.
-    layers: [...boundLayerNames(bound)],
-    refusalsPath: `${boundPath}.refusals.jsonl`,
-  };
+      ],
+    };
+    held = {
+      digest: createHash('sha256').update(text).digest('hex'),
+      // The bound, not the battery: the stamp is the whole record of what this
+      // seat was allowed to run, and the file holds every layer because the hook
+      // needs the ground and the `needs` of the ones it refuses too.
+      layers: [...boundLayerNames(bound)],
+      refusalsPath: `${boundPath}.refusals.jsonl`,
+    };
+  }
+  if (rules.length > 0) file.permissions = { deny: [...rules] };
+  if (held === null && rules.length === 0) return { settingsPath: null, bound: null };
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  writeFileSync(settingsPath, JSON.stringify(file, null, 2) + '\n', 'utf8');
+  return { settingsPath, bound: held };
 }
 
 /**
@@ -747,6 +804,23 @@ function stampLostRefusals(store, seat, held) {
       stampRefusal(store, seat, line);
     }
   }
+}
+
+/**
+ * The argument that carries the excess of a refused command line, by the flag
+ * in front of it or by its position.
+ *
+ * Never by its content. The longest argument of a seat dispatch is a prompt, a
+ * path or a rule list, and a ledger a reader outside this machine may hold says
+ * which argument grew, not what was in it.
+ */
+function longestArgument(argv) {
+  let at = 0;
+  for (let i = 1; i < argv.length; i++) {
+    if (String(argv[i]).length > String(argv[at]).length) at = i;
+  }
+  const before = at > 0 ? String(argv[at - 1]) : '';
+  return before.startsWith('--') ? before : `argument ${at}`;
 }
 
 /**

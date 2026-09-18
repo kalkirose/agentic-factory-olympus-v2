@@ -4197,7 +4197,7 @@ function normalizePath(file) {
  * seat's live diff on every call, so a seat whose work grows into another
  * layer's ground may run that layer too.
  */
-function gateCommandLines(base, bound) {
+export function gateCommandLines(base, bound) {
   const inBound = bound ? boundLayerNames(bound) : null;
   const layers = inBound === null ? base.layers : base.layers.filter((l) => inBound.has(l.name));
   return [
@@ -4867,7 +4867,7 @@ const SEAT_LAYER_CAP_MS = 300_000;
  * a bound that rested on the wider one would be absent on exactly the pass that
  * spawns a seat over a tree that just moved.
  */
-async function seatBound(ctx, base, mode) {
+export async function seatBound(ctx, base, mode) {
   const baseSha = passOpeningSha(runEvents(ctx), ctx.payload.baseSha ?? null);
   if (typeof baseSha !== 'string' || baseSha.length === 0) return null;
   const config = base.config ?? (await loadProjectConfig(ctx));
