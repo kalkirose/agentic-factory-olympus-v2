@@ -25,6 +25,7 @@ import {
   changedFiles,
   changedInRange,
   changedSince,
+  commitChanged,
   commitAll,
   headSha,
   mergeIntoTree,
@@ -1455,8 +1456,20 @@ async function suiteStage(ctx) {
     checks: (r) => suiteChecks(ctx, base, r, 'author'),
   });
   if (fail) return fail;
+  const before = await headSha(base.worktree);
   const sha = await commitAll(base.worktree, `suite: ${base.card.key}`);
-  ctx.store.append('suite-committed', { actor: ACTOR, sha, phase: 'author', files: report.suiteFiles });
+  ctx.store.append('suite-committed', {
+    actor: ACTOR,
+    sha,
+    phase: 'author',
+    files: report.suiteFiles,
+    // What the commit moved, beside what the seat declared. The two differ: a
+    // declaration names files the write never touched, and the reader that
+    // settles an amendment obligation needs the commit (ADR-0094). It is read
+    // here because both shas are live here, and a fresh pass can put this one
+    // out of reach later.
+    changed: await commitChanged(base.worktree, before, sha),
+  });
   return { next: 'freeze' };
 }
 
@@ -1588,8 +1601,15 @@ function freezeHandler(nextStage) {
         checks: (r) => suiteChecks(ctx, base, r, 'fix'),
       });
       if (fail) return fail;
+      const beforeFix = await headSha(base.worktree);
       const fixSha = await commitAll(base.worktree, `suite red-state fix: ${base.card.key}`);
-      ctx.store.append('suite-committed', { actor: ACTOR, sha: fixSha, phase: 'fix', files: report.suiteFiles });
+      ctx.store.append('suite-committed', {
+        actor: ACTOR,
+        sha: fixSha,
+        phase: 'fix',
+        files: report.suiteFiles,
+        changed: await commitChanged(base.worktree, beforeFix, fixSha),
+      });
     }
     // A stated supersede that no seat executed cannot freeze. The suite check
     // refused it while the seat was live; this is the record's own refusal, and

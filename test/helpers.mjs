@@ -153,8 +153,34 @@ export const NO_WAIT = () => Promise.resolve();
  * scenario says the seat handed over a tree it knows is red.
  */
 export function answeredReport(report, prompt) {
+  return withFix(withSuiteState(report, prompt), prompt);
+}
+
+function withSuiteState(report, prompt) {
   if (!report || !prompt.includes('suiteState') || report.suiteState !== undefined) return report;
   return { ...report, suiteState: 'green' };
+}
+
+/**
+ * The same rule for the field a code review finding states its fix in. A
+ * finding that leaves it out fails schema validation, so a scenario about
+ * something else would be corrected for the shape of its report rather than
+ * judged on its behaviour.
+ *
+ * `code` is what it fills, because a suite fix carries obligations of its own:
+ * it names one frozen test in its ground, and where the run did not write that
+ * test it states the card claim. A scenario about the suite route states the
+ * field itself.
+ *
+ * The marker is the schema the prompt carries. Only a code review seat holds a
+ * `fix` property, so no record round and no triage report is touched.
+ */
+function withFix(report, prompt) {
+  if (!report || !Array.isArray(report.findings) || !prompt.includes('"fix"')) return report;
+  return {
+    ...report,
+    findings: report.findings.map((f) => (f.fix === undefined ? { ...f, fix: 'code' } : f)),
+  };
 }
 
 /**

@@ -218,6 +218,15 @@ function lensFindings(name) {
       ground: asked.ground,
       finding: asked.finding,
       evidence: asked.ground.join(', '),
+      // Where the repair belongs. The schema requires it on every finding, and
+      // a scenario about a frozen test states 'suite' with the claim beside it.
+      fix: asked.fix ?? 'code',
+      ...(asked.supersedes && {
+        supersedes: asked.supersedes,
+        supersedeAssertion: asked.supersedeAssertion,
+        supersedeQuote: asked.supersedeQuote,
+        supersedeClause: asked.supersedeClause,
+      }),
     },
   ];
 }

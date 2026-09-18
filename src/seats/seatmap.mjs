@@ -54,6 +54,14 @@ export const SEATS = Object.freeze({
   // review panel: the code-shape seat sits out of the default panel and
   // returns with the lenses it carries (ADR-0038).
   'verdict-triage': seat({ model: CERTIFICATION_MODEL, effort: CERTIFICATION_EFFORT }),
+  // Judges the frozen-surface collisions an implementing seat reported, over
+  // that seat's own report and before any gate layer runs. It takes a name of
+  // its own rather than the triage seat's because the probe key, the retry
+  // budget and the attempt limit are all keyed on the seat name, and two
+  // dispatches inside one cycle would spend each other's (ADR-0094). It is not
+  // on the certification spine: it judges a report and certifies nothing, so it
+  // takes the default definition every other judging seat takes.
+  'conflict-triage': seat(),
   'fury-spec': seat(),
   'fury-code-shape': seat(),
   'fury-operational': seat(),

@@ -91,6 +91,7 @@ import {
   concludeMerge,
   abortMerge,
   changedAgainstBase,
+  commitChanged,
   resetHard,
   restorePaths,
 } from '../isolation/tree.mjs';
@@ -2101,7 +2102,20 @@ async function mergeRound(
     // not finished recording, so it moves the verdict's reading and names no
     // code head of its own. The stamp that names the head comes after it
     // (ADR-0093).
-    ctx.store.append('suite-committed', { actor: ACTOR, sha, phase: 're-freeze', files: testConflicts });
+    ctx.store.append('suite-committed', {
+      actor: ACTOR,
+      sha,
+      phase: 're-freeze',
+      files: testConflicts,
+      // What this commit moved under the test paths. The range is the merge's
+      // own, so it holds the default branch's own test edits beside the
+      // conflicts the seat resolved: an amendment obligation the branch itself
+      // already met settles here, which is the same direction the freeze's own
+      // check takes about the same evidence (ADR-0094).
+      changed: (await commitChanged(base.worktree, fromSha, sha)).filter((f) =>
+        underAny(f, base.testPaths),
+      ),
+    });
     ctx.store.append('re-freeze', {
       actor: ACTOR,
       sha,

@@ -110,20 +110,30 @@ and the stage proceeds to the verdict as it does on a green report. The repair
 lane has no frozen suite, so `devSchema('repair')` strips the field with
 `suiteState`.
 
+ADR-0094 widens which report the entries are read from. The red gate holds for
+the first implementing pass, where a red with no attribution is unfinished work.
+It is dropped for a repair seat, which reports on the findings it was given over
+a tree it may have left exactly as it found it, so its conflicts are about those
+findings whatever the suite said.
+
 **The dev seat is told the route before it needs it, never by the refusal.**
 `devRole` states the field and when to use it. A seat that learned it from the
 refusal would have spent the one corrective invocation the run had, which is the
 shape of the failure this record removes.
 
-**The triage reads the attribution as evidence and rules on it.** `triageRole`
-carries the entries from the dev report of the pass that produced the tree: the
-file, the pinned clause, the seat's reason and the card line where it gave one.
-The seat classes each as a `suite-defect` finding at depth `intent` with the
-supersede claim where the card covers it, or as a `code-defect` finding where an
-implementation can satisfy the pin. From there nothing is new: `cardSupersedes`
-authorizes at site `verdict`, the re-freeze amends the file and checks it, the
-ladder re-enters with a fresh dev pass, and an unauthorized claim parks
-`intent-conflict` with the refusal named.
+**A seat reads the attribution as evidence and rules on it.** The brief carries
+the entries from the report of the pass that produced the tree: the file, the
+pinned clause, the seat's reason and the card line where it gave one. The seat
+classes each as a `suite-defect` finding with the supersede claim where the card
+covers it, or as a `code-defect` finding where an implementation can satisfy the
+pin. From there nothing is new: `cardSupersedes` authorizes at site `verdict`,
+the re-freeze amends the file and checks it, the ladder re-enters, and an
+unauthorized claim parks `intent-conflict` with the refusal named.
+
+ADR-0094 moves that judgment in front of the spectrum and gives it a seat of its
+own. A collision is a statement about a pin and about a card, and neither one is
+read out of a gate layer's output, so the run no longer buys a whole spectrum
+before anybody rules on it.
 
 **Every reader of the stamp reads every site.** The spec-lens verification duty
 in `src/lanes/review.mjs` selects `supersede-authorized` events without a site
@@ -188,6 +198,7 @@ and no harness change.
 ## References
 
 - ADR-0015, ADR-0019, ADR-0020, ADR-0044, ADR-0053, ADR-0055, ADR-0067,
+  ADR-0094,
   ADR-0071, ADR-0072
 - `src/lanes/supersede.mjs`
 - `src/lanes/speclint.mjs`

@@ -43,6 +43,7 @@ export const CONSTITUTION_SEATS = new Set([
   'dev',
   'repair-dev',
   'verdict-triage',
+  'conflict-triage',
   'fury-spec',
   'fury-code-shape',
   'fury-operational',
@@ -59,8 +60,10 @@ export const CONSTITUTION_SEATS = new Set([
  * The judging seats. Each one weighs the tree against a document, so each one
  * needs to know which document wins when two of them disagree. The record judge
  * is one: it weighs the run's diff against the record tree and reports what the
- * tree owes. The record review is not, because it judges a record against the
- * code and against its criteria, and neither is an authority over the other.
+ * tree owes. The conflict triage is one too: it weighs a pinned test clause
+ * against the intent card, and which of those two wins is the order itself. The
+ * record review is not, because it judges a record against the code and against
+ * its criteria, and neither is an authority over the other.
  */
 export const AUTHORITY_SEATS = new Set([
   'spec-gate',
@@ -71,6 +74,7 @@ export const AUTHORITY_SEATS = new Set([
   'fury-verifier',
   'generalist-review',
   'verdict-triage',
+  'conflict-triage',
   'reconcile-judge',
 ]);
 

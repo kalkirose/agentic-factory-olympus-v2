@@ -241,6 +241,21 @@ function seatFixture(seats) {
   return { commandFor, calls };
 }
 
+/**
+ * A repair seat that really moves the tree: one file per round, under a name
+ * the round itself gives.
+ *
+ * A round that writes nothing leaves the tree exactly as the render found it,
+ * and such a round plans no cycle (ADR-0094). Every scenario about the stall
+ * ladder is about rounds that ran and moved the work, so each one writes.
+ */
+function attemptWrites(summary) {
+  return ({ label }) => ({
+    files: { [`src/attempt-${label}.txt`]: 'ok\n' },
+    report: { summary },
+  });
+}
+
 /** The layers one brief lists as the seat's bound, in the order it lists them. */
 function boundLayersOf(prompt) {
   const names = [];
@@ -2831,7 +2846,7 @@ test('a project that names the cut lenses gets the code-shape seat back, and it 
     'fury-verifier': verifierSeat((item) =>
       item.mode === 'confirm' ? { verdict: 'confirmed' } : { verdict: 'resolved' },
     ),
-    'repair-dev': () => ({ report: { summary: 'moved' } }),
+    'repair-dev': attemptWrites('moved'),
     'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
   };
   const fx = verdictFixture(t, {
@@ -2876,7 +2891,7 @@ test('stall → fresh pass → second stall parks; abandon closes the run', asyn
     'fury-verifier': verifierSeat((item) =>
       item.mode === 'confirm' ? { verdict: 'confirmed' } : { verdict: 'unresolved' },
     ),
-    'repair-dev': () => ({ report: { summary: 'tried' } }),
+    'repair-dev': attemptWrites('tried'),
     'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
   };
   const fx = verdictFixture(t, { seats });
@@ -2979,7 +2994,7 @@ test('a confirmed approach finding rides the repair brief, and the stall behind 
         ? { verdict: 'confirmed', approach: item.line.includes('structure') }
         : { verdict: 'unresolved' },
     ),
-    'repair-dev': () => ({ report: { summary: 'tried' } }),
+    'repair-dev': attemptWrites('tried'),
     'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
   };
   const fx = verdictFixture(t, { seats });
@@ -3336,7 +3351,7 @@ test('a stop between the fresh pass and its dev report re-dispatches the seat', 
     'verdict-triage': triageThenSuiteDefect,
     suite: refreezeSuite,
     ...furyClean(),
-    'repair-dev': () => ({ report: { summary: 'tried' } }),
+    'repair-dev': attemptWrites('tried'),
     'generalist-review': () => ({ report: { findings: [], summary: 'clean' } }),
   };
   const fx = verdictFixture(t, { seats, gates: CLEAN_GATES, commands: CLEAN_COMMANDS });
@@ -4895,7 +4910,26 @@ const DEV_CONFLICT = {
   clause: 'scope-boundary',
 };
 
-test('a red the dev seat attributes to a frozen pin is verdict evidence, not a defect', async (t) => {
+/** The seat that rules on a reported collision, with or without a claim. */
+function pinConflictTriage(claim) {
+  return () => ({
+    report: {
+      findings: [
+        {
+          entry: 1,
+          class: 'suite-defect',
+          depth: 'intent',
+          summary: 'the frozen pin closes the export set the criterion extends',
+          evidence: 'tests/pinned.test.mjs pins the set closed',
+          ...claim,
+        },
+      ],
+      summary: 'ruled',
+    },
+  });
+}
+
+test('a collision the dev seat reports is judged and amended before the spectrum runs', async (t) => {
   const seats = {
     dev: () => ({
       files: { 'src/feature.mjs': PAIR_FEATURE },
@@ -4903,6 +4937,7 @@ test('a red the dev seat attributes to a frozen pin is verdict evidence, not a d
       // done, the frozen pin is red, and the seat may not touch the test file.
       report: { summary: 'implemented', suiteState: 'red', suiteConflicts: [DEV_CONFLICT] },
     }),
+    'conflict-triage': pinConflictTriage(COVERING_CLAIM),
     'verdict-triage': pinTriage(COVERING_CLAIM),
     ...furyClean(),
     'spec-birth': () => ({ report: { amendedSections: ['AC-1'], summary: 'amended' } }),
@@ -4924,28 +4959,51 @@ test('a red the dev seat attributes to a frozen pin is verdict evidence, not a d
   const stamp = events.find((e) => e.event === 'dev-suite-conflict');
   assert.deepEqual(stamp.files, ['tests/pinned.test.mjs']);
   assert.equal(stamp.count, 1);
-  // The triage seat read the attribution as evidence, and was told what to do
-  // with it: judge the collision, and class it.
-  const triage = fx.calls.find((c) => c.seat === 'verdict-triage');
-  assert.ok(triage.prompt.includes('attributed these reds to frozen pins'));
+  assert.equal(stamp.seat, 'dev');
+  // A seat of its own read the attribution as evidence, and was told what to do
+  // with it: rule on the entry, and class it.
+  const triage = fx.calls.find((c) => c.seat === 'conflict-triage');
+  assert.ok(triage.prompt.includes('reported frozen-surface collisions'));
   assert.ok(triage.prompt.includes(DEV_CONFLICT.reason));
   assert.ok(triage.prompt.includes(COVERING_LINE));
-  assert.ok(triage.prompt.includes('is a code-defect finding, whatever the seat said'));
-  // From there the route is the one that already worked: the card rules, the
-  // re-freeze amends the pin, and the next cycle is green.
+  assert.ok(triage.prompt.includes('is a "code-defect" finding, whatever the reporting'));
+  const ruled = events.find((e) => e.event === 'conflict-triage');
+  assert.equal(ruled.before, 'spectrum');
+  assert.equal(ruled.answers, stamp.seq);
+  // The card rules and the amendment lands in front of the first gate layer of
+  // the cycle. The run pays one spectrum, over the suite it decided to have.
   const authorized = events.filter((e) => e.event === 'supersede-authorized');
   assert.equal(authorized.length, 1);
   assert.equal(authorized[0].site, 'verdict');
   const refreeze = events.filter((e) => e.event === 're-freeze');
   assert.equal(refreeze.length, 1);
   assert.equal(refreeze[0].ruling.source, 'card');
+  const firstLayer = events.find((e) => e.event === 'layer-started');
+  assert.ok(refreeze[0].seq < firstLayer.seq);
   assert.deepEqual(
     events.filter((e) => e.event === 'verdict-rendered').map((e) => [e.cycle, e.verdict]),
-    [
-      [1, 'red'],
-      [2, 'green'],
-    ],
+    [[1, 'green']],
   );
+  // The route the plan removes: no repair seat was asked to answer a pin, and
+  // no pass was discarded over one.
+  for (const event of ['repair-round', 'repair-no-change', 'stall', 'fresh-pass']) {
+    assert.equal(events.filter((e) => e.event === event).length, 0, event);
+  }
+  // The amendment nobody was asked about was reviewed inside the cycle's one
+  // round, over its own diff file.
+  const review = fx.calls.filter((c) => c.seat === 'generalist-review');
+  assert.equal(review.length, 1);
+  assert.match(review[0].prompt, /diff-c1-amendment-1/);
+  // The obligation is settled once, against the write that executed it, and
+  // every suite write records what its own commit moved.
+  const settled = events.filter((e) => e.event === 'supersede-settled');
+  assert.deepEqual(
+    settled.map((e) => [e.test, e.site]),
+    [['tests/pinned.test.mjs', 'verdict']],
+  );
+  assert.equal(settled[0].write, refreeze[0].sha);
+  const write = events.filter((e) => e.event === 'suite-committed').at(-1);
+  assert.deepEqual(write.changed, ['tests/pinned.test.mjs']);
 });
 
 test('a conflict outside the frozen suite is refused, and a red with none still is', async (t) => {
@@ -4962,6 +5020,7 @@ test('a conflict outside the frozen suite is refused, and a red with none still 
             }
           : { summary: 'implemented', suiteState: 'red', suiteConflicts: [DEV_CONFLICT] },
     }),
+    'conflict-triage': pinConflictTriage(COVERING_CLAIM),
     'verdict-triage': pinTriage(COVERING_CLAIM),
     ...furyClean(),
     'spec-birth': () => ({ report: { amendedSections: ['AC-1'], summary: 'amended' } }),
@@ -5085,6 +5144,10 @@ test('a stretched authorization surfaces as a confirmed HIGH on the spec lens', 
                   ground: ['tests/pinned.test.mjs'],
                   finding: 'the scope line covers a second export, not the closed-set shape the amendment dropped',
                   evidence: 'tests/pinned.test.mjs',
+                  // The repair is in the test the amendment overshot in, and
+                  // the card already authorized this run to amend that test, so
+                  // the finding owes no fresh claim (ADR-0094).
+                  fix: 'suite',
                 },
               ],
               summary: 'the authorization is stretched',
@@ -5094,10 +5157,6 @@ test('a stretched authorization surfaces as a confirmed HIGH on the spec lens', 
     'fury-verifier': verifierSeat((item) =>
       item.mode === 'confirm' ? { verdict: 'confirmed' } : { verdict: 'resolved' },
     ),
-    'repair-dev': () => ({
-      files: { 'src/feature.mjs': PAIR_FEATURE },
-      report: { summary: 'narrowed' },
-    }),
   };
   const fx = pinFixture(t, { card: SUPERSEDE_CARD, seats });
   const { runId } = await fx.launch({ card: 'cards/alpha.md' });
@@ -5107,11 +5166,16 @@ test('a stretched authorization surfaces as a confirmed HIGH on the spec lens', 
   assert.equal(high.severity, 'HIGH');
   assert.equal(high.confirmed, true);
   assert.equal(high.advisory, undefined);
-  // It blocked the cycle behind the amendment, and the repair round closed it.
+  // The repair is in the test, so the finding is a suite defect and the
+  // amendment arm answers it. The run asks no repair seat to fix a test file.
+  assert.equal(high.fix, 'suite');
+  assert.equal(high.class, 'suite-defect');
+  assert.equal(high.depth, 'test');
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   assert.deepEqual(renders[1].open, [high.id]);
   assert.equal(renders[2].verdict, 'green');
-  assert.equal(events.filter((e) => e.event === 'repair-round').length, 1);
+  assert.equal(events.filter((e) => e.event === 'repair-round').length, 0);
+  assert.equal(events.filter((e) => e.event === 're-freeze').length, 2);
 });
 
 test('a project that turns the decision off parks every collision, card or no card', async (t) => {

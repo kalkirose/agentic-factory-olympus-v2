@@ -96,12 +96,15 @@ machinery.
 2. **A judgment seat reads the amendment nobody was asked about.** The quote
    check proves the words are in the card. Whether the words REACH the assertion
    that changed is a judgment, and the panel's spec lens is the reader that
-   makes it. A re-freeze behind a human ruling was judged by the human who
-   ruled; a re-freeze on the card's authority was judged by nobody, so the cycle
-   behind it reviews that amendment's own diff, with the executed supersedes and
-   the verification duty in the brief. One seat, only where nobody was asked. A
-   stretched authorization is a HIGH on the spec lens, and confirm-to-block
-   (ADR-0038) does the rest.
+   makes it. A re-freeze on the card's authority was judged by nobody, so the
+   cycle behind it reviews that amendment's own diff, with the executed
+   supersedes and the verification duty in the brief. A stretched authorization
+   is a HIGH on the spec lens, and confirm-to-block (ADR-0038) does the rest.
+   That duty stands whatever the findings behind the amendment were. ADR-0094
+   adds a second reason a round is owed, and it is a resolution mechanic rather
+   than a review duty: an amendment that carried a confirmed review finding owes
+   a round whatever authority it rests on, because such a finding is dropped
+   only by a verifier that resolution-checks it.
 3. **The count is a metric.** Every authorization is one stamp. The eval review
    counts them per run across its window, because a run far above the rest of
    the window, or a window whose count keeps climbing, is a classifier

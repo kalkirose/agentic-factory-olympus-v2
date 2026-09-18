@@ -109,10 +109,13 @@ test('the vocabulary says which record carries each kind, and the two sets are d
     [...GATE_INTEGRITY_KINDS].sort(),
     [
       'auto-merge',
+      'claim-unrun',
       'deterministic-red',
+      'fresh-pass-suite-route',
       'pr-label-missing',
       'reconciliation-lost',
       'record-finding-shipped',
+      'report-unconsumed',
       'resource-exhaustion',
       'triage-log-missing',
       'whole-rerun-after-refreeze',

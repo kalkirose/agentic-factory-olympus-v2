@@ -998,3 +998,44 @@ never carries a project's specifics.
   `fast-path-ship` carries `certification` on a carried refusal; the centre
   measures `uncertified` and `unnamedHead`. ADR-0093 is new and ADR-0075 cites
   it.
+- 2026-09-18: a finding about a frozen pin takes the amendment route, whoever
+  finds it. The harness held one shape for "this pinned clause must change", and
+  the review panel was the one finder that could not state it. A confirmed
+  review finding about a frozen test was a code finding by definition, so it
+  went to a seat that may not edit a test file; that seat measured the
+  collision, wrote it down, and the harness read none of it; the empty commit
+  read as a moved tree and bought a whole review cycle over an identical diff;
+  and the same finding twice read as no progress, which spends the run's one
+  automatic fresh pass on work no implementation could answer. Now every review
+  finding states `fix`, `code` or `suite`, in both lanes, and a suite fix names
+  one frozen test and carries the card claim where the pin is an earlier story's
+  and no authority for it stands on the ledger yet. The round's check loop holds that shape: one frozen test per
+  finding, a claim whose file is the file the ground names, a claim wherever an
+  earlier story's pin is the target, and no code fix whose ground is frozen
+  tests and nothing else. The run's own frozen tests are read from the tree at
+  the launch base sha and never from a seat's declaration, because a
+  declaration names files the write never touched. Before the verifier judges a
+  claim the harness runs it: one command per review round, narrowed to the
+  claimed files, outside the spectrum, with its own kept log, read per file and
+  never off the exit code. A red confirms the claim's premise, a green makes
+  the finding advisory and carries the claim to a later triage, and a file no
+  gate selects leaves the verifier's reading standing. A confirmed suite fix is
+  stamped `suite-defect` with the depth its own origin decides, it never enters
+  the code set, and the ladder and the interrupted-step resume read one
+  derivation of the sets so a step dispatched twice is dispatched over the same
+  work. An implementing seat's `suiteConflicts` are read whatever the suite
+  said, a seat of their own judges them before the spectrum runs and after a
+  repair round that moved nothing, and the card rules on the set all or nothing
+  before anything is stamped. A repair round whose commit left the head where it
+  found it stamps `repair-no-change`, which moves no code head, still counts as
+  a round, and is dropped by the progress rule where a re-freeze answered its
+  collision; a round that changed nothing and named no pin is refused once and
+  then accepted. Every re-freeze that carried a confirmed finding owes the
+  amendment review, each amendment read over its own range into its own diff
+  file and judged inside the cycle's one round. Every suite write records the
+  paths its own commit moved, every authorized supersede is settled once from
+  the ledger, and a write that leaves one owed is refused with the entry named.
+  Six event names, one seat name and three `gate-integrity` kinds enter the
+  registries; the three kinds are owned by the run close. ADR-0094 is new;
+  ADR-0044, ADR-0091, ADR-0092 and ADR-0093 stand and are the decisions it
+  extends.

@@ -1617,7 +1617,7 @@ test('a code lens brief on a mixed diff holds no record', async (t) => {
   const item = seat.schema.properties.findings.items;
   assert.deepEqual(item.properties.lens.enum, [...RECORD_BASE.lenses]);
   assert.ok(!('criterion' in item.properties));
-  assert.deepEqual(item.required, ['lens', 'severity', 'ground', 'finding', 'evidence']);
+  assert.deepEqual(item.required, ['lens', 'severity', 'ground', 'finding', 'evidence', 'fix']);
 });
 
 test('a mixed diff is the code panel plus one record seat over the records', async (t) => {
