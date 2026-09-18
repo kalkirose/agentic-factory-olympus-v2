@@ -311,6 +311,12 @@ export function authorizedSupersedes(events, { after = -1 } = {}) {
  * files. A card citation is a second source of exactly that, so it travels the
  * same route rather than a parallel one: the `re-freeze` stamp spends it the
  * same way, and `source` on the stamp is what tells the two apart.
+ *
+ * `tests` is the same statement as a list. A human ruling is prose and the
+ * files it names are matched out of the frozen set; a card ruling already knows
+ * every file it is about, and the reader that has to refuse a write for an
+ * unexecuted entry should not have to find them again by matching its own
+ * sentence (ADR-0094).
  * @returns {object|null}
  */
 export function supersedeRuling(supersedes) {
@@ -321,6 +327,7 @@ export function supersedeRuling(supersedes) {
     parkSeq: null,
     source: 'card',
     actor: 'card',
+    tests: supersedes.map((s) => s.test),
     answer: [
       'The intent card authorizes these supersedes; amend each frozen test named here, ' +
         'exactly as far as the quoted card line reaches and no further. Restate what each pin ' +

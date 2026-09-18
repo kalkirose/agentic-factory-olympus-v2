@@ -58,6 +58,35 @@ export const LOUD_OWNERSHIP = {
       match: (item) => item.kind === 'auto-merge',
       owner: 'merged',
     },
+    // The three routing alarms. Each says a route the run was built to take was
+    // not taken, and none of them is repaired inside the run that raises one:
+    // the cycle is over, the finding is settled one way or another, and the
+    // repair is a change to this harness. So the record lives exactly as long as
+    // the run that reports it, and the count of them across the ledgers is what
+    // the records are for. The run's close is the owner, which every terminal
+    // state reaches through one path, a kill included (ADR-0094).
+    //
+    // Each matches on `kind` alone, and no stamp of theirs carries a
+    // `findingId`. The rule below keys on that field and `ownedResolutions`
+    // breaks at the first matching rule, so a stamp carrying both would be
+    // owned by `verdict-rendered` and would resolve the moment the finding it
+    // names left an open set, which is the moment the alarm is about. The
+    // findings they name ride under `findings`, a list.
+    {
+      name: 'fresh-pass-suite-route',
+      match: (item) => item.kind === 'fresh-pass-suite-route',
+      owner: 'run-closed',
+    },
+    {
+      name: 'report-unconsumed',
+      match: (item) => item.kind === 'report-unconsumed',
+      owner: 'run-closed',
+    },
+    {
+      name: 'claim-unrun',
+      match: (item) => item.kind === 'claim-unrun',
+      owner: 'run-closed',
+    },
     {
       name: 'harness-finding',
       match: (item) => typeof item.findingId === 'string',

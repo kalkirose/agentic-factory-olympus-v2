@@ -808,9 +808,25 @@ suite authoring (seat) → freeze (process).
   that names no conflict is refused as it always was, and so is an entry naming
   a file outside the run's frozen suite. An accepted report stamps
   `dev-suite-conflict` and the stage goes to the verdict as it does on a green
-  report; the triage brief carries the entries as the dev seat's evidence and
-  classes each as a suite defect at intent depth or as a code defect. The
-  repair lane has no frozen suite and takes neither field.
+  report. The repair lane has no frozen suite and takes neither field.
+
+  The red gate holds for the first implementing pass, where a red with no
+  attribution is unfinished work, and it is dropped for a repair seat
+  (ADR-0094): that seat reports on the findings it was given over a tree it may
+  have left exactly as it found it, so its conflicts are about those findings
+  whatever the suite said.
+- **The conflict triage rules on those entries before the spectrum runs**
+  (ADR-0094). A collision is a statement about a pin and about a card, and
+  neither is read out of a gate layer's output, so a seat of its own answers the
+  entries at the open of a cycle and again after a repair round that moved
+  nothing. It is dispatched by the seq of the stamp it answers, which is its
+  label, its resume anchor and the idempotency key of everything it writes. Each
+  entry takes exactly one finding: a `suite-defect` with a depth, or a
+  `code-defect` where an implementation can satisfy the pin, whatever the
+  reporting seat said. The card then rules on the intent findings all or
+  nothing, and an authorized set amends the spec and re-freezes in front of the
+  first gate layer of that cycle. One refusal sends the whole set to the render,
+  where the owner is asked as before.
 - **Corrective rounds and crash retries** are two budgets (ADR-0067). Every
   lane contract loop has one corrective round on a work-product defect, then
   the `seat-failure` park. A retry bought at that park is one invocation
@@ -833,6 +849,32 @@ suite authoring (seat) → freeze (process).
   An arm that parks does not lose the arms behind it: a render whose open suite
   defects have earned no re-freeze still owes one, and the ladder re-enters to
   deliver it before the next cycle starts.
+
+  The class decides the arm and the confirmation decides nothing about a suite
+  defect (ADR-0094). A confirmed review finding about a frozen test is exactly
+  the shape that used to reach a repair seat, which may not edit one. Every
+  review finding therefore states `fix`, `code` or `suite`, in both lanes; a
+  suite fix names one frozen test in its ground and carries the card claim where
+  an earlier story wrote that test; and a confirmed one is stamped
+  `suite-defect` with a depth and takes the amendment arm.
+- **A repair round that moved nothing says so** (ADR-0094). It stamps
+  `repair-no-change` in place of the implementation commit, which moves no code
+  head, so the loop buys no review cycle over a diff it already judged. The
+  round still counts against the cap, the stall and the fresh pass. The progress
+  rule drops such a round where a re-freeze answered the collision it named: the
+  amendment was what had to move the findings, and it landed. A round that
+  changed nothing and named no pin is refused once by the check loop and
+  accepted on the second report, which costs one corrective invocation and never
+  a park.
+- **The harness runs a review seat's suite claims itself** (ADR-0094). Once per
+  review round, before the verifier spawns: the project's own suite command,
+  narrowed to the claimed files, outside the spectrum, with its own kept log.
+  The reading is per file and it is not the exit code. A file is `red` where the
+  part that ran it reported it failed, `green` where a part passed AND said it
+  selected the file, and `unselected` in every other case. A red confirms the claim's
+  premise; a green makes the finding advisory and carries the claim to the
+  triage of a later red in that file; an unselected file leaves the verifier's
+  own reading in force.
 - **An intent ruling reaches the frozen suite.** An intent-level suite defect
   parks for the owner, who names the frozen test the ruling amends. The ruling
   then rides the re-freeze behind it: the spec seat writes the supersede
@@ -851,10 +893,13 @@ suite authoring (seat) → freeze (process).
   test the owner pinned (`olympus:owner-pinned` in the test file, recorded at
   the freeze). Three sites classify this way, and all three are one obligation
   with one record (ADR-0091): the spec states the supersede at birth, the spec
-  gate finds the collision, or the verdict triage finds it after the freeze. The
-  amendment nobody was asked about is read by the panel's spec lens on the cycle
-  behind it, whichever site stamped it, and every authorization is a
-  `supersede-authorized` stamp the eval review counts by site.
+  gate finds the collision, or a seat finds it after the freeze: the conflict
+  triage over a reported collision, the verdict triage over a red, or a review
+  seat over the diff (ADR-0094). The amendment nobody was asked about is read by
+  the panel's spec lens on the cycle behind it, whichever site stamped it, and
+  every authorization is a `supersede-authorized` stamp the eval review counts
+  by site. Each one is settled once, from the ledger, against the write that
+  executed it, and a write that leaves one owed is refused with the entry named.
   `lanes.story.cardAuthorizedSupersede: false` restores the always-park default,
   at every site.
 - **Covered is necessity, not naming** (ADR-0053). The classifier asks one

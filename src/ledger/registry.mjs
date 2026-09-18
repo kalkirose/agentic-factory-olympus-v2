@@ -280,6 +280,18 @@ export const RUN_EVENTS = new Set([
   // the records exist and this run did not write them, which is what the born
   // and late counts read.
   'records-committed',
+  // One suite write, committed: the `sha`, the `phase` it belongs to, the
+  // `files` the seat declared and the `changed` paths the commit really moved.
+  //
+  // The two file lists answer two questions and neither one stands in for the
+  // other. `files` is the declaration: the set the seat says its write is about,
+  // which a later reader briefs a seat with. `changed` is the commit,
+  // read from git while both shas are still live. A declaration holds files the
+  // write never touched, so an amendment obligation settled from `files` is an
+  // obligation nothing executed; and a commit read later cannot be read at all
+  // once a fresh pass has reset the branch past it, because the freeze makes no
+  // commit of its own and these shas are the only handles on the suite writes
+  // (ADR-0094). A stamp from before the field existed carries no `changed`.
   'suite-committed',
   // Retired names, kept so an archived ledger still reads. Nothing writes
   // them: the stage that did is gone from the lane.
@@ -332,15 +344,36 @@ export const RUN_EVENTS = new Set([
   'freeze-inherited',
   // verdict
   'implementation-committed',
-  // A dev pass that handed over a red tree and said which frozen tests it
-  // attributes the red to: the `files` and the `count` of clauses. The entries
-  // themselves stay in the seat report, which the triage brief reads. It is
-  // evidence for the verdict and not a defect of the seat: the seat may not
-  // touch a test file, so a collision it finds after the freeze has exactly one
-  // legal answer, and the triage classes it (ADR-0091). A run where every named
-  // file is then classed `code-defect` is a seat that used the field to dodge
-  // work, and the count is what says so.
+  // An implementing pass that handed over a tree and said which frozen tests it
+  // attributes a red to: the `files` and the `count` of clauses. The entries
+  // themselves stay in the seat report, which the brief of the seat that judges
+  // them reads. It is evidence for the verdict and not a defect of the seat:
+  // such a seat may not touch a test file, so a collision it finds after the
+  // freeze has exactly one legal answer (ADR-0091). A run where every named file
+  // is then classed `code-defect` is a seat that used the field to dodge work,
+  // and the count is what says so. `seat` names which of the two wrote it, so a
+  // reader tells a first pass's red from a repair round's measurement.
+  //
+  // Both implementing seats write it. The first pass reports a red it cannot
+  // fix; a repair seat reports a collision inside the findings it was handed,
+  // over a tree it may have left exactly as it found it, so its report carries
+  // the entries whatever the suite said (ADR-0094).
   'dev-suite-conflict',
+  // The judgment over one `dev-suite-conflict`: `answers`, the seq of the stamp
+  // it settles, `before`, the step it ran in front of (`spectrum` at the open of
+  // a cycle, `repair` inside the ladder), and the `findings` it raised. Quiet,
+  // because a collision the seat named is evidence the verdict was built to act
+  // on, and this is the act (ADR-0094). `answers` is the idempotency key: a
+  // restart between the findings and this stamp rebuilds the ids from the ledger
+  // rather than minting a second set.
+  'conflict-triage',
+  // A repair round whose tree did not move: the `conflicts` it named instead.
+  // A round that changed nothing earns no verdict cycle, and stamping the
+  // implementation commit for it would buy a whole review over a diff that is
+  // byte for byte the judged one. It still counts as a round, so the round cap
+  // and the stall reach it exactly as they reach a round that moved the tree
+  // (ADR-0094).
+  'repair-no-change',
   // One gate layer, at the moment its process starts: the cycle, the layer,
   // the sha, and the attempt (the flake filter's re-run is the second). A
   // layer can hold a run for an hour, and without this the ledger ran silent
@@ -443,7 +476,36 @@ export const RUN_EVENTS = new Set([
   // question of a moved base per finding, whether the branch touched that
   // ground, and a finding that names none costs the run its whole code
   // certification (ADR-0056).
+  //
+  // A review finding also says where its fix lives: `fix` is `code` or `suite`.
+  // A suite fix carries the card claim under `supersede` and is stamped
+  // `class: 'suite-defect'` with a `depth`, so it takes the amendment route and
+  // never a repair round (ADR-0094).
+  //
+  // `answers` is the seq of the `dev-suite-conflict` a conflict-triage finding
+  // rules on. It is the idempotency key of that step: a restart between the
+  // findings and the step's own stamp rebuilds the ids from the ledger rather
+  // than minting a second set (ADR-0094).
   'finding',
+  // The claim run of one review round, at the moment its process starts: the
+  // `cycle`, the verifier `items` it is about, the `files` it claims, the
+  // `parts` it asked the command for and the `log` it writes. It holds the run
+  // for as long as the suite layer does, and without the stamp the ledger runs
+  // silent from the review seats' reports to the verifier's spawn, which reads
+  // to a person exactly like a run that died (ADR-0094).
+  'claim-started',
+  // What the claim run said about one claimed file: the `cycle`, the verifier
+  // `item`, the `file`, the `part` that answered for it, the `result` (`red`,
+  // `green` or `unselected`) and the `log`. One per finding, before the verifier
+  // spawns, and the re-entry key of the run: a round whose every item already
+  // has one reads the results off the ledger and runs nothing.
+  'claim-run',
+  // A suite claim the harness's own run turned green. The finding is advisory
+  // whatever the verifier says: the test it wants amended passes at the judged
+  // sha, so the premise of the claim is not met. It is recorded rather than
+  // dropped, because a later red in that file reaches the triage with the claim
+  // already written (ADR-0094).
+  'claim-unproven',
   // The cycle boundary, and what the cycle did not have to buy. `partsRun`,
   // `partsCarried` and `carryShare` are the cycle's carry (ADR-0058); a
   // footprint cycle carries whole layers and holds no part table, so it stamps
@@ -485,6 +547,13 @@ export const RUN_EVENTS = new Set([
   // It is a round of the code repair alone: a decision record is corrected in
   // the reconcile stage, under `reconcile-round`, and no seat that writes code
   // may touch a record (ADR-0074).
+  //
+  // `changed: false` says the round left the tree exactly as the render found
+  // it. One reader takes it: the progress rule drops such a round where a
+  // re-freeze answered the collision it named, because the amendment was what
+  // had to move the findings and it landed. A round from an older ledger
+  // carries no field and reads as moved, which is what those rounds were
+  // (ADR-0094).
   'repair-round',
   // The run stopped moving on its own findings, and the reason says how: a
   // repair round that closed none of them (`no-progress`), a suite defect that
@@ -504,6 +573,13 @@ export const RUN_EVENTS = new Set([
   // checks the card against, and the count of them is what an outlier window is
   // read from (ADR-0044).
   'supersede-authorized',
+  // One authorized supersede, settled: the `test`, the `site` that authorized
+  // it and the `write` that executed it. An amendment obligation is settled
+  // once and is never asked for again, so a suite write is refused for an
+  // obligation the run still owes and for no other. Without it the run asks
+  // every later write to amend a file an earlier write already amended, and
+  // the second refusal parks a seat that did nothing wrong (ADR-0094).
+  'supersede-settled',
   // The suite amended and frozen again, at the sha the amendment commits at.
   // `source: 'merge-round'` names the one writer whose sha is not the code
   // head: that re-freeze commits the merged tests inside a merge the stage has
@@ -1192,6 +1268,23 @@ export const GATE_INTEGRITY_KINDS = new Set([
   // classifying, or that `repo.recordPaths` names a tree the reviews do not
   // read. Stamped at close-out, in both lanes.
   'record-finding-shipped',
+  // A fresh pass taken over a suite defect no re-freeze of the run ever
+  // carried. The pass discards a whole implementation, and a defect about a
+  // frozen test is not what an implementation can answer: the route the run
+  // took was the amendment route, and it never reached it. Threshold nought:
+  // one of these is a suite finding that was routed to the code arm (ADR-0094). A stalled suite defect a re-freeze DID carry is the legitimate
+  // route and raises none.
+  'fresh-pass-suite-route',
+  // A frozen-surface collision an implementing seat reported and no judgment
+  // answered. The seat measured the tree and wrote down what it found; a run
+  // that walks past it pays a repair round, a review cycle and a fresh pass to
+  // rediscover the same fact. Threshold nought (ADR-0094).
+  'report-unconsumed',
+  // A confirmed suite finding whose claim the harness never ran. The claim run
+  // is what tells a real collision from a reading, and a finding that reached
+  // the amendment route without one amends a frozen test on a seat's word
+  // alone. Threshold nought (ADR-0094).
+  'claim-unrun',
 ]);
 
 // The kinds a step stamps on the record of the defect it just met. These

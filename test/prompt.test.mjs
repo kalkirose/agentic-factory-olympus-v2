@@ -66,6 +66,7 @@ test('one seat per group carries the text', () => {
 test('the authority order reaches exactly the judging seats', () => {
   const judging = new Set([
     'spec-gate',
+    'conflict-triage',
     'fury-spec',
     'fury-code-shape',
     'fury-operational',

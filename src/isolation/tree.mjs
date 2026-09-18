@@ -508,6 +508,24 @@ export async function changedInRange(tree, from, to) {
 }
 
 /**
+ * What one commit moved, recorded where both shas are still live: the paths of
+ * the range, forward-slashed, and nothing at all for a write that committed
+ * nothing.
+ *
+ * Every writer of a suite commit records this beside the file list its seat
+ * declared, because the two are different facts and only one of them is the
+ * commit. A reader that comes back later cannot always ask git: a fresh pass
+ * resets the branch, and a commit before it is then reachable through the
+ * reflog alone. An unreadable range answers with nothing rather than throwing,
+ * for the same reason: the caller is recording a fact, not deciding one.
+ */
+export async function commitChanged(tree, from, to) {
+  if (from === to) return [];
+  const changed = await changedInRange(tree, from, to).catch(() => []);
+  return changed.map((path) => path.replaceAll('\\', '/'));
+}
+
+/**
  * File paths the tree's HEAD changes against a base ref, counted from the
  * commit the two last shared. That is the set the forge shows on a request:
  * what the base gained after the branch left it belongs to the base, not to

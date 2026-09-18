@@ -44,6 +44,7 @@ import {
   restorePaths,
   reviewDiff,
   changedInRange,
+  commitChanged,
   resetHard,
 } from '../isolation/tree.mjs';
 import { MAX_DIFF_BYTES, git } from '../isolation/git.mjs';
@@ -128,6 +129,7 @@ import {
 } from './parts.mjs';
 import { substrateGate } from './substrate.mjs';
 import { furyRound, generalistReview, recordFields } from './review.mjs';
+import { unprovenClaims } from './claims.mjs';
 import { panelLenses } from './lenses.mjs';
 import {
   RECORD_TAKEBACK_NOTE,
@@ -152,6 +154,7 @@ import {
   authorizedSupersedes,
   refusalLine,
   supersedeClaim,
+  supersedeRefusal,
   supersedeRuling,
 } from './supersede.mjs';
 import { SUITE_SCHEMA, SPEC_AMEND_SCHEMA, specLintDefects } from './story.mjs';
@@ -182,7 +185,6 @@ import {
   freezeSuiteFiles,
   seatReportAfter,
   seatFailureAfter,
-  lastSeatReportEvent,
   readJson,
   parkDirective,
   GATE_FORMS,
@@ -530,7 +532,15 @@ function verdictHandler(mode, nextStage) {
 // -- what a stop left half done ----------------------------------------------
 
 /** The stamps that bound a step of the ladder. */
-const STEP_BOUNDARIES = new Set(['fresh-pass', 'repair-round', 'verdict-rendered']);
+const STEP_BOUNDARIES = new Set([
+  'fresh-pass',
+  'repair-round',
+  'repair-no-change',
+  'verdict-rendered',
+]);
+
+/** The stamps that end one implementing dispatch, whatever it did to the tree. */
+const ROUND_ENDED = new Set(['implementation-committed', 'repair-no-change']);
 
 /**
  * The step of the ladder that never finished, read from the ledger alone, or
@@ -573,8 +583,17 @@ export function interruptedStep(events) {
   const spawn = reversed.find(
     (e) => e.event === 'seat-spawned' && e.seat === 'repair-dev' && e.seq > last.seq,
   );
-  if (!spawn || committedAfter(spawn.seq)) return null;
+  // A round that ended is a round that ended, whatever it did to the tree. A
+  // repair seat that changed nothing stamps `repair-no-change` and no
+  // implementation commit, and a rule that looked for the commit alone would
+  // re-dispatch a round that had already reported (ADR-0094).
+  if (!spawn || roundEnded(events, spawn.seq)) return null;
   return { kind: 'repair-round' };
+}
+
+/** Whether an implementing dispatch after this seq reached a stamp of its own. */
+function roundEnded(events, seq) {
+  return events.some((e) => ROUND_ENDED.has(e.event) && e.seq > seq);
 }
 
 /**
@@ -600,13 +619,13 @@ async function resumeInterrupted(ctx, base, mode) {
   if (!step) return null;
   const renders = events.filter((e) => e.event === 'verdict-rendered');
   const last = renders[renders.length - 1];
-  const { code, suiteDefects } = openSets(events, last, mode);
+  const { code, suiteDefects } = ladderSets(events, renders, last, mode);
   await resetHard(base.worktree, await headSha(base.worktree));
   if (step.kind === 'fresh-pass') {
     const outcome = await freshPass(ctx, base, mode, {
       newPass: step.stamp.pass,
       trigger: step.stamp.trigger,
-      open: [...code, ...suiteDefects],
+      open: distinct([...code, ...suiteDefects]),
       last,
     });
     return outcome.fail ?? null;
@@ -620,6 +639,11 @@ async function resumeInterrupted(ctx, base, mode) {
     cap: REPAIR_CAP,
   });
   return outcome.fail ?? null;
+}
+
+/** One set of findings, by id, in the order they were first named. */
+function distinct(findings) {
+  return [...new Map(findings.map((f) => [f.id, f])).values()];
 }
 
 /**
@@ -639,6 +663,14 @@ export function repairRounds(events, pass) {
  * One derivation, because the ladder and the resume above must brief a seat
  * with the same set: a step dispatched again over a narrower set would repair
  * less than the step the stop interrupted.
+ *
+ * On the story lane the class decides the arm and the confirmation decides
+ * nothing about a suite defect. A confirmed review finding about a frozen test
+ * is exactly the shape that used to reach a repair seat, which may not edit a
+ * test: the round moved nothing, the loop read the empty commit as a moved tree
+ * and bought a review cycle over it, and the same finding twice spent the run's
+ * one fresh pass (ADR-0094). The repair lane freezes no suite, so a suite fix
+ * there is an ordinary edit and stays in the code set.
  */
 function openSets(events, last, mode) {
   const index = findingIndex(events);
@@ -649,20 +681,66 @@ function openSets(events, last, mode) {
     suiteDefects,
     intent: suiteDefects.filter((f) => f.depth === 'intent'),
     ops: open.filter((f) => f.class === 'env' || f.class === 'harness'),
-    code: open.filter(
-      (f) =>
-        f.confirmed === true ||
-        f.class === 'code-defect' ||
-        (mode !== 'story' && f.class === 'suite-defect'),
+    code: open.filter((f) =>
+      mode === 'story'
+        ? f.class !== 'suite-defect' && (f.confirmed === true || f.class === 'code-defect')
+        : f.confirmed === true || f.class === 'code-defect' || f.class === 'suite-defect',
     ),
+  };
+}
+
+/**
+ * The sets one ladder entry acts on: the render's own open sets, widened by
+ * what the entry itself has to answer.
+ *
+ * Two widenings, and both exist so that a step dispatched twice is dispatched
+ * over the same set.
+ *
+ * A suite defect that survived its own re-freeze goes to the code arm, because
+ * the tree is the suspect from there, and the routing above keeps it out of the
+ * code set, so the arm would brief a seat with nothing. It also closes a hole
+ * older than that routing: a triage-sourced suite defect that stalls and is
+ * answered `repair-again` reached a repair seat with an empty brief.
+ *
+ * The findings a conflict triage raised inside this entry are not on any
+ * render: the render that opened the entry was written before the triage ran.
+ * They join the arm each one belongs to.
+ *
+ * `ladder` and the interrupted-step resume both read this. A resume that read
+ * the narrower sets would re-dispatch a round over less than the round it is
+ * replacing, which is what `openSets` itself is for (ADR-0094).
+ */
+function ladderSets(events, renders, last, mode) {
+  const sets = openSets(events, last, mode);
+  const stalled = suiteDefectStalled(events, renders, last, sets.suiteDefects);
+  const fresh = conflictOpen(events, last);
+  const freshSuite = fresh.filter((f) => f.class === 'suite-defect');
+  // `suiteDefects` is what the suite arm may still amend. A defect that
+  // survived its own re-freeze is not one of them, because one defect buys one
+  // amendment and the tree is the suspect from there. A collision this entry has
+  // only just learned about has had no amendment at all.
+  const suiteDefects = stalled ? freshSuite : [...sets.suiteDefects, ...freshSuite];
+  const code = [
+    ...sets.code,
+    ...fresh.filter((f) => f.class === 'code-defect'),
+    ...(stalled ? sets.suiteDefects : []),
+  ];
+  return {
+    open: [...sets.open, ...fresh],
+    suiteDefects,
+    intent: suiteDefects.filter((f) => f.depth === 'intent'),
+    ops: sets.ops,
+    code,
+    stalled,
+    fresh,
   };
 }
 
 // -- one verdict cycle -------------------------------------------------------
 
 async function runCycle(ctx, base, mode, { cycle }) {
-  const startEvents = runEvents(ctx);
-  const suiteSha = mode === 'story' ? currentSuiteSha(startEvents) : null;
+  let startEvents = runEvents(ctx);
+  let suiteSha = mode === 'story' ? currentSuiteSha(startEvents) : null;
   const pass = currentPass(startEvents);
   const impl = lastImplementation(startEvents);
   // What the capture took back before this tree was committed. Every seat this
@@ -672,6 +750,32 @@ async function runCycle(ctx, base, mode, { cycle }) {
     await restorePaths(base.worktree, restoreAnchor(startEvents), base.testPaths, {
       except: base.frozenExclusions,
     });
+  }
+  // The collisions the implementing seat reported, judged and amended before
+  // this cycle buys a single gate layer.
+  //
+  // It runs AFTER the structural restore, because the restore is derived from
+  // the events read at the top of this function and would revert an amendment
+  // committed in front of it. It runs BEFORE the sha is read, the plan is made
+  // and the spectrum starts, because the amendment moves the tree, the suite
+  // sha and the part plan's stale-carry cut, and a cycle that read those first
+  // would spend the whole spectrum on a suite the run had already decided to
+  // change (ADR-0094).
+  //
+  // An unauthorized conflict finding rides this cycle's render, where the
+  // ladder parks the owner on it exactly as it does on a triage-sourced one.
+  let conflictRiding = [];
+  if (mode === 'story') {
+    const settled = await settleConflicts(ctx, base, { cycle });
+    if (settled.fail) return { directive: settled.fail };
+    conflictRiding = settled.riding;
+    if (settled.amended) {
+      // The cycle re-derives what the amendment moved. The suite sha keys the
+      // cycle fingerprint and the render, and the part plan reads the newest
+      // re-freeze to drop a carry the amendment made stale.
+      startEvents = runEvents(ctx);
+      suiteSha = currentSuiteSha(startEvents);
+    }
   }
   const sha = await headSha(base.worktree);
   const gates = {
@@ -781,7 +885,14 @@ async function runCycle(ctx, base, mode, { cycle }) {
     prevRender && prevRender.pass === pass
       ? prevRender.open.map((id) => index.get(id)).filter(Boolean)
       : [];
-  const triagePrior = priorOpen.filter((f) => f.source === 'triage');
+  // The findings a seat of this run raised about the reds themselves, whichever
+  // seat raised them. Both resolve the same way, because a green spectrum leaves
+  // them no evidence, so both are re-derived by the triage the reds reach. A
+  // filter that admitted one would drop the other at the next render
+  // (ADR-0094).
+  const triagePrior = priorOpen.filter(
+    (f) => f.source === 'triage' || f.source === 'conflict-triage',
+  );
 
   // Verdict triage fires only when persistent reds exist. Findings from a
   // green spectrum resolve mechanically: their evidence is gone.
@@ -797,13 +908,17 @@ async function runCycle(ctx, base, mode, { cycle }) {
   // after a re-freeze or an operational fix alone, because the tree did not
   // change.
   const newTree = !prevRender || prevRender.pass !== pass;
+  // A round that moved the tree. A round that moved nothing left the judged diff
+  // exactly as the render found it, so taking this branch would review an
+  // already-judged implementation and leave the amendment behind it unreviewed
+  // (ADR-0094).
   const repaired =
-    prevRender && eventsAfter(events, prevRender.seq).some((e) => e.event === 'repair-round');
-  const cardRuled = prevRender
-    ? eventsAfter(events, prevRender.seq).find(
-        (e) => e.event === 're-freeze' && e.ruling?.source === 'card' && e.baseSha,
-      )
-    : null;
+    prevRender &&
+    eventsAfter(events, prevRender.seq).some(
+      (e) => e.event === 'repair-round' && e.changed !== false,
+    );
+  // Every suite amendment this cycle owes a review, each over its own range.
+  const amendments = amendmentBlocks(events, prevRender);
   const priorConfirmed = priorOpen.filter((f) => f.confirmed);
   let reviewOpen = priorConfirmed;
   // What the judgment seats of this cycle were actually given. The whole diff
@@ -813,9 +928,12 @@ async function runCycle(ctx, base, mode, { cycle }) {
   // carries the word for it: on the findings it raised, and on the cycle
   // record, which is stamped even when the round came out clean (ADR-0066).
   let diffTruncated = false;
-  const readDiff = async (from, to) => {
+  // Each read writes the whole diff to its own file, because the brief names
+  // that file and tells the seat to read it: a second read under one name would
+  // overwrite the text the seat was sent to (ADR-0094).
+  const readDiff = async (from, to, name = `diff-c${cycle}`) => {
     const diff = await reviewDiff(base.worktree, from, to, {
-      path: reviewDiffPath(ctx.paths, ctx.runId, `diff-c${cycle}`),
+      path: reviewDiffPath(ctx.paths, ctx.runId, name),
       exclude: base.config?.review?.excludeFromDiff,
       excerptChars: base.config?.review?.excerptChars,
     });
@@ -831,33 +949,48 @@ async function runCycle(ctx, base, mode, { cycle }) {
     (await changedInRange(base.worktree, from, to).catch(() => [])).filter(
       (file) => !recordPathIncludes(file, base.recordPaths),
     );
+  // One labelled block per owed amendment, each read over its own range and
+  // written to its own file. A range from the first amendment's base to the
+  // last one's head would swallow whatever was committed between them, and a
+  // repair round between two amendments is exactly that.
+  const amendmentBlock = async (entry, i) => ({
+    label: `the suite amendment at ${entry.sha}`,
+    diff: await readDiff(entry.baseSha, entry.sha, `diff-c${cycle}-amendment-${i + 1}`),
+    diffFiles: await readFiles(entry.baseSha, entry.sha),
+  });
+  const amendmentList = async () =>
+    Promise.all(amendments.map((entry, i) => amendmentBlock(entry, i)));
   if (newTree) {
     const diff = await readDiff(impl.baseSha, impl.sha);
     const diffFiles = await readFiles(impl.baseSha, impl.sha);
     const round =
       mode === 'story'
-        ? await furyRound(ctx, base, { cycle, diff, diffFiles })
-        : await generalistReview(ctx, base, { cycle, diff, diffFiles, priorConfirmed: [] });
+        ? await furyRound(ctx, base, { cycle, diff, diffFiles, mode, amendment: await amendmentList() })
+        : await generalistReview(ctx, base, { cycle, diff, diffFiles, priorConfirmed: [], mode });
     if (round.fail) return { directive: round.fail };
     reviewOpen = round.confirmed;
-  } else if (repaired) {
-    const diff = await readDiff(impl.baseSha, impl.sha);
-    const diffFiles = await readFiles(impl.baseSha, impl.sha);
-    const round = await generalistReview(ctx, base, { cycle, diff, diffFiles, priorConfirmed });
-    if (round.fail) return { directive: round.fail };
-    reviewOpen = [
-      ...priorConfirmed.filter((f) => !round.resolved.includes(f.id)),
-      ...round.confirmed,
+  } else if (repaired || amendments.length > 0) {
+    // The repair diff first where the round has one, then one block per owed
+    // amendment. An amendment on the card's authority was judged by nobody: the
+    // quote check proves the words are in the card, and whether the words reach
+    // the assertion that changed is a judgment (ADR-0044). An amendment behind
+    // any other ruling owes the same round for a different reason: a confirmed
+    // review finding is dropped only by a verifier that resolution-checks it,
+    // and a cycle that ran no round leaves it open until the run spends its
+    // fresh pass on it (ADR-0094).
+    const blocks = [
+      ...(repaired
+        ? [
+            {
+              label: 'the repair round',
+              diff: await readDiff(impl.baseSha, impl.sha),
+              diffFiles: await readFiles(impl.baseSha, impl.sha),
+            },
+          ]
+        : []),
+      ...(await amendmentList()),
     ];
-  } else if (cardRuled) {
-    // A re-freeze behind a human ruling was judged by the human who ruled. A
-    // re-freeze on the card's authority was judged by nobody: the quote check
-    // proves the words are in the card, and whether the words reach the
-    // assertion that changed is a judgment. So the panel reads that amendment's
-    // own diff — one seat, only where nobody was asked (ADR-0044).
-    const diff = await readDiff(cardRuled.baseSha, cardRuled.sha);
-    const diffFiles = await readFiles(cardRuled.baseSha, cardRuled.sha);
-    const round = await generalistReview(ctx, base, { cycle, diff, diffFiles, priorConfirmed });
+    const round = await generalistReview(ctx, base, { cycle, blocks, priorConfirmed, mode });
     if (round.fail) return { directive: round.fail };
     reviewOpen = [
       ...priorConfirmed.filter((f) => !round.resolved.includes(f.id)),
@@ -865,7 +998,7 @@ async function runCycle(ctx, base, mode, { cycle }) {
     ];
   }
 
-  let open = [...triageOpen, ...reviewOpen];
+  let open = [...triageOpen, ...reviewOpen, ...conflictRiding];
 
   // The confirmation sweep: a targeted cycle proves nothing about the layers
   // it carried, so no green verdict rests on them. A clean targeted cycle
@@ -943,6 +1076,9 @@ async function runCycle(ctx, base, mode, { cycle }) {
   // says so: the layer is green, the cycle is clean, and the only symptom is
   // the minutes.
   stampWholeRerun(ctx, { cycle, sha, parts });
+  // A collision an implementing seat reported that no judgment ever answered.
+  // Read here, once per cycle, before the render closes it.
+  if (mode === 'story') stampUnconsumedReports(ctx, runEvents(ctx), cycle);
   const record = {
     runId: ctx.runId,
     cycle,
@@ -1271,20 +1407,59 @@ function partSummary(part, layerMode) {
 }
 
 /**
- * The frozen-suite conflicts the dev pass that produced this tree reported.
+ * The newest frozen-surface collision an implementing seat reported that
+ * nothing has answered, or null.
  *
- * The last dev report and no earlier one: an earlier pass's conflicts were
- * either answered by the re-freeze that followed them or are the same clauses
- * this pass reports again. A report older than the last `re-freeze` is spent —
- * the suite it named has been amended since, so briefing it would hand the
- * triage a collision the run already settled.
+ * Two things spend a conflict stamp. A `conflict-triage` answers it by name, on
+ * the seq. A `re-freeze` after it spends it whatever raised it: the suite the
+ * stamp named has been amended since, so acting on it would hand a seat a
+ * collision the run already settled.
+ *
+ * One derivation, because two steps read it: the conflict triage that judges an
+ * open stamp, and the ordinary verdict triage, whose brief carries the entries
+ * of a stamp nobody judged. Two readings of "is this collision still open"
+ * would let one step act on a stamp the other had retired (ADR-0094).
+ */
+function openConflictStamp(events) {
+  const stamp = [...events].reverse().find((e) => e.event === 'dev-suite-conflict');
+  if (!stamp) return null;
+  const refreeze = events.filter((e) => e.event === 're-freeze').pop();
+  if (refreeze && stamp.seq < refreeze.seq) return null;
+  if (events.some((e) => e.event === 'conflict-triage' && e.answers === stamp.seq)) return null;
+  return stamp;
+}
+
+/**
+ * The report one conflict stamp was written from: the newest implementing
+ * seat's report at or before it.
+ *
+ * The stamp is appended inside the capture step, after the seat's report and
+ * before the commit, so the report behind it is always the one it is about.
+ * Both implementing seats write such a report, and both can name a conflict.
+ */
+function conflictReport(events, stamp) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.seq > stamp.seq) continue;
+    if (e.event === 'seat-report' && (e.seat === 'dev' || e.seat === 'repair-dev')) return e;
+  }
+  return null;
+}
+
+/**
+ * The conflict entries the ordinary verdict triage is briefed with: the ones of
+ * an open stamp no conflict triage answered.
+ *
+ * In the ordinary course this is empty, because the conflict triage answers
+ * every open stamp before the spectrum runs. It is the answer for a run that
+ * was launched before that step existed and resumed onto it, whose stamp no
+ * `conflict-triage` names.
  */
 function devSuiteConflicts(events) {
-  const report = lastSeatReportEvent(events, 'dev');
-  if (!report) return [];
-  const refreeze = events.filter((e) => e.event === 're-freeze').pop();
-  if (refreeze && report.seq < refreeze.seq) return [];
-  return readJson(report.path)?.suiteConflicts ?? [];
+  const stamp = openConflictStamp(events);
+  if (!stamp) return [];
+  const report = conflictReport(events, stamp);
+  return report ? (readJson(report.path)?.suiteConflicts ?? []) : [];
 }
 
 /** A gate command that could not run at all: an environment defect. */
@@ -1338,6 +1513,9 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
   }
   const redLayers = reds.map((r) => r.layer);
   const conflicts = devSuiteConflicts(events);
+  // The suite claims this run already ran and found green. A later red in one
+  // of those files reaches this seat with the claim already written.
+  const unproven = unprovenClaims(events);
   const takeBacks = recordedTakeBacks(events);
   // What the harness already read as a cause outside the tree, and the ladder
   // it already climbed against it. The seat is told, and the checks below
@@ -1370,6 +1548,7 @@ export async function triageStep(ctx, base, { cycle, reds, priorOpen, dropped = 
           { replays, budget, layers: tier1 },
           transient,
           conflicts,
+          unproven,
         ),
       // A report that asks for a probe it can still have is a request and not
       // a verdict, so the coverage rules do not judge it. Past the round
@@ -1457,6 +1636,411 @@ const RECAPTURE_FINDING_NOTE =
   "verdict's re-freeze re-takes. The class was decided at the revert and is " +
   'honored here: the take-back is a record and not an open item, so no ' +
   'gate-integrity defect is stamped for it.';
+
+// -- conflict triage (seat) --------------------------------------------------
+
+/**
+ * The report shape of the seat that judges one implementing seat's
+ * frozen-surface collisions.
+ *
+ * It is the triage shape less the three fields a spectrum puts in it. There is
+ * no `layers`, because the evidence is a report and not a gate run; no
+ * `persisting`, because the entries it answers are this report's own and no
+ * earlier cycle's; and no `probe`, because the question is what the card says
+ * about a pin, which no layer run answers.
+ *
+ * `entry` is the 1-based conflict entry the finding answers. A finding that
+ * named a file instead would leave two entries about one file indistinguishable
+ * (ADR-0094).
+ */
+export const CONFLICT_TRIAGE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    findings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          entry: { type: 'integer' },
+          class: { type: 'string', enum: ['suite-defect', 'code-defect'] },
+          depth: { type: 'string', enum: ['test', 'spec', 'intent'] },
+          summary: { type: 'string' },
+          evidence: { type: 'string' },
+          // A suite-defect finding may carry the card's own authorization for
+          // the amendment it needs. Four facts or nothing (ADR-0044).
+          ...SUPERSEDE_CLAIM_PROPERTIES,
+        },
+        required: ['entry', 'class', 'summary', 'evidence'],
+      },
+    },
+    summary: { type: 'string' },
+  },
+  required: ['findings', 'summary'],
+};
+
+/**
+ * The three things a conflict-triage report is refused for, and nothing else.
+ * Every other reading of it is the card check's or nobody's.
+ */
+function conflictTriageChecks(report, conflicts) {
+  const defects = [];
+  const answered = new Map();
+  for (const [index, finding] of (report.findings ?? []).entries()) {
+    const label = `finding #${index + 1}`;
+    if (!Number.isInteger(finding.entry) || finding.entry < 1 || finding.entry > conflicts.length) {
+      defects.push(
+        `${label} names entry ${finding.entry}; the entries are 1 to ${conflicts.length}.`,
+      );
+      continue;
+    }
+    answered.set(finding.entry, (answered.get(finding.entry) ?? 0) + 1);
+    if (finding.class === 'suite-defect' && !finding.depth) {
+      defects.push(
+        `${label} classes entry ${finding.entry} "suite-defect" and states no "depth". A suite ` +
+          'defect is answered by amending a test ("test"), the spec ("spec") or the intent the ' +
+          'spec rests on ("intent"), and the depth is which.',
+      );
+    }
+  }
+  for (let entry = 1; entry <= conflicts.length; entry++) {
+    const count = answered.get(entry) ?? 0;
+    if (count === 1) continue;
+    defects.push(
+      count === 0
+        ? `entry ${entry} (${conflicts[entry - 1].test}) has no finding. Every entry is answered.`
+        : `entry ${entry} (${conflicts[entry - 1].test}) has ${count} findings. Each entry is ` +
+          'answered by exactly one.',
+    );
+  }
+  return defects;
+}
+
+/**
+ * The seat that judges the collisions an implementing seat reported, before the
+ * run spends anything on them.
+ *
+ * The seat exists because the report was being thrown away. An implementing
+ * seat that meets a frozen pin it cannot satisfy has one legal thing to say,
+ * and it says it; without a seat to rule on that sentence the run took the
+ * route it takes for an unexplained red, which is a whole spectrum, a triage
+ * over its output and a repair round that cannot touch a test file (ADR-0094).
+ *
+ * It is dispatched by the stamp it answers and not by the cycle, because both
+ * sites can reach it and the cycle number differs between them. `answers` is
+ * the label, the resume anchor and the idempotency key of everything it writes:
+ * a restart between its report and its findings re-reads the report, and a
+ * restart between its findings and its own stamp rebuilds the ids from the
+ * ledger rather than minting a second set.
+ *
+ * @param {{before: 'spectrum'|'repair', cycle: number}} opts `before` is the
+ *   step this dispatch stands in front of, which is what a reader of the
+ *   ledger needs to place it.
+ * @returns {Promise<{findings: object[], fail?: object}>}
+ */
+async function conflictTriageStep(ctx, base, { before, cycle }) {
+  const events = runEvents(ctx);
+  const stamp = openConflictStamp(events);
+  if (!stamp) return { findings: [] };
+  const report = conflictReport(events, stamp);
+  const conflicts = readJson(report?.path)?.suiteConflicts ?? [];
+  if (conflicts.length === 0) return { findings: [] };
+  const answers = stamp.seq;
+  const label = `conflict-triage-s${answers}`;
+  const stamped = events.filter(
+    (e) => e.event === 'finding' && e.source === 'conflict-triage' && e.answers === answers,
+  );
+  let findings = stamped.map((e) => findingFromEvent(e));
+  if (stamped.length === 0) {
+    const outcome = await seatWithChecks(ctx, {
+      seat: 'conflict-triage',
+      label,
+      // A report the ledger holds for this label after the stamp it answers is
+      // this dispatch's answer, and the checks judge it again before it stands.
+      resumeByReport: answers,
+      schema: CONFLICT_TRIAGE_SCHEMA,
+      cwd: base.worktree,
+      env: base.env,
+      constitution: base.constitution,
+      buildRole: (brief) => conflictTriageRole(base, conflicts, brief),
+      checks: (r) => conflictTriageChecks(r, conflicts),
+    });
+    if (outcome.fail) return { fail: outcome.fail, findings: [] };
+    let nextId = 1 + runEvents(ctx).filter((e) => e.event === 'finding').length;
+    findings = outcome.report.findings.map((f) => {
+      const claim = supersedeClaim(f);
+      const entry = conflicts[f.entry - 1];
+      const finding = {
+        id: `F${nextId++}`,
+        source: 'conflict-triage',
+        class: f.class,
+        ...(f.depth && { depth: f.depth }),
+        summary: f.summary,
+        evidence: f.evidence,
+        ...(claim && { supersede: claim }),
+        // The file the entry is about, so the render, the park question and the
+        // amendment brief all name it without reading the seat report again.
+        ...(entry?.test && { file: normalizePath(entry.test) }),
+      };
+      ctx.store.append('finding', {
+        actor: ACTOR,
+        cycle,
+        // The stamp this finding answers. It is the idempotency key of the
+        // whole step and it is on the finding rather than on the step alone,
+        // because the step rebuilds its own findings from it.
+        answers,
+        ...finding,
+        summary: gist(finding.summary),
+        evidence: gist(finding.evidence),
+      });
+      return finding;
+    });
+  }
+  if (!runEvents(ctx).some((e) => e.event === 'conflict-triage' && e.answers === answers)) {
+    ctx.store.append('conflict-triage', {
+      actor: ACTOR,
+      cycle,
+      before,
+      answers,
+      findings: findings.map((f) => f.id),
+    });
+  }
+  return { findings };
+}
+
+/**
+ * The whole brief of the conflict triage: the entries verbatim, the card, and
+ * the one question the seat answers.
+ *
+ * The entries are stated as the reporting seat wrote them, because the seat is
+ * ruling on that sentence and not on a summary of it. The classification duty
+ * is the wording the ordinary triage already carries for the same entries, so
+ * the two seats answer one question one way.
+ */
+function conflictTriageRole(base, conflicts, brief = null) {
+  return [
+    'An implementing seat reported frozen-surface collisions. It may not edit a test file, so ' +
+      'each entry below is what it could say and no more. Rule on every one of them.',
+    `The spec: ${base.specRef}`,
+    `The intent card: ${base.cardPath ?? '(the run names none)'}`,
+    'The entries, in order. Answer each one by its number in "entry":',
+    ...conflicts.map(
+      (c, i) =>
+        `${i + 1}. ${c.test} pins "${c.assertion}". The seat says: ${c.reason}` +
+        (c.quote ? ` The card's ${c.clause ?? 'card'} section says: "${c.quote}"` : ''),
+    ),
+    'A pin no implementation of this spec can leave true is a "suite-defect" finding, and its ' +
+      '"depth" says what has to change: "test" where the test itself mis-encodes this spec, ' +
+      '"spec" where the spec is wrong, "intent" where the story\'s own scope replaces what the ' +
+      'pin asserts.',
+    'A pin an implementation CAN satisfy is a "code-defect" finding, whatever the reporting ' +
+      'seat said. The seat that met the red is not the seat that decides what it was.',
+    'Read the test file and the code before you answer. Cite the file and the line in "evidence".',
+    ...SUPERSEDE_BRIEF_LINES,
+    ...briefLines(brief),
+  ].join('\n');
+}
+
+/**
+ * The findings of one conflict-triage stamp that no later re-freeze carried.
+ * A finding an amendment already carried is spent: the suite holds the change.
+ */
+function unspentConflictFindings(events, stamp) {
+  const carried = new Set(
+    events
+      .filter((e) => e.event === 're-freeze' && e.seq > stamp.seq)
+      .flatMap((e) => e.findings ?? []),
+  );
+  const index = findingIndex(events);
+  return (stamp.findings ?? []).map((id) => index.get(id)).filter((f) => f && !carried.has(f.id));
+}
+
+/**
+ * The findings the conflict triage raised inside THIS ladder entry, which no
+ * render carries and no re-freeze has spent. The ladder's own sets are widened
+ * by them, so the entry acts on what it just learned.
+ */
+function conflictOpen(events, last) {
+  const since = last?.seq ?? 0;
+  const stamp = [...events]
+    .reverse()
+    .find((e) => e.event === 'conflict-triage' && e.before === 'repair' && e.seq > since);
+  return stamp ? unspentConflictFindings(events, stamp) : [];
+}
+
+/**
+ * The same reading for the cycle-open site, where the amendment is still owed.
+ *
+ * The last re-freeze bounds it as well as the last render, because this site
+ * runs before the cycle renders anything and a re-freeze it already made is
+ * what spends the stamp. An empty answer means the triage's work is done and
+ * the cycle goes on; a non-empty one means the re-freeze is still owed and the
+ * step re-enters it with the same set (ADR-0094).
+ */
+function spectrumConflictOpen(events) {
+  const since = Math.max(lastRenderSeq(events), lastRefreezeSeq(events));
+  const stamp = [...events]
+    .reverse()
+    .find((e) => e.event === 'conflict-triage' && e.before === 'spectrum' && e.seq > since);
+  return stamp ? unspentConflictFindings(events, stamp) : [];
+}
+
+/** The seq of the newest re-freeze, or 0 where the run made none. */
+function lastRefreezeSeq(events) {
+  let seq = 0;
+  for (const e of events) if (e.event === 're-freeze') seq = e.seq;
+  return seq;
+}
+
+/**
+ * The cycle-open half of the conflict route: judge the open collision, take the
+ * card's answer all or nothing, and amend the suite before the spectrum runs.
+ *
+ * ALL OR NOTHING, BEFORE ANYTHING IS STAMPED. The card is asked about every
+ * intent finding through the pure check first. One refusal sends the whole set
+ * to the render, where the ladder parks the owner on it as it does today.
+ * Without that guard a partial set would leave `supersede-authorized` stamps
+ * behind and the ladder would stamp a second authorization for the same test at
+ * its next entry, because the verdict site passes no already-authorized list
+ * (ADR-0044, ADR-0094).
+ *
+ * @returns {Promise<{amended: boolean, riding: object[], fail?: object}>}
+ *   `riding` is the findings that must enter this cycle's own open set: an
+ *   unauthorized conflict rides the render and is the owner's question.
+ */
+async function settleConflicts(ctx, base, { cycle }) {
+  const triaged = await conflictTriageStep(ctx, base, { before: 'spectrum', cycle });
+  if (triaged.fail) return { amended: false, riding: [], fail: triaged.fail };
+  const events = runEvents(ctx);
+  const owed = spectrumConflictOpen(events);
+  if (owed.length === 0) return { amended: false, riding: [] };
+  const suite = owed.filter((f) => f.class === 'suite-defect');
+  // A code-defect conflict is the implementing seat's own red to fix. It is not
+  // carried into an amendment: the spectrum runs, the ordinary triage classes
+  // the red, and it rides the next repair round's brief.
+  if (suite.length === 0) return { amended: false, riding: [] };
+  const intent = suite.filter((f) => f.depth === 'intent');
+  const refused = intent.some(
+    (f) =>
+      supersedeRefusal({
+        claim: f.supersede ?? null,
+        cardText: base.cardText,
+        worktree: base.worktree,
+        testPaths: base.testPaths,
+        frozen: base.frozenSuiteFiles,
+        pins: base.ownerPins,
+        enabled: base.cardAuthorizedSupersede,
+      }) !== null,
+  );
+  // The suite defects alone ride the render. A code-defect conflict is a red
+  // the spectrum is about to produce, and the ordinary triage classes it there
+  // with the layer output in front of it.
+  if (refused) return { amended: false, riding: suite };
+  const after = [...events]
+    .reverse()
+    .find((e) => e.event === 'conflict-triage' && e.before === 'spectrum')?.seq;
+  const card = cardSupersedes(ctx, base, { intent, after });
+  // The pure check above passed, so this cannot refuse; the guard stands
+  // because a refusal here would leave the set half authorized.
+  if (card.refusals.length > 0) return { amended: false, riding: suite };
+  const outcome = await refreezeStep(ctx, base, {
+    findings: suite,
+    // No render of this cycle exists yet, so there is no verdict record to hand
+    // the suite seat. The brief states the conflict entries the triage judged in
+    // its place.
+    record: null,
+    intentAnswer: card.ruling,
+    since: after,
+  });
+  if (outcome.fail) return { amended: false, riding: [], fail: outcome.fail };
+  return { amended: true, riding: [] };
+}
+
+/**
+ * The suite amendments this cycle owes a review, each with the range it made.
+ *
+ * A re-freeze amends a frozen test, and the reason a round is owed over it is
+ * not one reason but two.
+ *
+ * A re-freeze on the card's authority was judged by nobody: the quote check
+ * proves the words are in the card, and whether the words REACH the assertion
+ * that changed is a judgment (ADR-0044). That duty stands whatever the findings
+ * behind it were.
+ *
+ * A re-freeze that carried a CONFIRMED finding owes a round for a different
+ * reason, and it is a resolution mechanic rather than a review duty. A
+ * triage-sourced suite defect resolves mechanically: the findings are
+ * re-derived from the cycle's reds, and a green spectrum yields none. A
+ * confirmed review finding does not. It is carried forward by the prior-open
+ * set, and the only thing that drops it is a verifier that resolution-checks it
+ * inside a review round. A cycle that ran no round leaves it open at the next
+ * render, the suite defect reads as stalled, and the run spends its one fresh
+ * pass on an amendment that did answer it (ADR-0094).
+ *
+ * So the owed set is the union of the two, after the newest of the last render
+ * and the last fresh pass. The fresh-pass bound is load-bearing: a pass resets
+ * the tree, an earlier amendment commit stops being an ancestor of HEAD, and a
+ * diff over it would be read out of the reflog.
+ *
+ * The review is owed until a render follows the amendment, so a park between
+ * the seat's report and its settlement costs nothing and a later cycle of the
+ * same pass does not review it twice.
+ */
+function amendmentBlocks(events, prevRender) {
+  let since = prevRender?.seq ?? 0;
+  for (const e of events) {
+    if (e.event === 'fresh-pass' && e.seq > since) since = e.seq;
+  }
+  const index = findingIndex(events);
+  return eventsAfter(events, since).filter(
+    (e) =>
+      e.event === 're-freeze' &&
+      typeof e.baseSha === 'string' &&
+      (e.ruling?.source === 'card' ||
+        (e.findings ?? []).some((id) => index.get(id)?.confirmed === true)),
+  );
+}
+
+/**
+ * The alarm behind the conflict route: a collision an implementing seat
+ * reported that no judgment answered.
+ *
+ * The seat measured the tree and wrote down what it found. A run that walks
+ * past it pays a repair round, a review cycle and a fresh pass to rediscover
+ * the same fact. Threshold nought.
+ *
+ * It deliberately drops the re-freeze guard `openConflictStamp` carries. With
+ * that guard the alarm would be dead by construction, because the cycle-open
+ * step answers every open stamp before this reads it. Without it the alarm is
+ * live and it names a real shape: a repair seat stamps a collision, the
+ * ladder's suite arm then re-freezes for a different finding, and the guard
+ * retires the stamp unread (ADR-0094).
+ */
+function stampUnconsumedReports(ctx, events, cycle) {
+  const answered = new Set(
+    events.filter((e) => e.event === 'conflict-triage').map((e) => e.answers),
+  );
+  const raised = new Set(
+    events
+      .filter((e) => e.event === 'gate-integrity' && e.kind === 'report-unconsumed')
+      .map((e) => e.stamp),
+  );
+  for (const stamp of events) {
+    if (stamp.event !== 'dev-suite-conflict') continue;
+    if (answered.has(stamp.seq) || raised.has(stamp.seq)) continue;
+    ctx.store.append('gate-integrity', {
+      actor: ACTOR,
+      kind: assertDefectKind('report-unconsumed'),
+      cycle,
+      stamp: stamp.seq,
+      files: stamp.files ?? [],
+      gist: gist(
+        `a frozen-pin collision the ${stamp.seat ?? 'implementing'} seat reported was never judged`,
+      ),
+    });
+  }
+}
 
 /**
  * What this run's captures took back, in the two classes they were recorded
@@ -2008,7 +2592,20 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
       cycles: repeat.occurrences.map((o) => o.cycle),
     });
   }
-  const { open, suiteDefects, intent, ops, code } = openSets(events, last, mode);
+  // The collisions the round that just ran reported, judged before this entry
+  // routes anything. A repair round that changed nothing plans no cycle, so
+  // without this step there is no later site that reads what that seat found:
+  // the run would climb to the cap, stall, and spend its fresh pass on a
+  // collision the seat had already measured and written down (ADR-0094).
+  const triaged = await conflictTriageStep(ctx, base, { before: 'repair', cycle: last.cycle });
+  if (triaged.fail) return triaged.fail;
+  if (triaged.findings.length > 0) events = runEvents(ctx);
+  const { open, suiteDefects, intent, ops, code, stalled, fresh } = ladderSets(
+    events,
+    renders,
+    last,
+    mode,
+  );
   let acted = false;
 
   // Intent-level conflicts escalate; the ruling directs the amendment. A ruling
@@ -2024,7 +2621,7 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
   // ask a question the run had already half answered.
   let intentAnswer = null;
   if (intent.length > 0) {
-    const card = cardSupersedes(ctx, base, { intent, last });
+    const card = cardSupersedes(ctx, base, { intent, after: last.seq });
     if (card.ruling) intentAnswer = rulingCarried(events, card.ruling) ? null : card.ruling;
     else {
       const park = answeredPark(events, 'intent-conflict');
@@ -2038,7 +2635,7 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
           // intent findings come first, because they are what the park asks
           // about; the card's refusals close the question.
           question:
-            'Verdict triage found an intent-level suite conflict. Every finding open at this ' +
+            'A seat of this run found an intent-level suite conflict. Every finding open at this ' +
             `render:\n${openFindingsBlock(open, intent)}\n\nThe card did not settle it:\n` +
             card.refusals.map((r) => `- ${r}`).join('\n'),
           text: RULING_TEXT,
@@ -2145,17 +2742,31 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
 
   // Suite-defect → re-freeze step (story lane). A suite defect that survived
   // its re-freeze is a stall for loop safety — it still costs no budget.
-  let suiteStalled = false;
+  const suiteStalled = stalled;
   if (suiteDefects.length > 0) {
-    suiteStalled = suiteDefectStalled(events, renders, last, suiteDefects);
-    if (!suiteStalled) {
-      const outcome = await refreezeStep(ctx, base, {
-        findings: suiteDefects,
-        record: readJson(last.record),
-        intentAnswer,
-      });
-      if (outcome.fail) return outcome.fail;
-      acted = true;
+    const outcome = await refreezeStep(ctx, base, {
+      findings: suiteDefects,
+      record: readJson(last.record),
+      intentAnswer,
+      since: lastRenderSeq(events),
+    });
+    if (outcome.fail) return outcome.fail;
+    acted = true;
+    // The entry ends here when the amendment carried a finding this entry's own
+    // conflict triage raised. The arms run in sequence over one render, so the
+    // code arm below would re-dispatch to a repair seat the very finding the
+    // amendment just answered, in the same entry. The return is narrow on
+    // purpose: an amendment that carried only render findings still falls
+    // through to the code arm, which is what it has always done (ADR-0094).
+    const answered = new Set(fresh.map((f) => f.id));
+    if (
+      answered.size > 0 &&
+      runEvents(ctx).some(
+        (e) =>
+          e.event === 're-freeze' && e.seq > last.seq && (e.findings ?? []).some((id) => answered.has(id)),
+      )
+    ) {
+      return null;
     }
   }
 
@@ -2187,7 +2798,7 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
         const outcome = await freshPass(ctx, base, mode, {
           newPass: pass + 1,
           trigger: reason,
-          open: [...code, ...suiteDefects],
+          open: distinct([...code, ...suiteDefects]),
           last,
         });
         if (outcome.fail) return outcome.fail;
@@ -2209,7 +2820,7 @@ async function ladder(ctx, base, mode, { events, renders, last, nextStage }) {
         const outcome = await freshPass(ctx, base, mode, {
           newPass: pass + 1,
           trigger: 'answer',
-          open: [...code, ...suiteDefects],
+          open: distinct([...code, ...suiteDefects]),
           last,
         });
         if (outcome.fail) return outcome.fail;
@@ -2542,19 +3153,23 @@ export function refreezeOwed(events, renders, last, mode) {
  * The card's answer to a render's intent findings: a ruling when the card
  * authorizes every one of them, and the refusals when it does not.
  *
- * The stamping is idempotent by render. The ladder re-enters a render whose
- * later arm parked, and a second stamp would mint a second ruling seq: the
- * re-freeze that already spent the first would read as unspent, and the suite
- * would be amended twice for one collision.
+ * The stamping is idempotent by the seq the caller anchors on. The ladder
+ * re-enters a render whose later arm parked, and a second stamp would mint a
+ * second ruling seq: the re-freeze that already spent the first would read as
+ * unspent, and the suite would be amended twice for one collision.
+ *
+ * `after` is that anchor. On the ladder it is the render; at the open of a
+ * cycle it is the conflict-triage stamp, because no render of that cycle exists
+ * yet and the render behind it belongs to the cycle before (ADR-0094).
  *
  * @returns {{ruling: object|null, refusals: string[]}}
  */
-function cardSupersedes(ctx, base, { intent, last }) {
+function cardSupersedes(ctx, base, { intent, after }) {
   const refusals = [];
   const stamped = [];
   for (const finding of intent) {
     const events = runEvents(ctx);
-    const already = authorizedSupersedes(events, { after: last.seq }).find(
+    const already = authorizedSupersedes(events, { after }).find(
       (e) => e.finding === finding.id,
     );
     if (already) {
@@ -2634,7 +3249,19 @@ export function repairStalled(events, renders, last, { round = 'repair-round' } 
   const prevRender = renders[renders.length - 2];
   if (!prevRender || prevRender.pass !== last.pass) return false;
   const window = eventsAfter(events, prevRender.seq).filter((e) => e.seq < last.seq);
-  if (!window.some((e) => e.event === round)) return false;
+  // A round that moved nothing and whose collision a re-freeze then answered
+  // was never the thing that had to move the findings: the amendment was, and
+  // it landed. Counting such a round would read the amendment route as a stall
+  // and spend the fresh pass this plan exists to keep (ADR-0094). A round that
+  // moved nothing and that no re-freeze answered still counts: the seat had its
+  // chance and took it. A reconcile round carries no `changed` field, so
+  // the other caller of this rule is untouched.
+  const counted = window.filter(
+    (e) =>
+      e.event === round &&
+      (e.changed !== false || !window.some((r) => r.event === 're-freeze' && r.seq > e.seq)),
+  );
+  if (counted.length === 0) return false;
   const prior = tally(openIdentities(events, prevRender));
   if (prior.size === 0) return false;
   const open = tally(openIdentities(events, last));
@@ -2646,6 +3273,35 @@ function tally(identities) {
   const counts = new Map();
   for (const identity of identities) counts.set(identity, (counts.get(identity) ?? 0) + 1);
   return counts;
+}
+
+/**
+ * The alarm behind the routing: a fresh pass taken over a suite defect no
+ * re-freeze of this run ever carried.
+ *
+ * The pass discards a whole implementation and starts a fresh seat from
+ * nothing. A finding about a frozen test is not what an implementation can
+ * answer, so a run that reached this holding one never took the amendment route
+ * it was built to take. Threshold nought.
+ *
+ * The "no re-freeze carried it" half is the whole of the test, and it is what
+ * keeps the alarm off the legitimate route: a suite defect that survived its own
+ * re-freeze rides the repair brief by design and is in the open set of the pass
+ * behind it. The trigger is not read. Every route to a fresh pass is the same
+ * mistake where the defect under it never reached an amendment (ADR-0094).
+ */
+function stampFreshPassRoute(ctx, events, { open }) {
+  const carried = new Set(events.filter((e) => e.event === 're-freeze').flatMap((e) => e.findings ?? []));
+  const routed = open.filter((f) => f.class === 'suite-defect' && !carried.has(f.id));
+  if (routed.length === 0) return;
+  ctx.store.append('gate-integrity', {
+    actor: ACTOR,
+    kind: assertDefectKind('fresh-pass-suite-route'),
+    findings: routed.map((f) => f.id),
+    gist: gist(
+      `a fresh pass is being taken over ${routed.length} suite defect(s) no re-freeze carried`,
+    ),
+  });
 }
 
 // -- ladder arms -------------------------------------------------------------
@@ -2667,6 +3323,12 @@ async function repairRound(ctx, base, mode, { pass, round, open, record, cap = R
     // rather than re-deriving a diff class the run no longer holds (ADR-0007).
     cap,
     sha: result.sha,
+    // Whether the round moved the tree. The progress rule is the one reader: a
+    // round that moved nothing and whose collision a re-freeze then answered
+    // was never the thing that had to move the findings. A round from an older
+    // ledger carries no field and reads as moved, which is what those rounds
+    // were (ADR-0094).
+    ...(result.changed === false && { changed: false }),
     openBefore: open.map((f) => f.id),
   });
   return {};
@@ -2675,6 +3337,7 @@ async function repairRound(ctx, base, mode, { pass, round, open, record, cap = R
 export async function freshPass(ctx, base, mode, { newPass, trigger, open, last }) {
   const events = runEvents(ctx);
   if (!events.some((e) => e.event === 'fresh-pass' && e.seq > last.seq)) {
+    stampFreshPassRoute(ctx, events, { open });
     // The fresh pass never sees the prior tree: reset to the state the pass is
     // born on, then carry the current frozen suite forward. A carry and not a
     // restore, because a merge-born pass is born on the updated default branch
@@ -2718,19 +3381,46 @@ export async function freshPass(ctx, base, mode, { newPass, trigger, open, last 
 }
 
 /**
- * One dev-seat pass over the worktree: seat, structural suite restore,
- * commit, `implementation-committed` stamp.
+ * One dev-seat pass over the worktree: seat, structural suite restore, commit,
+ * and the stamp that says what the pass did to the tree.
+ *
+ * A repair round whose tree did not move stamps `repair-no-change` instead of
+ * `implementation-committed`, and the difference is a whole review cycle. Every
+ * reader of the code head takes `implementation-committed` as a moved tree
+ * (ADR-0093), so an empty repair commit bought a full Fury round, a verifier
+ * and a spectrum over a diff byte for byte identical to the one the render had
+ * already judged. The same finding twice is `no-progress`, which spends the
+ * run's one fresh pass (ADR-0094).
+ *
+ * The fresh pass keeps its stamp whatever the tree did. The pass is read off it
+ * by the interrupted-step resume, by the pass counter and by the pass-opening
+ * sha, and a pass that rebuilt an identical tree has still spent the pass.
+ *
+ * @returns {Promise<{sha?: string, changed?: boolean, fail?: object}>}
  */
 async function runDevSeat(ctx, base, mode, { seat, buildRole, pass = null, phase = null }) {
   const events = runEvents(ctx);
   const baseSha = await headSha(base.worktree);
-  const { fail, dropped, allowlists } = await devSeatWithCapture(ctx, base, mode, {
+  const { fail, report, dropped, allowlists } = await devSeatWithCapture(ctx, base, mode, {
     seat,
     buildRole,
     suiteSha: mode === 'story' ? currentSuiteSha(events) : null,
   });
   if (fail) return { fail };
   const sha = await commitAll(base.worktree, `${seat === 'dev' ? 'implement' : 'repair'}: ${ctx.runId}`);
+  const changed = sha !== baseSha;
+  if (seat === 'repair-dev' && !changed) {
+    ctx.store.append('repair-no-change', {
+      actor: ACTOR,
+      pass: pass ?? currentPass(events),
+      sha,
+      // What the seat reported instead of a change. A round that named a
+      // collision did the work it could do; one that named none did not, and
+      // the check loop has already refused that once.
+      conflicts: acceptedConflicts(mode, report, seat).length,
+    });
+    return { sha, changed };
+  }
   ctx.store.append('implementation-committed', {
     actor: ACTOR,
     pass: pass ?? currentPass(events),
@@ -2740,10 +3430,10 @@ async function runDevSeat(ctx, base, mode, { seat, buildRole, pass = null, phase
     ...(dropped.length > 0 && { dropped }),
     ...(allowlists.length > 0 && { allowlists }),
   });
-  return { sha };
+  return { sha, changed };
 }
 
-async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
+async function refreezeStep(ctx, base, { findings, record, intentAnswer, since }) {
   const events = runEvents(ctx);
   // The tree the amendment starts from. It rides the stamp so a later reader
   // can diff what the amendment changed without guessing at a parent commit.
@@ -2753,10 +3443,16 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
   // pin, and the pin still fails the run until the file itself changes. So the
   // named files are stated to the seat and required of its work.
   const ruled = intentAnswer ? ruledSuiteFiles(intentAnswer, base.frozenSuiteFiles ?? []) : [];
+  // Every amendment obligation this run still owes, beside the ruling's own.
+  // An entry is owed until a suite write executed it, and a write that leaves
+  // one unexecuted is refused: the run would carry the obligation to the next
+  // write, brief a seat about a file that is already correct, and park it on
+  // the second refusal (ADR-0094).
+  const owed = await owedSupersedes(base, events);
   // Spec-deep defects amend the born spec first; the answered intent
   // conflict rides the same amendment.
   const deep = findings.filter((f) => f.depth === 'spec' || f.depth === 'intent');
-  if (deep.length > 0 && !specAmended(events, lastRenderSeq(events))) {
+  if (deep.length > 0 && !specAmended(events, since)) {
     // The template holds after the freeze too: this amendment is re-linted
     // like every other one, and a defect takes the corrective route (ADR-0019).
     const amend = await seatWithChecks(ctx, {
@@ -2778,7 +3474,7 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
     cwd: base.worktree,
     env: base.env,
     constitution: base.constitution,
-    buildRole: (brief) => refreezeRole(base, findings, record, intentAnswer, ruled, brief),
+    buildRole: (brief) => refreezeRole(base, findings, record, intentAnswer, ruled, brief, owed),
     checks: async (r) => {
       const defects = [];
       if (r.suiteFiles.length === 0) defects.push('no suite files declared');
@@ -2797,6 +3493,19 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
               'this amendment is the only route a ruling has into the frozen suite.',
           );
         }
+      }
+      // An obligation an earlier site of this run took and no write executed.
+      // It is owed to THIS write, and it is refused here rather than carried:
+      // a run that carries it asks the next write for the same file, and the
+      // seat that is asked twice for one edit parks on the second refusal.
+      for (const entry of owed) {
+        if (ruled.includes(entry.test) || changed.includes(entry.test)) continue;
+        defects.push(
+          `the run authorized a supersede of ${entry.test} at the ${entry.site} site and no ` +
+            `suite write has executed it. The assertion "${entry.assertion}" is superseded; the ` +
+            `card's ${entry.clause} section says: "${entry.cardQuote}". Restate what that pin ` +
+            'protected in the form the card mandates; never delete it.',
+        );
       }
       // The surface map. The re-freeze is the fifth suite write, and a map that
       // stopped at the freeze would let this write drop a row the four before
@@ -2836,7 +3545,12 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
     sha,
     phase: 're-freeze',
     files: report.suiteFiles,
+    changed: await commitChanged(base.worktree, baseSha, sha),
   });
+  // Every obligation this run holds, settled. One stamp per entry for the life
+  // of the run: a settled obligation is never asked for again, and nothing
+  // later has to read a commit a fresh pass may have put out of reach.
+  settleSupersedes(ctx, runEvents(ctx), { write: sha });
   ctx.store.append('re-freeze', {
     actor: ACTOR,
     baseSha,
@@ -2862,15 +3576,101 @@ async function refreezeStep(ctx, base, { findings, record, intentAnswer }) {
 }
 
 /**
- * Whether the spec amendment this render asked for stands. A seat report says
- * the seat answered; a work-product failure after it says the answer did not
- * hold, and the amendment that never landed is owed again.
+ * Whether the spec amendment this step asked for stands. A seat report says the
+ * seat answered; a work-product failure after it says the answer did not hold,
+ * and the amendment that never landed is owed again.
+ *
+ * The anchor is the seq the step is standing on and not the last render. At the
+ * open of the first cycle the render seq is nought, and the spec birth's own
+ * report would satisfy this: the amendment would be skipped and the spec would
+ * still say what the frozen test said (ADR-0094).
  */
-function specAmended(events, renderSeq) {
-  const report = seatReportAfter(events, 'spec-birth', renderSeq);
+function specAmended(events, since) {
+  const report = seatReportAfter(events, 'spec-birth', since);
   if (!report) return false;
-  const failure = seatFailureAfter(events, 'spec-birth', renderSeq);
+  const failure = seatFailureAfter(events, 'spec-birth', since);
   return !failure || failure.seq < report.seq;
+}
+
+/**
+ * The amendment obligations this run still owes: every `supersede-authorized`
+ * no write has executed and no settlement has closed.
+ *
+ * Two readings answer "was it executed", and an entry is owed only when both
+ * answer no.
+ *
+ * The first is this run's own suite writes, read from the `changed` list each
+ * one carries. It is the commit and not the declaration, because a declaration
+ * names files the write never touched.
+ *
+ * The second is owed to the freeze. The freeze accepts a target the DEFAULT
+ * BRANCH amended, because its own check asks whether the file moved since the
+ * launch base sha and a merge brings main's edit in. With the first reading
+ * alone, no suite write of this run holds that file, every later write would be
+ * refused for it, and the seat would be asked to amend a file that is already
+ * correct, which is a park nobody earned. The freeze's own evidence settles it,
+ * and the two readings together are exactly what the two gates accept
+ * (ADR-0094).
+ *
+ * A ledger written before the `changed` field existed is read from git. Where
+ * git cannot answer, because a fresh pass reset the branch past the commit and
+ * it is reachable through the reflog alone, every entry settles rather than
+ * refusing: the pre-freeze entries are already covered by the freeze's own
+ * refusal, the current ruling's entries are always checked against this write,
+ * and a refusal over evidence the harness cannot read is a deadlock that costs
+ * the whole run.
+ */
+async function owedSupersedes(base, events) {
+  const settled = new Set(
+    events.filter((e) => e.event === 'supersede-settled').map((e) => normalizePath(e.test)),
+  );
+  const entries = authorizedSupersedes(events).filter(
+    (e) => !settled.has(normalizePath(e.test)),
+  );
+  if (entries.length === 0) return [];
+  const written = new Set();
+  for (const e of events) {
+    if (e.event !== 'suite-committed') continue;
+    if (Array.isArray(e.changed)) {
+      for (const file of e.changed) written.add(normalizePath(file));
+      continue;
+    }
+    const changed = await changedInRange(base.worktree, `${e.sha}^`, e.sha).catch(() => null);
+    if (changed === null) return [];
+    for (const file of changed) written.add(normalizePath(file));
+  }
+  const anchor = freezeAnchor(events);
+  if (anchor?.sha && typeof base.baseSha === 'string' && base.baseSha.length > 0) {
+    const moved = await changedInRange(base.worktree, base.baseSha, anchor.sha).catch(() => null);
+    if (moved === null) return [];
+    for (const file of moved) written.add(normalizePath(file));
+  }
+  return entries
+    .filter((e) => !written.has(normalizePath(e.test)))
+    .map((e) => ({
+      test: normalizePath(e.test),
+      site: e.site,
+      assertion: e.assertion,
+      cardQuote: e.cardQuote,
+      clause: e.clause,
+    }));
+}
+
+/**
+ * Settles every obligation the run holds against the write that just landed.
+ * Idempotent by test: one settlement per test for the life of the run, so a
+ * restart after the stamps writes none of them twice.
+ */
+function settleSupersedes(ctx, events, { write }) {
+  const settled = new Set(
+    events.filter((e) => e.event === 'supersede-settled').map((e) => normalizePath(e.test)),
+  );
+  for (const entry of authorizedSupersedes(events)) {
+    const test = normalizePath(entry.test);
+    if (settled.has(test)) continue;
+    settled.add(test);
+    ctx.store.append('supersede-settled', { actor: ACTOR, test, site: entry.site, write });
+  }
 }
 
 /**
@@ -2880,6 +3680,13 @@ function specAmended(events, renderSeq) {
  * repo-relative path or its file name. Nothing else in the text is read.
  */
 function ruledSuiteFiles(answer, frozen) {
+  // A card ruling knows every file it is about and says so. Matching its own
+  // sentence back against the frozen set would find the same files by a weaker
+  // route, and it would miss one whose name the sentence wraps (ADR-0094).
+  if (Array.isArray(answer?.tests) && answer.tests.length > 0) {
+    const named = new Set(answer.tests.map(normalizePath));
+    return frozen.filter((file) => named.has(normalizePath(file)));
+  }
   const text = [answer?.answer ?? '', answer?.option ?? ''].join('\n');
   if (text.trim().length === 0) return [];
   return frozen.filter((file) => text.includes(file) || text.includes(basename(file)));
@@ -2999,7 +3806,14 @@ async function captureDefects(ctx, base, mode, { seat, capture }) {
   // first capture took back is gone from the commit the corrective attempt
   // produces, and the commit record has to say so.
   for (const path of dropped) if (!capture.dropped.includes(path)) capture.dropped.push(path);
+  // What survives the restore: the seat's own work product. It rides the
+  // carrier because a caller outside this function asks the same question, and
+  // a second derivation of it would be a second answer to "did this seat write
+  // anything" (ADR-0094). It is this attempt's, replaced on every attempt,
+  // where `dropped` is the union across the attempts of one pass: what a seat
+  // wrote is the last attempt's, what the capture took back is all of them.
   const kept = changed.filter((f) => !frozenWrites.includes(f) && !recordWrites.includes(f));
+  capture.kept = kept;
   const violations = [
     ...diffPolicyViolations(kept, tier, declaresPath(base, mode, tier)),
     ...(await grantViolations(base, tier, kept)),
@@ -3185,7 +3999,7 @@ function declaresPath(base, mode, tier) {
  *   allowlists the candidate touched, across the attempts of this pass.
  */
 async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
-  const capture = { dropped: [], allowlists: [] };
+  const capture = { dropped: [], allowlists: [], kept: [] };
   // One derivation for the two facts that must agree: the file the hook
   // enforces and the list the brief states. A brief that named a layer the hook
   // refuses would put the seat in a fight it cannot win.
@@ -3212,28 +4026,105 @@ async function devSeatWithCapture(ctx, base, mode, { seat, buildRole }) {
     buildRole: (brief) => buildRole(brief, bound),
     checks: async (report) => [
       ...(await captureDefects(ctx, base, mode, { seat, capture })),
-      ...suiteStateDefects(mode, base, report),
+      ...suiteStateDefects(mode, base, report, seat),
+      ...noChangeDefects(ctx, base, mode, { seat, capture, report }),
     ],
   });
-  // A red the seat attributed to frozen pins, once the checks took the report.
-  // The stamp is the verdict's entry point: the stage proceeds as it does on a
-  // green report, and the triage reads the entries off the seat report itself.
-  const conflicts = acceptedConflicts(mode, outcome.report);
+  // A collision the seat attributed to frozen pins, once the checks took the
+  // report. The stamp is the verdict's entry point: the stage proceeds as it
+  // does on a green report, and the seat that judges the entries reads them off
+  // the seat report itself.
+  const conflicts = acceptedConflicts(mode, outcome.report, seat);
   if (conflicts.length > 0) {
     ctx.store.append('dev-suite-conflict', {
       actor: ACTOR,
+      seat,
       files: [...new Set(conflicts.map((c) => normalizePath(c.test)))],
       count: conflicts.length,
-      gist: gist(`the dev seat attributes ${conflicts.length} red(s) to frozen pins`),
+      gist: gist(`the ${seat} seat attributes ${conflicts.length} red(s) to frozen pins`),
     });
   }
-  return { ...outcome, dropped: capture.dropped, allowlists: capture.allowlists };
+  return {
+    ...outcome,
+    dropped: capture.dropped,
+    allowlists: capture.allowlists,
+    // What the capture let through. It is the seat's work product, which is a
+    // different question from whether the tree moved: a seat that wrote only
+    // frozen test files wrote something and committed nothing (ADR-0094).
+    kept: capture.kept,
+  };
 }
 
-/** The conflicts of a report the checks accepted, or none. */
-function acceptedConflicts(mode, report) {
-  if (mode !== 'story' || report?.suiteState !== 'red') return [];
-  return report.suiteConflicts ?? [];
+/** The opening of the defect line a repair round with nothing to show is refused for. */
+const NO_CHANGE_DEFECT_HEAD = 'your report changed no file and names no frozen-pin collision';
+
+/**
+ * The one refusal a repair round with nothing to show earns.
+ *
+ * The seat was told to fix findings, it wrote nothing the capture let through,
+ * and it named no pin. That is a defect in the work product and the cheap
+ * correction is usually the right one: the common cause is a seat that did not
+ * know it could name a pin. So it is refused once and no more. A second
+ * no-change report is accepted, the round is stamped and counted, and the run
+ * takes the route it already has for a repair seat that cannot move the tree:
+ * another round, the cap, the stall, the one fresh pass. Refusing it twice
+ * would park a seat that judged a finding wrong, which is a touchpoint this
+ * plan does not buy (ADR-0094).
+ *
+ * The invocation is spent per DISPATCH and not per render: the ladder can
+ * dispatch several rounds against one render, and a key on the render would
+ * accept every round after the first with no correction at all. It is spent per
+ * DEFECT CLASS too, because every refused attempt of every kind stamps
+ * `seat-refused`, so a capture violation earlier in the same round would
+ * otherwise answer this one.
+ */
+function noChangeDefects(ctx, base, mode, { seat, capture, report }) {
+  if (seat !== 'repair-dev') return [];
+  if (capture.kept.length > 0) return [];
+  if (acceptedConflicts(mode, report, seat).length > 0) return [];
+  const events = runEvents(ctx);
+  const since = Math.max(
+    lastRenderSeq(events),
+    ...events
+      .filter((e) => e.event === 'repair-round' || e.event === 'repair-no-change')
+      .map((e) => e.seq),
+    0,
+  );
+  const spent = events.some(
+    (e) =>
+      e.event === 'seat-refused' &&
+      e.seat === seat &&
+      e.seq > since &&
+      (e.defects ?? []).some((d) => String(d).startsWith(NO_CHANGE_DEFECT_HEAD)),
+  );
+  if (spent) return [];
+  return [
+    `${NO_CHANGE_DEFECT_HEAD}. You were given findings to repair. Either change the code that ` +
+      'answers them, or, where a finding can only be answered by amending a frozen test, name ' +
+      'that test under "suiteConflicts" with the clause it pins, why no implementation of this ' +
+      'spec leaves it true, and the card line that mandates the change. A report that does ' +
+      'neither leaves the run exactly where it was.',
+  ];
+}
+
+/**
+ * The conflicts of a report the checks accepted, or none.
+ *
+ * The red gate holds for the first implementing pass: a red tree with no
+ * attribution is unfinished work, and a green one has nothing to attribute.
+ *
+ * It is dropped for a repair seat, and the reason is what that seat is for. It
+ * is handed findings and a tree it may have left exactly as it found it, so
+ * what it reports on is the findings and not the suite: a seat that measures a
+ * claimed collision, finds four of five files green and names the fifth is
+ * telling the run the truth about the findings it was given, whatever the suite
+ * says. Reading it only on a red threw every word of that away and paid a
+ * review cycle, a stall and a fresh pass to rediscover it (ADR-0094).
+ */
+function acceptedConflicts(mode, report, seat) {
+  if (mode !== 'story') return [];
+  if (seat !== 'repair-dev' && report?.suiteState !== 'red') return [];
+  return report?.suiteConflicts ?? [];
 }
 
 /**
@@ -3251,10 +4142,9 @@ function acceptedConflicts(mode, report) {
  * one thing a check can settle — every named file is in the frozen suite of
  * this run — and the verdict's own triage rules on the rest (ADR-0091).
  */
-function suiteStateDefects(mode, base, report) {
-  if (mode !== 'story' || report?.suiteState !== 'red') return [];
-  const conflicts = report.suiteConflicts ?? [];
-  if (conflicts.length === 0) {
+function suiteStateDefects(mode, base, report, seat) {
+  if (mode !== 'story') return [];
+  if (report?.suiteState === 'red' && (report.suiteConflicts ?? []).length === 0) {
     return [
       'your report states the frozen suite is red and names no conflict; the suite defines ' +
         'done, and a tree that does not satisfy it is not implemented. Finish the work, run ' +
@@ -3262,6 +4152,12 @@ function suiteStateDefects(mode, base, report) {
         'supersedes, name it under "suiteConflicts" instead.',
     ];
   }
+  // The frozen-set check runs over whatever the report names, whatever the
+  // suite said. A green report that names a file this run never froze is a
+  // conflict about somebody else's tree, and it is the same defect there as it
+  // is behind a red.
+  const conflicts = acceptedConflicts(mode, report, seat);
+  if (conflicts.length === 0) return [];
   const frozen = new Set(
     (base.frozenSuiteFiles ?? [])
       .map(normalizePath)
@@ -3576,6 +4472,7 @@ function triageRole(
   probe = null,
   transient = null,
   conflicts = [],
+  unproven = [],
 ) {
   const lines = [
     'Classify the persistent red Tier-1 layers below into findings. Cluster reds that share one root cause into one finding.',
@@ -3603,7 +4500,11 @@ function triageRole(
       'The report takes no "persisting" field on this cycle; write "findings" and "summary" only.',
     );
   }
-  lines.push(...takenBackLines(dropped, recaptured), ...suiteConflictEvidence(conflicts));
+  lines.push(
+    ...takenBackLines(dropped, recaptured),
+    ...suiteConflictEvidence(conflicts),
+    ...unprovenClaimLines(unproven),
+  );
   if (transient) {
     lines.push(
       'The harness read these reds as a cause outside the tree before you were spawned, and',
@@ -3652,6 +4553,26 @@ function suiteConflictEvidence(conflicts) {
       'finding at depth "intent", and it carries the card claim when the card covers it. A pin ' +
       'an implementation can satisfy is a code-defect finding, whatever the seat said.',
     'A file named here whose layer is green in the reds below is no finding at all.',
+  ];
+}
+
+/**
+ * The suite claims this run's own command turned green, for a later triage.
+ *
+ * A review seat claimed a frozen test had to be amended, the harness ran that
+ * test at the judged sha, and it passed. The claim was rendered advisory then.
+ * The reason it is stated again here is a race: a test that passes in one cycle
+ * and fails in the next is the shape such a claim is usually about, and a
+ * triage that meets that red already holds the claim somebody wrote for it
+ * (ADR-0094).
+ */
+function unprovenClaimLines(unproven) {
+  if (unproven.length === 0) return [];
+  return [
+    'These frozen tests were claimed earlier in this run as needing amendment, and the run of ' +
+      'each one at the judged sha passed, so the claim was made advisory. If one of them is red ' +
+      'below, the claim is evidence you may use and not a verdict you must take:',
+    ...unproven.map((c) => `- ${c.file} (claimed in cycle ${c.cycle}; that run's log: ${c.log})`),
   ];
 }
 
@@ -3723,11 +4644,17 @@ function redEvidence(r) {
   ];
 }
 
-function refreezeRole(base, findings, record, intentAnswer, ruled, brief) {
+function refreezeRole(base, findings, record, intentAnswer, ruled, brief, owed = []) {
   const layers = new Set(findings.flatMap((f) => f.layers ?? []));
   const reds = (record?.spectrum ?? []).filter((r) => layers.has(r.layer));
   const lines = [
-    'Verdict triage classed these persistent reds as suite defects: the frozen tests mis-encode the spec.',
+    // A cycle that reached its spectrum states the reds; an amendment made at
+    // the open of a cycle has none to state, because the judgment stands on an
+    // implementing seat's own report and no gate layer has run (ADR-0094).
+    record
+      ? 'Verdict triage classed these persistent reds as suite defects: the frozen tests mis-encode the spec.'
+      : 'These frozen tests were judged to mis-encode the spec before this cycle ran a gate layer. ' +
+        'The judgment stands on the implementing seat\'s own report of the collision.',
     `Amend the tests so they encode the spec at: ${base.specRef}`,
     `Write test files only under: ${base.testPaths.join(', ')}. Touch nothing else.`,
     'In the report, list every amended suite file; list expected residual reds (none when the amended suite is green).',
@@ -3754,11 +4681,24 @@ function refreezeRole(base, findings, record, intentAnswer, ruled, brief) {
       );
     }
   }
+  if (owed.length > 0) {
+    lines.push(
+      'This run authorized these supersedes at an earlier site and no suite write has executed ' +
+        'them. Each one is owed here, in this write: a pin the run said it would amend and did ' +
+        'not is a pin the next dev seat meets again.',
+      ...owed.map(
+        (entry) =>
+          `- ${entry.test}: the assertion "${entry.assertion}" is superseded. The card's ` +
+          `${entry.clause} section says: "${entry.cardQuote}"`,
+      ),
+    );
+  }
   lines.push(
     'Suite-defect findings:',
     ...findings.map((f) => `- ${findingLine(f)}`),
-    'Red layers:',
-    ...reds.map((r) => `- ${r.layer}`),
+    ...(record
+      ? ['Red layers:', ...reds.map((r) => `- ${r.layer}`)]
+      : ['No gate layer has run this cycle, so there are no red layers to read.']),
     ...briefLines(brief),
   );
   return lines.join('\n');
@@ -3868,7 +4808,14 @@ function openFindingLine(f) {
  * exactly what a code finding always printed.
  */
 export function findingLine(f) {
-  const grade = f.source === 'triage' ? `[${f.class}]` : `[${f.lens} ${f.severity}]`;
+  // The class decides the line, and the source decides nothing. A class is what
+  // the ladder routes on, and more than one seat now raises a classed finding: a
+  // line keyed on one source printed `[undefined undefined]` for every other
+  // one (ADR-0094). The depth rides it where the finding carries one, because a
+  // pin this run wrote and a pin an earlier story wrote take two answers.
+  const grade = f.class
+    ? `[${f.class}${f.depth ? ` ${f.depth}` : ''}]`
+    : `[${f.lens} ${f.severity}]`;
   const unit = f.unit ? ` [unit: ${f.unit}${f.head ? ` "${f.head}"` : ''}]` : '';
   return `${grade}${unit}${againstClause(f)} ${f.summary} (evidence: ${f.evidence})`;
 }
@@ -4357,6 +5304,11 @@ function findingFromEvent(e) {
     // triage seat made has to survive the round trip or the collision it
     // settled reads as silence on the next entry (ADR-0044).
     ...(e.supersede && { supersede: e.supersede }),
+    // Where the review seat said the fix lives. The class above is what routes
+    // the finding; this is the word the seat wrote, and the eval reads the two
+    // together to ask how often a seat's own answer and the harness's route
+    // agreed (ADR-0094).
+    ...(e.fix && { fix: e.fix }),
   };
 }
 

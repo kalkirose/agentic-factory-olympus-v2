@@ -78,6 +78,7 @@ test('the seat list is exactly these names', () => {
     'dev',
     'repair-dev',
     'verdict-triage',
+    'conflict-triage',
     'fury-spec',
     'fury-code-shape',
     'fury-operational',

@@ -63,7 +63,16 @@ import {
   recordNeighbours,
   recordUnits,
 } from './units.mjs';
-import { authorizedSupersedes, supersedeLines } from './supersede.mjs';
+import {
+  SUPERSEDE_BRIEF_LINES,
+  SUPERSEDE_CLAIM_PROPERTIES,
+  authorizedSupersedes,
+  supersedeClaim,
+  supersedeLines,
+} from './supersede.mjs';
+import { runClaims } from './claims.mjs';
+import { filesAt } from '../isolation/tree.mjs';
+import { assertDefectKind } from '../ledger/registry.mjs';
 import {
   PROBE_REQUEST_PROPERTY,
   asksForProbe,
@@ -100,6 +109,13 @@ const SEVERITIES = Object.freeze(['HIGH', 'MED', 'LOW']);
  * than that it is a list of strings: the flat subset carries no `minItems`
  * (`src/seats/contract.mjs`), so the seat's check loop is what holds the list
  * non-empty and holds every entry to a path this repository can compare.
+ *
+ * `fix` says where the repair lives: in the code, or in the frozen suite. It is
+ * required on every finding of every lane, because the two answers take two
+ * different routes and a finding that names neither is routed by guess. A suite
+ * fix may carry the card's own authorization beside it, in the four fields
+ * every other site states a claim in, and that claim is what the card check
+ * rules on (ADR-0094).
  */
 export function reviewSchema(lenses) {
   return {
@@ -119,8 +135,10 @@ export function reviewSchema(lenses) {
             finding: { type: 'string' },
             evidence: { type: 'string' },
             approach: { type: 'boolean' },
+            fix: { type: 'string', enum: ['code', 'suite'] },
+            ...SUPERSEDE_CLAIM_PROPERTIES,
           },
-          required: ['lens', 'severity', 'ground', 'finding', 'evidence'],
+          required: ['lens', 'severity', 'ground', 'finding', 'evidence', 'fix'],
         },
       },
       summary: { type: 'string' },
@@ -242,37 +260,59 @@ export const VERIFIER_SCHEMA = {
  * record is judged in the record round and nowhere else, and a code lens that
  * read one would report on a document through criteria it does not carry
  * (ADR-0073).
+ *
+ * `amendment` adds the generalist seat to the fan-out over the suite amendments
+ * this cycle owes a review, one labelled diff block per amendment. It joins the
+ * fan-out rather than taking a round of its own, because the verifier label and
+ * the resume guard are keyed by cycle: a second round would read the first
+ * round's stamps and its verifier report (ADR-0094).
  */
-export async function furyRound(ctx, base, { cycle, diff, diffFiles }) {
+export async function furyRound(ctx, base, { cycle, diff, diffFiles, mode = 'story', amendment = [] }) {
   const codeFiles = codeOnly(base, diffFiles);
   const panel = furyPanel(base.lenses);
   const supersedes = authorizedSupersedes(runEvents(ctx));
+  const sets = await suiteSets(base, mode, supersedes);
   const seats = Object.keys(panel).filter(
     (seat) =>
       seat !== 'fury-interface' ||
       (base.uiPaths.length > 0 && codeFiles.some((f) => underAny(f, base.uiPaths))),
   );
+  const dispatches = seats.map((seat) => ({
+    seat,
+    label: `${seat}-c${cycle}`,
+    schema: reviewSchema(panel[seat]),
+    buildRole: (brief) => furyRole(panel[seat], base, diff, codeFiles, supersedes, brief, sets),
+  }));
+  if (amendment.length > 0) {
+    dispatches.push({
+      seat: 'generalist-review',
+      label: `generalist-review-c${cycle}`,
+      schema: reviewSchema(base.lenses),
+      buildRole: (brief) =>
+        generalistRole(base, amendment, amendmentFiles(base, amendment), supersedes, brief, sets),
+    });
+  }
   const outcomes = await Promise.all(
-    seats.map((seat) =>
-      codeReviewSeat(ctx, base, {
-        seat,
-        label: `${seat}-c${cycle}`,
-        schema: reviewSchema(panel[seat]),
-        buildRole: (brief) => furyRole(panel[seat], base, diff, codeFiles, supersedes, brief),
-      }),
-    ),
+    dispatches.map((dispatch) => codeReviewSeat(ctx, base, { ...dispatch, sets })),
   );
   const failed = outcomes.find((o) => o.fail);
   if (failed) return { fail: failed.fail };
   const collected = outcomes.flatMap((o, i) =>
-    o.report.findings.map((f) => ({ ...f, source: seats[i] })),
+    o.report.findings.map((f) => ({ ...f, source: dispatches[i].seat })),
   );
   return settleFindings(ctx, base, {
     cycle,
     collected,
     priorConfirmed: [],
-    diffTruncated: diff.truncated === true,
+    diffTruncated: [diff, ...amendment.map((block) => block.diff)].some((d) => d?.truncated === true),
+    mode,
+    sets,
   });
+}
+
+/** The code files every block of a labelled diff list names, deduplicated. */
+function amendmentFiles(base, blocks) {
+  return codeOnly(base, [...new Set(blocks.flatMap((block) => block.diffFiles ?? []))]);
 }
 
 /** The files of a diff a code lens is answerable for: the record paths leave. */
@@ -289,15 +329,29 @@ function codeOnly(base, diffFiles) {
  * The verifier fires only when the round has something for it: a HIGH, a record
  * finding, or a prior confirmed finding needing a resolution-check. So a clean
  * small fix costs one review agent.
+ *
+ * `blocks` is the ordered list of labelled diffs the seat judges where the
+ * cycle holds more than one: the repair diff first, then one block per suite
+ * amendment the cycle owes a review. Each block is read over its own range, so
+ * a repair commit between two amendments enters neither of them (ADR-0094). A
+ * caller with one diff passes `diff` and the brief reads exactly as it always
+ * did.
  */
-export async function generalistReview(ctx, base, { cycle, diff, diffFiles, priorConfirmed }) {
+export async function generalistReview(
+  ctx,
+  base,
+  { cycle, diff, diffFiles, priorConfirmed, mode = 'story', blocks = null },
+) {
   const supersedes = authorizedSupersedes(runEvents(ctx));
-  const codeFiles = codeOnly(base, diffFiles);
+  const list = blocks ?? [{ diff, diffFiles }];
+  const sets = await suiteSets(base, mode, supersedes);
   const outcome = await codeReviewSeat(ctx, base, {
     seat: 'generalist-review',
     label: `generalist-review-c${cycle}`,
     schema: reviewSchema(base.lenses),
-    buildRole: (brief) => generalistRole(base, diff, codeFiles, supersedes, brief),
+    buildRole: (brief) =>
+      generalistRole(base, list, amendmentFiles(base, list), supersedes, brief, sets),
+    sets,
   });
   if (outcome.fail) return { fail: outcome.fail };
   const collected = outcome.report.findings.map((f) => ({ ...f, source: 'generalist-review' }));
@@ -305,7 +359,9 @@ export async function generalistReview(ctx, base, { cycle, diff, diffFiles, prio
     cycle,
     collected,
     priorConfirmed,
-    diffTruncated: diff.truncated === true,
+    diffTruncated: list.some((block) => block.diff?.truncated === true),
+    mode,
+    sets,
   });
 }
 
@@ -556,6 +612,195 @@ function groundDefects(base, findings) {
   return defects;
 }
 
+// -- the frozen suite, as one review round sees it ---------------------------
+
+/**
+ * The two frozen-suite sets a story-lane review round is judged against, or
+ * null for a lane that holds no frozen suite.
+ *
+ * `frozen` is what this run froze, less the files the spec assigned to the
+ * implementing seat: those are the seat's own and no pin of anybody's.
+ *
+ * `own` is the frozen files this run WROTE: the frozen set less what the tree
+ * held at the sha the run launched from. It decides whether the card is asked
+ * about an amendment: a pin an earlier story wrote is amended on the card's
+ * authority or not at all, and a test this run wrote itself mis-encodes this
+ * run's own spec and owes the card nothing.
+ *
+ * It is read from the tree and never from a seat's declaration. A suite write
+ * declares the files its round is about, and both the author write and the
+ * re-freeze declare files they did not touch and files an earlier story pinned;
+ * either list would class another story's pin as this run's own and skip the
+ * card check on it. Absence at the launch base sha cannot (ADR-0094).
+ *
+ * A test the card already authorized this run to amend joins that set, and the
+ * reason is the review duty ADR-0044 put on the panel. A seat reads the
+ * amendment and reports that it reached further than the card line does. Its
+ * ground is that one test and the repair is in that test, so a rule that asked
+ * it for a fresh card claim would refuse the one finding the round exists to
+ * raise. The authority is already in the ledger, once per test per run, and the
+ * one-amendment-per-defect rule bounds what it can buy.
+ *
+ * A run with no readable listing at its base sha owns nothing beyond those, so
+ * every other suite finding needs a claim. That is the safe direction: the cost
+ * of being wrong is one card check the run did not owe, against one amendment
+ * nobody authorized.
+ *
+ * @param {object[]} [authorized] the run's `supersede-authorized` stamps
+ */
+export async function suiteSets(base, mode, authorized = []) {
+  if (mode !== 'story') return null;
+  const exclusions = new Set((base.frozenExclusions ?? []).map(forwardSlashes));
+  const frozen = new Set(
+    (base.frozenSuiteFiles ?? []).map(forwardSlashes).filter((file) => !exclusions.has(file)),
+  );
+  const ruled = authorized.map((e) => forwardSlashes(e.test)).filter((file) => frozen.has(file));
+  const baseSha = typeof base.baseSha === 'string' && base.baseSha.length > 0 ? base.baseSha : null;
+  const at =
+    frozen.size > 0 && baseSha !== null
+      ? await filesAt(base.worktree, baseSha, base.testPaths ?? []).catch(() => null)
+      : null;
+  // The tree rides the sets, because every reader of them compares a seat's
+  // path against it and a comparison of two spellings is not a comparison of
+  // two paths.
+  const worktree = base.worktree;
+  if (at === null) return { worktree, frozen, own: new Set(ruled) };
+  const held = new Set(at.map(forwardSlashes));
+  const wrote = [...frozen].filter((file) => !held.has(file));
+  return { worktree, frozen, own: new Set([...wrote, ...ruled]) };
+}
+
+/** One path as both sides of every comparison here spell it. */
+function forwardSlashes(path) {
+  return String(path ?? '').replaceAll('\\', '/');
+}
+
+/** The frozen files one finding's ground names. */
+function frozenGround(finding, worktree, sets) {
+  return findingGround(finding, worktree).filter((entry) => sets.frozen.has(entry));
+}
+
+/**
+ * The one frozen test a finding says the fix belongs in, or null where the
+ * finding is not a suite fix at all.
+ *
+ * One file, because the check loop refuses a suite fix that names two: one
+ * amendment is authorized, written and reviewed per test. A record finding is
+ * never one of these, because a decision record is judged in a round of its own.
+ * @param {object} finding a marked finding of this round
+ * @param {{frozen: Set<string>, own: Set<string>}|null} sets
+ */
+function suiteFixFile(finding, sets) {
+  if (!sets || finding.fix !== 'suite' || finding.record === true) return null;
+  const frozen = frozenGround(finding, sets.worktree, sets);
+  return frozen.length === 1 ? frozen[0] : null;
+}
+
+/**
+ * The work-product defects of a story-lane review round's suite claims.
+ *
+ * A finding that says the fix is in a frozen test takes the amendment route,
+ * and that route needs three facts the finding has to carry: which frozen test,
+ * whether the run wrote it, and, where it did not, the card line that
+ * authorizes the change. Each rule below refuses a shape the route cannot act
+ * on, and each is mechanical: the seat is told what is missing and says it in
+ * one corrective answer (ADR-0094).
+ *
+ * A finding with no `fix` at all falls through every rule. The field is
+ * required by the schema, so such a finding reaches this only from a report
+ * written before the field existed.
+ *
+ * The last rule is deliberately narrow and the plan it comes from says so: it
+ * catches a finding that is entirely about frozen tests and is filed as code,
+ * and it does not catch one whose ground also names code. What catches that one
+ * is the round after it: the repair seat reports the collision, a seat of its
+ * own judges it, and the round that moved nothing buys no fresh pass.
+ */
+function suiteClaimDefects(base, findings, sets) {
+  if (!sets) return [];
+  const defects = [];
+  for (const [index, finding] of findings.entries()) {
+    if (finding.record === true || finding.severity !== 'HIGH') continue;
+    const label = findingLabel(finding, index);
+    const ground = findingGround(finding, base.worktree);
+    const frozen = frozenGround(finding, base.worktree, sets);
+    const claim = supersedeClaim(finding);
+    if (finding.fix === 'suite') {
+      if (frozen.length > 1) {
+        defects.push(
+          `finding ${label} states "fix": "suite" and its ground names ${frozen.length} frozen ` +
+            `tests: ${frozen.join(', ')}. One finding names one frozen test, because one ` +
+            'amendment is authorized, written and reviewed per test. File one finding per file.',
+        );
+        continue;
+      }
+      if (frozen.length === 0) {
+        defects.push(
+          `finding ${label} states "fix": "suite" and its ground names no frozen test of this ` +
+            'run. Put the repo-relative path of the one frozen test that must change in ' +
+            '"ground"; a suite fix with no test to amend asks for nothing anybody can do.',
+        );
+        continue;
+      }
+      if (!sets.own.has(frozen[0]) && !claim) {
+        defects.push(
+          `finding ${label} asks to amend ${frozen[0]}, which an earlier story pinned and this ` +
+            'run did not write. Such a pin is amended on the intent card\'s authority or not at ' +
+            'all: state the claim, or file the finding against the code.',
+        );
+        continue;
+      }
+      if (claim && forwardSlashes(claim.test) !== frozen[0]) {
+        defects.push(
+          `finding ${label} grounds on ${frozen[0]} and its "supersedes" names ` +
+            `${forwardSlashes(claim.test)}. The amendment would go to one file and the evidence ` +
+            'would be about another. Name the same file in both.',
+        );
+      }
+      continue;
+    }
+    if (finding.fix !== 'code' || frozen.length === 0) continue;
+    if (ground.some((entry) => !sets.frozen.has(entry))) continue;
+    defects.push(
+      `finding ${label} states "fix": "code" and its ground is frozen tests and nothing else: ` +
+        `${frozen.join(', ')}. A code fix lives in the code, so its ground names code. Where the ` +
+        'fix really is in the test, state "fix": "suite" and name the one test.',
+    );
+  }
+  return defects;
+}
+
+/**
+ * The duty a code review seat carries about the frozen suite. It states the
+ * rule and never the set: a frozen suite runs to hundreds of files and a list
+ * that long buys a prompt nothing.
+ */
+function suiteFixLines(base, sets) {
+  if (!sets) {
+    return [
+      'Every finding states "fix", "code" or "suite", for where the repair belongs. ' +
+        'This lane freezes no suite, so a "suite" fix is an ordinary edit to a test file.',
+    ];
+  }
+  const own = [...sets.own].sort();
+  return [
+    'Every finding states "fix": where the repair belongs.',
+    `- "code": the repair is in the implementation. The test paths of this repository are ` +
+      `${(base.testPaths ?? []).join(', ') || '(the project names none)'}.`,
+    '- "suite": the repair is in a frozen test. Name that one test in "ground", one finding per ' +
+      'file, and say in the finding what the pinned clause asserts and why no implementation of ' +
+      'this spec can leave it true.',
+    own.length > 0
+      ? `The frozen tests this run wrote itself: ${own.join(', ')}. A file under the test paths ` +
+        'that is not one of those is a pin an earlier story wrote.'
+      : 'This run wrote no frozen test of its own, so every file under the test paths is a pin ' +
+        'an earlier story wrote.',
+    'A pin an earlier story wrote is amended on the intent card\'s authority or not at all. State ' +
+      'the claim on the finding:',
+    ...SUPERSEDE_BRIEF_LINES,
+  ];
+}
+
 /** One ground entry as a path entry is written, or null for one that will not compare. */
 function groundOf(entry, worktree) {
   const relative = repoRelative(entry, worktree);
@@ -762,11 +1007,27 @@ function byRecord(value, record) {
  * a wrong block costs less as the writer's own dispute, which the next fresh
  * reviewer either raises again or does not (ADR-0080). A HIGH of a round that
  * does not verify is confirmed as raised.
+ *
+ * `sets` is the frozen suite as this round sees it, or null for a lane with
+ * none. Where it is given, a HIGH whose fix is a frozen test is run against the
+ * project's own suite command before the verifier spawns, is stamped with the
+ * class and the depth that route it to the amendment arm, and never enters the
+ * code set (ADR-0094).
  */
 async function settleFindings(
   ctx,
   base,
-  { cycle, collected, priorConfirmed, diffTruncated = false, verify = true, read = null, moved = null },
+  {
+    cycle,
+    collected,
+    priorConfirmed,
+    diffTruncated = false,
+    verify = true,
+    read = null,
+    moved = null,
+    mode = 'story',
+    sets = null,
+  },
 ) {
   const allowlist = base.allowlistPaths ?? [];
   const recordPaths = base.recordPaths ?? [];
@@ -789,6 +1050,19 @@ async function settleFindings(
     ...verifiable.map((f, i) => ({ id: `new-${i + 1}`, mode: 'confirm', finding: f })),
     ...priorConfirmed.map((f) => ({ id: f.id, mode: 'resolution-check', finding: f })),
   ];
+  // The round's suite claims, run once, before the verifier spawns. The
+  // verifier then judges each claim with the run in hand: a red confirms the
+  // claim's premise, and a green settles it whatever the seat reads.
+  const claims = await runClaims(ctx, base, {
+    cycle,
+    claims: items
+      .filter((item) => item.mode === 'confirm' && suiteFixFile(item.finding, sets) !== null)
+      .map((item) => ({ item: item.id, file: suiteFixFile(item.finding, sets) })),
+  });
+  for (const item of items) {
+    const answer = claims.get(item.id);
+    if (answer) item.claim = answer;
+  }
   let results = new Map();
   if (verify && items.length > 0) {
     const verified = await verifierSeat(ctx, base, { cycle, items });
@@ -804,8 +1078,17 @@ async function settleFindings(
     );
   }
   const events = runEvents(ctx);
+  // The findings of this cycle this round is responsible for. Every seat that
+  // stamps a finding of its own inside one cycle is excluded by name: a triage
+  // over the cycle's reds, and a triage over the conflicts an implementing seat
+  // reported. A guard that counted theirs would read this round as already
+  // settled and return the wrong set (ADR-0094).
   const stampedForCycle = events.filter(
-    (e) => e.event === 'finding' && e.cycle === cycle && e.source !== 'triage',
+    (e) =>
+      e.event === 'finding' &&
+      e.cycle === cycle &&
+      e.source !== 'triage' &&
+      e.source !== 'conflict-triage',
   );
   if (stampedForCycle.length > 0) {
     // Resumed after the stamp: the ledger holds the assigned ids.
@@ -832,6 +1115,14 @@ async function settleFindings(
         // no sentence.
         ...recordFields(e),
         ...(e.approach && { approach: true }),
+        // Where the fix lives, the class it routes on, the depth the amendment
+        // takes and the card claim behind it. A resumed cycle that rebuilt a
+        // suite finding without them would route it to the code arm, which is
+        // the whole defect this plan removes (ADR-0094).
+        ...(e.fix && { fix: e.fix }),
+        ...(e.class && { class: e.class }),
+        ...(e.depth && { depth: e.depth }),
+        ...(e.supersede && { supersede: e.supersede }),
       }));
     const resolved = priorConfirmed
       .filter((f) => results.get(f.id)?.verdict === 'resolved')
@@ -847,7 +1138,13 @@ async function settleFindings(
   for (let i = 0; i < verifiable.length; i++) {
     const f = verifiable[i];
     const result = results.get(`new-${i + 1}`);
-    const isConfirmed = result?.verdict === 'confirmed';
+    const suiteFile = suiteFixFile(f, sets);
+    const claim = claims.get(`new-${i + 1}`);
+    // A suite claim the harness's own run turned green is advisory whatever the
+    // verifier says: the test the finding wants amended passes at the judged
+    // sha, so the premise the claim rests on is not met. The stamp beside it
+    // carries the claim to a later red in that file (ADR-0094).
+    const isConfirmed = result?.verdict === 'confirmed' && claim?.result !== 'green';
     // The verifier's own ground on a confirmed finding. It read the code and
     // the review seat read a diff, so the seat that proved the finding is the
     // one whose word the ladder carries. A verifier that states none leaves
@@ -867,6 +1164,19 @@ async function settleFindings(
       ...(f.record && { record: true, ...(f.criterion && { criterion: f.criterion }) }),
       approach: isConfirmed && (result.approach ?? f.approach ?? false),
       confirmed: isConfirmed,
+      ...(f.fix === 'code' || f.fix === 'suite' ? { fix: f.fix } : {}),
+      // A confirmed suite fix is a suite defect, and the depth says who
+      // authorizes the amendment. A test this run wrote mis-encodes this run's
+      // own spec, so the suite seat amends it and no card line is owed; a pin an
+      // earlier story wrote is the card's to authorize, and the claim rides the
+      // finding into that check (ADR-0094).
+      ...(isConfirmed && suiteFile !== null
+        ? {
+            class: 'suite-defect',
+            depth: sets.own.has(suiteFile) ? 'test' : 'intent',
+            ...(supersedeClaim(f) && { supersede: supersedeClaim(f) }),
+          }
+        : {}),
     };
     // A refuted record finding is not advice. A second seat read the tree and
     // wrote down, with evidence, why the record is right; the word for material
@@ -876,6 +1186,19 @@ async function settleFindings(
       diffTruncated,
     });
     if (isConfirmed) confirmed.push(finding);
+    // A confirmed suite finding whose claim nothing ran amends a frozen test on
+    // one seat's reading. Threshold nought: the run above stamps an answer for
+    // every claim it is given, so one of these is the claim run itself failing.
+    if (isConfirmed && suiteFile !== null && !claim) {
+      ctx.store.append('gate-integrity', {
+        actor: ACTOR,
+        kind: assertDefectKind('claim-unrun'),
+        findings: [finding.id],
+        file: suiteFile,
+        cycle,
+        gist: gist(`a confirmed suite finding on ${suiteFile} has no claim run`),
+      });
+    }
   }
   for (const f of advisory) {
     // A remark about a record carries the record word, the criterion and the
@@ -1057,6 +1380,15 @@ function stampReviewFinding(ctx, cycle, finding, { advisory, diffTruncated = fal
     // finding stamped without them is a finding no reading can count
     // (ADR-0073).
     ...recordFields(finding),
+    // Where the fix lives, and, on a confirmed suite fix, the class and the
+    // depth that route it. The ladder rebuilds every finding from the ledger,
+    // so a finding stamped without them is routed to the code arm on the next
+    // entry whatever this round decided (ADR-0094). The claim travels with
+    // them, because the card check is what rules on it.
+    ...(finding.fix && { fix: finding.fix }),
+    ...(finding.class && { class: finding.class }),
+    ...(finding.depth && { depth: finding.depth }),
+    ...(finding.supersede && { supersede: finding.supersede }),
     ...(advisory ? { advisory: true } : {}),
     ...(finding.confirmed !== undefined && { confirmed: finding.confirmed }),
     ...(finding.approach && { approach: true }),
@@ -1098,7 +1430,7 @@ async function reviewSeat(ctx, { seat, label, schema, roleBlock, cwd, env, const
  * it stands, so a stamped report that names no ground is not carried by a
  * restart.
  */
-function codeReviewSeat(ctx, base, { seat, label, schema, buildRole }) {
+function codeReviewSeat(ctx, base, { seat, label, schema, buildRole, sets = null }) {
   return seatWithChecks(ctx, {
     seat,
     label,
@@ -1108,7 +1440,10 @@ function codeReviewSeat(ctx, base, { seat, label, schema, buildRole }) {
     env: base.env,
     constitution: base.constitution,
     buildRole,
-    checks: (report) => groundDefects(base, report.findings ?? []),
+    checks: (report) => [
+      ...groundDefects(base, report.findings ?? []),
+      ...suiteClaimDefects(base, report.findings ?? [], sets),
+    ],
   });
 }
 
@@ -1204,7 +1539,7 @@ function verifierCoverageDefects(items, results) {
 
 // -- role blocks -------------------------------------------------------------
 
-function furyRole(lenses, base, diff, files = [], supersedes = [], brief = null) {
+function furyRole(lenses, base, diff, files = [], supersedes = [], brief = null, sets = null) {
   return [
     `Review the candidate implementation diff through these lenses, and label every finding with its lens:`,
     ...lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
@@ -1214,6 +1549,7 @@ function furyRole(lenses, base, diff, files = [], supersedes = [], brief = null)
     'Set "approach": true only when the finding names the implementation structure as wrong against the spec.',
     'Put the repo-relative path of the one file a finding is about in "file"; leave it out for a finding about no single file.',
     ...FINDING_GROUND_DUTY,
+    ...suiteFixLines(base, sets),
     ...(lenses.includes('spec') ? supersedeDutyLines(base, supersedes) : []),
     ...governingRecordLines(base.worktree, files, base.recordPaths ?? [], {
       reconcile: base.reconcile,
@@ -1223,7 +1559,7 @@ function furyRole(lenses, base, diff, files = [], supersedes = [], brief = null)
   ].join('\n');
 }
 
-function generalistRole(base, diff, files = [], supersedes = [], brief = null) {
+function generalistRole(base, blocks, files = [], supersedes = [], brief = null, sets = null) {
   return [
     'Review the diff below through these lenses, and label every finding with its lens:',
     ...base.lenses.map((lens) => `- ${LENS_CRITERIA[lens]}`),
@@ -1233,13 +1569,36 @@ function generalistRole(base, diff, files = [], supersedes = [], brief = null) {
     'Set "approach": true only when the finding names the implementation structure as wrong against the spec.',
     'Put the repo-relative path of the one file a finding is about in "file"; leave it out for a finding about no single file.',
     ...FINDING_GROUND_DUTY,
+    ...suiteFixLines(base, sets),
     ...(base.lenses.includes('spec') ? supersedeDutyLines(base, supersedes) : []),
     ...governingRecordLines(base.worktree, files, base.recordPaths ?? [], {
       reconcile: base.reconcile,
     }),
-    ...diffLines(diff),
+    ...diffBlockLines(blocks),
     ...briefLines(brief),
   ].join('\n');
+}
+
+/**
+ * The diffs one seat judges, each under a heading that says what it is.
+ *
+ * A cycle can hand one seat several pieces of work: a repair round's own diff,
+ * and the suite amendment of every re-freeze the cycle owes a review. Each is
+ * read over its own range and written to its own file, because one range from
+ * the first to the last would swallow whatever was committed between them
+ * (ADR-0094).
+ *
+ * One block keeps the wording it always had: a seat given one diff is not told
+ * it is the first of one.
+ */
+function diffBlockLines(blocks) {
+  const list = Array.isArray(blocks) ? blocks : [blocks];
+  if (list.length === 1) return diffLines(list[0].diff);
+  return list.flatMap((block, i) => [
+    '',
+    `Diff ${i + 1} of ${list.length}${block.label ? `: ${block.label}` : ''}.`,
+    ...diffLines(block.diff),
+  ]);
 }
 
 /**
@@ -1519,8 +1878,29 @@ function verifierItemLine(item) {
   const against = againstClause(f);
   return (
     `[${item.id}] (${item.mode}) ${grade}${where}${unit}${criterion}${against}: ` +
-    `${f.finding ?? f.summary} (evidence: ${f.evidence})`
+    `${f.finding ?? f.summary} (evidence: ${f.evidence})${claimClause(item)}`
   );
+}
+
+/**
+ * What the harness's own run of a claimed test said, on the item line.
+ *
+ * The seat judges the claim with the run in hand rather than by reading alone.
+ * A red confirms the premise the claim rests on. A green settles the item
+ * whatever this seat answers, and the line says so, because a seat that reads
+ * the code and confirms anyway would be told its verdict changed nothing. An
+ * unselected file is one the project's own gate does not run, and there the
+ * seat's reading is all there is.
+ */
+function claimClause(item) {
+  const claim = item.claim;
+  if (!claim) return '';
+  const word = {
+    red: 'ran RED, so the claim\'s premise holds',
+    green: 'ran GREEN, so this finding is advisory whatever you answer',
+    unselected: 'was not selected by any gate of this project, so your reading stands',
+  }[claim.result];
+  return ` [claim run: ${claim.file} ${word}; log: ${claim.log ?? '(none)'}]`;
 }
 
 /**
