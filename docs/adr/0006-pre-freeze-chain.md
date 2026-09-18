@@ -114,18 +114,20 @@ authoring, freeze. It gets these concrete shapes:
   The `freeze` event carries the sha and the counts. The valid record is
   the chain's completion signal.
 - **Test-edit boundary.** `editDenyRules({testPaths, recordPaths, except,
-  worktree})` produces `Edit`/`Write`/`NotebookEdit` deny rules over every test
-  path and every record path; `runSeat({denyTools})` carries them into the claude
-  argv as disallowed tools. A plain prefix entry covers its subtree (`prefix/**`);
-  a glob entry is already a complete pattern and passes through unsuffixed; an
-  `!` exclusion is skipped. `testEditDenyRules(testPaths, opts)` is the same
-  rules by the old positional call, for the sites that deny the test paths alone.
-  Every seat that writes code carries them: the dev and fix seats, the repair-dev
-  seat, and the seat that resolves a merge conflict. Every other test-path read
-  (the suite checks, the conflict-hunk routing, the freeze file set) matches
-  entries with the same semantics, and the restore rides git pathspecs
-  (`:(glob)` magic for glob entries). The record half has its own structural
-  backstop at the candidate capture (ADR-0017, ADR-0074).
+  worktree})` produces one `Edit` deny rule per pattern over every test path and
+  every record path, because an `Edit(path)` rule holds every built-in tool that
+  edits that path; `runSeat({denyTools})` writes them into the seat's own
+  settings file as its deny list, and never onto the command line (ADR-0095). A
+  plain prefix entry covers its subtree (`prefix/**`); a glob entry is already a
+  complete pattern and passes through unsuffixed; an `!` exclusion is skipped.
+  `testEditDenyRules(testPaths, opts)` is the same rules by the old positional
+  call, for the sites that deny the test paths alone. Every seat that writes code
+  carries them: the dev and fix seats, the repair-dev seat, and the seat that
+  resolves a merge conflict. Every other test-path read (the suite checks, the
+  conflict-hunk routing, the freeze file set) matches entries with the same
+  semantics, and the restore rides git pathspecs (`:(glob)` magic for glob
+  entries). The record half has its own structural backstop at the candidate
+  capture (ADR-0017, ADR-0074).
 - **Command environment.** The lane command runner strips
   `NODE_TEST_CONTEXT` from the child environment: under an inherited test
   context a child `node --test` reports exit 0 for a red suite — a false
@@ -213,10 +215,12 @@ directive returns to a close. Trigger: three consecutive exhaustion parks
 answered `abandon`. Reversal cost: low — the park directive becomes a close
 directive again, and the catalog entry can stay.
 
-If the `--disallowedTools` rule syntax does not hold at the live shakedown,
-the ADR-0005 fallback applies: a deny hook in the seat's settings file. The
-restore of the test paths before a verdict cycle keeps the evaluation path safe
-either way.
+If the deny rules in the settings file do not hold at the tool call, the
+fallback is a hook over the editing tools in that same file: the file is
+already written per dispatch and its load is already proven from the hook
+marker (ADR-0084, ADR-0095). Trigger: an edit to a test path that the capture
+takes back on a seat whose settings file carried the rule. The restore of the
+test paths before a verdict cycle keeps the evaluation path safe either way.
 
 If that restore hides tamper attempts the eval seat should see, stamp a
 pre-restore diff of the test paths as a ledger event. Trigger: an eval review

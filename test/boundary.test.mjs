@@ -1,5 +1,5 @@
 // The edit boundary at the tool level: deny rules from the project's test paths
-// and record paths, carried into the claude argv as disallowed tools.
+// and record paths, carried into the seat's own settings file as its deny list.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { editDenyRules, testEditDenyRules } from '../src/seats/boundary.mjs';
@@ -7,33 +7,20 @@ import { claudeSeatCommand } from '../src/seats/claude.mjs';
 import { seatDef } from '../src/seats/seatmap.mjs';
 import { tempDir, removeDir, writeTree } from './helpers.mjs';
 
-test('deny rules cover every edit tool per test path', () => {
+// One rule per pattern. An `Edit(path)` rule holds every built-in tool that
+// edits that path, so a rule naming a second editing tool states the boundary
+// again and is consulted by nothing (ADR-0095).
+test('one deny rule covers each test path', () => {
   const rules = testEditDenyRules(['tests', 'e2e/']);
-  assert.deepEqual(rules, [
-    'Edit(tests/**)',
-    'Write(tests/**)',
-    'NotebookEdit(tests/**)',
-    'Edit(e2e/**)',
-    'Write(e2e/**)',
-    'NotebookEdit(e2e/**)',
-  ]);
+  assert.deepEqual(rules, ['Edit(tests/**)', 'Edit(e2e/**)']);
+  assert.ok(!rules.some((r) => r.startsWith('Write(') || r.startsWith('NotebookEdit(')));
   assert.deepEqual(testEditDenyRules([]), []);
   assert.deepEqual(testEditDenyRules(undefined), []);
 });
 
 test('a glob entry passes through unsuffixed; a prefix keeps its suffix', () => {
   const rules = testEditDenyRules(['tests/', 'src/**/*.test.ts', '**/*.spec.ts']);
-  assert.deepEqual(rules, [
-    'Edit(tests/**)',
-    'Write(tests/**)',
-    'NotebookEdit(tests/**)',
-    'Edit(src/**/*.test.ts)',
-    'Write(src/**/*.test.ts)',
-    'NotebookEdit(src/**/*.test.ts)',
-    'Edit(**/*.spec.ts)',
-    'Write(**/*.spec.ts)',
-    'NotebookEdit(**/*.spec.ts)',
-  ]);
+  assert.deepEqual(rules, ['Edit(tests/**)', 'Edit(src/**/*.test.ts)', 'Edit(**/*.spec.ts)']);
 });
 
 test('a freeze exclusion narrows the rules to everything but that file', (t) => {
@@ -58,20 +45,18 @@ test('a freeze exclusion narrows the rules to everything but that file', (t) => 
     'Edit(tests/support/util.mjs)',
     'Edit(tests/unit/**)',
   ]);
-  assert.ok(rules.includes('Write(tests/support/util.mjs)'));
+  assert.deepEqual(rules, edits);
   assert.ok(!rules.some((r) => r.includes('harness.mjs')));
   // Without the tree there is nothing to walk, so the boundary stays whole.
-  assert.deepEqual(testEditDenyRules(['tests'], { except: ['tests/support/harness.mjs'] }), [
-    'Edit(tests/**)',
-    'Write(tests/**)',
-    'NotebookEdit(tests/**)',
-  ]);
+  assert.deepEqual(
+    testEditDenyRules(['tests'], { except: ['tests/support/harness.mjs'] }),
+    ['Edit(tests/**)'],
+  );
   // An exemption under no test path changes nothing.
-  assert.deepEqual(testEditDenyRules(['tests'], { except: ['src/feature.mjs'], worktree: root }), [
-    'Edit(tests/**)',
-    'Write(tests/**)',
-    'NotebookEdit(tests/**)',
-  ]);
+  assert.deepEqual(
+    testEditDenyRules(['tests'], { except: ['src/feature.mjs'], worktree: root }),
+    ['Edit(tests/**)'],
+  );
 });
 
 test('a bracketed exclusion is narrowed by its path, not by what it would match', (t) => {
@@ -102,28 +87,16 @@ test('a bracketed exclusion is narrowed by its path, not by what it would match'
 // record paths join the frozen paths at the same boundary the test paths use.
 test('the record paths are denied beside the test paths, in that order', () => {
   const rules = editDenyRules({ testPaths: ['tests'], recordPaths: ['docs/adr'] });
-  assert.deepEqual(rules, [
-    'Edit(tests/**)',
-    'Write(tests/**)',
-    'NotebookEdit(tests/**)',
-    'Edit(docs/adr/**)',
-    'Write(docs/adr/**)',
-    'NotebookEdit(docs/adr/**)',
-  ]);
+  assert.deepEqual(rules, ['Edit(tests/**)', 'Edit(docs/adr/**)']);
   // Either list alone, and neither list at all.
-  assert.deepEqual(editDenyRules({ recordPaths: ['docs/adr'] }), [
-    'Edit(docs/adr/**)',
-    'Write(docs/adr/**)',
-    'NotebookEdit(docs/adr/**)',
-  ]);
+  assert.deepEqual(editDenyRules({ recordPaths: ['docs/adr'] }), ['Edit(docs/adr/**)']);
   assert.deepEqual(editDenyRules({}), []);
   assert.deepEqual(editDenyRules(), []);
   // One path in both lists is denied once.
-  assert.deepEqual(editDenyRules({ testPaths: ['docs/adr'], recordPaths: ['docs/adr/'] }), [
-    'Edit(docs/adr/**)',
-    'Write(docs/adr/**)',
-    'NotebookEdit(docs/adr/**)',
-  ]);
+  assert.deepEqual(
+    editDenyRules({ testPaths: ['docs/adr'], recordPaths: ['docs/adr/'] }),
+    ['Edit(docs/adr/**)'],
+  );
 });
 
 // An exclusion names a file that is not a record. The entry it was carved out
@@ -133,11 +106,7 @@ test('an exclusion entry is not a deny rule', () => {
   const rules = editDenyRules({
     recordPaths: ['docs/adr', '!docs/adr/TEMPLATE.md'],
   });
-  assert.deepEqual(rules, [
-    'Edit(docs/adr/**)',
-    'Write(docs/adr/**)',
-    'NotebookEdit(docs/adr/**)',
-  ]);
+  assert.deepEqual(rules, ['Edit(docs/adr/**)']);
   assert.ok(!rules.some((r) => r.includes('!')));
   assert.ok(!rules.some((r) => r.includes('TEMPLATE')));
   // Nothing but exclusions denies nothing.
@@ -148,39 +117,35 @@ test('an exclusion entry is not a deny rule', () => {
 // the rules they always got.
 test('the old positional call is the test half of the same boundary', () => {
   assert.deepEqual(testEditDenyRules(['tests', 'e2e']), editDenyRules({ testPaths: ['tests', 'e2e'] }));
-  assert.deepEqual(testEditDenyRules(['tests']), [
-    'Edit(tests/**)',
-    'Write(tests/**)',
-    'NotebookEdit(tests/**)',
-  ]);
+  assert.deepEqual(testEditDenyRules(['tests']), ['Edit(tests/**)']);
 });
 
-test('denyTools ride the claude argv as disallowed tools', () => {
-  const def = seatDef('spec-gate');
+// The deny list is the size of the project's test tree, and a command line
+// holds only what the harness bounds. So no caller can put a rule on argv: the
+// builder emits the seat definition's own tool policy and nothing else, and the
+// rules ride the settings file the runner writes (ADR-0095).
+test('no caller rule reaches the command line', () => {
   const { args } = claudeSeatCommand({
     prompt: 'P',
     model: 'claude-opus-5',
     effort: 'high',
-    def,
-    denyTools: testEditDenyRules(['tests']),
+    def: seatDef('spec-gate'),
+    denyTools: testEditDenyRules(['tests', 'docs/adr']),
   });
+  assert.ok(!args.some((a) => a.startsWith('Edit(')));
   const at = args.indexOf('--disallowedTools');
   assert.notEqual(at, -1);
-  // The value list runs to the flag that closes it; the prompt is last.
+  // The value list runs to the flag that closes it; the prompt is last. What
+  // stands in it is the definition's policy: this seat has no web tools and no
+  // subagents.
   const disallowed = args.slice(at + 1, args.indexOf('--dangerously-skip-permissions'));
-  assert.ok(disallowed.includes('Edit(tests/**)'));
-  assert.ok(disallowed.includes('Write(tests/**)'));
-  assert.ok(disallowed.includes('NotebookEdit(tests/**)'));
-  // The seat has no web tools and no subagents.
-  assert.ok(disallowed.includes('WebSearch'));
-  assert.ok(disallowed.includes('Task'));
+  assert.deepEqual(disallowed, ['WebSearch', 'WebFetch', 'Task']);
 });
 
-// The bound and the deny list are two mechanisms over the same seat: the list
-// says which tools it may call, the hook says which layers it may run. The
-// settings file that loads the hook rides between the list and the flag that
-// closes it, so neither swallows the other.
-test('a bound settings file does not open the deny list', () => {
+// A dev seat has web tools and a subagent budget, so its policy list is empty
+// and the flag that would carry it is omitted. The settings file that carries
+// the bound and the rules still rides between the flags and the prompt.
+test('a seat whose policy denies nothing carries no deny flag at all', () => {
   const { args } = claudeSeatCommand({
     prompt: 'P',
     model: 'claude-opus-5',
@@ -189,8 +154,9 @@ test('a bound settings file does not open the deny list', () => {
     denyTools: testEditDenyRules(['tests']),
     settingsPath: '/home/runs/r1/seats/dev-1.settings.json',
   });
-  const disallowed = args.slice(args.indexOf('--disallowedTools') + 1, args.indexOf('--include-hook-events'));
-  assert.deepEqual(disallowed, ['Edit(tests/**)', 'Write(tests/**)', 'NotebookEdit(tests/**)']);
+  assert.ok(!args.includes('--disallowedTools'));
   assert.equal(args.at(-1), 'P');
   assert.equal(args.at(-2), '--dangerously-skip-permissions');
+  assert.equal(args.at(-3), '/home/runs/r1/seats/dev-1.settings.json');
+  assert.equal(args.at(-4), '--settings');
 });

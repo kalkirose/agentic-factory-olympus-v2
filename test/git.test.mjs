@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { git, gitArgv, gitPlain } from '../src/isolation/git.mjs';
+import { COMMAND_LINE_MAX } from '../src/engine/executable.mjs';
 import { scaffoldHome } from '../src/daemon/home.mjs';
 import { ensureBareClone } from '../src/isolation/clones.mjs';
 import { addRunWorktree, removeRunWorktrees, workspaceRoot } from '../src/isolation/worktrees.mjs';
@@ -125,3 +126,23 @@ test(
     assert.ok(!existsSync(workspaceRoot(paths, runId)));
   },
 );
+
+// A pathspec list grows with the tree, and a command line has a ceiling on it.
+// The host answers a line over that ceiling by throwing where the call stands,
+// and the throw names the condition and nothing else. The refusal here names
+// the command and the length, and it carries a mark, because a caller that
+// swallows an ordinary git failure must not swallow one that ran nothing
+// (ADR-0095).
+test('a git command line over the ceiling is refused with the length named', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const repo = initOriginRepo(join(root, 'repo'), { 'src/a.mjs': 'v1\n' });
+  const paths = Array.from({ length: 2000 }, (_, i) => `:(literal)src/generated/file-${i}.mjs`);
+  await assert.rejects(() => git(['checkout', 'HEAD', '--', ...paths], { cwd: repo }), (error) => {
+    assert.match(error.message, /refused: the command line is \d+ characters, over the 32767/);
+    assert.ok(error.commandLineChars > COMMAND_LINE_MAX);
+    // The message states which command it is, and not the whole of it.
+    assert.ok(error.message.length < 400, error.message.length);
+    return true;
+  });
+});

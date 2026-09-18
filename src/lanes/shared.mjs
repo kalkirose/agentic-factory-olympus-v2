@@ -720,8 +720,9 @@ export function attemptLimit(events, seat) {
  * the report, because a caller that stamps one entry per record needs what the
  * dispatch spent and the ledger's own per-seat total cannot say which slot.
  *
- * `settings` is the bound the seat runs inside, as the caller computed it. The
- * two files it needs are named here, per dispatch, from the invocation count
+ * `settings` is the bound the seat runs inside, as the caller computed it, and
+ * `denyTools` the edit rules it runs under. Both ride one settings file, and
+ * the files they need are named here, per dispatch, from the invocation count
  * the ledger already holds.
  */
 export async function seatWithChecks(
@@ -781,13 +782,16 @@ export async function seatWithChecks(
       constitution,
       ...(styleFiles && { styleFiles }),
       ...(denyTools && { denyTools }),
-      // The bound this dispatch runs inside, with the two files it needs named
-      // per dispatch: the invocation count is what makes them this dispatch's
-      // own, and the refusals of one seat are then readable against the bound
-      // that produced them.
-      ...(settings && {
+      // The bound this dispatch runs inside and the edit rules it runs under,
+      // with the files they need named per dispatch: the invocation count is
+      // what makes them this dispatch's own, and the refusals of one seat are
+      // then readable against the bound that produced them. The paths are named
+      // for a dispatch that carries rules and no bound too, because the rules
+      // ride that file and a dispatch that could not name it would put them
+      // back on the command line (ADR-0095).
+      ...((settings || denyTools) && {
         settings: {
-          bound: settings,
+          ...(settings && { bound: settings }),
           settingsPath: seatSettingsPath(ctx.paths, ctx.runId, seat, n),
           boundPath: seatBoundPath(ctx.paths, ctx.runId, seat, n),
         },

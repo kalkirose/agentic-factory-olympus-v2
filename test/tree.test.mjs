@@ -162,6 +162,28 @@ test('carryPaths brings the suite commit\'s own files onto a tree that moved und
   assert.equal(content('tests/kept.test.mjs'), 'base kept\n');
 });
 
+// A frozen suite runs to hundreds of files, and each one of them would ride one
+// command line. The host refuses a line over its ceiling, so the carry goes in
+// batches no line is too long for (ADR-0095).
+test('carryPaths carries a file set larger than one command line', async (t) => {
+  const root = tempDir();
+  t.after(() => removeDir(root));
+  const repo = initOriginRepo(join(root, 'repo'), { 'src/a.mjs': 'base src\n' });
+  gitSync(['checkout', '-b', 'run/alpha'], repo);
+  const suite = {};
+  for (let i = 0; i < 500; i++) suite[`tests/case-${i}.test.mjs`] = `case ${i}\n`;
+  writeTree(repo, suite);
+  const suiteSha = await commitAll(repo, 'suite: freeze');
+  gitSync(['checkout', 'main'], repo);
+  const mainSha = commitTree(repo, { 'src/a.mjs': 'main advanced src\n' }, 'main moves');
+  gitSync(['checkout', 'run/alpha'], repo);
+  gitSync(['reset', '--hard', mainSha], repo);
+  await carryPaths(repo, suiteSha, ['tests']);
+  const carried = (await changedFiles(repo)).filter((file) => file.startsWith('tests/'));
+  assert.equal(carried.length, 500);
+  assert.ok(existsSync(join(repo, 'tests', 'case-499.test.mjs')));
+});
+
 test('carryPaths leaves the freeze exclusions alone', async (t) => {
   const root = tempDir();
   t.after(() => removeDir(root));

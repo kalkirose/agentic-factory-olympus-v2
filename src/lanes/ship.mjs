@@ -68,6 +68,8 @@ import {
   repairTicketPath,
   reconcileTicketPath,
   runReportPath,
+  seatBoundPath,
+  seatSettingsPath,
 } from '../daemon/home.mjs';
 import { readEvents } from '../ledger/ledger.mjs';
 import { DEFAULT_PROJECT_CONFIG_PATH, recordPathIncludes } from '../config/project.mjs';
@@ -130,7 +132,9 @@ import {
   currentPass,
   freshPass,
   answerCount,
+  gateCommandLines,
   passOpeningSha,
+  seatBound,
   sweepSkippedAfter,
   verdictRecordFile,
 } from './verdict.mjs';
@@ -2025,9 +2029,18 @@ async function mergeRound(
   let cause = null;
   if (codeConflicts.length > 0) {
     const n = invocationCount(runEvents(ctx), 'dev') + 1;
+    // The merge round dispatches a seat that writes code, so it runs inside the
+    // bound every other implementation seat runs inside, in every lane
+    // (ADR-0084). The bound is the verdict's own derivation, and the brief
+    // carries the layers it admits: a seat that met a refusal it was not told
+    // about reads it as a broken environment. One file carries the hook and the
+    // deny rules, and the hook's marker is what proves the file loaded, so a
+    // seat with rules and no bound would carry rules nothing can prove loaded
+    // (ADR-0095).
+    const bound = await seatBound(ctx, base, base.mode);
     const result = await ctx.runSeat({
       seat: 'dev',
-      roleBlock: conflictRole(base, codeConflicts, brief),
+      roleBlock: conflictRole(base, codeConflicts, brief, bound),
       reportPath: runReportPath(ctx.paths, ctx.runId, `dev-${n}`),
       schema: DEV_SCHEMA,
       cwd: base.worktree,
@@ -2041,6 +2054,13 @@ async function mergeRound(
         except: base.frozenExclusions,
         worktree: base.worktree,
       }),
+      // The dispatch's own files, named from the invocation count exactly as
+      // the lane's own seat dispatches name theirs.
+      settings: {
+        ...(bound && { bound }),
+        settingsPath: seatSettingsPath(ctx.paths, ctx.runId, 'dev', n),
+        boundPath: seatBoundPath(ctx.paths, ctx.runId, 'dev', n),
+      },
     });
     if (!result.ok) cause = 'dev seat failed';
   }
@@ -3237,7 +3257,7 @@ function fixEscapeBack(ctx, merged) {
 
 // -- role blocks -------------------------------------------------------------
 
-function conflictRole(base, conflicts, brief) {
+function conflictRole(base, conflicts, brief, bound = null) {
   return [
     `A merge of ${base.defaultBranch} into the run branch stopped on textual conflicts.`,
     'Resolve the conflict markers in these files; combine both sides faithfully:',
@@ -3245,6 +3265,10 @@ function conflictRole(base, conflicts, brief) {
     `The spec of this run: ${base.specRef}`,
     'Change conflicted files only. Do not edit test files. Do not commit; the orchestrator concludes the merge.',
     ...recordLines(base),
+    // The layers of this seat's bound, and the rule behind a refusal. A
+    // resolution that ran a layer to check itself meets the hook, and a seat
+    // told nothing reads the refusal as a defect of the environment (ADR-0084).
+    ...gateCommandLines(base, bound),
     ...briefLines(brief),
   ].join('\n');
 }
@@ -3355,6 +3379,11 @@ async function shipBase(ctx, forgeFor) {
     // every Tier-1 layer, so the fast path reads a default-branch move of it as
     // ground the certification rests on (ADR-0056).
     configPath: ctx.payload.configPath ?? DEFAULT_PROJECT_CONFIG_PATH,
+    // The Tier-1 layers and the command table. The merge round dispatches a
+    // seat that writes code, and a bound and a brief for it are derived from
+    // these two the way every other implementation seat's are.
+    layers: config.gates?.tier1 ?? [],
+    commands: config.commands ?? {},
     testPaths: config.repo.testPaths ?? [],
     // The Tier-1 layers a changed record path is attributed to. The records
     // lane's CI route reads them to tell a record red from a code red

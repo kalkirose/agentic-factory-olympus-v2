@@ -217,8 +217,13 @@ export async function restorePaths(tree, sha, entries, { except = [] } = {}) {
     const pathspec = isGlobEntry(entry) ? `:(glob)${entry}` : entry;
     try {
       await git(['checkout', sha, '--', pathspec, ...excludes], { cwd: tree });
-    } catch {
+    } catch (error) {
       // The sha holds nothing under this entry; the clean still applies.
+      // A command line the host would refuse is the one failure this may not
+      // swallow: nothing ran, so the entry was not restored, and a caller that
+      // read the silence as "nothing to restore" would judge a tampered tree
+      // (ADR-0095).
+      if (typeof error?.commandLineChars === 'number') throw error;
     }
     if (exempt.size === 0) {
       await git(['clean', '-fd', '--', pathspec], { cwd: tree });
@@ -279,11 +284,14 @@ export async function carryPaths(tree, sha, entries, { except = [] } = {}) {
     if (!entries.some((entry) => underEntry(file, entry))) continue;
     (fields[i] === 'D' ? drop : take).push(file);
   }
-  if (take.length > 0) {
-    // `:(literal)` for the same reason the exclusions carry it: a bare
-    // pathspec is wildmatched, and a file whose name holds `[` would reach
-    // its siblings.
-    await git(['checkout', sha, '--', ...take.map((file) => `:(literal)${file}`)], { cwd: tree });
+  // In batches, because the set is every file the sha authored under the
+  // entries, and a frozen suite runs to hundreds of them: one command line
+  // holding all of them is a line the host refuses (ADR-0095). Every batch
+  // carries `:(literal)` for the reason the exclusions carry it: a bare
+  // pathspec is wildmatched, and a file whose name holds `[` would reach its
+  // siblings.
+  for (const batch of pathspecBatches(take)) {
+    await git(['checkout', sha, '--', ...batch], { cwd: tree });
   }
   for (const file of drop) rmSync(longPath(join(tree, file)), { force: true });
 }

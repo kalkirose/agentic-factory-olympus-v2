@@ -232,12 +232,22 @@ Two levels; the ownership test decides placement.
   limit, applied everywhere) is written to a file in the run directory and the
   spawn carries the path; the substitution stamps `prompt-spilled`. Under the
   ceiling the prompt rides argv unchanged (ADR-0005).
-- **An implementation seat runs within a bound** (ADR-0084). The dev and
-  repair-dev seats are spawned with two files in the run directory: a bound file
+- **The command line holds only what the harness bounds** (ADR-0095). A seat's
+  edit deny rules ride its settings file as `permissions.deny`, because that list
+  grows with the project's tree. The runner measures the line it will spawn after
+  the prompt substitution, and one still over the ceiling is a `seat-failure`
+  with the reason `spawn`, the measured length, and the argument that carried it,
+  named by its flag or its position and never by its content. A spawn the host
+  refuses by throwing is the same seat failure, from the supervisor and from the
+  layer runner. `seat-spawned` carries the measured length and the number of
+  rules the file held.
+- **An implementation seat runs within a bound** (ADR-0084). The dev seat, the
+  repair-dev seat and the dev seat a merge round dispatches over a conflict are
+  spawned with two files in the run directory: a bound file
   stating the worktree, the base commit, every Tier-1 layer with its argv,
   ground, `needs` and `setup` flag, the frozen suite, the declared paths and the
   certified base's per-layer durations; and a settings file loading one pre-tool
-  hook over the command tools. The hook computes the bound from the live diff at
+  hook over the command tools and carrying the seat's deny rules. The hook computes the bound from the live diff at
   every call: the layers whose ground the diff touches, the layers downstream of
   those, every setup layer and the frozen suite, and then everything any of them
   needs, transitively. The prerequisite closure runs last and walks `needs`

@@ -295,9 +295,27 @@ export function runCommand(
     const base = { ...process.env, ...env };
     delete base.NODE_TEST_CONTEXT;
     // The command table names the tool, the host decides which file that is.
-    let spec;
+    // The spawn stands under the same try. The host refuses some command lines
+    // before any child exists, and it says so by throwing where it stands: a
+    // line over the platform's ceiling, or an argument the platform cannot
+    // carry. No `error` event answers that throw. Outside this catch it rejects
+    // to whatever awaits the command, which reads as a stage that failed for no
+    // stated cause, while every caller here already answers a spawn refusal off
+    // the result (ADR-0095).
+    let child;
     try {
-      spec = resolveArgv(argv, { env: base });
+      const spec = resolveArgv(argv, { env: base });
+      child = spawn(spec.file, spec.args, {
+        cwd,
+        env: base,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // The same shape a seat takes: no window on Windows, a process group off
+        // it. A gate command is a sequence of its own and leaves descendants
+        // behind, and the timeout below ends the tree rather than the wrapper
+        // (ADR-0016).
+        ...treeSpawnOptions(),
+        ...(spec.windowsVerbatimArguments && { windowsVerbatimArguments: true }),
+      });
     } catch (error) {
       // Nothing ran, so there is no stream and no file to open: an argv this
       // host cannot carry is a defect of the call, not output of a command.
@@ -312,18 +330,9 @@ export function runCommand(
       });
       return;
     }
+    // The log opens after the spawn: a command that never started leaves no
+    // open handle and no empty file inside the run directory.
     const log = logFile === false ? null : openCommandLog(logFile ?? ambientLogFile(argv), logCap);
-    const child = spawn(spec.file, spec.args, {
-      cwd,
-      env: base,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      // The same shape a seat takes: no window on Windows, a process group off
-      // it. A gate command is a sequence of its own and leaves descendants
-      // behind, and the timeout below ends the tree rather than the wrapper
-      // (ADR-0016).
-      ...treeSpawnOptions(),
-      ...(spec.windowsVerbatimArguments && { windowsVerbatimArguments: true }),
-    });
     // The measurement starts once there is a tree to measure and never before:
     // it reads the child from outside, so it needs the pid the spawn returned
     // and nothing else of the command (ADR-0045).

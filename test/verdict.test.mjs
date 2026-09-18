@@ -3571,11 +3571,7 @@ test('a console launch reaches the repair fix seat, which reviews generally and 
   assert.ok(!dev.prompt.includes('The dependencies this story ships'), dev.prompt);
   // The record tree is denied in this lane too; the test paths are not, because
   // this seat writes the regression test (ADR-0074).
-  assert.deepEqual(dev.denyTools, [
-    'Edit(docs/adr/**)',
-    'Write(docs/adr/**)',
-    'NotebookEdit(docs/adr/**)',
-  ]);
+  assert.deepEqual(dev.denyTools, ['Edit(docs/adr/**)']);
   // The tree is named to it by path, not by directory. This ticket declares no
   // path, so the first list is empty and the active tree is the whole block; the
   // closed record is in no list (ADR-0089).

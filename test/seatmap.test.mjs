@@ -272,8 +272,7 @@ test('a bound settings file sits between the flag list and the permission flag',
     prompt: 'P',
     model: DEFAULT_MODEL,
     effort: 'high',
-    def: seatDef('dev'),
-    denyTools: ['Edit(tests/**)'],
+    def: seatDef('fury-verifier'),
     resume: 'session-1',
     settingsPath: '/home/runs/r1/seats/dev-1.settings.json',
   });
@@ -286,14 +285,28 @@ test('a bound settings file sits between the flag list and the permission flag',
   // The events have to be in the stream: a settings file the CLI refuses is
   // ignored without a word in print mode, and the hook's own line is the proof.
   assert.ok(bounded.args.includes('--include-hook-events'));
-  // The variadic deny list ends at the first flag after it, which is still a
+  // The variadic policy list ends at the first flag after it, which is still a
   // flag and never the prompt.
   const disallowed = bounded.args.slice(
     bounded.args.indexOf('--disallowedTools') + 1,
     bounded.args.indexOf('--resume'),
   );
-  assert.deepEqual(disallowed, ['Edit(tests/**)']);
-  // A seat with no bound carries neither flag.
+  assert.deepEqual(disallowed, ['WebSearch', 'WebFetch', 'Task']);
+  // A dev seat's own policy denies nothing, and a caller's edit rules ride the
+  // settings file rather than argv (ADR-0095). So the dev command line carries
+  // no deny flag at all, and the settings path stands where the list stood.
+  const dev = claudeSeatCommand({
+    prompt: 'P',
+    model: DEFAULT_MODEL,
+    effort: 'high',
+    def: seatDef('dev'),
+    denyTools: ['Edit(tests/**)'],
+    settingsPath: '/home/runs/r1/seats/dev-1.settings.json',
+  });
+  assert.ok(!dev.args.includes('--disallowedTools'));
+  assert.ok(!dev.args.some((a) => a.startsWith('Edit(')));
+  assert.equal(dev.args.at(-4), '--settings');
+  // A seat with no bound and no rules carries neither flag.
   const plain = claudeSeatCommand({
     prompt: 'P',
     model: DEFAULT_MODEL,

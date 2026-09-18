@@ -1,6 +1,7 @@
 // Minimal async git runner. Every isolation module goes through this one
 // call; an error carries the command and git's stderr.
 import { execFile } from 'node:child_process';
+import { COMMAND_LINE_MAX, commandLineLength } from '../engine/executable.mjs';
 
 /**
  * The output cap every full-text diff read carries.
@@ -15,6 +16,13 @@ import { execFile } from 'node:child_process';
  * in the harness carries this number.
  */
 export const MAX_DIFF_BYTES = 256 * 1024 * 1024;
+
+/**
+ * How much of a refused command its message carries. The command that meets the
+ * command-line ceiling is one carrying hundreds of paths, and a message that
+ * repeated the whole of it would be as long as the line it is about.
+ */
+const MESSAGE_ARGS_CHARS = 120;
 
 /**
  * The line-ending settings every harness git invocation carries.
@@ -95,6 +103,26 @@ export function gitCapped(args, { cwd, maxBuffer = MAX_DIFF_BYTES, timeout } = {
 
 function run(argv, args, { cwd, env, maxBuffer, timeout, capped = false }) {
   return new Promise((resolve, reject) => {
+    // A pathspec list is an argument that grows with the tree, and a command
+    // line has a ceiling. The host refuses a line over it by throwing where it
+    // stands, and that throw says only what the operating system calls the
+    // condition. This names the command and the length instead, so the caller
+    // that must shorten its list and the reader of the failure both learn what
+    // happened (ADR-0095).
+    const chars = commandLineLength(['git', ...argv]);
+    if (chars > COMMAND_LINE_MAX) {
+      const refusal = new Error(
+        `git ${clip(args.join(' '))} refused: the command line is ${chars} characters, over ` +
+          `the ${COMMAND_LINE_MAX} ceiling`,
+      );
+      // The length is on the error as well as in the words, because a caller
+      // that swallows an ordinary git failure must not swallow this one: a
+      // refused command did not answer the question, and a caller that read it
+      // as "nothing there" would carry on over a step that never ran.
+      refusal.commandLineChars = chars;
+      reject(refusal);
+      return;
+    }
     // The failure names the command the caller asked for, not the invocation
     // this module built around it.
     const options = {
@@ -128,4 +156,9 @@ function run(argv, args, { cwd, env, maxBuffer, timeout, capped = false }) {
       }
     });
   });
+}
+
+/** The head of a command, for a message that states which command it is. */
+function clip(text) {
+  return text.length > MESSAGE_ARGS_CHARS ? `${text.slice(0, MESSAGE_ARGS_CHARS - 1)}…` : text;
 }

@@ -243,6 +243,35 @@ test('a spawn error stamps seat-failure on the spawn route', async (t) => {
   assert.equal(failure.reason, 'spawn');
 });
 
+// A missing binary arrives as the child's `error` event. A command line the host
+// will not carry never gets that far: the spawn throws where it stands, and
+// outside a catch that throw leaves the supervisor, the runner and the stage
+// handler, and the run stops with no stated cause. It is the same seat failure
+// as every other spawn refusal (ADR-0095).
+test('a spawn the host refuses by throwing is the same seat failure', async (t) => {
+  const { paths, store } = setup(t);
+  const seat = superviseSeat(store, {
+    seat: 'dev-1',
+    // An argument no host can carry. A line over the ceiling reproduces on one
+    // platform; a NUL inside an argument is refused on every platform, by the
+    // same synchronous throw.
+    ...nodeSeat('process.exit(0)\u0000'),
+  });
+  const result = await seat.done;
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'spawn');
+  assert.ok(result.error.length > 0);
+  const events = readEvents(runLedgerPath(paths, 'r1'));
+  // The dispatch is stamped before the attempt, so a reader sees the spawn and
+  // then what the host said about it.
+  assert.equal(events[0].event, 'seat-spawned');
+  const failure = events.find((e) => e.event === 'seat-failure');
+  assert.equal(failure.reason, 'spawn');
+  assert.equal(failure.error, result.error);
+  // The answer carries a handle that ends nothing, because nothing started.
+  seat.terminate('run-killed');
+});
+
 // -- secret environment -------------------------------------------------------
 
 // The machine's credentials, as a host that runs a payment provider's test

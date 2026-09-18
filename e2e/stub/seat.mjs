@@ -591,9 +591,12 @@ function commandToolUse() {
       content: [{ type: 'tool_use', id, name: 'Bash', input: { command: 'git status --short' } }],
     },
   });
-  if (scenario.unboundSeat !== seat) {
-    const boundPath = JSON.parse(readFileSync(settings, 'utf8')).hooks.PreToolUse[0].hooks[0]
-      .args[1];
+  // A settings file carries the deny rules of a seat with no bound too, and
+  // such a file names no hook. The CLI answers that call with no hook line at
+  // all, which is the stream this leaves (ADR-0095).
+  const boundPath = JSON.parse(readFileSync(settings, 'utf8')).hooks?.PreToolUse?.[0]?.hooks?.[0]
+    ?.args?.[1];
+  if (scenario.unboundSeat !== seat && boundPath !== undefined) {
     const digest = createHash('sha256').update(readFileSync(boundPath)).digest('hex');
     emit({
       type: 'system',
